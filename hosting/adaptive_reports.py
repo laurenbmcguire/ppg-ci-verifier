@@ -229,6 +229,7 @@ def inspect_adaptive(sources, base):
             record_count += 1
             if len(result['records']) < MAX_RECORDS_RETURNED:
                 part = row[labels['part']] if 'part' in labels and labels['part'] < len(row) else None
+                part = None if part is None or (isinstance(part, str) and part.startswith('=')) else part
                 result['records'].append(dict(sheet=title, row=r, part=str(part) if part is not None else None,
                                               values={f: (str(v) if v is not None else None) for f, v in values.items()}))
         if sheet['data_row_count'] == 0:

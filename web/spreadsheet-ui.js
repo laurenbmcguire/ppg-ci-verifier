@@ -43,7 +43,7 @@
     if(!result.template_id)target.append(make('p',`${result.numeric_columns_checked||0} supported quantity columns checked. ${result.internal_check_status==='unverified'?'No complete supported mapping: this is unverified.':'Only the documented internal checks were performed.'}`));
     if(result.mapping_mode==='adaptive'){
       if(result.recognized_template)target.append(make('p','This looks like a known PPG/Pratt report with a different layout, so the columns were detected automatically.','hint'));
-      target.append(make('p',`${result.record_count} rows with quantities · ${result.numeric_cells_checked} numbers checked${result.formula_count?` · ${result.formula_count} formula cells left unevaluated (unknown, not zero)`:''}.`));
+      target.append(make('p',`${result.record_count} data rows found · ${result.numeric_cells_checked} numbers checked${result.formula_count?` · ${result.formula_count} formula cells left unevaluated (unknown, not zero)`:''}.`));
       const columns=make('div','','report-finding');columns.append(make('strong','Detected columns — please confirm'));
       const names={inspected:'Inspected',certified:'Certified / accepted',rejected:'Rejected'};
       (result.sheets||[]).forEach(sheet=>{
