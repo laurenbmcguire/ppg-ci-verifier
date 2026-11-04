@@ -25,7 +25,7 @@
     const r = reports.find(x => key(x) === selected) || reports[0];
     if (!r) { detail.append(make('h3', 'Evidence before approval'), make('p', 'Each version gets its own findings, hashes, source scope and text preview. Missing evidence holds verification; no report is released.')); return; }
     selected = key(r);
-    detail.append(make('h3', `${r.report_id} · version ${r.version}`), make('div', labels[r.status] || r.status, 'result-badge ' + r.status), make('p', 'Compared only with supplied synthetic evidence. Source authenticity is not independently established. Customer release is held.', 'hint'));
+    detail.append(make('h3', `${r.report_id} · version ${r.version}`), make('div', labels[r.status] || r.status, 'result-badge ' + r.status), make('p', 'Compared only with the supplied evidence. Source authenticity is not independently established. Customer release is held.', 'hint'));
     const findings = r.findings || [];
     if (!findings.length) detail.append(make('p', 'No discrepancies found in the supplied records and totals. This does not approve the report.'));
     findings.forEach(f => { const box = make('div', '', 'report-finding'); box.append(make('strong', `${f.severity || 'Review'} · ${f.code || 'Finding'}`), make('p', f.message || 'Review required'));

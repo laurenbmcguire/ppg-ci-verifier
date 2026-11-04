@@ -71,3 +71,6 @@ html{scroll-behavior:smooth}.nav{display:block;text-decoration:none}.nav:hover{b
 .baseline-flag td{background:#fdf0d5;font-weight:600}
 
 .banner.banner-ok{background:#e6f2ec;border-left-color:#2f7a63;color:#1f4d40}.banner.banner-ok p{color:#2c5a4c}
+
+.hosted-mode .legacy-demo,.hosted-mode #dataset-banner,.hosted-mode .mode-switch,.hosted-mode #workflow-sample,.hosted-mode #development-lab,.hosted-mode header .identity{display:none!important}
+.hosted-mode main{margin-right:0}

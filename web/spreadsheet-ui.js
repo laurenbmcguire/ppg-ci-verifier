@@ -488,3 +488,5 @@
   }
   refresh().catch(error => message(error.message, true));
 })();
+// Hosted app: hide the bundled sample demos (sample grid editor, sample buttons, simulated reviewer).
+fetch('/api/health').then(r => r.json()).then(h => { if (h && h.local_only === false) document.body.classList.add('hosted-mode'); }).catch(() => {});
