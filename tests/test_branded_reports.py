@@ -37,6 +37,18 @@ def source():
 
 def rehash(s):s.pop('source_sha256',None);s['source_sha256']=fingerprint(s);return s
 
+
+def assert_layout_fallback(test, r, difference=None):
+    """A recognized PPG layout that differs from the exact template falls back to automatic column detection,
+    records why, and keeps the exact-template differences as information."""
+    test.assertEqual(r['mapping_mode'], 'adaptive')
+    test.assertTrue(r['recognized_template'].startswith('ppg-'))
+    test.assertIn('known_template_layout_differs', r['finding_counts'])
+    test.assertTrue(r['template_differences'])
+    if difference:
+        test.assertIn(difference, r['template_differences'])
+    test.assertEqual(r['release_status'], 'held')
+
 class BrandedTests(unittest.TestCase):
     def test_explicit_row15_mapping_checks_quantities(self):
         r=report();self.assertEqual(r['record_count'],1);self.assertEqual(r['numeric_cells_checked'],2);self.assertEqual(r['template_mapping_status'],'matched')
@@ -44,9 +56,11 @@ class BrandedTests(unittest.TestCase):
     def test_generic_unmapped_input_is_unverified(self):
         r=inspect_spreadsheet('x.csv',b'label,qty\nx,123\n');self.assertEqual(r['internal_check_status'],'unverified');self.assertIn('no_quantity_mapping',r['finding_counts'])
     def test_wrong_header_never_falls_back_to_guess(self):
-        w=workbook();w['1st Shift']['G15']='Qty';r=report(w);self.assertEqual(r['template_mapping_status'],'incomplete');self.assertEqual(r['numeric_cells_checked'],0);self.assertEqual(r['internal_check_status'],'unverified')
+        w=workbook();w['1st Shift']['G15']='Qty';r=report(w);assert_layout_fallback(self,r,'template_header_mapping_mismatch')
+        # A bare 'Qty' is ambiguous, so it is never treated as the inspected column.
+        self.assertNotIn('inspected',[f for s in r['sheets'] if s['name']=='1st Shift' for t in s['tables'] for f in t['columns']])
     def test_unknown_sheet_is_not_silently_ignored(self):
-        w=workbook();w.create_sheet('Another Job');r=report(w);self.assertIn('template_sheet_mapping_mismatch',r['finding_counts'])
+        w=workbook();w.create_sheet('Another Job');r=report(w);assert_layout_fallback(self,r,'template_sheet_mapping_mismatch');self.assertIn('Another Job',[s['name'] for s in r['sheets']])
     def test_summary_formula_wrong_range_is_detected(self):
         w=workbook();w['Summary']['G21']="=SUM('1st Shift'!G16:G15)";r=report(w);self.assertIn('summary_formula_mapping_mismatch',r['finding_counts'])
     def test_formula_in_numeric_data_not_executed(self):

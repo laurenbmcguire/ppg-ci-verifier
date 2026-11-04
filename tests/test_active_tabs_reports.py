@@ -13,6 +13,18 @@ def active_tabs(reject=None):
         reg=w['Rejects & Photos'];reg.title='Rejects';reg['H16']=None;reg['A20']=None
     return w
 
+
+def assert_layout_fallback(test, r, difference=None):
+    """A recognized PPG layout that differs from the exact template falls back to automatic column detection,
+    records why, and keeps the exact-template differences as information."""
+    test.assertEqual(r['mapping_mode'], 'adaptive')
+    test.assertTrue(r['recognized_template'].startswith('ppg-'))
+    test.assertIn('known_template_layout_differs', r['finding_counts'])
+    test.assertTrue(r['template_differences'])
+    if difference:
+        test.assertIn(difference, r['template_differences'])
+    test.assertEqual(r['release_status'], 'held')
+
 class ActiveTabsTests(unittest.TestCase):
     def test_dynamic_tabs_map_active_rows_without_false_completion(self):
         r=report(active_tabs());self.assertEqual(r['template_id'],ACTIVE_TABS_TEMPLATE_ID);self.assertEqual(r['template_mapping_status'],'matched');self.assertEqual(r['record_count'],1);self.assertEqual(r['numeric_cells_checked'],2);self.assertEqual(r['absent_shift_ids'],['2','3']);self.assertEqual(r['finding_counts']['shift_activity_unverified'],2)
@@ -27,11 +39,11 @@ class ActiveTabsTests(unittest.TestCase):
         for c in range(1,6):w['Rejects'].cell(25,c).value=w['Rejects'].cell(17,c).value
         self.assertIn('reject_register_difference',report(w)['finding_counts'])
     def test_conflicting_register_tabs_rejected(self):
-        w=active_tabs(1);w.create_sheet('Rejects & Photos');self.assertEqual(report(w)['template_mapping_status'],'incomplete')
+        w=active_tabs(1);w.create_sheet('Rejects & Photos');assert_layout_fallback(self,report(w))
     def test_unsupported_extra_sheet_rejected(self):
-        w=active_tabs();w.create_sheet('At a glance');self.assertEqual(report(w)['template_mapping_status'],'incomplete')
+        w=active_tabs();w.create_sheet('At a glance');r=report(w);assert_layout_fallback(self,r);self.assertIn('At a glance',[s['name'] for s in r['sheets']])
     def test_all_shift_tabs_removed_rejected(self):
-        w=active_tabs();del w['1st Shift'];r=report(w);self.assertEqual(r['template_mapping_status'],'incomplete');self.assertEqual(r['numeric_cells_checked'],0);self.assertIn('no_quantity_checks_performed',r['finding_counts'])
+        w=active_tabs();del w['1st Shift'];r=report(w);assert_layout_fallback(self,r,'no_quantity_checks_performed')
     def test_absent_shift_zero_in_summary_not_accepted(self):
         w=active_tabs();w['Summary']['G22']=0;self.assertIn('unobserved_shift_claim',report(w)['finding_counts'])
     def test_source_activity_on_omitted_shift_detected(self):

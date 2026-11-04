@@ -20,7 +20,7 @@ MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 MAX_FINDINGS = 200
-CHECKER_VERSION = '2026-11-04-templates-v3'
+CHECKER_VERSION = '2026-11-04-adaptive-v1'
 
 
 class SpreadsheetError(ValueError):
@@ -194,6 +194,7 @@ def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
                   limitations=['First row is treated as headers.', 'Formulas are not evaluated.',
                                'No external source reconciliation or authenticity verification was performed.'])
     counts = Counter()
+    pristine = dict(result, sheets=[], findings=[], limitations=list(result['limitations']))
 
     def finding(code, sheet, row=None, column=None):
         counts[code] += 1
@@ -225,10 +226,10 @@ def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
             sources.append((title,sheet_rows))
         from hosting.pratt_reports import inspect_pratt
         pratt=inspect_pratt(sources,result)
-        if pratt is not None:return _attach_external(pratt,notes)
+        if pratt is not None:return _attach_external(_exact_or_adaptive(pratt,sources,pristine),notes)
         from hosting.branded_reports import inspect_branded
         branded=inspect_branded(sources,result)
-        if branded is not None:return _attach_external(branded,notes)
+        if branded is not None:return _attach_external(_exact_or_adaptive(branded,sources,pristine),notes)
     total_cells = total_rows = 0
     try:
         for title, rows in sources:
@@ -308,7 +309,34 @@ def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
     result.update(row_count=total_rows, cell_count=total_cells, finding_counts=dict(counts),
                   numeric_columns_checked=sum(len(s['numeric_columns_checked']) for s in result['sheets']),
                   internal_check_status='unverified' if not any(s['numeric_columns_checked'] for s in result['sheets']) else ('findings' if counts else 'no_findings_in_checks_performed'))
+    if result['internal_check_status'] == 'unverified':
+        # No first-row quantity headers: look for them anywhere, in any layout.
+        from hosting.adaptive_reports import inspect_adaptive
+        rows = sources if fmt == 'xlsx' else [('CSV', list(csv.reader(io.StringIO(decoded, newline=''), strict=True)))]
+        adaptive = inspect_adaptive(rows, pristine)
+        if adaptive is not None:
+            return _attach_external(adaptive, notes)
     return _attach_external(result, notes)
+
+
+def _exact_or_adaptive(strict, sources, pristine):
+    """Keep an exact template match; otherwise use automatic column detection for this layout."""
+    if strict.get('template_mapping_status') == 'matched':
+        return strict
+    from hosting.adaptive_reports import inspect_adaptive
+    adaptive = inspect_adaptive(sources, pristine)
+    if adaptive is None:
+        return strict
+    adaptive['recognized_template'] = strict.get('template_id')
+    # Keep what differed from the exact template, as information (not blocking).
+    adaptive['template_differences'] = dict(strict.get('finding_counts') or {})
+    if strict.get('report_identity'):
+        adaptive['report_identity'] = strict['report_identity']
+    adaptive['findings'].insert(0, dict(code='known_template_layout_differs', sheet='Workbook', row=None, column=None,
+        message='This looks like a known PPG/Pratt report, but its layout differs from the exact template. Columns were detected automatically instead.'))
+    adaptive['finding_counts']['known_template_layout_differs'] = 1
+    adaptive['finding_count'] = adaptive.get('finding_count', 0) + 1
+    return adaptive
 
 
 def _attach_external(result, notes):

@@ -16,13 +16,25 @@ def sectioned():
     summary['B42']='RECORDED RESULTS BY SHIFT';summary['B44']='Shift';summary['C44']='Certified';summary['B45']='1st Shift';summary['C45']="=SUM('1st Shift'!K16:K16)"
     return w
 
+
+def assert_layout_fallback(test, r, difference=None):
+    """A recognized PPG layout that differs from the exact template falls back to automatic column detection,
+    records why, and keeps the exact-template differences as information."""
+    test.assertEqual(r['mapping_mode'], 'adaptive')
+    test.assertTrue(r['recognized_template'].startswith('ppg-'))
+    test.assertIn('known_template_layout_differs', r['finding_counts'])
+    test.assertTrue(r['template_differences'])
+    if difference:
+        test.assertIn(difference, r['template_differences'])
+    test.assertEqual(r['release_status'], 'held')
+
 class SectionedTests(unittest.TestCase):
     def test_actual_core_rows_not_appended_results(self):
         r=report(sectioned());self.assertEqual(r['template_id'],SECTIONED_TEMPLATE_ID);self.assertEqual(r['template_mapping_status'],'matched');self.assertEqual(r['record_count'],1);self.assertEqual(r['numeric_cells_checked'],2)
         self.assertEqual(r['totals']['inspected']['total'],10);self.assertEqual(r['absent_shift_ids'],['2','3'])
     def test_removed_optional_field_only_allowed_if_all_cells_empty(self):
-        w=sectioned();w['1st Shift']['G15']=None;r=report(w);self.assertEqual(r['template_mapping_status'],'incomplete');self.assertEqual(r['numeric_cells_checked'],0)
-        w=sectioned();w['1st Shift']['D15']=None;r=report(w);self.assertEqual(r['template_mapping_status'],'incomplete')
+        w=sectioned();w['1st Shift']['G15']=None;r=report(w);assert_layout_fallback(self,r)
+        w=sectioned();w['1st Shift']['D15']=None;r=report(w);assert_layout_fallback(self,r)
     def test_omitted_reject_header_does_not_create_zero(self):
         r=report(sectioned());self.assertIsNone(r['totals']['rejected']['total']);self.assertIn('quantity_missing',r['finding_counts']);self.assertNotIn('rejected',r['sheets'][0]['numeric_columns_checked'])
     def test_blank_reject_reference_not_accepted_as_zero(self):
@@ -38,7 +50,7 @@ class SectionedTests(unittest.TestCase):
     def test_record_after_boundary_not_silently_discarded(self):
         w=sectioned();w['1st Shift']['A28']=datetime(2026,11,3);w['1st Shift']['G28']=10;r=report(w);self.assertIn('record_outside_mapped_table',r['finding_counts'])
     def test_duplicate_boundary_rejected(self):
-        w=sectioned();w['1st Shift']['A30']='SHIFT INSPECTION RESULTS';r=report(w);self.assertEqual(r['template_mapping_status'],'incomplete')
+        w=sectioned();w['1st Shift']['A30']='SHIFT INSPECTION RESULTS';r=report(w);assert_layout_fallback(self,r,'record_boundary_unverified')
     def test_source_comparison_still_works_and_held(self):
         r=reconcile_result(report(sectioned()),source());self.assertEqual(r['numeric_values_compared'],2);self.assertEqual(r['source_difference_count'],0);self.assertEqual(r['release_status'],'held')
     def test_blank_chart_reject_is_not_complete_zero(self):

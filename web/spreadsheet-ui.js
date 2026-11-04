@@ -19,6 +19,11 @@
     empty_sheet: 'This sheet is empty.',
     no_data_rows: 'This sheet has headers but no data rows.',
     no_quantity_mapping: 'No supported quantity columns were mapped. This sheet is unverified, not passed.',
+    known_template_layout_differs: 'Recognized as a known report type, but the layout differs from the exact template, so columns were detected automatically. Check the detected columns.',
+    no_quantity_columns_detected: 'No Inspected / Certified / Rejected style headers were found on this sheet, so it was not quantity-checked.',
+    quantity_formulas_not_evaluated: 'Some quantity cells contain formulas. They were not evaluated, so those values are unknown rather than zero.',
+    number_stored_as_text: 'A number is stored as text. It was read as a number, but Excel may not include it in sums.',
+    rejected_exceeds_inspected: 'More parts were rejected than inspected in this row.',
     external_reference_formula: 'A formula refers to another workbook or a web/network location. The stored value was checked; the link was never opened, so that value may be stale.',
     web_function_formula: 'A formula uses a web function (WEBSERVICE, IMAGE or FILTERXML). It was never run; check that the stored result is current.',
     hyperlink_formula: 'A HYPERLINK formula is present. Links are recorded only and never opened.',
@@ -34,9 +39,21 @@
   function detail(result) {
     const detailTicket=++detailVersion;
     const target = node('spreadsheet-detail'); target.replaceChildren();
-    target.append(make('h3', `${result.filename} · version ${result.version}`), make('div', result.source_reconciliation_status==='mismatch'?'Source mismatch · release held':result.template_id?(result.template_mapping_status==='incomplete'?'Template mapping incomplete · release held':'Mapped template checks · release held'):'Internal checks only · source not verified', 'result-badge unable_to_verify'), make('p', 'Original retained unchanged. These findings are not independent verification, approval, or permission to release a report.', 'hint'));
+    target.append(make('h3', `${result.filename} · version ${result.version}`), make('div', result.source_reconciliation_status==='mismatch'?'Source mismatch · release held':result.mapping_mode==='adaptive'?'Columns detected automatically · release held':result.template_id?(result.template_mapping_status==='incomplete'?'Template mapping incomplete · release held':'Mapped template checks · release held'):'Internal checks only · source not verified', 'result-badge unable_to_verify'), make('p', 'Original retained unchanged. These findings are not independent verification, approval, or permission to release a report.', 'hint'));
     if(!result.template_id)target.append(make('p',`${result.numeric_columns_checked||0} supported quantity columns checked. ${result.internal_check_status==='unverified'?'No complete supported mapping: this is unverified.':'Only the documented internal checks were performed.'}`));
-    if(result.template_id){
+    if(result.mapping_mode==='adaptive'){
+      if(result.recognized_template)target.append(make('p','This looks like a known PPG/Pratt report with a different layout, so the columns were detected automatically.','hint'));
+      target.append(make('p',`${result.record_count} rows with quantities · ${result.numeric_cells_checked} numbers checked${result.formula_count?` · ${result.formula_count} formula cells left unevaluated (unknown, not zero)`:''}.`));
+      const columns=make('div','','report-finding');columns.append(make('strong','Detected columns — please confirm'));
+      const names={inspected:'Inspected',certified:'Certified / accepted',rejected:'Rejected'};
+      (result.sheets||[]).forEach(sheet=>{
+        if(!(sheet.tables||[]).length){columns.append(make('p',`${sheet.name}: no quantity columns found (not checked).`,'hint'));return}
+        sheet.tables.forEach(table=>columns.append(make('p',`${sheet.name}, header row ${table.header_row}: `+Object.entries(table.columns).map(([field,c])=>`${names[field]||field} = column ${c.column} “${c.header}”`).join(' · ')+` — ${table.data_row_count} row${table.data_row_count===1?'':'s'}`)));
+      });
+      target.append(columns);
+      const t=result.totals||{};target.append(make('p',['inspected','certified','rejected'].filter(f=>t[f]).map(f=>`${names[f]}: ${t[f].total!==null?t[f].total:`at least ${t[f].known_sum} (some values unknown)`}`).join(' · ')));
+    }
+    else if(result.template_id){
       target.append(make('p',`${result.record_count} ${result.template_id.startsWith('pratt-kn-')?'mapped audit-detail rows':'detail records'} · ${result.numeric_cells_checked} numeric cells checked · ${result.formula_count} formulas preserved without execution.`));
       if(result.source_sha256)target.append(make('p',`${result.numeric_values_compared} known ${result.template_id.startsWith('pratt-kn-')?'numeric/audit':'quantity'} values compared to ${result.source_provenance_kind==='independently_retrieved'?'a separately retrieved source snapshot':'retained historical source evidence'}. Source authentication and human approval remain unconfirmed.`,'hint'));
       (result.source_differences||[]).forEach(d=>{const box=make('div','','report-finding');box.append(make('strong',`${d.code} · ${d.sheet||'source'} ${d.row?'row '+d.row:''}`),make('p','Review only. No client workbook or source value was changed.'),make('pre',JSON.stringify({workbook_value:d.before,supplied_source_value:d.source_value},null,2)));target.append(box)});

@@ -135,7 +135,9 @@ class SpreadsheetTests(unittest.TestCase):
         self.assertEqual(result['finding_counts']['total_mismatch'], 1)
         for raw in (b'Quantity,Quantity\n1,2\n', b'qty,accepted count,rejected count\nabc,abc,abc\n'):
             result = inspect_spreadsheet('ambiguous.csv', raw)
-            self.assertEqual(result['sheets'][0]['numeric_columns_checked'], [])
+            # Ambiguous or non-numeric columns never yield checked numbers.
+            self.assertEqual(result.get('numeric_cells_checked', 0), 0)
+            self.assertEqual(result['internal_check_status'], 'unverified')
         result = inspect_spreadsheet('missing.csv', b'label,quantity\na,\nTotal,0\n')
         self.assertNotIn('total_mismatch', result['finding_counts'])
         self.assertIn('invalid_numeric_value', result['finding_counts'])
