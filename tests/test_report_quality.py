@@ -30,6 +30,16 @@ class CleanReportTests(unittest.TestCase):
         self.assertNotIn('_detail_records', r)
 
 
+class TemplateRowTests(unittest.TestCase):
+    def test_unused_template_rows_with_formulas_are_ignored(self):
+        overrides = {}
+        for r in range(16, 21):
+            overrides[('2nd Shift', f'K{r}')] = f'=G{r}-J{r}'
+        r = inspect_spreadsheet('eos.xlsx', build(overrides=overrides))
+        self.assertEqual(issues(r), {})
+        self.assertEqual(r['record_count'], 13)
+
+
 class SeededErrorTests(unittest.TestCase):
     def check(self, code, rows=None, overrides=None, cached=None):
         r = inspect_spreadsheet('eos_bad.xlsx', build(rows=rows or list(ROWS), overrides=overrides, cached_overrides=cached))

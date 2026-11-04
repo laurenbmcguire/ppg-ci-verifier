@@ -294,6 +294,10 @@ def scan(sources, cached=None):
             if all(state == 'blank' for _, state in cells.values()):
                 continue
             labels = {k: label_text(row[i], cget(i)) if i < len(row) else None for k, i in labmap.items()}
+            typed = any(state in ('number', 'number_as_text') for _, state in cells.values())
+            if table['kind'] != 'totals' and not typed and not any(labels.values()) and not _row_label(row, mapping, labmap):
+                stats['blank_template_rows'] += 1
+                continue  # an unused template row: only formulas, nothing entered
             day = as_day(row[labmap['date']], cget(labmap['date'])) if 'date' in labmap and labmap['date'] < len(row) else None
             for _, state in cells.values():
                 stats[state] += 1
@@ -527,7 +531,7 @@ def inspect_adaptive(sources, base, cached=None, report_day=None):
                 if n is not None and known and n != s:
                     finding('summary_mismatch', r['sheet'], r['row'], r['columns'].get(f),
                             message=f'{target} {f} shows {n} on {r["sheet"]} but the {target} sheet adds up to {s}.')
-        elif r['is_total'] and r['sheet'] not in sheet_sums and len(sheet_sums) > 1:
+        elif r['is_total'] and r['sheet'] not in sheet_sums and len(sheet_sums) >= 1:
             for f, n in r['values'].items():
                 s, known = grand.get(f, (None, False))
                 if n is not None and known and n != s:

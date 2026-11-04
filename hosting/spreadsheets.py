@@ -20,7 +20,7 @@ MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 MAX_FINDINGS = 200
-CHECKER_VERSION = '2026-11-04-adaptive-v2'
+CHECKER_VERSION = '2026-11-04-adaptive-v3'
 
 
 class SpreadsheetError(ValueError):
