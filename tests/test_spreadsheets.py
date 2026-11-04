@@ -79,7 +79,7 @@ class SpreadsheetTests(unittest.TestCase):
             inspect_spreadsheet('test.xlsx', xlsx())
 
     def test_bounded(self):
-        for raw in (b'a\n' * 10001, (b'a,' * 100 + b'a\n'), b'x' * (2*1024*1024+1), b'a\n' + b'x' * 32768):
+        for raw in (b'a\n' * 10001, (b'a,' * 100 + b'a\n'), b'x' * (3*1024*1024+1), b'a\n' + b'x' * 32768):
             with self.subTest(size=len(raw)), self.assertRaises(SpreadsheetError):
                 inspect_spreadsheet('bad.csv', raw)
         with patch('hosting.spreadsheets.MAX_CELLS', 2), self.assertRaises(SpreadsheetError):

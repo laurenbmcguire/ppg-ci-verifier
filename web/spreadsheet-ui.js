@@ -154,7 +154,12 @@
   }
   node('spreadsheet-file').addEventListener('change', async event => {
     const file = event.target.files[0]; if (!file || pending) return;
-    if (!/\.(csv|xlsx)$/i.test(file.name) || file.size < 1 || file.size > 2 * 1024 * 1024) { message('Choose a CSV or XLSX file between 1 byte and 2 MiB.', true); event.target.value = ''; return; }
+    const problem = /\.(xls|xlsm|xlsb)$/i.test(file.name) ? `"${file.name}" is a legacy or macro-enabled Excel file. In Excel use File → Save As → "Excel Workbook (.xlsx)", then upload that copy.`
+      : !/\.(csv|xlsx)$/i.test(file.name) ? `"${file.name}" is not a .csv or .xlsx file. Only UTF-8 CSV and XLSX workbooks are supported.`
+      : file.size < 1 ? `"${file.name}" is empty (0 bytes).`
+      : file.size > 3 * 1024 * 1024 ? `"${file.name}" is ${(file.size / 1048576).toFixed(1)} MiB; the upload limit is 3 MiB. Remove unused sheets or split the workbook.`
+      : null;
+    if (problem) { message(problem, true); event.target.value = ''; return; }
     setBusy(true);
     try {
       message('Reading and checking the spreadsheet…');

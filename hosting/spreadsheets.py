@@ -10,7 +10,7 @@ from collections import Counter
 from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import PurePosixPath
 
-MAX_BYTES = 2 * 1024 * 1024
+MAX_BYTES = 3 * 1024 * 1024
 MAX_ROWS = 10000
 MAX_COLS = 100
 MAX_CELLS = 100000
@@ -138,7 +138,7 @@ def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
     if not isinstance(raw, bytes) or not raw:
         raise SpreadsheetError('Spreadsheet is empty.')
     if len(raw) > MAX_BYTES:
-        raise SpreadsheetError('Spreadsheet exceeds the 2 MiB upload limit.')
+        raise SpreadsheetError('Spreadsheet exceeds the 3 MiB upload limit.')
     if not isinstance(filename, str) or not filename or len(filename) > 255:
         raise SpreadsheetError('A filename of at most 255 characters is required.')
     fmt = filename.rsplit('.', 1)[-1].lower()
