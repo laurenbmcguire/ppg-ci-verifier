@@ -4,9 +4,11 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 
 from hosting.spreadsheets import inspect_spreadsheet,CHECKER_VERSION
+from hosting.files import files_for
 from hosting.branded_reports import fingerprint
 from hosting.reconcile_spreadsheet import reconcile_result
 from hosting.report_workflow import stamp,canonical
@@ -53,13 +55,7 @@ class SpreadsheetInbox:
             version = db.execute('SELECT COALESCE(MAX(version),0)+1 FROM spreadsheets WHERE filename=?', (filename,)).fetchone()[0]
             suffix = '.xlsx' if filename.lower().endswith('.xlsx') else '.csv'
             relative = 'uploads/' + file_hash + suffix
-            path = self.root / relative
-            path.parent.mkdir(exist_ok=True)
-            if path.exists() and path.read_bytes() != raw:
-                raise ValueError('Stored original differs; upload was not saved.')
-            if not path.exists():
-                path.write_bytes(raw)
-                path.chmod(0o400)
+            files_for(self.root).put(relative, raw)  # write-once; a differing existing file raises
             result.update(file_hash=file_hash, filename=filename, version=version,
                 finding_count=sum(result.get('finding_counts', {}).values()), sheet_count=len(result.get('sheets', [])),
                 original_path=relative, received_at=datetime.now(timezone.utc).isoformat())
@@ -67,6 +63,25 @@ class SpreadsheetInbox:
                        (file_hash, filename, version, json.dumps(result, allow_nan=False)))
             result=self.save_check(db,result)
         return dict(result, idempotent=False)
+    def store_part(self, upload_id, index, raw):
+        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < 100000:
+            raise ValueError('Upload part index must be an integer from 0 to 99999.')
+        if not raw:
+            raise ValueError('Empty upload part.')
+        files_for(self.root).put_part(upload_id, index, raw)
+        return {'upload_id': upload_id, 'part_index': index, 'bytes': len(raw)}
+    def finish_upload(self, upload_id, filename, part_count, sha256):
+        if not isinstance(part_count, int) or isinstance(part_count, bool) or not 0 < part_count <= 100000:
+            raise ValueError('Upload part count is invalid.')
+        if not isinstance(sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', sha256):
+            raise ValueError('A SHA-256 of the complete file is required.')
+        chunks = files_for(self.root).take_parts(upload_id)
+        if len(chunks) != part_count:
+            raise ValueError(f'Upload incomplete: {len(chunks)} of {part_count} parts arrived. Nothing was saved; upload the file again.')
+        raw = b''.join(chunks)
+        if hashlib.sha256(raw).hexdigest() != sha256:
+            raise ValueError('Uploaded bytes do not match the file hash computed in the browser. Nothing was saved; upload the file again.')
+        return self.ingest(filename, raw)
     def list(self):
         with self.connect() as db:
             rows = db.execute('SELECT result_json FROM spreadsheets ORDER BY seq DESC LIMIT 100').fetchall()
@@ -87,7 +102,7 @@ class SpreadsheetInbox:
             result=self.latest(db,file_hash,json.loads(found['result_json']))
         if result.get('checker_version')!=CHECKER_VERSION:
             suffix='.xlsx' if result['filename'].lower().endswith('.xlsx') else '.csv'
-            raw=(self.root/'uploads'/(file_hash+suffix)).read_bytes()
+            raw=files_for(self.root).get('uploads/'+file_hash+suffix)
             if hashlib.sha256(raw).hexdigest()!=file_hash:raise ValueError('Stored original integrity mismatch.')
             return self.ingest(result['filename'],raw)
         return result
@@ -109,7 +124,7 @@ class SpreadsheetInbox:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?',(file_hash,)).fetchone()
             if not row:raise ValueError('Spreadsheet version not found.')
-            original=json.loads(row['result_json']);raw=(self.root/original['original_path']).read_bytes()
+            original=json.loads(row['result_json']);raw=files_for(self.root).get(original['original_path'])
             if hashlib.sha256(raw).hexdigest()!=file_hash:raise ValueError('Stored original integrity mismatch.')
             result=reconcile_result(inspect_spreadsheet(original['filename'],raw),source)
             latest=self.latest(db,file_hash,original)

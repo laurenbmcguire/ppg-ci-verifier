@@ -204,11 +204,11 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
-            limit = 4 * 1024 * 1024 + 16384 if route == '/api/spreadsheets/import' else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
-            if not route.startswith('/api/workflow/') and route not in ('/api/spreadsheets/import','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
+            limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
+            if not route.startswith('/api/workflow/') and route not in ('/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= limit:
                 return self.fail(413, 'Request size is invalid.')
@@ -264,6 +264,20 @@ class handler(BaseHTTPRequestHandler):
                     payload=parse_workflow(raw)
                     data={'item':SpreadsheetInbox(directory).reconcile(payload.get('file_hash'),payload.get('source'))}
                     body=encode_json(data)
+                elif route == '/api/spreadsheets/upload/part':
+                    # Chunked upload: no file-size limit; each part is at most one request body.
+                    upload = json.loads(raw)
+                    if not isinstance(upload, dict) or not isinstance(upload.get('upload_id'), str) or not isinstance(upload.get('content_base64'), str):
+                        raise Conflict('Upload id, part index and base64 content are required.')
+                    part = base64.b64decode(upload['content_base64'], validate=True)
+                    data = {'part': SpreadsheetInbox(directory).store_part(upload['upload_id'], upload.get('index'), part)}
+                    body = encode_json(data)
+                elif route == '/api/spreadsheets/upload/finish':
+                    upload = json.loads(raw)
+                    if not isinstance(upload, dict) or not isinstance(upload.get('upload_id'), str) or not isinstance(upload.get('filename'), str):
+                        raise Conflict('Upload id and filename are required.')
+                    data = {'item': SpreadsheetInbox(directory).finish_upload(upload['upload_id'], upload['filename'], upload.get('part_count'), upload.get('sha256'))}
+                    body = encode_json(data)
                 elif route == '/api/spreadsheets/import':
                     upload = json.loads(raw)
                     if not isinstance(upload, dict) or not isinstance(upload.get('filename'), str) or not isinstance(upload.get('content_base64'), str):

@@ -17,7 +17,7 @@ def safe_name(name):
         raise StorageUnavailable('Invalid stored workspace path.')
     if name in ('review.sqlite3', 'report-intake/report_inbox.sqlite3', 'spreadsheet_inbox.sqlite3', 'report_workflow.sqlite3'):
         return True
-    if len(p.parts) == 2 and p.parts[0] in ('original', 'working', 'approved', 'simulated_reports', 'uploads'):
+    if len(p.parts) == 2 and p.parts[0] in ('original', 'working', 'approved', 'simulated_reports', 'uploads', 'upload_parts'):
         if re.fullmatch(r'[A-Za-z0-9_.-]+', p.parts[1]):
             return True
     raise StorageUnavailable('Unexpected stored workspace file.')

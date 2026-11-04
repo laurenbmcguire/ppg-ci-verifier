@@ -152,20 +152,35 @@
     });
     if (result.has_more) list.append(make('p', `Showing the latest ${result.limit} of ${result.count} uploaded versions.`, 'hint'));
   }
+  const CHUNK = 3 * 1024 * 1024;
+  const toBase64 = blob => new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = () => reject(Error('Could not read this file.')); reader.readAsDataURL(blob); });
+  const post = async (path, payload) => {
+    const response = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json','X-Review-Token':'same-origin'}, body:JSON.stringify(payload)});
+    const result = await response.json(); if (!response.ok) throw Error(result.error || 'Spreadsheet was not saved.');
+    return result;
+  };
+  const sha256Hex = async file => { const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer()); return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join(''); };
+  const mib = n => (n / 1048576).toFixed(n < 10 * 1048576 ? 2 : 1) + ' MiB';
   node('spreadsheet-file').addEventListener('change', async event => {
     const file = event.target.files[0]; if (!file || pending) return;
     const problem = /\.(xls|xlsm|xlsb)$/i.test(file.name) ? `"${file.name}" is a legacy or macro-enabled Excel file. In Excel use File → Save As → "Excel Workbook (.xlsx)", then upload that copy.`
       : !/\.(csv|xlsx)$/i.test(file.name) ? `"${file.name}" is not a .csv or .xlsx file. Only UTF-8 CSV and XLSX workbooks are supported.`
       : file.size < 1 ? `"${file.name}" is empty (0 bytes).`
-      : file.size > 3 * 1024 * 1024 ? `"${file.name}" is ${(file.size / 1048576).toFixed(1)} MiB; the upload limit is 3 MiB. Remove unused sheets or split the workbook.`
       : null;
     if (problem) { message(problem, true); event.target.value = ''; return; }
     setBusy(true);
     try {
-      message('Reading and checking the spreadsheet…');
-      const content = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = () => reject(Error('Could not read this file.')); reader.readAsDataURL(file); });
-      const response = await fetch('/api/spreadsheets/import', {method:'POST', headers:{'Content-Type':'application/json','X-Review-Token':'same-origin'}, body:JSON.stringify({filename:file.name,content_base64:content})});
-      const result = await response.json(); if (!response.ok) throw Error(result.error || 'Spreadsheet was not saved.');
+      // No file-size limit: the file is hashed in the browser, sent in 3 MiB parts, then assembled, verified and checked on the server.
+      message(`Preparing ${file.name} (${mib(file.size)})…`);
+      const sha256 = await sha256Hex(file);
+      const uploadId = crypto.randomUUID().replace(/-/g, '');
+      const partCount = Math.max(1, Math.ceil(file.size / CHUNK));
+      for (let index = 0; index < partCount; index++) {
+        message(partCount > 1 ? `Uploading part ${index + 1} of ${partCount} (${mib(Math.min(file.size, (index + 1) * CHUNK))} of ${mib(file.size)})…` : 'Uploading…');
+        await post('/api/spreadsheets/upload/part', {upload_id: uploadId, index, content_base64: await toBase64(file.slice(index * CHUNK, (index + 1) * CHUNK))});
+      }
+      message('Checking the spreadsheet… large workbooks can take a minute.');
+      const result = await post('/api/spreadsheets/upload/finish', {upload_id: uploadId, filename: file.name, part_count: partCount, sha256});
       ++selectionVersion; selected = result.item.file_hash; detail(result.item); await refresh();
       message(result.item.idempotent ? 'This exact file was already checked. Its original version was preserved.' : 'Internal checks saved and original preserved. Independent source verification and report release remain held.');
     } catch (error) { message(error.message, true); }

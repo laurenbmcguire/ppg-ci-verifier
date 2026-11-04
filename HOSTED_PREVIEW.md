@@ -32,6 +32,14 @@ Supabase free plan allows 2 active projects and both were in use, so the app use
 
 To move to a dedicated database later (e.g. Neon free tier from the Vercel Marketplace), apply `hosting/schema.sql` there and change `DATABASE_URL`; the whole workspace is one row, so copy `payload`/`revision` across.
 
+## Uploads: no file-size limit (Nov 4, 2026)
+
+- The browser hashes the file (SHA-256), sends it in 3 MiB parts to `/api/spreadsheets/upload/part`, then calls `/api/spreadsheets/upload/finish`; the server reassembles, verifies the hash, and runs the same checks as before. Missing parts or a hash mismatch save nothing.
+- Hosted mode stores originals in `ci_verifier.ci_verifier_files` (write-once: the app role has no UPDATE/DELETE) and parts in `ci_verifier.ci_verifier_upload_parts` (`hosting/files.py`). The per-request workspace snapshot now holds only metadata, so its 16 MiB cap no longer bounds uploads.
+- Local SQLite mode is unchanged: originals and parts stay inside the snapshot, so the local copy is still bounded by that 16 MiB cap.
+- Parser budgets (`hosting/spreadsheets.py`): Excel's own 1,048,576 rows × 16,384 columns, plus 2,000,000 cells per workbook (the template checkers hold sheets in memory). XML safety preflight now streams (`iterparse`) instead of loading each sheet's XML whole.
+- Remaining real ceilings: Supabase free plan = 500 MB database total; Vercel function 300 s / memory tier. Very large workbooks take longer to check.
+
 ## Redeploying after changes
 
 Source of truth is GitHub: `laurenbmcguire/ppg-ci-verifier` (private). `main` is Vercel's production branch, and the app refuses production, so deployments come from the `preview` branch:

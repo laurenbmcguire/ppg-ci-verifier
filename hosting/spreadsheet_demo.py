@@ -18,6 +18,7 @@ from zipfile import ZipFile
 from hosting.branded_reports import QUANTITIES, SHIFT_SHEETS, quantity
 from hosting.report_workflow import canonical, fingerprint, now, WorkflowError, WorkflowConflict
 from hosting.spreadsheet_inbox import SpreadsheetInbox
+from hosting.files import files_for
 from hosting.sqlite_storage import local_environment
 
 EXAMPLES = Path(__file__).resolve().parents[1] / 'samples' / 'development_examples'
@@ -132,7 +133,7 @@ class SpreadsheetDemo:
         with self.inbox.connect() as inbox_db:
             stored=inbox_db.execute('SELECT source_json FROM spreadsheet_sources WHERE source_hash=?',(source['source_sha256'],)).fetchone()
         if not stored or stored[0]!=canonical(source):raise WorkflowConflict('Stored comparison source differs from the packaged synthetic source.')
-        raw=(self.root/item['original_path']).read_bytes()
+        raw=files_for(self.root).get(item['original_path'])
         if digest(raw)!=file_hash:raise WorkflowConflict('Workbook integrity mismatch.')
         binding={k:item[k] for k in ('file_hash','check_hash','source_sha256')};binding_hash=fingerprint(binding);proposals=[];paths=sheet_paths(raw)
         # Deliberately narrow: only explicit PPG quantity mappings. No arbitrary cell edits.
@@ -188,8 +189,8 @@ class SpreadsheetDemo:
             draft=self.inbox.ingest(filename,new_raw);draft=self.inbox.reconcile(new_hash,source)
             if draft.get('formula_sha256')!=item.get('formula_sha256'):raise WorkflowConflict('Formula integrity changed; draft cannot be saved.')
             db.execute('INSERT OR IGNORE INTO drafts(file_hash,parent_hash,fixture_hash,source_hash,filename) VALUES(?,?,?,?,?)',(new_hash,state['file_hash'],example['artifact']['sha256'],source['source_sha256'],filename))
-            if digest((self.root/item['original_path']).read_bytes())!=state['file_hash']:raise WorkflowConflict('Original workbook integrity changed; draft cannot be saved.')
-            self.log(db,new_hash,'spreadsheet_demo_draft_created',parent_file_hash=state['file_hash'],check_hash=state['check_hash'],source_sha256=source['source_sha256'],proposal_ids=payload['proposal_ids'],formula_caches_cleared=True,original_unchanged=digest((self.root/item['original_path']).read_bytes())==state['file_hash'])
+            if digest(files_for(self.root).get(item['original_path']))!=state['file_hash']:raise WorkflowConflict('Original workbook integrity changed; draft cannot be saved.')
+            self.log(db,new_hash,'spreadsheet_demo_draft_created',parent_file_hash=state['file_hash'],check_hash=state['check_hash'],source_sha256=source['source_sha256'],proposal_ids=payload['proposal_ids'],formula_caches_cleared=True,original_unchanged=digest(files_for(self.root).get(item['original_path']))==state['file_hash'])
             return dict(item=draft,review=self.state(db,new_hash)[0],download_url='/api/spreadsheets/demo/download?id='+new_hash)
     def download(self,file_hash):
         with self.connect() as db:

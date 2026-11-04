@@ -10,12 +10,13 @@ from collections import Counter
 from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import PurePosixPath
 
-MAX_BYTES = 3 * 1024 * 1024
-MAX_ROWS = 10000
-MAX_COLS = 100
-MAX_CELLS = 100000
-MAX_UNCOMPRESSED = 20 * 1024 * 1024
-MAX_MEMBERS = 1000
+# No upload size limit. Budgets below are Excel's own sheet dimensions plus a per-workbook
+# cell budget sized to what the checkers can hold in memory on the hosted function.
+MAX_ROWS = 1048576
+MAX_COLS = 16384
+MAX_CELLS = 2000000
+MAX_UNCOMPRESSED = 4 * 1024 * 1024 * 1024
+MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 MAX_FINDINGS = 200
@@ -86,8 +87,8 @@ def _xlsx_rows(raw):
             for member in members:
                 if not member.filename.lower().endswith(('.xml', '.rels')):
                     continue
-                document = ET.fromstring(archive.read(member), forbid_dtd=True)
-                for element in document.iter():
+                with archive.open(member) as stream:
+                  for _event, element in ET.iterparse(stream, events=('end',), forbid_dtd=True):
                     tag = element.tag.rsplit('}', 1)[-1]
                     if tag == 'Override' and any(t in element.attrib.get('ContentType', '').lower()
                                                  for t in ('macroenabled', 'macrosheet', 'activex')):
@@ -102,7 +103,7 @@ def _xlsx_rows(raw):
                         if tag == 'c':
                             cells += 1
                             coordinate = re.fullmatch(r'([A-Z]+)([1-9][0-9]*)', element.attrib.get('r', ''))
-                            if not coordinate or len(coordinate[1]) > 3 or len(coordinate[2]) > 5:
+                            if not coordinate or len(coordinate[1]) > 3 or len(coordinate[2]) > 7:  # Excel: XFD1048576
                                 raise SpreadsheetError('Invalid spreadsheet cell coordinate.')
                             col = 0
                             for letter in coordinate[1]:
@@ -113,6 +114,8 @@ def _xlsx_rows(raw):
                         formula = element.text or ''
                         if re.search(r'\[|\||https?://|(?:WEBSERVICE|HYPERLINK|IMAGE|RTD|DDE|CALL|REGISTER(?:\.ID)?|EXEC(?:UTE)?|RUN|SQL\.REQUEST)\s*\(', formula, re.I):
                             raise SpreadsheetError('External or active formulas are not supported.')
+                    if tag in ('row', 'c', 'v', 'f', 'is', 't', 'si', 'r'):
+                        element.clear()
         workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=False, keep_links=False)
         try:
             for sheet in workbook.worksheets:
@@ -137,8 +140,6 @@ def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
     """
     if not isinstance(raw, bytes) or not raw:
         raise SpreadsheetError('Spreadsheet is empty.')
-    if len(raw) > MAX_BYTES:
-        raise SpreadsheetError('Spreadsheet exceeds the 3 MiB upload limit.')
     if not isinstance(filename, str) or not filename or len(filename) > 255:
         raise SpreadsheetError('A filename of at most 255 characters is required.')
     fmt = filename.rsplit('.', 1)[-1].lower()

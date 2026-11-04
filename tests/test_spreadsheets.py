@@ -79,14 +79,25 @@ class SpreadsheetTests(unittest.TestCase):
             inspect_spreadsheet('test.xlsx', xlsx())
 
     def test_bounded(self):
-        for raw in (b'a\n' * 10001, (b'a,' * 100 + b'a\n'), b'x' * (3*1024*1024+1), b'a\n' + b'x' * 32768):
-            with self.subTest(size=len(raw)), self.assertRaises(SpreadsheetError):
-                inspect_spreadsheet('bad.csv', raw)
+        # Row/column/cell budgets are enforced (patched small so the test stays fast); there is no byte-size limit.
+        with patch('hosting.spreadsheets.MAX_ROWS', 10000), patch('hosting.spreadsheets.MAX_COLS', 100):
+            for raw in (b'a\n' * 10001, (b'a,' * 100 + b'a\n')):
+                with self.subTest(size=len(raw)), self.assertRaises(SpreadsheetError):
+                    inspect_spreadsheet('bad.csv', raw)
+            sheet = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="10001"><c r="A10001"><v>2</v></c></row></sheetData></worksheet>'
+            with self.assertRaises(SpreadsheetError):
+                inspect_spreadsheet('bad.xlsx', xlsx(sheet))
+        with self.assertRaises(SpreadsheetError):
+            inspect_spreadsheet('bad.csv', b'a\n' + b'x' * 32768)  # single field over the CSV field limit
         with patch('hosting.spreadsheets.MAX_CELLS', 2), self.assertRaises(SpreadsheetError):
             inspect_spreadsheet('bad.csv', b'a,b\n1,2\n')
-        sheet = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="10001"><c r="A10001"><v>2</v></c></row></sheetData></worksheet>'
-        with self.assertRaises(SpreadsheetError):
-            inspect_spreadsheet('bad.xlsx', xlsx(sheet))
+        big = b'x' * (3 * 1024 * 1024 + 1) + b'\n'
+        self.assertNotIn('size', str(inspect_spreadsheet.__doc__))
+        with self.assertRaises(SpreadsheetError) as caught:
+            inspect_spreadsheet('big.csv', big)
+        self.assertIn('field exceeds', str(caught.exception))  # rejected for the field limit, not for byte size
+        wide_ok = (b'a,' * 150 + b'a\n') * 3
+        self.assertEqual(inspect_spreadsheet('wide.csv', wide_ok)['sheets'][0]['header_column_count'], 151)
 
     def test_result_bounded(self):
         result = inspect_spreadsheet('test.csv', b'a,b\n' + b',\n' * 500)
@@ -167,9 +178,15 @@ class SpreadsheetTests(unittest.TestCase):
         self.assertIn('no_data_rows', inspect_spreadsheet('empty.csv', b'header\n')['finding_counts'])
         sheet = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:XFD1048576"/><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>'
         self.assertEqual(inspect_spreadsheet('dim.xlsx', xlsx(sheet))['row_count'], 1)
-        for coord in ('CW2', 'A10001', 'A0'):
-            with self.subTest(coord=coord), self.assertRaises(SpreadsheetError):
-                inspect_spreadsheet('bad.xlsx', xlsx(sheet.replace('r="A1"', 'r="' + coord + '"')))
+        with patch('hosting.spreadsheets.MAX_ROWS', 10000), patch('hosting.spreadsheets.MAX_COLS', 100):
+            for coord in ('CW2', 'A10001', 'A0'):
+                with self.subTest(coord=coord), self.assertRaises(SpreadsheetError):
+                    inspect_spreadsheet('bad.xlsx', xlsx(sheet.replace('r="A1"', 'r="' + coord + '"')))
+        for coord in ('XFD2', 'A1048576'):
+            with self.subTest(coord=coord):
+                self.assertEqual(inspect_spreadsheet('edge.xlsx', xlsx(sheet.replace('r="A1"', 'r="' + coord + '"')))['row_count'], 1)
+        with self.assertRaises(SpreadsheetError):
+            inspect_spreadsheet('over.xlsx', xlsx(sheet.replace('r="A1"', 'r="XFE1"')))
 
 
 if __name__ == '__main__':

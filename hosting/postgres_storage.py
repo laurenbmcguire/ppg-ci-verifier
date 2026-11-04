@@ -13,6 +13,7 @@ import psycopg
 
 from hosting.storage import StorageUnavailable, restore, NAMESPACE
 from hosting.sqlite_storage import checked_pack, immutable_files
+from hosting.files import PostgresFiles, activate
 
 DB_ERRORS = (psycopg.Error, OSError)
 UNAVAILABLE = 'Durable storage is unavailable. No success was confirmed; reload before retrying.'
@@ -42,7 +43,7 @@ class PostgresWorkspace:
             with conn.cursor() as cur:
                 # Bounded waits; one row lock serializes concurrent requests.
                 cur.execute("SET LOCAL lock_timeout = '5s'")
-                cur.execute("SET LOCAL statement_timeout = '10s'")
+                cur.execute("SET LOCAL statement_timeout = '120s'")
                 cur.execute('INSERT INTO ci_verifier_state(namespace) VALUES (%s) ON CONFLICT DO NOTHING', (NAMESPACE,))
                 cur.execute('SELECT payload, revision FROM ci_verifier_state WHERE namespace=%s FOR UPDATE', (NAMESPACE,))
                 row = cur.fetchone()
@@ -50,7 +51,7 @@ class PostgresWorkspace:
                     raise StorageUnavailable('Durable workspace is unavailable.')
                 old_payload, revision = row
                 old = bytes(old_payload) if old_payload is not None else None
-                with tempfile.TemporaryDirectory(prefix='ci-verifier-pg-') as directory:
+                with tempfile.TemporaryDirectory(prefix='ci-verifier-pg-') as directory, activate(PostgresFiles(cur)):
                     root = Path(directory)
                     restore(root, old)
                     originals = immutable_files(root)
