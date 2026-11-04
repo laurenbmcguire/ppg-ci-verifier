@@ -24,6 +24,31 @@
     quantity_formulas_not_evaluated: 'Some quantity cells contain formulas. They were not evaluated, so those values are unknown rather than zero.',
     number_stored_as_text: 'A number is stored as text. It was read as a number, but Excel may not include it in sums.',
     rejected_exceeds_inspected: 'More parts were rejected than inspected in this row.',
+    formula_results_used: 'Some quantities are formulas; the result Excel last saved was checked. Re-save the file in Excel if it was edited elsewhere.',
+    duplicate_row: 'This row repeats an earlier row exactly.',
+    duplicate_identifier: 'The same identifier (scan / lot) is listed more than once.',
+    possible_identifier_typo: 'This identifier differs from another only by a look-alike character or prefix — likely a typo.',
+    identifier_format_differs: 'This identifier is formatted differently from the others (e.g. a letter where digits are expected).',
+    part_format_differs: 'This part number is formatted differently from the others.',
+    possible_part_number_typo: 'This part number is one character off a part number used throughout the report — likely a typo.',
+    possible_defect_typo: 'This defect / reject reason looks like a misspelling of a reason used elsewhere.',
+    possible_condition_typo: 'This condition value looks like a misspelling of one used elsewhere.',
+    possible_auditor_typo: 'This auditor name looks like a misspelling of one used elsewhere.',
+    extra_spaces: 'A value has extra spaces.',
+    missing_part_number: 'A row with quantities has no part number.',
+    missing_identifier: 'A row with quantities has no identifier.',
+    missing_defect_reason: 'Parts were rejected but no defect / reject reason is given.',
+    condition_conflicts_with_quantity: 'The OK/NOK condition does not agree with the rejected quantity.',
+    invalid_date: 'The date is not a valid date.',
+    date_differs_from_report: 'The row date differs from the report date.',
+    future_date: 'The date is in the future.',
+    invalid_shift: 'The shift value is not a recognizable shift.',
+    shift_differs_from_sheet: 'The row shift does not match the shift sheet it is on.',
+    totals_block_mismatch: 'A totals box does not equal the sum of the rows on its sheet.',
+    summary_mismatch: 'A Summary figure does not equal the rows on the sheet it summarizes.',
+    reject_log_mismatch: 'The reject log disagrees with the shift rows for this identifier.',
+    reject_log_row_not_in_detail: 'The reject log lists an identifier that is not in any shift rows.',
+    reject_log_total_mismatch: 'The reject log total disagrees with the shift rows.',
     external_reference_formula: 'A formula refers to another workbook or a web/network location. The stored value was checked; the link was never opened, so that value may be stale.',
     web_function_formula: 'A formula uses a web function (WEBSERVICE, IMAGE or FILTERXML). It was never run; check that the stored result is current.',
     hyperlink_formula: 'A HYPERLINK formula is present. Links are recorded only and never opened.',
@@ -39,7 +64,7 @@
   function detail(result) {
     const detailTicket=++detailVersion;
     const target = node('spreadsheet-detail'); target.replaceChildren();
-    target.append(make('h3', `${result.filename} · version ${result.version}`), make('div', result.source_reconciliation_status==='mismatch'?'Source mismatch · release held':result.mapping_mode==='adaptive'?'Columns detected automatically · release held':result.template_id?(result.template_mapping_status==='incomplete'?'Template mapping incomplete · release held':'Mapped template checks · release held'):'Internal checks only · source not verified', 'result-badge unable_to_verify'), make('p', 'Original retained unchanged. These findings are not independent verification, approval, or permission to release a report.', 'hint'));
+    target.append(make('h3', `${result.filename} · version ${result.version}`), make('div', result.sharepoint&&result.sharepoint.status==='match'?'Matches SharePoint · release held':result.sharepoint&&result.sharepoint.status==='differences'?'Differs from SharePoint · release held':result.source_reconciliation_status==='mismatch'?'Source mismatch · release held':result.mapping_mode==='adaptive'?'Columns detected automatically · release held':result.template_id?(result.template_mapping_status==='incomplete'?'Template mapping incomplete · release held':'Mapped template checks · release held'):'Internal checks only · source not verified', 'result-badge unable_to_verify'), make('p', 'Original retained unchanged. These findings are not independent verification, approval, or permission to release a report.', 'hint'));
     if(!result.template_id)target.append(make('p',`${result.numeric_columns_checked||0} supported quantity columns checked. ${result.internal_check_status==='unverified'?'No complete supported mapping: this is unverified.':'Only the documented internal checks were performed.'}`));
     if(result.mapping_mode==='adaptive'){
       if(result.recognized_template)target.append(make('p','This looks like a known PPG/Pratt report with a different layout, so the columns were detected automatically.','hint'));
@@ -51,6 +76,7 @@
         sheet.tables.forEach(table=>columns.append(make('p',`${sheet.name}, header row ${table.header_row}: `+Object.entries(table.columns).map(([field,c])=>`${names[field]||field} = column ${c.column} “${c.header}”`).join(' · ')+` — ${table.data_row_count} row${table.data_row_count===1?'':'s'}`)));
       });
       target.append(columns);
+      target.append(sharepointPanel(result));
       const t=result.totals||{};target.append(make('p',['inspected','certified','rejected'].filter(f=>t[f]).map(f=>`${names[f]}: ${t[f].total!==null?t[f].total:`at least ${t[f].known_sum} (some values unknown)`}`).join(' · ')));
     }
     else if(result.template_id){
@@ -71,6 +97,50 @@
     if (result.findings_truncated) target.append(make('p', `Showing a bounded selection of ${result.finding_count || 'all'} findings. Review the original spreadsheet for the remainder.`, 'hint'));
     showDemoReview(result,target,detailTicket);
     const summary = document.createElement('details'); summary.append(make('summary', 'File, sheet, and provenance details'), make('pre', JSON.stringify(result, null, 2))); target.append(summary);
+  }
+  function sharepointPanel(result) {
+    const sp = result.sharepoint || {};
+    const box = make('section', '', 'report-finding sharepoint-panel');
+    box.append(make('strong', 'SharePoint check'));
+    if (sp.status === 'match' || sp.status === 'differences') {
+      const where = sp.site ? ` (${sp.site} · ${sp.path})` : sp.source_filename ? ` (${sp.source_filename})` : '';
+      box.append(make('p', sp.status === 'match'
+        ? `Matches the ${sp.source_label || 'SharePoint export'}${where}: all ${sp.matched_rows} rows and totals agree.`
+        : `Compared with the ${sp.source_label || 'SharePoint export'}${where}: ${sp.matched_rows} of ${sp.report_rows} report rows matched; ${sp.value_differences} value difference(s), ${sp.missing_from_report} row(s) on SharePoint but not in the report, ${sp.not_on_sharepoint} report row(s) not on SharePoint.`));
+      if (sp.web_url && /^https:\/\/[a-z0-9.-]+\.sharepoint\.com\//i.test(sp.web_url)) { const link = make('a', 'Open the SharePoint export'); link.href = sp.web_url; link.target = '_blank'; link.rel = 'noopener'; box.append(link); }
+      const t = sp.totals || {};
+      box.append(make('p', ['inspected', 'certified', 'rejected'].filter(f => t[f]).map(f => `${f[0].toUpperCase() + f.slice(1)}: report ${t[f].report ?? '?'} / SharePoint ${t[f].sharepoint ?? '?'}`).join(' · '), 'hint'));
+      (sp.findings || []).forEach(f => { const item = make('p', f.message || f.code); if (f.sheet && f.row) item.append(make('small', ` — ${f.sheet} row ${f.row}`)); box.append(item); });
+    } else if (sp.status) {
+      box.append(make('p', sp.message || 'SharePoint was not checked.', sp.status === 'error' ? 'intake-error' : 'hint'));
+    } else {
+      box.append(make('p', 'Not compared with SharePoint yet.', 'hint'));
+    }
+    const run = make('button', sp.status === 'match' || sp.status === 'differences' ? 'Re-check against SharePoint' : 'Check against SharePoint');
+    run.disabled = pending;
+    run.addEventListener('click', async () => {
+      if (pending) return; setBusy(true);
+      try {
+        message('Looking up this job on SharePoint…');
+        const answer = await post('/api/spreadsheets/sharepoint', {file_hash: result.file_hash});
+        ++selectionVersion; selected = answer.item.file_hash; detail(answer.item); await refresh();
+        const st = (answer.item.sharepoint || {}).status;
+        message(st === 'match' ? 'Report matches SharePoint.' : st === 'differences' ? 'Differences from SharePoint found — see the SharePoint check.' : (answer.item.sharepoint || {}).message || 'SharePoint check finished.', st !== 'match' && st !== 'differences');
+      } catch (error) { message(error.message, true); } finally { setBusy(false); }
+    });
+    const label = make('label', 'Or upload the SharePoint export (CSV or XLSX)');
+    const input = document.createElement('input'); input.type = 'file'; input.accept = '.csv,.xlsx'; input.disabled = pending; label.append(input);
+    input.addEventListener('change', async () => {
+      const file = input.files[0]; if (!file || pending) return; setBusy(true);
+      try {
+        message('Comparing with the uploaded SharePoint export…');
+        const answer = await post('/api/spreadsheets/source-upload', {file_hash: result.file_hash, filename: file.name, content_base64: await toBase64(file)});
+        ++selectionVersion; selected = answer.item.file_hash; detail(answer.item); await refresh();
+        message(answer.item.sharepoint.status === 'match' ? 'Report matches the uploaded SharePoint export.' : 'Differences found — see the SharePoint check.');
+      } catch (error) { message(error.message, true); } finally { setBusy(false); input.value = ''; }
+    });
+    box.append(run, label);
+    return box;
   }
   async function showDemoReview(result, target, detailTicket) {
     if (!developmentDemo || !result.template_id || !result.source_sha256) return;

@@ -1,46 +1,59 @@
-"""Format-agnostic quantity checks for inspection/sort reports in any layout.
+"""Format-agnostic checks for inspection/sort reports in any layout.
 
-Used whenever a workbook is not an exact match for a known PPG/Pratt template (or a
-CSV has no first-row quantity headers). Header rows are found by meaning, anywhere in
-the first rows of each sheet and again further down (multiple tables per sheet).
-Formulas are never evaluated: a formula in a quantity cell is an unknown value, not zero.
-Results are internal checks only; no source authenticity, approval or release.
+Used whenever a workbook is not an exact match for a known PPG/Pratt template (or a CSV
+has no first-row quantity headers). Header rows are found by meaning, anywhere in each
+sheet, with any number of tables per sheet. Formulas are never executed; when Excel saved
+a result for a formula, that saved result is used and labeled as such.
+
+Checks: quantity rules, duplicates, likely typos, data validity, totals blocks and
+Summary rows against the detail rows. Internal checks only: no source authenticity,
+approval or release.
 """
-from collections import Counter
+from collections import Counter, defaultdict
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import re
 
 TEMPLATE_ID = 'adaptive-columns/1'
-SCAN_ROWS = 120          # rows searched for the first header row on each sheet
-MAX_FINDINGS = 200
+SCAN_ROWS = 120
+MAX_FINDINGS = 300
 MAX_RECORDS_RETURNED = 500
 
-# Words that may surround a field word in a header: "Total Parts Inspected (pcs)", "Qty Rejected", "# Good".
 _FILLER = {'total', 'totals', 'qty', 'quantity', 'quantities', 'pcs', 'pc', 'pieces', 'piece', 'parts', 'part',
-           'count', 'counts', 'no', 'number', 'of', 'num', 'units', 'unit', 'amount', 'daily', 'shift', 'sum', 'ea'}
+           'count', 'counts', 'no', 'number', 'of', 'num', 'units', 'unit', 'amount', 'daily', 'sum', 'ea'}
 FIELDS = {
-    'inspected': {'inspected', 'sorted', 'checked', 'inspect', 'inspection', 'audited', 'reviewed', 'sort'},
-    'rejected': {'rejected', 'rejects', 'reject', 'ng', 'nok', 'no good', 'defects', 'defect', 'defective', 'nonconforming',
-                 'non conforming', 'nc', 'scrap', 'scrapped', 'failed', 'fail', 'bad', 'suspect', 'held', 'on hold'},
+    'inspected': {'inspected', 'sorted', 'checked', 'inspect', 'audited', 'reviewed', 'sort'},
+    'rejected': {'rejected', 'rejects', 'reject', 'ng', 'nok', 'no good', 'defects', 'defective', 'nonconforming',
+                 'non conforming', 'scrap', 'scrapped', 'failed', 'fail', 'bad', 'suspect'},
     'certified': {'certified', 'accepted', 'accept', 'good', 'passed', 'pass', 'ok', 'conforming', 'released',
                   'approved', 'clean', 'cleared', 'acceptable'},
+    'reworked': {'reworked', 'rework', 'repaired'},
 }
-TOTAL_WORDS = ('total', 'grand total', 'totals', 'subtotal', 'sub total', 'shift total', 'daily total', 'sum')
-LABEL_WORDS = {'part number': 'part', 'part': 'part', 'part no': 'part', 'part num': 'part', 'p n': 'part', 'pn': 'part',
-               'part name': 'part', 'item': 'part', 'item number': 'part', 'sku': 'part', 'shift': 'shift', 'date': 'date',
-               'area': 'area', 'line': 'area', 'location': 'area', 'lot': 'lot', 'identifier lot': 'lot', 'lot number': 'lot',
-               'batch': 'lot', 'serial': 'lot'}
+QTY = ('inspected', 'certified', 'rejected', 'reworked')
+TOTAL_WORDS = ('total', 'grand total', 'totals', 'subtotal', 'sub total', 'shift total', 'daily total', 'day total', 'sum')
+LABELS = {
+    'identifier': {'identifier', 'identifier lot', 'id', 'lot', 'lot number', 'lot no', 'serial', 'serial number', 'serial no',
+                   'tag', 'label', 'container', 'container id', 'box', 'skid', 'batch', 'barcode', 'scan', 'scan id'},
+    'part': {'part number', 'part', 'part no', 'part num', 'p n', 'pn', 'part name', 'item', 'item number', 'sku', 'part id'},
+    'date': {'date', 'inspection date', 'scan date', 'report date'},
+    'shift': {'shift', 'shift no', 'shift number'},
+    'defect': {'defect', 'defect type', 'reject reason', 'reason', 'defect reason', 'nok reason', 'failure mode', 'issue'},
+    'condition': {'condition', 'status', 'result', 'ok nok', 'ok nok status', 'disposition'},
+    'auditor': {'auditor', 'inspector', 'inspected by', 'operator', 'sorter', 'technician'},
+    'area': {'area', 'line', 'location', 'station', 'cell'},
+}
+CONFUSABLE = str.maketrans({'O': '0', 'o': '0', 'I': '1', 'l': '1', 'i': '1', 'S': '5', 's': '5', 'B': '8', 'Z': '2', 'z': '2'})
 
 
-def _norm(value):
+def norm(value):
     return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9]+', ' ', str(value).lower())).strip()
 
 
 def field_for_header(value):
-    """Map one header cell to inspected/rejected/certified, or None. 'Inspected for' stays unmapped."""
+    """Map one header cell to a quantity field, or None. 'Inspected for' and a bare 'Qty' stay unmapped."""
     if not isinstance(value, str):
         return None
-    words = _norm(value).split()
+    words = norm(value).split()
     if not words or len(words) > 6:
         return None
     while words and words[0] in _FILLER:
@@ -55,7 +68,13 @@ def field_for_header(value):
 
 
 def label_for_header(value):
-    return LABEL_WORDS.get(_norm(value)) if isinstance(value, str) else None
+    if not isinstance(value, str):
+        return None
+    key = norm(value)
+    for label, names in LABELS.items():
+        if key in names:
+            return label
+    return None
 
 
 def _header_map(row):
@@ -64,6 +83,7 @@ def _header_map(row):
         field = field_for_header(value)
         if field and field not in mapping:
             mapping[field] = index
+            continue
         label = label_for_header(value)
         if label and label not in labels:
             labels[label] = index
@@ -74,7 +94,7 @@ def _text_cells(row):
     return sum(1 for v in row if isinstance(v, str) and v.strip() and not v.startswith('='))
 
 
-def _column(index):
+def column_letter(index):
     letters, n = '', index + 1
     while n:
         n, rem = divmod(n - 1, 26)
@@ -82,8 +102,8 @@ def _column(index):
     return letters
 
 
-def _value(raw):
-    """Return (number|None, state). States: number, number_as_text, formula, blank, invalid."""
+def number_state(raw, cached=None):
+    """(Decimal|None, state). States: number, number_as_text, formula_result, formula, blank, invalid."""
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return None, 'blank'
     if isinstance(raw, bool):
@@ -96,13 +116,100 @@ def _value(raw):
         return (n, 'number') if n.is_finite() else (None, 'invalid')
     text = str(raw).strip()
     if text.startswith('='):
+        if isinstance(cached, (int, float)) and not isinstance(cached, bool):
+            n = Decimal(str(cached))
+            return (n, 'formula_result') if n.is_finite() else (None, 'formula')
         return None, 'formula'
     cleaned = text.replace(',', '')
     if re.fullmatch(r'-?\d+(\.\d+)?', cleaned):
         return Decimal(cleaned), 'number_as_text'
-    if text.lower() in ('-', 'n/a', 'na', 'none', 'nil'):
+    if text.lower() in ('-', 'n/a', 'na', 'none', 'nil', '—', '–'):
         return None, 'blank'
     return None, 'invalid'
+
+
+KNOWN = ('number', 'number_as_text', 'formula_result')
+
+
+def label_text(raw, cached=None):
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip().startswith('='):
+        raw = cached
+        if raw is None:
+            return None
+    if isinstance(raw, float) and raw.is_integer():
+        raw = int(raw)
+    text = raw.isoformat() if isinstance(raw, (datetime, date)) else str(raw)
+    text = text.strip()
+    return text or None
+
+
+def as_day(raw, cached=None):
+    value = cached if isinstance(raw, str) and raw.strip().startswith('=') else raw
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        for fmt in ('%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y', '%m-%d-%Y', '%m.%d.%y', '%m.%d.%Y', '%B %d, %Y', '%b %d, %Y'):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except ValueError:
+                pass
+    return None
+
+
+def shift_number(text):
+    if text is None:
+        return None
+    t = norm(text)
+    m = re.fullmatch(r'(?:shift )?([123])(?:st|nd|rd)?(?: shift)?', t)
+    if m:
+        return m.group(1)
+    return {'first': '1', 'second': '2', 'third': '3', 'day': None, 'night': None}.get(t.replace(' shift', ''), None)
+
+
+def edit_distance_le1(a, b):
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diffs = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+        if len(diffs) == 2 and diffs[1] == diffs[0] + 1 and a[diffs[0]] == b[diffs[1]] and a[diffs[1]] == b[diffs[0]]:
+            return True  # two neighbouring characters swapped
+        return len(diffs) == 1
+    if len(a) > len(b):
+        a, b = b, a
+    i = j = diff = 0
+    while i < len(a) and j < len(b):
+        if a[i] != b[j]:
+            diff += 1
+            if diff > 1:
+                return False
+            j += 1
+        else:
+            i += 1; j += 1
+    return True
+
+
+def near_miss(a, b, one_char=True):
+    """Two distinct codes that look like a typo of each other: a look-alike letter/digit, an inconsistent
+    S prefix, or (when one_char) a single character off. Sequential serials differ by one digit, so callers
+    comparing codes inside one report pass one_char=False."""
+    if not a or not b or a == b:
+        return False
+    if a.translate(CONFUSABLE) == b.translate(CONFUSABLE):
+        return True
+    if a.lstrip('Ss') == b.lstrip('Ss') and a.lstrip('Ss'):
+        return True
+    return one_char and len(a) >= 5 and edit_distance_le1(a, b)
+
+
+def shape(code):
+    return re.sub(r'[A-Za-z]', 'A', re.sub(r'[0-9]', '9', code))
 
 
 def _is_total_row(row, mapping):
@@ -110,143 +217,372 @@ def _is_total_row(row, mapping):
     for index, value in enumerate(row):
         if index in used:
             continue
-        if isinstance(value, str) and value.strip():
-            return _norm(value) in TOTAL_WORDS or _norm(value).endswith(' total')
+        if isinstance(value, str) and value.strip() and not value.startswith('='):
+            n = norm(value)
+            return n in TOTAL_WORDS or n.endswith(' total') or n.startswith('total ')
     return False
 
 
-def inspect_adaptive(sources, base):
-    """Return an adaptive result if any quantity column is found in any sheet, else None."""
-    result = dict(base, template_id=TEMPLATE_ID, mapping_mode='adaptive', template_mapping_status='matched',
-                  verification_scope='adaptive_column_internal_checks_only', sheets=[], findings=[], records=[],
-                  source_authenticity='not_supplied', source_reconciliation_status='not_performed',
-                  approval_effective=False, release_status='held')
-    result['limitations'] = list(base.get('limitations', [])) + [
-        'Quantity columns were detected automatically from header text; review the detected columns below.',
-        'Formulas in quantity cells are unknown values, never evaluated and never treated as zero.']
-    counts = Counter()
+def _row_label(row, mapping, labels):
+    used = set(mapping.values()) | set(labels.values())
+    for index, value in enumerate(row):
+        if index not in used and isinstance(value, str) and value.strip() and not value.startswith('='):
+            return value.strip()
+    return None
 
-    def finding(code, sheet, row=None, column=None, message=None):
-        counts[code] += 1
-        if len(result['findings']) < MAX_FINDINGS:
-            result['findings'].append(dict(code=code, sheet=sheet, row=row, column=column, **({'message': message} if message else {})))
+
+class Checker:
+    def __init__(self, result):
+        self.result = result
+        self.counts = Counter()
+
+    def __call__(self, code, sheet, row=None, column=None, message=None):
+        self.counts[code] += 1
+        if len(self.result['findings']) < MAX_FINDINGS:
+            item = dict(code=code, sheet=sheet, row=row, column=column)
+            if message:
+                item['message'] = message
+            self.result['findings'].append(item)
         else:
-            result['findings_truncated'] = True
+            self.result['findings_truncated'] = True
 
-    grand = {f: Decimal(0) for f in FIELDS}
-    grand_known = {f: True for f in FIELDS}
-    record_count = numeric_cells = formula_cells = total_rows = total_cells = 0
-    any_mapped = False
 
+def scan(sources, cached=None):
+    """Find tables and rows. Returns (sheets, records, stats)."""
+    cached = cached or {}
+    sheets, records = [], []
+    stats = Counter()
     for title, rows in sources:
         rows = list(rows)
+        crow = list(cached.get(title, []))
         sheet = dict(name=title, row_count=len(rows), tables=[], data_row_count=0, mapping_status='no_quantity_columns')
-        mapping, labels, header_row = {}, {}, None
         best = (0, None, {}, {})
         for r, row in enumerate(rows[:SCAN_ROWS], 1):
             m, lab = _header_map(row)
             if m and _text_cells(row) >= 2 and len(m) > best[0]:
                 best = (len(m), r, m, lab)
         if best[1] is None:
-            result['sheets'].append(sheet)
-            finding('no_quantity_columns_detected', title, message='No inspected/rejected/certified header was found. This sheet was not quantity-checked.')
+            sheets.append(sheet)
             continue
-        any_mapped = True
         sheet['mapping_status'] = 'adaptive'
-        segment = {f: Decimal(0) for f in FIELDS}
-        segment_known = {f: True for f in FIELDS}
-        segment_rows = 0
         table = None
 
-        def start_table(r, m, lab):
-            nonlocal mapping, labels, header_row, segment, segment_known, segment_rows, table
-            mapping, labels, header_row = m, lab, r
-            segment = {f: Decimal(0) for f in FIELDS}
-            segment_known = {f: True for f in FIELDS}
-            segment_rows = 0
-            table = dict(header_row=r, columns={f: dict(column=_column(i), header=str(rows[r - 1][i]).strip()) for f, i in m.items()},
-                         data_row_count=0, totals={})
+        def start(r, m, lab):
+            nonlocal table
+            heads = rows[r - 1]
+            is_totals_block = all(norm(heads[i]).startswith('total') for i in m.values())
+            table = dict(index=len(sheet['tables']), header_row=r, kind='totals' if is_totals_block else 'detail',
+                         columns={f: dict(column=column_letter(i), header=str(heads[i]).strip()) for f, i in m.items()},
+                         labels={k: dict(column=column_letter(i), header=str(heads[i]).strip()) for k, i in lab.items()},
+                         mapping=m, label_map=lab, data_row_count=0, total_rows=[])
             sheet['tables'].append(table)
 
-        start_table(best[1], best[2], best[3])
+        start(best[1], best[2], best[3])
         for r in range(best[1] + 1, len(rows) + 1):
             row = list(rows[r - 1])
-            total_rows += 1
-            total_cells += len(row)
+            crw = list(crow[r - 1]) if r - 1 < len(crow) else []
+            cget = (lambda i: crw[i] if i < len(crw) else None)
+            stats['rows'] += 1
+            stats['cells'] += len(row)
             m, lab = _header_map(row)
-            if m and _text_cells(row) >= 2 and len(m) >= max(1, len(mapping)) and not any(_value(row[i])[1] in ('number', 'number_as_text') for i in m.values() if i < len(row)):
-                start_table(r, m, lab)
+            if m and _text_cells(row) >= 2 and len(m) >= max(1, len(table['mapping'])) \
+                    and not any(number_state(row[i], cget(i))[1] in KNOWN and not isinstance(row[i], str) for i in m.values() if i < len(row)):
+                start(r, m, lab)
                 continue
-            cells = {f: _value(row[i]) if i < len(row) else (None, 'blank') for f, i in mapping.items()}
+            mapping, labmap = table['mapping'], table['label_map']
+            cells = {f: number_state(row[i], cget(i)) if i < len(row) else (None, 'blank') for f, i in mapping.items()}
             if all(state == 'blank' for _, state in cells.values()):
                 continue
-            if _is_total_row(row, mapping):
-                for f, (n, state) in cells.items():
-                    if state in ('number', 'number_as_text'):
-                        if segment_rows and segment_known[f] and n != segment[f]:
-                            finding('total_mismatch', title, r, mapping[f] + 1,
-                                    f'Stated {f} total does not equal the sum of the {segment_rows} rows above it.')
-                        table['totals'][f] = dict(stated=str(n), sum_of_rows=str(segment[f]) if segment_known[f] else None)
-                    elif state == 'formula':
-                        formula_cells += 1
-                segment = {f: Decimal(0) for f in FIELDS}
-                segment_known = {f: True for f in FIELDS}
-                segment_rows = 0
-                continue
-            values = {}
-            for f, (n, state) in cells.items():
-                col = mapping[f] + 1
-                if state in ('number', 'number_as_text'):
-                    numeric_cells += 1
-                    if state == 'number_as_text':
-                        finding('number_stored_as_text', title, r, col)
-                    if n < 0:
-                        finding('negative_count_or_quantity', title, r, col)
-                    if n != n.to_integral_value():
-                        finding('fractional_count', title, r, col)
-                    values[f] = n
-                    segment[f] += n
-                    grand[f] += n
-                else:
-                    values[f] = None
-                    segment_known[f] = False
-                    grand_known[f] = False
-                    if state == 'formula':
-                        formula_cells += 1
-                    elif state == 'invalid':
-                        finding('invalid_numeric_value', title, r, col)
-                    elif state == 'blank' and any(v[1] in ('number', 'number_as_text') for v in cells.values()):
-                        finding('missing_cell', title, r, col)
-            if all(values.get(f) is not None for f in ('inspected', 'rejected', 'certified')):
-                if values['inspected'] != values['certified'] + values['rejected']:
-                    finding('inspected_count_mismatch', title, r,
-                            message='Inspected does not equal certified/accepted plus rejected in this row.')
-            elif values.get('inspected') is not None and values.get('rejected') is not None and values['rejected'] > values['inspected']:
-                finding('rejected_exceeds_inspected', title, r)
-            segment_rows += 1
-            table['data_row_count'] += 1
-            sheet['data_row_count'] += 1
-            record_count += 1
-            if len(result['records']) < MAX_RECORDS_RETURNED:
-                part = row[labels['part']] if 'part' in labels and labels['part'] < len(row) else None
-                part = None if part is None or (isinstance(part, str) and part.startswith('=')) else part
-                result['records'].append(dict(sheet=title, row=r, part=str(part) if part is not None else None,
-                                              values={f: (str(v) if v is not None else None) for f, v in values.items()}))
-        if sheet['data_row_count'] == 0:
-            finding('no_data_rows', title, header_row, message='Quantity headers were found but no rows with quantities follow them.')
-        result['sheets'].append(sheet)
+            labels = {k: label_text(row[i], cget(i)) if i < len(row) else None for k, i in labmap.items()}
+            day = as_day(row[labmap['date']], cget(labmap['date'])) if 'date' in labmap and labmap['date'] < len(row) else None
+            for _, state in cells.values():
+                stats[state] += 1
+            record = dict(sheet=title, row=r, table=table['index'], table_kind=table['kind'],
+                          values={f: n for f, (n, s) in cells.items()}, states={f: s for f, (n, s) in cells.items()},
+                          labels=labels, day=day, row_label=_row_label(row, mapping, labmap),
+                          is_total=_is_total_row(row, mapping), columns={f: mapping[f] + 1 for f in mapping})
+            if record['is_total']:
+                table['total_rows'].append(record)
+            else:
+                table['data_row_count'] += 1
+                sheet['data_row_count'] += 1
+            records.append(record)
+        sheets.append(sheet)
+    classify(sheets, records)
+    return sheets, records, stats
 
-    if not any_mapped:
+
+SUMMARY_SHEETS = {'summary', 'dashboard', 'overview', 'totals', 'day summary', 'daily summary', 'recap'}
+
+
+def classify(sheets, records):
+    """detail = row-level data with an Inspected column; supporting = reject logs etc. (no Inspected column);
+    summary = summary sheets, or tables without identifier/part columns when other tables have them."""
+    has_ids = any(t['kind'] == 'detail' and ('identifier' in t['labels'] or 'part' in t['labels'])
+                  for s in sheets for t in s['tables'])
+    kinds = {}
+    for sheet in sheets:
+        for t in sheet['tables']:
+            if t['kind'] != 'totals':
+                if norm(sheet['name']) in SUMMARY_SHEETS or (has_ids and not ('identifier' in t['labels'] or 'part' in t['labels'])):
+                    t['kind'] = 'summary'
+                elif 'inspected' not in t['columns']:
+                    t['kind'] = 'supporting'
+            kinds[(sheet['name'], t['index'])] = t['kind']
+    for r in records:
+        r['table_kind'] = kinds.get((r['sheet'], r['table']), r['table_kind'])
+    for sheet in sheets:
+        sheet['data_row_count'] = sum(1 for r in records if r['sheet'] == sheet['name'] and r['table_kind'] == 'detail' and not r['is_total'])
+
+
+def _sum(rows, field):
+    values = [r['values'].get(field) for r in rows if field in r['values']]
+    if not values:
+        return None, False
+    known = all(v is not None for v in values)
+    return sum((v for v in values if v is not None), Decimal(0)), known
+
+
+def inspect_adaptive(sources, base, cached=None, report_day=None):
+    """Return an adaptive result if any quantity column is found in any sheet, else None."""
+    sheets, records, stats = scan(sources, cached)
+    if not any(s['mapping_status'] == 'adaptive' for s in sheets):
         return None
-    if formula_cells:
+    result = dict(base, template_id=TEMPLATE_ID, mapping_mode='adaptive', template_mapping_status='matched',
+                  verification_scope='adaptive_column_internal_checks_only', findings=[],
+                  source_authenticity='not_supplied', source_reconciliation_status='not_performed',
+                  approval_effective=False, release_status='held')
+    result['limitations'] = list(base.get('limitations', [])) + [
+        'Quantity columns were detected automatically from header text; review the detected columns.',
+        'Formulas are never executed. Where Excel saved a result for a formula, that saved result was checked.']
+    finding = Checker(result)
+
+    for sheet in sheets:
+        if sheet['mapping_status'] != 'adaptive':
+            finding('no_quantity_columns_detected', sheet['name'], message='No Inspected / Certified / Rejected style headers on this sheet, so it was not quantity-checked.')
+        elif sheet['data_row_count'] == 0 and any(t['kind'] == 'detail' for t in sheet['tables']):
+            finding('no_data_rows', sheet['name'], message='Quantity headers were found but no rows with quantities follow them.')
+
+    sheet_names = {norm(s['name']): s['name'] for s in sheets if s['data_row_count'] or any(t['kind'] in ('detail', 'totals') for t in s['tables'])}
+    for r in records:
+        texts = [r['row_label']] + list(r['labels'].values())
+        target = next((sheet_names[norm(t)] for t in texts if t and norm(t) in sheet_names and sheet_names[norm(t)] != r['sheet']), None)
+        r['rollup_of'] = target
+    detail = [r for r in records if r['table_kind'] == 'detail' and not r['is_total'] and not r['rollup_of']]
+    by_table = defaultdict(list)
+    for r in detail:
+        by_table[(r['sheet'], r['table'])].append(r)
+
+    # ---- per-row quantity and validity rules
+    day_counts = Counter(r['day'] for r in detail if r['day'])
+    expected_day = report_day or (day_counts.most_common(1)[0][0] if day_counts else None)
+    for r in detail:
+        v, s, c = r['values'], r['states'], r['columns']
+        for f, n in v.items():
+            if s[f] == 'number_as_text':
+                finding('number_stored_as_text', r['sheet'], r['row'], c[f])
+            elif s[f] == 'invalid':
+                finding('invalid_numeric_value', r['sheet'], r['row'], c[f])
+            if n is not None:
+                if n < 0:
+                    finding('negative_count_or_quantity', r['sheet'], r['row'], c[f])
+                if n != n.to_integral_value():
+                    finding('fractional_count', r['sheet'], r['row'], c[f])
+        if any(st in KNOWN for st in s.values()):
+            for f in v:
+                if s[f] == 'blank':
+                    finding('missing_cell', r['sheet'], r['row'], c[f])
+        ins, ok, nok, rw = v.get('inspected'), v.get('certified'), v.get('rejected'), v.get('reworked')
+        if ins is not None and ok is not None and nok is not None:
+            if ins != ok + nok + (rw or 0):
+                finding('inspected_count_mismatch', r['sheet'], r['row'],
+                        message=f'Inspected {ins} ≠ certified {ok} + rejected {nok}' + (f' + reworked {rw}' if rw else '') + '.')
+        if ins is not None and nok is not None and nok > ins:
+            finding('rejected_exceeds_inspected', r['sheet'], r['row'], message=f'Rejected {nok} is more than inspected {ins}.')
+        lab = r['labels']
+        if 'part' in lab and not lab['part']:
+            finding('missing_part_number', r['sheet'], r['row'])
+        if 'identifier' in lab and not lab['identifier']:
+            finding('missing_identifier', r['sheet'], r['row'])
+        if nok is not None and nok > 0 and 'defect' in lab and not lab['defect']:
+            finding('missing_defect_reason', r['sheet'], r['row'], message=f'{nok} rejected but no defect / reject reason.')
+        cond = norm(lab.get('condition') or '')
+        if cond and nok is not None:
+            if cond in ('ok', 'pass', 'good', 'accepted') and nok > 0:
+                finding('condition_conflicts_with_quantity', r['sheet'], r['row'], message=f'Condition says {lab["condition"]} but {nok} were rejected.')
+            if cond in ('nok', 'ng', 'fail', 'reject', 'rejected') and nok == 0:
+                finding('condition_conflicts_with_quantity', r['sheet'], r['row'], message=f'Condition says {lab["condition"]} but 0 were rejected.')
+        if 'date' in lab:
+            if lab['date'] and r['day'] is None:
+                finding('invalid_date', r['sheet'], r['row'], message=f'"{lab["date"]}" is not a recognizable date.')
+            elif r['day'] and expected_day and r['day'] != expected_day:
+                finding('date_differs_from_report', r['sheet'], r['row'], message=f'{r["day"].isoformat()} differs from the report date {expected_day.isoformat()}.')
+            if r['day'] and r['day'] > date.today():
+                finding('future_date', r['sheet'], r['row'])
+        sheet_shift = shift_number(r['sheet'])
+        row_shift = shift_number(lab.get('shift'))
+        if lab.get('shift') and row_shift is None:
+            finding('invalid_shift', r['sheet'], r['row'], message=f'"{lab["shift"]}" is not a recognizable shift.')
+        elif sheet_shift and row_shift and sheet_shift != row_shift:
+            finding('shift_differs_from_sheet', r['sheet'], r['row'], message=f'Row says shift {row_shift} on the {r["sheet"]} sheet.')
+
+    # ---- duplicates
+    seen_exact, seen_id = {}, defaultdict(list)
+    for r in detail:
+        key = (r['sheet'], r['table'], tuple(sorted((k, v) for k, v in r['labels'].items() if v)), tuple(sorted((k, str(v)) for k, v in r['values'].items())))
+        if key in seen_exact and any(r['labels'].values()):
+            first = seen_exact[key]
+            finding('duplicate_row', r['sheet'], r['row'], message=f'Same as row {first["row"]} (every field identical).')
+        else:
+            seen_exact[key] = r
+        ident = r['labels'].get('identifier')
+        if ident:
+            seen_id[ident.strip().upper()].append(r)
+    for ident, rows in seen_id.items():
+        if len(rows) > 1:
+            places = ', '.join(f'{x["sheet"]} row {x["row"]}' for x in rows)
+            where = 'across shifts' if len({x['sheet'] for x in rows}) > 1 else 'on the same sheet'
+            for x in rows[1:]:
+                finding('duplicate_identifier', x['sheet'], x['row'], message=f'Identifier {ident} appears {len(rows)} times {where}: {places}.')
+
+    # ---- likely typos (within the report)
+    ids = sorted(seen_id)
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            if near_miss(a, b, one_char=False):
+                r = seen_id[b][0]
+                finding('possible_identifier_typo', r['sheet'], r['row'], message=f'Identifier {b} looks like {a} with a look-alike character or prefix difference.')
+    for kind in ('identifier', 'part'):
+        codes = [(r, (r['labels'].get(kind) or '').strip()) for r in detail if r['labels'].get(kind)]
+        shapes = Counter(shape(c) for _, c in codes)
+        if len(codes) >= 4:
+            common, n = shapes.most_common(1)[0]
+            if n >= 0.75 * len(codes):
+                for r, c in codes:
+                    if shape(c) != common:
+                        finding(f'{kind}_format_differs', r['sheet'], r['row'],
+                                message=f'{"Identifier" if kind == "identifier" else "Part number"} {c} has a different format from the other {n} (expected like {common.replace("9", "#")}).')
+    parts = Counter((r['labels'].get('part') or '').strip().upper() for r in detail if r['labels'].get('part'))
+    for rare, n in parts.items():
+        if n > 2:
+            continue
+        for common, m in parts.items():
+            if m >= 3 * n and m >= 3 and near_miss(rare, common):
+                for r in detail:
+                    if (r['labels'].get('part') or '').strip().upper() == rare:
+                        finding('possible_part_number_typo', r['sheet'], r['row'], message=f'Part {rare} appears {n}× but {common} appears {m}×; likely a typo.')
+                break
+    for kind in ('defect', 'condition', 'auditor'):
+        words = Counter((r['labels'].get(kind) or '').strip() for r in detail if r['labels'].get(kind))
+        for rare, n in words.items():
+            if n > 1:
+                continue
+            for common, m in words.items():
+                if m >= 3 and common != rare and (norm(common) == norm(rare) or (len(norm(rare)) >= 4 and edit_distance_le1(norm(rare), norm(common)))):
+                    r = next(x for x in detail if (x['labels'].get(kind) or '').strip() == rare)
+                    finding(f'possible_{kind}_typo', r['sheet'], r['row'], message=f'"{rare}" looks like a misspelling of "{common}" (used {m}×).')
+                    break
+        for value in words:
+            if value != value.strip() or '  ' in value:
+                finding('extra_spaces', 'Workbook', message=f'{kind.title()} "{value}" has extra spaces.')
+
+    # ---- totals: stated total rows and totals blocks vs the rows they summarize
+    sheet_sums = {}
+    for sheet in sheets:
+        for table in sheet['tables']:
+            rows_ = by_table.get((sheet['name'], table['index']), [])
+            sums = {f: _sum(rows_, f) for f in table['mapping']}
+            table['sums'] = {f: (str(s) if known else None) for f, (s, known) in sums.items()}
+            for tr in table['total_rows']:
+                for f, n in tr['values'].items():
+                    s, known = sums.get(f, (None, False))
+                    if n is not None and known and rows_ and n != s:
+                        finding('total_mismatch', sheet['name'], tr['row'], tr['columns'].get(f),
+                                message=f'Stated {f} total {n} ≠ sum of the {len(rows_)} rows above ({s}).')
+        detail_rows = [r for r in detail if r['sheet'] == sheet['name']]
+        if detail_rows:
+            sheet_sums[sheet['name']] = {f: _sum(detail_rows, f) for f in QTY}
+        for table in sheet['tables']:
+            if table['kind'] != 'totals':
+                continue
+            block_rows = [r for r in records if r['sheet'] == sheet['name'] and r['table'] == table['index']]
+            if not block_rows or sheet['name'] not in sheet_sums:
+                continue
+            for f, n in block_rows[0]['values'].items():
+                s, known = sheet_sums[sheet['name']].get(f, (None, False))
+                if n is not None and s is not None and known and n != s:
+                    finding('totals_block_mismatch', sheet['name'], block_rows[0]['row'], block_rows[0]['columns'].get(f),
+                            message=f'"{table["columns"][f]["header"]}" says {n} but the {sheet["name"]} rows add up to {s}.')
+
+    # ---- Summary rows labeled with another sheet's name must match that sheet's rows
+    grand = {f: (sum((sheet_sums[n][f][0] for n in sheet_sums if sheet_sums[n][f][0] is not None), Decimal(0)),
+                 all(sheet_sums[n][f][1] for n in sheet_sums)) for f in QTY}
+    for r in records:
+        if r['table_kind'] not in ('detail', 'summary'):
+            continue
+        target = r.get('rollup_of')
+        if target and target in sheet_sums:
+            for f, n in r['values'].items():
+                s, known = sheet_sums[target].get(f, (None, False))
+                if n is not None and known and n != s:
+                    finding('summary_mismatch', r['sheet'], r['row'], r['columns'].get(f),
+                            message=f'{target} {f} shows {n} on {r["sheet"]} but the {target} sheet adds up to {s}.')
+        elif r['is_total'] and r['sheet'] not in sheet_sums and len(sheet_sums) > 1:
+            for f, n in r['values'].items():
+                s, known = grand.get(f, (None, False))
+                if n is not None and known and n != s:
+                    finding('summary_mismatch', r['sheet'], r['row'], r['columns'].get(f),
+                            message=f'Day total {f} shows {n} but all shift sheets add up to {s}.')
+
+    detail_by_id = {(r['labels'].get('identifier') or '').strip().upper(): r for r in detail if r['labels'].get('identifier')}
+    support = [r for r in records if r['table_kind'] == 'supporting' and not r['is_total']]
+    if support:
+        if any(r['labels'].get('identifier') for r in support):
+            for r in support:
+                ident = (r['labels'].get('identifier') or '').strip().upper()
+                d = detail_by_id.get(ident)
+                if ident and d is None:
+                    finding('reject_log_row_not_in_detail', r['sheet'], r['row'], message=f'{ident} is on {r["sheet"]} but in no shift detail rows.')
+                elif d is not None and r['values'].get('rejected') is not None and d['values'].get('rejected') is not None \
+                        and r['values']['rejected'] != d['values']['rejected']:
+                    finding('reject_log_mismatch', r['sheet'], r['row'],
+                            message=f'{ident}: {r["sheet"]} shows {r["values"]["rejected"]} rejected but {d["sheet"]} row {d["row"]} shows {d["values"]["rejected"]}.')
+        else:
+            log_total, log_known = _sum(support, 'rejected')
+            det_total, det_known = _sum(detail, 'rejected')
+            if log_known and det_known and log_total != det_total and log_total is not None:
+                finding('reject_log_total_mismatch', support[0]['sheet'],
+                        message=f'{support[0]["sheet"]} lists {log_total} rejected in total but the shift rows add up to {det_total}.')
+
+    if stats['formula']:
         finding('quantity_formulas_not_evaluated', 'Workbook',
-                message=f'{formula_cells} quantity cell(s) contain formulas. They were not evaluated, so those values are unknown.')
+                message=f'{stats["formula"]} quantity cell(s) are formulas with no saved result, so their values are unknown.')
+    if stats['formula_result']:
+        finding('formula_results_used', 'Workbook',
+                message=f'{stats["formula_result"]} quantity cell(s) are formulas; the result Excel last saved was checked. Recalculate in Excel if the file was edited elsewhere.')
+
+    for sheet in sheets:
+        for table in sheet['tables']:
+            table.pop('mapping'); table.pop('label_map')
+            table['total_rows'] = [tr['row'] for tr in table['total_rows']]
+    numeric = stats['number'] + stats['number_as_text'] + stats['formula_result']
+    info = {'no_quantity_columns_detected', 'no_data_rows', 'quantity_formulas_not_evaluated', 'formula_results_used'}
+    issues = {c for c in finding.counts if c not in info}
+    totals = {f: dict(total=str(grand[f][0]) if grand[f][1] else None, known_sum=str(grand[f][0])) for f in ('inspected', 'certified', 'rejected')} if sheet_sums else {}
     result.update(
-        record_count=record_count, numeric_cells_checked=numeric_cells, formula_count=formula_cells,
-        records_truncated=record_count > MAX_RECORDS_RETURNED,
-        totals={f: dict(total=str(grand[f]) if grand_known[f] else None, known_sum=str(grand[f])) for f in FIELDS},
-        finding_counts=dict(counts), finding_count=sum(counts.values()),
-        findings_truncated=sum(counts.values()) > MAX_FINDINGS, row_count=total_rows, cell_count=total_cells)
-    issues = {c for c in counts if c not in ('no_quantity_columns_detected', 'no_data_rows', 'quantity_formulas_not_evaluated')}
-    result['internal_check_status'] = ('unverified' if not numeric_cells else 'findings' if issues else 'no_findings_in_checks_performed')
+        sheets=sheets, record_count=len(detail), numeric_cells_checked=numeric,
+        formula_count=stats['formula'] + stats['formula_result'], formula_results_used=stats['formula_result'],
+        records=[export_record(r) for r in detail[:MAX_RECORDS_RETURNED]], records_truncated=len(detail) > MAX_RECORDS_RETURNED,
+        totals=totals, report_day=expected_day.isoformat() if expected_day else None,
+        finding_counts=dict(finding.counts), finding_count=sum(finding.counts.values()),
+        findings_truncated=sum(finding.counts.values()) > MAX_FINDINGS, row_count=stats['rows'], cell_count=stats['cells'],
+        internal_check_status='unverified' if not numeric else ('findings' if issues else 'no_findings_in_checks_performed'))
+    result['_detail_records'] = detail  # internal, removed before saving
     return result
+
+
+def export_record(r):
+    part = r['labels'].get('part')
+    return dict(sheet=r['sheet'], row=r['row'], part=part, identifier=r['labels'].get('identifier'),
+                day=r['day'].isoformat() if r['day'] else None, shift=r['labels'].get('shift'),
+                values={f: (str(v) if v is not None else None) for f, v in r['values'].items()})

@@ -20,7 +20,7 @@ MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 MAX_FINDINGS = 200
-CHECKER_VERSION = '2026-11-04-adaptive-v1'
+CHECKER_VERSION = '2026-11-04-adaptive-v2'
 
 
 class SpreadsheetError(ValueError):
@@ -173,7 +173,26 @@ def _xlsx_rows(raw, notes=None):
         raise SpreadsheetError('Malformed or unsupported XLSX workbook.') from exc
 
 
-def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
+def _cached_rows(raw):
+    """Values Excel last saved for each cell (formula results), read after the safety preflight passed."""
+    try:
+        from openpyxl import load_workbook
+        workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True, keep_links=False)
+    except Exception:
+        return {}
+    try:
+        out = {}
+        for sheet in workbook.worksheets:
+            sheet.reset_dimensions()
+            out[sheet.title] = [tuple(row) for row in sheet.iter_rows(values_only=True)]
+        return out
+    except Exception:
+        return {}
+    finally:
+        workbook.close()
+
+
+def inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) -> dict:
     """Return internal checks only; rejects unsafe input with SpreadsheetError.
 
     A successful parse is not source authentication, external reconciliation, or
@@ -226,10 +245,10 @@ def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
             sources.append((title,sheet_rows))
         from hosting.pratt_reports import inspect_pratt
         pratt=inspect_pratt(sources,result)
-        if pratt is not None:return _attach_external(_exact_or_adaptive(pratt,sources,pristine),notes)
+        if pratt is not None:return _finish(_attach_external(_exact_or_adaptive(pratt,sources,pristine,raw),notes),keep_records)
         from hosting.branded_reports import inspect_branded
         branded=inspect_branded(sources,result)
-        if branded is not None:return _attach_external(_exact_or_adaptive(branded,sources,pristine),notes)
+        if branded is not None:return _finish(_attach_external(_exact_or_adaptive(branded,sources,pristine,raw),notes),keep_records)
     total_cells = total_rows = 0
     try:
         for title, rows in sources:
@@ -313,18 +332,43 @@ def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
         # No first-row quantity headers: look for them anywhere, in any layout.
         from hosting.adaptive_reports import inspect_adaptive
         rows = sources if fmt == 'xlsx' else [('CSV', list(csv.reader(io.StringIO(decoded, newline=''), strict=True)))]
-        adaptive = inspect_adaptive(rows, pristine)
+        adaptive = inspect_adaptive(rows, pristine, cached=_cached_rows(raw) if fmt == 'xlsx' else None)
         if adaptive is not None:
-            return _attach_external(adaptive, notes)
+            return _finish(_attach_external(adaptive, notes), keep_records)
     return _attach_external(result, notes)
 
 
-def _exact_or_adaptive(strict, sources, pristine):
+def report_records(filename, raw):
+    """Detail rows of any report layout (automatic column detection), for source comparison."""
+    from hosting.adaptive_reports import inspect_adaptive
+    if filename.lower().endswith('.xlsx'):
+        rows = [(title, list(it)) for title, it in _xlsx_rows(raw, [])]
+        cached = _cached_rows(raw)
+    else:
+        rows = [('CSV', list(csv.reader(io.StringIO(raw.decode('utf-8-sig'), newline=''), strict=True)))]
+        cached = None
+    result = inspect_adaptive(rows, {'limitations': []}, cached=cached)
+    return result['_detail_records'] if result else []
+
+
+def _finish(result, keep_records):
+    if not keep_records:
+        result.pop('_detail_records', None)
+    return result
+
+
+def _exact_or_adaptive(strict, sources, pristine, raw):
     """Keep an exact template match; otherwise use automatic column detection for this layout."""
     if strict.get('template_mapping_status') == 'matched':
         return strict
+    from datetime import date as _date
     from hosting.adaptive_reports import inspect_adaptive
-    adaptive = inspect_adaptive(sources, pristine)
+    identity = strict.get('report_identity') or {}
+    try:
+        report_day = _date.fromisoformat(identity['report_date']) if identity.get('report_date') else None
+    except ValueError:
+        report_day = None
+    adaptive = inspect_adaptive(sources, pristine, cached=_cached_rows(raw), report_day=report_day)
     if adaptive is None:
         return strict
     adaptive['recognized_template'] = strict.get('template_id')

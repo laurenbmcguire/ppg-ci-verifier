@@ -82,6 +82,49 @@ class SpreadsheetInbox:
         if hashlib.sha256(raw).hexdigest() != sha256:
             raise ValueError('Uploaded bytes do not match the file hash computed in the browser. Nothing was saved; upload the file again.')
         return self.ingest(filename, raw)
+    def _original(self, db, file_hash):
+        row = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (file_hash,)).fetchone()
+        if not row:
+            raise ValueError('Spreadsheet version not found.')
+        original = json.loads(row['result_json'])
+        raw = files_for(self.root).get(original['original_path'])
+        if hashlib.sha256(raw).hexdigest() != file_hash:
+            raise ValueError('Stored original integrity mismatch.')
+        return original, raw
+    def compare_source(self, file_hash, source_name, source_raw, meta=None):
+        """Compare the report with a SharePoint export (fetched or uploaded); saved as a new review revision."""
+        from hosting.source_compare import parse_export, compare, digest
+        from hosting.spreadsheets import report_records
+        if not source_raw:
+            raise ValueError('The SharePoint export is empty.')
+        source_rows = parse_export(source_name, source_raw)
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            original, raw = self._original(db, file_hash)
+            rows = report_records(original['filename'], raw)
+            if not rows:
+                raise ValueError('No report rows with Inspected quantities were found to compare.')
+            sha = digest(source_raw)
+            suffix = '.xlsx' if source_name.lower().endswith('.xlsx') else '.csv'
+            files_for(self.root).put('uploads/' + sha + suffix, source_raw)
+            comparison = compare(rows, source_rows, dict(meta or {}, source_filename=source_name, source_sha256=sha))
+            result = dict(self.latest(db, file_hash, original))
+            result.pop('check_hash', None); result.pop('checked_at', None)
+            result['sharepoint'] = comparison
+            result['source_reconciliation_status'] = 'match' if comparison['status'] == 'match' else 'mismatch'
+            if comparison['status'] != 'match':
+                result['internal_check_status'] = 'findings'
+            return self.save_check(db, result)
+    def record_lookup(self, file_hash, status, message, job=None, day=None):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            original, _ = self._original(db, file_hash)
+            result = dict(self.latest(db, file_hash, original))
+            if (result.get('sharepoint') or {}).get('status') in ('match', 'differences'):
+                return result  # keep the last real comparison
+            result.pop('check_hash', None); result.pop('checked_at', None)
+            result['sharepoint'] = dict(status=status, message=message, job=job, day=day)
+            return self.save_check(db, result)
     def list(self):
         with self.connect() as db:
             rows = db.execute('SELECT result_json FROM spreadsheets ORDER BY seq DESC LIMIT 100').fetchall()
