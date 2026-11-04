@@ -69,3 +69,5 @@ html{scroll-behavior:smooth}.nav{display:block;text-decoration:none}.nav:hover{b
 .baseline-table th,.baseline-table td{text-align:left;padding:5px 8px;border-bottom:1px solid #e3eae6}
 .baseline-table th{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#536966}
 .baseline-flag td{background:#fdf0d5;font-weight:600}
+
+.banner.banner-ok{background:#e6f2ec;border-left-color:#2f7a63;color:#1f4d40}.banner.banner-ok p{color:#2c5a4c}

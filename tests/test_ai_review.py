@@ -48,7 +48,7 @@ class AIReviewTests(unittest.TestCase):
             fake = FakeClaude()
             out = ai_review.review(item, raw, opener=fake)
             sent = fake.requests[0]
-            self.assertEqual(sent['tool_choice']['name'], 'report_possible_issues')
+            self.assertEqual(sent['tool_choice'], {'type': 'auto'}); self.assertEqual(sent['tools'][0]['name'], 'report_possible_issues')
             self.assertIn('8010808539', sent['messages'][0]['content'])
             self.assertEqual([i['severity'] for i in out['issues']], ['high', 'medium', 'low'])  # sorted, bad enum -> medium
             self.assertEqual(out['issues'][1]['category'], 'other')
