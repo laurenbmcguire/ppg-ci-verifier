@@ -20,7 +20,7 @@ MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 MAX_FINDINGS = 200
-CHECKER_VERSION = '2026-11-04-adaptive-v4'
+CHECKER_VERSION = '2026-11-04-adaptive-v5'
 
 
 class SpreadsheetError(ValueError):
@@ -404,6 +404,8 @@ def _attach_external(result, notes):
         result['finding_counts'] = merged
         result['external_content'] = sorted(counts)
         result.setdefault('limitations', []).append('External links, web functions and DDE/macro-call formulas were recorded as findings. They were never executed or followed.')
-        if result.get('internal_check_status') == 'no_findings_in_checks_performed':
+        # Plain hyperlinks (e.g. photo links) are listed for information only; links that pull in
+        # outside values or can run something make the result need review.
+        if result.get('internal_check_status') == 'no_findings_in_checks_performed' and set(counts) - {'hyperlink_formula', 'external_hyperlink'}:
             result['internal_check_status'] = 'findings'
     return result

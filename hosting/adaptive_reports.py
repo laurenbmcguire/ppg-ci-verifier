@@ -570,7 +570,7 @@ def inspect_adaptive(sources, base, cached=None, report_day=None):
             table.pop('mapping'); table.pop('label_map')
             table['total_rows'] = [tr['row'] for tr in table['total_rows']]
     numeric = stats['number'] + stats['number_as_text'] + stats['formula_result']
-    info = {'no_quantity_columns_detected', 'no_data_rows', 'quantity_formulas_not_evaluated', 'formula_results_used'}
+    info = {'no_quantity_columns_detected', 'no_data_rows', 'quantity_formulas_not_evaluated', 'formula_results_used', 'known_template_layout_differs'}
     issues = {c for c in finding.counts if c not in info}
     totals = {f: dict(total=str(grand[f][0]) if grand[f][1] else None, known_sum=str(grand[f][0])) for f in ('inspected', 'certified', 'rejected')} if sheet_sums else {}
     result.update(
