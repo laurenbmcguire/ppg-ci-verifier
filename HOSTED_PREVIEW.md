@@ -74,3 +74,28 @@ Turn it on: Vercel → ppg-ci-verifier → Settings → Environment Variables (P
 | `AI_REVIEW_MODEL` | optional, default `claude-sonnet-5-5` | Plain |
 
 Then redeploy the `preview` branch. The report's cell contents are sent to the Anthropic API for each review.
+
+## Common data issues checked
+
+Besides the quantity, duplicate, typo, date and totals checks, every report is checked for these common
+data-entry and spreadsheet problems (`hosting/common_issues.py`):
+
+| Check | Example |
+|---|---|
+| Excel error values | `#REF!`, `#N/A`, `#DIV/0!` in a cell or formula result |
+| Hidden / garbled characters | non-breaking spaces, zero-width characters, `Ã©`-style encoding damage |
+| Hidden sheets, rows, columns with data | data that is counted but not visible (empty template formulas are ignored) |
+| Same value written differently | `Holes / Glue` vs `holes/glue`; `8010-808539` vs `8010808539` (likely duplicate scan) |
+| Placeholders | `TBD`, `xxx`, `same as above`, `0000`, `9999` |
+| Scientific-notation codes | `8.01081E+09` (Excel dropped digits) |
+| Value in the wrong column | part number in the Identifier column, identifier or Excel date serial in a quantity column |
+| Quantity outliers | an extra or missing zero (`340` among `34`s) |
+| Blank in a filled column | date / shift / auditor / area missing on one row |
+| Zero inspected | a row with a part/identifier but 0 inspected |
+| Dates typed as text | among real dates |
+| Comment counts | `3 holes 2 glue` but Rejected is 4 |
+| Condition columns | LF/RF/LR/RR marked SUSPECT vs the suspect quantity; unexpected condition values |
+| Labeled totals | `Total … Inspected` cell vs the rows, including different per-vehicle units |
+
+Column detection also understands descriptive headers (`Quantity Inspected 8 Wheel Weights per Vehicle`,
+`Suspect Wheel Position Quantity`, `VIN Inspected`, `LF Condition`) and unlabeled `=SUM()` total rows.

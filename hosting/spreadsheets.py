@@ -20,7 +20,7 @@ MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 MAX_FINDINGS = 200
-CHECKER_VERSION = '2026-11-04-adaptive-v5'
+CHECKER_VERSION = '2026-11-04-common-issues-v6'
 
 
 class SpreadsheetError(ValueError):
@@ -333,7 +333,7 @@ def inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) -
         # No first-row quantity headers: look for them anywhere, in any layout.
         from hosting.adaptive_reports import inspect_adaptive
         rows = sources if fmt == 'xlsx' else [('CSV', list(csv.reader(io.StringIO(decoded, newline=''), strict=True)))]
-        adaptive = inspect_adaptive(rows, pristine, cached=_cached_rows(raw) if fmt == 'xlsx' else None)
+        adaptive = inspect_adaptive(rows, pristine, cached=_cached_rows(raw) if fmt == 'xlsx' else None, hidden=_hidden(raw) if fmt == 'xlsx' else None)
         if adaptive is not None:
             return _finish(_attach_external(adaptive, notes), keep_records)
     return _attach_external(result, notes)
@@ -358,6 +358,11 @@ def _finish(result, keep_records):
     return result
 
 
+def _hidden(raw):
+    from hosting.common_issues import hidden_layout
+    return hidden_layout(raw)
+
+
 def _exact_or_adaptive(strict, sources, pristine, raw):
     """Keep an exact template match; otherwise use automatic column detection for this layout."""
     if strict.get('template_mapping_status') == 'matched':
@@ -369,7 +374,7 @@ def _exact_or_adaptive(strict, sources, pristine, raw):
         report_day = _date.fromisoformat(identity['report_date']) if identity.get('report_date') else None
     except ValueError:
         report_day = None
-    adaptive = inspect_adaptive(sources, pristine, cached=_cached_rows(raw), report_day=report_day)
+    adaptive = inspect_adaptive(sources, pristine, cached=_cached_rows(raw), report_day=report_day, hidden=_hidden(raw))
     if adaptive is None:
         return strict
     adaptive['recognized_template'] = strict.get('template_id')

@@ -105,14 +105,15 @@
   }
 
   // ---- Pop-up: every possible error for this upload, in one list to work through ----
-  const INFO_CODES = new Set(['hyperlink_formula', 'external_hyperlink', 'known_template_layout_differs']);
-  const HIGH_CODES = /duplicate|total|differs|missing_from_report|not_on_sharepoint|typo|mismatch|exceeds|future|invalid/;
+  const INFO_CODES = new Set(['hyperlink_formula', 'external_hyperlink', 'known_template_layout_differs', 'formula_results_used']);
+  const LOW_CODES = new Set(['labeled_total_unit_differs', 'date_stored_as_text', 'zero_inspected', 'hidden_columns_with_data', 'extra_spaces', 'number_stored_as_text']);
+  const HIGH_CODES = /duplicate|total|differs|missing_from_report|not_on_sharepoint|typo|mismatch|exceeds|future|invalid|excel_error|wrong_column|scientific/;
   const sevRank = {high: 0, medium: 1, low: 2, info: 3};
   function possibleErrors(result) {
     const items = [];
     (result.findings || []).forEach((f, i) => items.push({
       key: 'check:' + (f.code || '') + ':' + (f.sheet || '') + ':' + (f.cell || f.row || i),
-      source: 'Automatic check', severity: INFO_CODES.has(f.code) ? 'info' : HIGH_CODES.test(f.code || '') ? 'high' : 'medium',
+      source: 'Automatic check', severity: INFO_CODES.has(f.code) ? 'info' : LOW_CODES.has(f.code) ? 'low' : HIGH_CODES.test(f.code || '') ? 'high' : 'medium',
       where: [f.sheet, f.cell || (f.row ? `row ${f.row}` : ''), f.column ? `column ${f.column}` : ''].filter(Boolean).join(' · '),
       text: f.message || explanations[f.code] || f.code || 'Review this finding.'}));
     const sp = result.sharepoint || {};

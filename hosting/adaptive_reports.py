@@ -33,14 +33,18 @@ QTY = ('inspected', 'certified', 'rejected', 'reworked')
 TOTAL_WORDS = ('total', 'grand total', 'totals', 'subtotal', 'sub total', 'shift total', 'daily total', 'day total', 'sum')
 LABELS = {
     'identifier': {'identifier', 'identifier lot', 'id', 'lot', 'lot number', 'lot no', 'serial', 'serial number', 'serial no',
-                   'tag', 'label', 'container', 'container id', 'box', 'skid', 'batch', 'barcode', 'scan', 'scan id'},
-    'part': {'part number', 'part', 'part no', 'part num', 'p n', 'pn', 'part name', 'item', 'item number', 'sku', 'part id'},
+                   'tag', 'label', 'container', 'container id', 'box', 'skid', 'batch', 'barcode', 'scan', 'scan id',
+                   'vin', 'vin number', 'vin no', 'vin inspected', 'vehicle vin', 'vin scanned'},
+    'part': {'part number', 'part', 'part no', 'part num', 'p n', 'pn', 'part name', 'item', 'item number', 'sku', 'part id',
+             'vehicle', 'model', 'vehicle model'},
     'date': {'date', 'inspection date', 'scan date', 'report date'},
     'shift': {'shift', 'shift no', 'shift number'},
-    'defect': {'defect', 'defect type', 'reject reason', 'reason', 'defect reason', 'nok reason', 'failure mode', 'issue'},
+    'defect': {'defect', 'defect type', 'reject reason', 'reason', 'defect reason', 'nok reason', 'failure mode', 'issue', 'suspect reason',
+               'reason for reject', 'reject reason s'},
     'condition': {'condition', 'status', 'result', 'ok nok', 'ok nok status', 'disposition'},
     'auditor': {'auditor', 'inspector', 'inspected by', 'operator', 'sorter', 'technician'},
     'area': {'area', 'line', 'location', 'station', 'cell'},
+    'comment': {'comment', 'comments', 'note', 'notes', 'remark', 'remarks', 'observation', 'observations'},
 }
 CONFUSABLE = str.maketrans({'O': '0', 'o': '0', 'I': '1', 'l': '1', 'i': '1', 'S': '5', 's': '5', 'B': '8', 'Z': '2', 'z': '2'})
 
@@ -54,16 +58,23 @@ def field_for_header(value):
     if not isinstance(value, str):
         return None
     words = norm(value).split()
-    if not words or len(words) > 6:
+    if not words or len(words) > 12:
         return None
+    has_quantity_word = any(w in ('qty', 'quantity', 'quantities', 'count', 'pcs', 'total') for w in words)
     while words and words[0] in _FILLER:
         words.pop(0)
     while words and words[-1] in _FILLER:
         words.pop()
     core = ' '.join(words)
     for field, names in FIELDS.items():
-        if core in names:
+        if core in names and len(words) <= 6:
             return field
+    # Descriptive headers: "Quantity Inspected 8 Wheel Weights per Vehicle", "Suspect Wheel Position Quantity".
+    # Only when the header names a quantity, so "Inspected For" and "Reject Reason" stay labels.
+    if has_quantity_word and words and (len(words) == 1 or words[1] not in ('for', 'by', 'reason', 'reasons', 'rate', 'date', 'time', 'percent', 'type')):
+        for field, names in FIELDS.items():
+            if words[0] in names:
+                return field
     return None
 
 
@@ -74,6 +85,8 @@ def label_for_header(value):
     for label, names in LABELS.items():
         if key in names:
             return label
+    if key.endswith(' condition') and len(key.split()) <= 3:
+        return 'condition'  # LF Condition, Left Condition ...
     return None
 
 
@@ -212,8 +225,17 @@ def shape(code):
     return re.sub(r'[A-Za-z]', 'A', re.sub(r'[0-9]', '9', code))
 
 
+_COLUMN_RANGE = re.compile(r'\b(SUM|SUBTOTAL|COUNTA|COUNT|COUNTIF|COUNTIFS|SUMIF|SUMIFS)\s*\(\s*\$?([A-Z]{1,3})\$?(\d+)\s*:\s*\$?([A-Z]{1,3})\$?(\d+)', re.I)
+
+
 def _is_total_row(row, mapping):
     used = set(mapping.values())
+    for index in used:  # =SUM(M16:M76) style quantity cells: an unlabeled totals row
+        value = row[index] if index < len(row) else None
+        if isinstance(value, str) and value.startswith('='):
+            m = _COLUMN_RANGE.search(value)
+            if m and m.group(3) != m.group(5):
+                return True
     for index, value in enumerate(row):
         if index in used:
             continue
@@ -274,7 +296,8 @@ def scan(sources, cached=None):
             table = dict(index=len(sheet['tables']), header_row=r, kind='totals' if is_totals_block else 'detail',
                          columns={f: dict(column=column_letter(i), header=str(heads[i]).strip()) for f, i in m.items()},
                          labels={k: dict(column=column_letter(i), header=str(heads[i]).strip()) for k, i in lab.items()},
-                         mapping=m, label_map=lab, data_row_count=0, total_rows=[])
+                         mapping=m, label_map=lab, data_row_count=0, total_rows=[],
+                         condition_cols=[i for i, h in enumerate(heads) if label_for_header(h) == 'condition'])
             sheet['tables'].append(table)
 
         start(best[1], best[2], best[3])
@@ -285,7 +308,12 @@ def scan(sources, cached=None):
             stats['rows'] += 1
             stats['cells'] += len(row)
             m, lab = _header_map(row)
-            if m and _text_cells(row) >= 2 and len(m) >= max(1, len(table['mapping'])) \
+            ident_col = table['label_map'].get('identifier')
+            looks_like_data = (any(i in table['condition_cols'] and len(norm(row[i]).split()) <= 2 for i in m.values())  # 'OK' / 'SUSPECT' values, not headers
+                               or (ident_col is not None and ident_col < len(row) and isinstance(row[ident_col], str)
+                                   and row[ident_col].strip() and label_for_header(row[ident_col]) is None
+                                   and field_for_header(row[ident_col]) is None and 'total' not in norm(row[ident_col]).split()))
+            if m and not looks_like_data and _text_cells(row) >= 2 and len(m) >= max(1, len(table['mapping'])) \
                     and not any(number_state(row[i], cget(i))[1] in KNOWN and not isinstance(row[i], str) for i in m.values() if i < len(row)):
                 start(r, m, lab)
                 continue
@@ -304,7 +332,14 @@ def scan(sources, cached=None):
             record = dict(sheet=title, row=r, table=table['index'], table_kind=table['kind'],
                           values={f: n for f, (n, s) in cells.items()}, states={f: s for f, (n, s) in cells.items()},
                           labels=labels, day=day, row_label=_row_label(row, mapping, labmap),
-                          is_total=_is_total_row(row, mapping), columns={f: mapping[f] + 1 for f in mapping})
+                          is_total=_is_total_row(row, mapping) or (not (labels.get('identifier') or labels.get('part')) and any(
+                              isinstance(v, str) and not v.startswith('=') and 'total' in norm(v).split() for v in row)),
+                          columns={f: mapping[f] + 1 for f in mapping},
+                          label_columns={k: column_letter(i) for k, i in labmap.items()},
+                          conditions=[label_text(row[i], cget(i)) if i < len(row) else None for i in table['condition_cols']],
+                          condition_headers=[str(rows[table['header_row'] - 1][i]).strip() for i in table['condition_cols']],
+                          date_is_text=(isinstance(row[labmap['date']], str) and bool(row[labmap['date']].strip()) and not row[labmap['date']].startswith('='))
+                          if 'date' in labmap and labmap['date'] < len(row) and row[labmap['date']] not in (None, '') else None)
             if record['is_total']:
                 table['total_rows'].append(record)
             else:
@@ -347,7 +382,7 @@ def _sum(rows, field):
     return sum((v for v in values if v is not None), Decimal(0)), known
 
 
-def inspect_adaptive(sources, base, cached=None, report_day=None):
+def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
     """Return an adaptive result if any quantity column is found in any sheet, else None."""
     sheets, records, stats = scan(sources, cached)
     if not any(s['mapping_status'] == 'adaptive' for s in sheets):
@@ -412,9 +447,9 @@ def inspect_adaptive(sources, base, cached=None, report_day=None):
             finding('missing_defect_reason', r['sheet'], r['row'], message=f'{nok} rejected but no defect / reject reason.')
         cond = norm(lab.get('condition') or '')
         if cond and nok is not None:
-            if cond in ('ok', 'pass', 'good', 'accepted') and nok > 0:
+            if cond in ('ok', 'pass', 'good', 'accepted') and nok > 0 and len(r.get('conditions') or []) < 2:
                 finding('condition_conflicts_with_quantity', r['sheet'], r['row'], message=f'Condition says {lab["condition"]} but {nok} were rejected.')
-            if cond in ('nok', 'ng', 'fail', 'reject', 'rejected') and nok == 0:
+            if cond in ('nok', 'ng', 'fail', 'reject', 'rejected', 'suspect') and nok == 0 and len(r.get('conditions') or []) < 2:
                 finding('condition_conflicts_with_quantity', r['sheet'], r['row'], message=f'Condition says {lab["condition"]} but 0 were rejected.')
         if 'date' in lab:
             if lab['date'] and r['day'] is None:
@@ -482,7 +517,7 @@ def inspect_adaptive(sources, base, cached=None, report_day=None):
             if n > 1:
                 continue
             for common, m in words.items():
-                if m >= 3 and common != rare and (norm(common) == norm(rare) or (len(norm(rare)) >= 4 and edit_distance_le1(norm(rare), norm(common)))):
+                if m >= 3 and norm(common) != norm(rare) and len(norm(rare)) >= 4 and edit_distance_le1(norm(rare), norm(common)):
                     r = next(x for x in detail if (x['labels'].get(kind) or '').strip() == rare)
                     finding(f'possible_{kind}_typo', r['sheet'], r['row'], message=f'"{rare}" looks like a misspelling of "{common}" (used {m}×).')
                     break
@@ -558,6 +593,10 @@ def inspect_adaptive(sources, base, cached=None, report_day=None):
                 finding('reject_log_total_mismatch', support[0]['sheet'],
                         message=f'{support[0]["sheet"]} lists {log_total} rejected in total but the shift rows add up to {det_total}.')
 
+    # ---- common data-entry problems (researched list; see hosting/common_issues.py)
+    from hosting.common_issues import run as common_issue_checks
+    common_issue_checks(sources, cached, sheets, detail, finding, hidden)
+
     if stats['formula']:
         finding('quantity_formulas_not_evaluated', 'Workbook',
                 message=f'{stats["formula"]} quantity cell(s) are formulas with no saved result, so their values are unknown.')
@@ -570,7 +609,7 @@ def inspect_adaptive(sources, base, cached=None, report_day=None):
             table.pop('mapping'); table.pop('label_map')
             table['total_rows'] = [tr['row'] for tr in table['total_rows']]
     numeric = stats['number'] + stats['number_as_text'] + stats['formula_result']
-    info = {'no_quantity_columns_detected', 'no_data_rows', 'quantity_formulas_not_evaluated', 'formula_results_used', 'known_template_layout_differs'}
+    info = {'no_quantity_columns_detected', 'no_data_rows', 'quantity_formulas_not_evaluated', 'formula_results_used', 'known_template_layout_differs', 'labeled_total_unit_differs'}
     issues = {c for c in finding.counts if c not in info}
     totals = {f: dict(total=str(grand[f][0]) if grand[f][1] else None, known_sum=str(grand[f][0])) for f in ('inspected', 'certified', 'rejected')} if sheet_sums else {}
     result.update(
