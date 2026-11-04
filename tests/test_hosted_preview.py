@@ -82,6 +82,8 @@ class HostedGateTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertFalse(hosted_preview())
         with patch.dict(os.environ, {**PREVIEW, 'VERCEL_ENV': 'production'}):
+            self.assertFalse(hosted_preview())  # production only forwards to the preview app
+        with patch.dict(os.environ, {**PREVIEW, 'VERCEL_ENV': 'development'}):
             self.assertFalse(hosted_preview())
         with patch.dict(os.environ, PREVIEW):
             self.assertTrue(hosted_preview())
@@ -138,3 +140,23 @@ class PostgresCommitTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ProductionForwardTests(unittest.TestCase):
+    def test_production_forwards_every_get_to_the_preview_app(self):
+        import threading, urllib.request, urllib.error
+        from http.server import ThreadingHTTPServer
+        from api.index import handler, APP_HOST
+        server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k): return None
+        opener = urllib.request.build_opener(NoRedirect)
+        try:
+            with patch.dict(os.environ, {'VERCEL': '1', 'VERCEL_ENV': 'production'}):
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    opener.open(f'http://127.0.0.1:{server.server_port}/api/spreadsheets?x=1', timeout=10)
+            self.assertEqual(ctx.exception.code, 307)
+            self.assertEqual(ctx.exception.headers['Location'], f'https://{APP_HOST}/api/spreadsheets?x=1')
+        finally:
+            server.shutdown(); server.server_close()

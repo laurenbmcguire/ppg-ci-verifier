@@ -37,13 +37,24 @@ ACTIONS = {'edit', 'validate', 'approve', 'generate', 'request', 'timeout', 'lea
 
 
 def hosted_preview():
-    """True only on Vercel with the operator's protected-preview flag set (Vercel Authentication must be enabled)."""
+    """True only on Vercel with the operator's protected flag set (Vercel Authentication must cover all deployments)."""
     return (os.environ.get('VERCEL') == '1' and os.environ.get('VERCEL_ENV') == 'preview'
             and os.environ.get('CI_VERCEL_PROTECTED_PREVIEW') == '1')
 
 
+APP_HOST = 'ppg-ci-verifier-git-preview-lauren-mc-guire-llc.vercel.app'
+
+
+def production_forward():
+    """Production holds no data or credentials; its addresses forward to the protected preview app."""
+    return os.environ.get('VERCEL') == '1' and os.environ.get('VERCEL_ENV') == 'production'
+
+
 def hosted_hosts():
-    return {h.lower() for h in (os.environ.get('VERCEL_URL', ''), os.environ.get('VERCEL_BRANCH_URL', '')) if h}
+    """This deployment's own URL, its branch alias, the production URL, and operator-listed project domains."""
+    names = [os.environ.get(k, '') for k in ('VERCEL_URL', 'VERCEL_BRANCH_URL')]
+    names += os.environ.get('CI_ALLOWED_HOSTS', '').split(',')
+    return {h.strip().lower() for h in names if h.strip()}
 
 
 _HOSTED_STORE = None
@@ -178,10 +189,20 @@ class handler(BaseHTTPRequestHandler):
         with self.store().session() as directory:
             return SpreadsheetInbox(directory).record_ai_review(file_hash, outcome)
 
+    def forward_to_app(self):
+        target = 'https://' + (os.environ.get('CI_APP_HOST') or APP_HOST) + (self.path if self.path.startswith('/') else '/')
+        self.send_response(307)
+        self.send_header('Location', target)
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
     def do_GET(self):
+        if production_forward():
+            return self.forward_to_app()
         route = self.checked_route()
         if route is None:
-            return self.fail(403, 'LOCAL SQLITE COPY is available only on this computer’s loopback address.')
+            return self.fail(403, f'This address is not one of the verifier’s approved addresses. Open https://{APP_HOST} instead.' if hosted_preview() else 'LOCAL SQLITE COPY is available only on this computer’s loopback address.')
         try:
             if route in ('/api/spreadsheets/demo/review','/api/spreadsheets/demo/download'):
                 if not self.demo_enabled():return self.fail(403,'Synthetic workbook simulation is disabled.')

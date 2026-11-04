@@ -216,11 +216,15 @@ class VercelHTTPTests(unittest.TestCase):
     def test_bad_routes_and_oversized_body(self):
         self.assertEqual(self.request('/api/send', {'revision':1})[0], 404)
         self.assertEqual(self.request('/api/edit', b'x'*10001)[0], 413)
-    def test_preview_gate_and_production_denied(self):
+    def test_preview_gate_and_production_hosts(self):
         with patch.dict(os.environ, {'VERCEL':'1','VERCEL_ENV':'preview','VERCEL_URL':'verifier.example','CI_VERCEL_PROTECTED_PREVIEW':'1'}):
             self.assertTrue(allowed_host('verifier.example'))
             self.assertFalse(allowed_host('attacker.example'))
+            with patch.dict(os.environ, {'CI_ALLOWED_HOSTS':'ppg-ci-verifier-team.vercel.app, '}):
+                self.assertTrue(allowed_host('PPG-CI-Verifier-Team.vercel.app'))
+                self.assertFalse(allowed_host('attacker.example')); self.assertFalse(allowed_host(''))
             with patch.dict(os.environ, {'VERCEL_ENV':'production'}): self.assertFalse(allowed_host('verifier.example'))
+            with patch.dict(os.environ, {'VERCEL_ENV':'development'}): self.assertFalse(allowed_host('verifier.example'))
             with patch.dict(os.environ, {'CI_VERCEL_PROTECTED_PREVIEW':'0'}): self.assertFalse(allowed_host('verifier.example'))
 
 class VercelUploadTests(VercelHTTPTests):
