@@ -56,6 +56,7 @@
   }
   node('report-file').addEventListener('change', async e => {
     const file = e.target.files[0]; if (!file) return;
+    if (/\.(csv|xlsx|xlsm|xls|tsv)$/i.test(file.name) && window.ciUploadSpreadsheet) { e.target.value = ''; note(`"${file.name}" is a spreadsheet, so it was sent to "Check a spreadsheet".`); await window.ciUploadSpreadsheet(file); return; }
     if (file.size > 1024 * 1024) { note('Use a JSON file no larger than 1 MiB.', true); e.target.value = ''; return; }
     try { await importReport(await file.text()); } catch (err) { note('Invalid JSON: ' + err.message, true); e.target.value = ''; }
   });

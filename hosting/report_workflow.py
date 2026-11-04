@@ -54,13 +54,49 @@ def pairs(items):
     return result
 
 
+SPREADSHEET_HINT = ('This file is a spreadsheet, not a JSON report manifest. Upload it under "Check a spreadsheet" '
+                    '(it accepts CSV and XLSX in any layout and checks it against SharePoint).')
+
+
+def _manifest_text(value):
+    """Decode a manifest leniently: BOM, UTF-16, ```json fences and text around the JSON object are tolerated."""
+    if isinstance(value, bytes):
+        if value[:4] == b'PK\x03\x04' or value[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
+            raise WorkflowError(SPREADSHEET_HINT)
+        for encoding in ('utf-8-sig', 'utf-16'):
+            try:
+                value = value.decode(encoding)
+                break
+            except UnicodeError:
+                continue
+        else:
+            raise WorkflowError('The report manifest is not readable text (expected UTF-8 JSON).')
+    text_value = value.lstrip('﻿').strip()
+    fenced = re.fullmatch(r'```[A-Za-z0-9_-]*\s*\n(.*?)\n?```', text_value, re.S)
+    if fenced:
+        text_value = fenced.group(1).strip()
+    if not text_value.startswith(('{', '[')):
+        start, end = text_value.find('{'), text_value.rfind('}')
+        if start == -1 or end <= start:
+            first = text_value.splitlines()[0] if text_value else ''
+            if first.count(',') >= 2 or first.count('\t') >= 2:
+                raise WorkflowError(SPREADSHEET_HINT)
+            raise WorkflowError('Malformed report manifest: no JSON object was found in the file.')
+        text_value = text_value[start:end + 1]
+    return text_value
+
+
 def parse(value):
     if isinstance(value, (str, bytes)):
         if len(value) > MAX_BYTES: raise WorkflowError('Manifest exceeds 2 MiB.')
+        value = _manifest_text(value)
         try:
             value = json.loads(value, object_pairs_hook=pairs,
                 parse_constant=lambda x: (_ for _ in ()).throw(WorkflowError('Non-finite JSON number.')))
+        except json.JSONDecodeError as exc:
+            raise WorkflowError(f'Malformed report manifest: {exc.msg} at line {exc.lineno}, column {exc.colno}.') from exc
         except (ValueError, UnicodeError, RecursionError) as exc:
+            if isinstance(exc, WorkflowError): raise
             raise WorkflowError('Malformed report manifest.') from exc
     encoded = canonical(value)
     if len(encoded.encode()) > MAX_BYTES: raise WorkflowError('Manifest exceeds 2 MiB.')

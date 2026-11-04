@@ -84,8 +84,8 @@
       target.append(make('p',`${result.record_count} ${result.template_id.startsWith('pratt-kn-')?'mapped audit-detail rows':'detail records'} · ${result.numeric_cells_checked} numeric cells checked · ${result.formula_count} formulas preserved without execution.`));
       if(result.source_sha256)target.append(make('p',`${result.numeric_values_compared} known ${result.template_id.startsWith('pratt-kn-')?'numeric/audit':'quantity'} values compared to ${result.source_provenance_kind==='independently_retrieved'?'a separately retrieved source snapshot':'retained historical source evidence'}. Source authentication and human approval remain unconfirmed.`,'hint'));
       (result.source_differences||[]).forEach(d=>{const box=make('div','','report-finding');box.append(make('strong',`${d.code} · ${d.sheet||'source'} ${d.row?'row '+d.row:''}`),make('p','Review only. No client workbook or source value was changed.'),make('pre',JSON.stringify({workbook_value:d.before,supplied_source_value:d.source_value},null,2)));target.append(box)});
-      const label=make('label','Compare separate source evidence (JSON)');const input=document.createElement('input');input.type='file';input.disabled=pending;input.accept='.json,application/json';label.append(input);target.append(label,make('p','Supply the documented source-evidence schema from a separate retrieval. The workbook itself is never used as source truth. Comparison preserves the original, formulas and prior review revisions.','hint'));
-      input.addEventListener('change',async()=>{const file=input.files[0];if(!file||pending)return;if(file.size>2*1024*1024){message('Source evidence must be no larger than 2 MiB.',true);return}setBusy(true);try{const source=JSON.parse(await file.text());const response=await fetch('/api/spreadsheets/reconcile',{method:'POST',headers:{'Content-Type':'application/json','X-Review-Token':'same-origin'},body:JSON.stringify({file_hash:result.file_hash,source})});const value=await response.json();if(!response.ok)throw Error(value.error||'Source comparison failed.');++selectionVersion;selected=result.file_hash;detail(value.item);await refresh();message(value.item.idempotent?'This exact source comparison is already the current review revision. Release remains held.':'Source comparison saved as a new review revision. Client workbook and source remain unchanged; release is held.')}catch(error){message(error.message,true)}finally{setBusy(false)}});
+      const label=make('label','Compare separate source evidence (JSON)');const input=document.createElement('input');input.type='file';input.disabled=pending;input.accept='.json,.csv,.xlsx,application/json';label.append(input);target.append(label,make('p','Supply the documented source-evidence schema from a separate retrieval. The workbook itself is never used as source truth. Comparison preserves the original, formulas and prior review revisions.','hint'));
+      input.addEventListener('change',async()=>{const file=input.files[0];if(!file||pending)return;if(file.size>2*1024*1024){message('Source evidence must be no larger than 2 MiB.',true);return}setBusy(true);try{if(/\.(csv|xlsx)$/i.test(file.name)){const answer=await post('/api/spreadsheets/source-upload',{file_hash:result.file_hash,filename:file.name,content_base64:await toBase64(file)});++selectionVersion;selected=answer.item.file_hash;detail(answer.item);await refresh();message(answer.item.sharepoint.status==='match'?'Report matches the uploaded SharePoint export.':'Differences found — see the SharePoint check.');return}const source=JSON.parse(await file.text());const response=await fetch('/api/spreadsheets/reconcile',{method:'POST',headers:{'Content-Type':'application/json','X-Review-Token':'same-origin'},body:JSON.stringify({file_hash:result.file_hash,source})});const value=await response.json();if(!response.ok)throw Error(value.error||'Source comparison failed.');++selectionVersion;selected=result.file_hash;detail(value.item);await refresh();message(value.item.idempotent?'This exact source comparison is already the current review revision. Release remains held.':'Source comparison saved as a new review revision. Client workbook and source remain unchanged; release is held.')}catch(error){message(error.message,true)}finally{setBusy(false)}});
     }
     const findings = result.findings || [];
     if (!findings.length) target.append(make('p', 'No supported internal issues found. This does not establish that the spreadsheet is accurate or complete.'));
@@ -257,13 +257,16 @@
   };
   const sha256Hex = async file => { const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer()); return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join(''); };
   const mib = n => (n / 1048576).toFixed(n < 10 * 1048576 ? 2 : 1) + ' MiB';
-  node('spreadsheet-file').addEventListener('change', async event => {
-    const file = event.target.files[0]; if (!file || pending) return;
+  node('spreadsheet-file').addEventListener('change', async event => { await uploadSpreadsheet(event.target.files[0]); event.target.value = ''; });
+  // Other upload boxes (report manifest, legacy JSON inbox) hand spreadsheets here instead of rejecting them.
+  window.ciUploadSpreadsheet = file => { node('spreadsheet-upload').scrollIntoView({behavior: 'smooth', block: 'start'}); return uploadSpreadsheet(file); };
+  async function uploadSpreadsheet(file) {
+    if (!file || pending) return;
     const problem = /\.(xls|xlsm|xlsb)$/i.test(file.name) ? `"${file.name}" is a legacy or macro-enabled Excel file. In Excel use File → Save As → "Excel Workbook (.xlsx)", then upload that copy.`
       : !/\.(csv|xlsx)$/i.test(file.name) ? `"${file.name}" is not a .csv or .xlsx file. Only UTF-8 CSV and XLSX workbooks are supported.`
       : file.size < 1 ? `"${file.name}" is empty (0 bytes).`
       : null;
-    if (problem) { message(problem, true); event.target.value = ''; return; }
+    if (problem) { message(problem, true); return; }
     setBusy(true);
     try {
       // No file-size limit: the file is hashed in the browser, sent in 3 MiB parts, then assembled, verified and checked on the server.
@@ -280,8 +283,8 @@
       ++selectionVersion; selected = result.item.file_hash; detail(result.item); await refresh();
       message(result.item.idempotent ? 'This exact file was already checked. Its original version was preserved.' : 'Internal checks saved and original preserved. Independent source verification and report release remain held.');
     } catch (error) { message(error.message, true); }
-    finally { setBusy(false); event.target.value = ''; }
-  });
+    finally { setBusy(false); }
+  }
   node('spreadsheet-refresh').addEventListener('click', () => refresh().then(() => message('Uploads refreshed from the private database.')).catch(error => message(error.message, true)));
   async function loadDevelopmentExample(example){
     if(pending)return;

@@ -20,7 +20,7 @@
 </section>
 <section class="card intake" id="all-report-workflow" aria-labelledby="workflow-title">
  <div class="section-head"><div><p class="eyebrow">INTERNAL REVIEW / JOB / DAY / VERSION</p><h2 id="workflow-title">Structured report review example</h2><p>Keep client workbooks separate from this internal review. Review exact job/day report versions against their supplied source evidence. Missing values stay unknown. Corrections are proposals, and applying them creates a new private draft.</p></div><span class="pill">Human approval required</span></div>
- <div class="import-actions"><label class="file-label">Import report manifest<input type="file" id="workflow-file" accept=".json,application/json"></label><button id="workflow-sample">Load synthetic workflow</button><button id="workflow-refresh">Refresh report versions</button></div>
+ <div class="import-actions"><label class="file-label">Import report manifest<input type="file" id="workflow-file" accept=".json,.csv,.xlsx,application/json"></label><button id="workflow-sample">Load synthetic workflow</button><button id="workflow-refresh">Refresh report versions</button></div>
  <p id="workflow-message" role="status" aria-live="polite"></p>
  <p class="hint">No source writeback or messages. Approvals require a trusted reviewer identity, which is not connected yet. Even a private-draft approval never releases a customer report.</p>
  <div class="inbox-layout"><div><h3>Report versions by job and day</h3><div id="workflow-list"></div><button id="workflow-more" hidden>Load more versions</button></div><div id="workflow-detail" aria-live="polite"><h3>Exact evidence, explicit decisions</h3><p>Select a report version to see its source scope, blocking findings, and proposed corrections.</p></div></div>
@@ -28,7 +28,7 @@
 <div class="legacy-demo"><section class="card intake" id="report-inbox" aria-labelledby="intake-title">
  <div class="section-head"><div><p class="eyebrow">REPORT INTAKE / SYNTHETIC PILOT</p><h2 id="intake-title">Report verification inbox</h2><p>Compare report rows and totals with a supplied source snapshot. A match is not independent source authentication.</p></div><span class="pill">Live connections off</span></div>
  <div class="connection-grid"><div><strong>ChatGPT reports</strong><span>Not connected · JSON intake ready</span></div><div><strong>Source evidence</strong><span>Supplied synthetic snapshots only</span></div><div><strong>Text findings</strong><span>Preview only · nothing is sent</span></div></div>
- <div class="import-actions"><label class="file-label">Import synthetic JSON<input type="file" id="report-file" accept=".json,application/json"></label><button id="sample-match">Load matching example</button><button id="sample-errors">Load discrepancy example</button><button id="refresh-reports">Refresh inbox</button></div>
+ <div class="import-actions"><label class="file-label">Import synthetic JSON<input type="file" id="report-file" accept=".json,.csv,.xlsx,application/json"></label><button id="sample-match">Load matching example</button><button id="sample-errors">Load discrepancy example</button><button id="refresh-reports">Refresh inbox</button></div>
  <p id="intake-message" role="status" aria-live="polite"></p>
  <div id="report-stats" class="report-stats"></div>
  <div class="inbox-layout"><div><h3>Report versions</h3><div id="report-list"></div></div><div id="report-detail" aria-live="polite"></div></div>
