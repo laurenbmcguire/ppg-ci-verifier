@@ -72,7 +72,9 @@ def debug_log():
         exc_type, exc, tb = sys.exc_info()
         frame = traceback.extract_tb(tb)[-1] if tb else None
         where = f'{frame.filename.rsplit("/", 1)[-1]}:{frame.lineno}' if frame else '?'
-        print(f'[ci-verifier] {exc_type.__name__ if exc_type else "?"} at {where}: {exc}', file=sys.stderr, flush=True)
+        cause = exc.__cause__ if exc is not None else None
+        tail = f' <- {type(cause).__name__}: {cause}' if cause is not None else ''
+        print(f'[ci-verifier] {exc_type.__name__ if exc_type else "?"} at {where}: {exc}{tail}', file=sys.stderr, flush=True)
 
 
 class handler(BaseHTTPRequestHandler):
@@ -185,6 +187,7 @@ class handler(BaseHTTPRequestHandler):
         except (Conflict, IntakeError, ValueError) as exc:
             return self.fail(409, str(exc))
         except StorageUnavailable as exc:
+            debug_log()
             return self.fail(503, str(exc))
         except Exception:
             debug_log()
@@ -287,6 +290,7 @@ class handler(BaseHTTPRequestHandler):
         except (Conflict, IntakeError, ValueError, TypeError, KeyError) as exc:
             return self.fail(409, str(exc))
         except StorageUnavailable as exc:
+            debug_log()
             return self.fail(503, str(exc))
         except Exception:
             debug_log()
