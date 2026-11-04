@@ -18,7 +18,15 @@
     rows_after_total_not_reconciled: 'Data appears after a Total row. The totals layout needs manual review.',
     empty_sheet: 'This sheet is empty.',
     no_data_rows: 'This sheet has headers but no data rows.',
-    no_quantity_mapping: 'No supported quantity columns were mapped. This sheet is unverified, not passed.'
+    no_quantity_mapping: 'No supported quantity columns were mapped. This sheet is unverified, not passed.',
+    external_reference_formula: 'A formula refers to another workbook or a web/network location. The stored value was checked; the link was never opened, so that value may be stale.',
+    web_function_formula: 'A formula uses a web function (WEBSERVICE, IMAGE or FILTERXML). It was never run; check that the stored result is current.',
+    hyperlink_formula: 'A HYPERLINK formula is present. Links are recorded only and never opened.',
+    dde_or_macro_call_formula: 'A formula uses DDE or a macro-call function (e.g. cmd|, CALL, RUN, EXEC). It was never run. Treat this workbook with care before opening it in Excel.',
+    external_hyperlink: 'The sheet contains web or file hyperlinks. Links are recorded only and never opened.',
+    external_workbook_link: 'The workbook links to another workbook. Values from that link were not refreshed or checked against the linked file.',
+    external_data_connection: 'The workbook has a data connection or query (e.g. a database or web query). It was never refreshed; checks use the stored values.',
+    dde_link: 'The workbook contains a DDE link to another program. It was never run. Treat this workbook with care before opening it in Excel.'
   };
   let pending = false, selected = null, selectionVersion = 0, detailVersion = 0, developmentDemo = false;
   function setBusy(value){pending=value;if(value)++selectionVersion;node('spreadsheet-file').disabled=value;node('spreadsheet-refresh').disabled=value;node('spreadsheet-list').querySelectorAll('button').forEach(button=>button.disabled=value);node('spreadsheet-detail').querySelectorAll('input').forEach(input=>input.disabled=value);node('spreadsheet-detail').querySelectorAll('button').forEach(button=>button.disabled=value);node('development-examples')?.querySelectorAll('button').forEach(button=>button.disabled=value)}

@@ -59,16 +59,31 @@ class SpreadsheetTests(unittest.TestCase):
         sheet = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>1+1</f><v>2</v></c></row></sheetData></worksheet>'
         result = inspect_spreadsheet('test.xlsx', xlsx(sheet))
         self.assertEqual(result['finding_counts']['formula_not_evaluated'], 1)
-        with self.assertRaises(SpreadsheetError):
-            inspect_spreadsheet('test.xlsx', xlsx(sheet.replace('1+1', 'WEBSERVICE("https://example.invalid")')))
+        web = inspect_spreadsheet('test.xlsx', xlsx(sheet.replace('1+1', 'WEBSERVICE("https://example.invalid")')))
+        self.assertEqual(web['finding_counts']['web_function_formula'], 1)  # flagged, never executed
+        self.assertEqual(web['external_content'], ['web_function_formula'])
+        table = inspect_spreadsheet('test.xlsx', xlsx(sheet.replace('1+1', 'SUM(Table1[Qty])+Table1[@Accepted]')))
+        self.assertNotIn('external_content', table)  # structured table references are ordinary formulas
 
     def test_unsafe_archives(self):
         for extra in ({'../bad.xml': '<x/>'}, {'xl/vbaProject.bin': 'bad'},
-                      {'xl/externalLinks/externalLink1.xml': '<x/>'},
+                      {'xl/embeddings/oleObject1.bin': 'bad'}, {'xl/activeX/activeX1.xml': '<x/>'},
                       {'bad.xml': '<!DOCTYPE a [<!ENTITY x "hello">]><a>&x;</a>'},
-                      {'bad.rels': '<Relationships><Relationship TargetMode="External" Target="https://example.invalid"/></Relationships>'}):
+                      {'bad.rels': '<Relationships><Relationship TargetMode="External" Type="http://x/oleObject" Target="file:///c:/x.doc"/></Relationships>'},
+                      {'xl/worksheets/sheet2.xml': '<worksheet><oleObjects><oleObject progId="Package"/></oleObjects></worksheet>'}):
             with self.subTest(extra=extra), self.assertRaises(SpreadsheetError):
                 inspect_spreadsheet('test.xlsx', xlsx(extra=extra))
+        # External links and hyperlinks are recorded as findings, not refused; printer settings are normal.
+        flagged = {
+            'external_workbook_link': {'xl/externalLinks/externalLink1.xml': '<x/>'},
+            'external_hyperlink': {'xl/worksheets/_rels/sheet1.xml.rels': '<Relationships><Relationship TargetMode="External" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid"/></Relationships>'},
+            'external_data_connection': {'xl/connections.xml': '<connections/>'},
+            'dde_link': {'xl/externalLinks/externalLink2.xml': '<externalLink><ddeLink ddeService="cmd"/></externalLink>'},
+        }
+        for code, extra in flagged.items():
+            with self.subTest(code=code):
+                self.assertIn(code, inspect_spreadsheet('test.xlsx', xlsx(extra=extra))['finding_counts'])
+        self.assertNotIn('external_content', inspect_spreadsheet('test.xlsx', xlsx(extra={'xl/printerSettings/printerSettings1.bin': 'binary'})))
         with self.assertRaises(SpreadsheetError):
             inspect_spreadsheet('bad.xlsx', b'PKbad')
         with self.assertRaises(SpreadsheetError):
@@ -163,14 +178,24 @@ class SpreadsheetTests(unittest.TestCase):
         with self.assertRaises(SpreadsheetError):
             inspect_spreadsheet('test.xlsx', bytes(encrypted))
 
-    def test_xml_dtd_and_active_formula_rejected(self):
+    def test_xml_dtd_rejected_and_active_formulas_flagged(self):
         for body in ('<!DOCTYPE x><x/>', '<!DOCTYPE x SYSTEM "https://example.invalid/a"><x/>'):
             with self.subTest(body=body), self.assertRaises(SpreadsheetError):
                 inspect_spreadsheet('test.xlsx', xlsx(extra={'extra.xml': body}))
-        for formula in ('[other.xlsx]Sheet1!A1', 'cmd|data!A1', 'EXECUTE(A1)', 'REGISTER.ID(A1)', 'IMAGE(A1)', 'RUN(A1)'):
-            xml = '<root><definedName>' + formula + '</definedName></root>'
-            with self.subTest(formula=formula), self.assertRaises(SpreadsheetError):
-                inspect_spreadsheet('test.xlsx', xlsx(extra={'extra.xml': xml}))
+        expected = {'[other.xlsx]Sheet1!A1': 'external_reference_formula', 'SUM([1]Sheet1!A1:A9)': 'external_reference_formula',
+                    'cmd|data!A1': 'dde_or_macro_call_formula', 'EXECUTE(A1)': 'dde_or_macro_call_formula',
+                    'REGISTER.ID(A1)': 'dde_or_macro_call_formula', 'RUN(A1)': 'dde_or_macro_call_formula',
+                    'IMAGE(A1)': 'web_function_formula', 'HYPERLINK("https://example.invalid")': 'hyperlink_formula'}
+        for formula, code in expected.items():
+            xml = '<root><definedName>' + formula.replace('&', '&amp;').replace('"', '&quot;') + '</definedName></root>'
+            with self.subTest(formula=formula):
+                result = inspect_spreadsheet('test.xlsx', xlsx(extra={'extra.xml': xml}))
+                self.assertIn(code, result['finding_counts'])
+                self.assertIn(code, result['external_content'])
+        for ordinary in ('SUM(Table1[Qty])', 'tbl[[#This Row],[Qty]]', 'TEXTJOIN("|",TRUE,A1:A3)', 'IF(A1="https://x",1,0)', '[0]!LocalName'):
+            xml = '<root><definedName>' + ordinary.replace('"', '&quot;') + '</definedName></root>'
+            with self.subTest(ordinary=ordinary):
+                self.assertNotIn('external_content', inspect_spreadsheet('test.xlsx', xlsx(extra={'extra.xml': xml})))
 
     def test_empty_sheets_and_untrusted_dimension(self):
         empty = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'

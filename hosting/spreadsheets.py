@@ -46,7 +46,40 @@ def _add(left, right):
         return left + right
 
 
-def _xlsx_rows(raw):
+_STRING = re.compile(r'"(?:[^"]|"")*"')
+_EXTERNAL_REF = re.compile(r"\[[1-9][0-9]*\]|\[[^\]\[]+\.(?:xls[xmb]?|xlam|csv)\]|https?://|\\\\\\\\", re.I)
+_WEB_FN = re.compile(r'\b(?:WEBSERVICE|IMAGE|FILTERXML)\s*\(', re.I)
+_HYPERLINK_FN = re.compile(r'\bHYPERLINK\s*\(', re.I)
+_DDE = re.compile(r"\||\b(?:RTD|DDE|DDEAUTO|CALL|REGISTER(?:\.ID)?|EXEC(?:UTE)?|RUN|SQL\.REQUEST)\s*\(", re.I)
+
+# Recorded as findings, never executed. The checker reads stored values only and no
+# uploaded original is ever served back, so these are flagged for review instead of refused.
+EXTERNAL_CONTENT_CODES = ('external_reference_formula', 'web_function_formula', 'hyperlink_formula',
+                          'dde_or_macro_call_formula', 'external_hyperlink', 'external_workbook_link',
+                          'external_data_connection', 'dde_link')
+
+
+def formula_flags(formula):
+    """Classify one formula. Table structured references like Table1[Col] or [@Col] are normal."""
+    code = _STRING.sub('""', formula or '')
+    flags = []
+    if _EXTERNAL_REF.search(code):
+        flags.append('external_reference_formula')
+    if _WEB_FN.search(code):
+        flags.append('web_function_formula')
+    if _HYPERLINK_FN.search(code):
+        flags.append('hyperlink_formula')
+    if _DDE.search(code):
+        flags.append('dde_or_macro_call_formula')
+    return flags
+
+
+def _part_label(name):
+    return PurePosixPath(name).stem
+
+
+def _xlsx_rows(raw, notes=None):
+    notes = notes if notes is not None else []
     # defusedxml is mandatory: no entity expansion or external XML references.
     try:
         from defusedxml import ElementTree as ET
@@ -77,10 +110,14 @@ def _xlsx_rows(raw):
                 if member.file_size / max(member.compress_size, 1) > MAX_RATIO:
                     raise SpreadsheetError('Archive compression ratio exceeds the allowed limit.')
                 low = name.lower()
-                if (any(token in low for token in ('vbaproject', 'macrosheet', 'externallink',
-                        'embeddings/', 'activex/', 'connections', 'querytables/', 'customui/'))
-                        or low.endswith(('.bin', '.exe', '.vbs', '.js'))):
-                    raise SpreadsheetError('Macros, active content, and external data are not supported.')
+                if (any(token in low for token in ('vbaproject', 'macrosheet', 'embeddings/', 'activex/', 'customui/'))
+                        or (low.endswith('.bin') and not low.startswith('xl/printersettings/'))
+                        or low.endswith(('.exe', '.vbs', '.js', '.dll', '.ps1'))):
+                    raise SpreadsheetError('Macros or embedded active content (VBA, ActiveX, OLE objects) are not supported. Save a copy as .xlsx without macros or embedded objects.')
+                if 'externallink' in low and low.endswith('.xml'):
+                    notes.append(('external_workbook_link', _part_label(name)))
+                if (low.endswith('connections.xml') or 'querytables/' in low) and low.endswith('.xml'):
+                    notes.append(('external_data_connection', _part_label(name)))
             if not {'[Content_Types].xml', 'xl/workbook.xml'}.issubset(names):
                 raise SpreadsheetError('File is not a supported XLSX workbook.')
             cells = 0
@@ -94,9 +131,14 @@ def _xlsx_rows(raw):
                                                  for t in ('macroenabled', 'macrosheet', 'activex')):
                         raise SpreadsheetError('Macros or active content are not supported.')
                     if tag == 'Relationship' and element.attrib.get('TargetMode', '').lower() == 'external':
-                        raise SpreadsheetError('External links are not supported.')
-                    if tag in ('ddeLink', 'oleLink', 'oleObject', 'control'):
-                        raise SpreadsheetError('Active content is not supported.')
+                        kind = element.attrib.get('Type', '').rsplit('/', 1)[-1].lower()
+                        if kind in ('oleobject', 'package', 'control', 'activexcontrol', 'attachedtemplate'):
+                            raise SpreadsheetError('Linked OLE/ActiveX objects are not supported. Save a copy without embedded or linked objects.')
+                        notes.append(('external_hyperlink' if kind == 'hyperlink' else 'external_workbook_link', _part_label(member.filename)))
+                    if tag in ('oleObject', 'control'):
+                        raise SpreadsheetError('Embedded OLE objects or ActiveX controls are not supported. Save a copy without them.')
+                    if tag in ('ddeLink', 'oleLink'):
+                        notes.append(('dde_link', _part_label(member.filename)))
                     if member.filename.startswith('xl/worksheets/'):
                         if tag == 'row' and int(element.attrib.get('r', '1')) > MAX_ROWS:
                             raise SpreadsheetError('Spreadsheet exceeds the row limit.')
@@ -111,9 +153,8 @@ def _xlsx_rows(raw):
                             if col > MAX_COLS or int(coordinate[2]) > MAX_ROWS or cells > MAX_CELLS:
                                 raise SpreadsheetError('Spreadsheet exceeds the cell, row, or column limit.')
                     if tag in ('f', 'definedName'):
-                        formula = element.text or ''
-                        if re.search(r'\[|\||https?://|(?:WEBSERVICE|HYPERLINK|IMAGE|RTD|DDE|CALL|REGISTER(?:\.ID)?|EXEC(?:UTE)?|RUN|SQL\.REQUEST)\s*\(', formula, re.I):
-                            raise SpreadsheetError('External or active formulas are not supported.')
+                        for flag in formula_flags(element.text or ''):
+                            notes.append((flag, _part_label(member.filename) if tag == 'f' else 'workbook names'))
                     if tag in ('row', 'c', 'v', 'f', 'is', 't', 'si', 'r'):
                         element.clear()
         workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=False, keep_links=False)
@@ -161,6 +202,7 @@ def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
         else:
             result['findings_truncated'] = True
 
+    notes = []
     if fmt == 'csv':
         try:
             decoded = raw.decode('utf-8-sig')
@@ -172,7 +214,7 @@ def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
     else:
         # Materialize only within the same row/cell limits after ZIP/XML preflight.
         sources=[];bounded_rows=bounded_cells=0
-        for title, iterator in _xlsx_rows(raw):
+        for title, iterator in _xlsx_rows(raw, notes):
             sheet_rows=[]
             for row in iterator:
                 bounded_rows+=1;bounded_cells+=len(row)
@@ -183,10 +225,10 @@ def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
             sources.append((title,sheet_rows))
         from hosting.pratt_reports import inspect_pratt
         pratt=inspect_pratt(sources,result)
-        if pratt is not None:return pratt
+        if pratt is not None:return _attach_external(pratt,notes)
         from hosting.branded_reports import inspect_branded
         branded=inspect_branded(sources,result)
-        if branded is not None:return branded
+        if branded is not None:return _attach_external(branded,notes)
     total_cells = total_rows = 0
     try:
         for title, rows in sources:
@@ -266,4 +308,29 @@ def inspect_spreadsheet(filename: str, raw: bytes) -> dict:
     result.update(row_count=total_rows, cell_count=total_cells, finding_counts=dict(counts),
                   numeric_columns_checked=sum(len(s['numeric_columns_checked']) for s in result['sheets']),
                   internal_check_status='unverified' if not any(s['numeric_columns_checked'] for s in result['sheets']) else ('findings' if counts else 'no_findings_in_checks_performed'))
+    return _attach_external(result, notes)
+
+
+def _attach_external(result, notes):
+    """Add external/active-content findings (one per code and location) to any result shape."""
+    seen = set()
+    counts = Counter()
+    for code, where in notes:
+        counts[code] += 1
+        if (code, where) in seen:
+            continue
+        seen.add((code, where))
+        if len(result.setdefault('findings', [])) < MAX_FINDINGS:
+            result['findings'].append(dict(code=code, sheet=where, row=None, column=None))
+        else:
+            result['findings_truncated'] = True
+    if counts:
+        merged = dict(result.get('finding_counts') or {})
+        for code, n in counts.items():
+            merged[code] = merged.get(code, 0) + n
+        result['finding_counts'] = merged
+        result['external_content'] = sorted(counts)
+        result.setdefault('limitations', []).append('External links, web functions and DDE/macro-call formulas were recorded as findings. They were never executed or followed.')
+        if result.get('internal_check_status') == 'no_findings_in_checks_performed':
+            result['internal_check_status'] = 'findings'
     return result
