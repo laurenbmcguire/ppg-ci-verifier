@@ -1,0 +1,83 @@
+{
+  "data": [
+    {
+      "ActualQty_x002e_": 7,
+      "AuditResult": "Pass",
+      "Date": "2026-11-03T06:00:00Z",
+      "Defects": null,
+      "DeliveryNote": "000011",
+      "Export": "No",
+      "ID": 11,
+      "Id": 11,
+      "Location": "Commercial Bulk",
+      "OrderQty_x002e_": 7,
+      "PartNumber": "aB-0011",
+      "Resolution": null,
+      "Shift": "1",
+      "Status": "Complete"
+    },
+    {
+      "ActualQty_x002e_": 7,
+      "AuditResult": "Fail",
+      "Date": "2026-11-03T06:00:00Z",
+      "Defects": {
+        "results": [
+          "Export Documents Missing & Not legible",
+          "Back Label Missing & Not legible"
+        ]
+      },
+      "DeliveryNote": "000012",
+      "Export": "Yes",
+      "ID": 12,
+      "Id": 12,
+      "Location": "Commercial Bulk",
+      "OrderQty_x002e_": 7,
+      "PartNumber": "aB-0012",
+      "Resolution": {
+        "results": [
+          "Inspect at shipping"
+        ]
+      },
+      "Shift": "1",
+      "Status": "Complete"
+    },
+    {
+      "ActualQty_x002e_": 7,
+      "AuditResult": null,
+      "Date": "2026-11-03T06:00:00Z",
+      "Defects": null,
+      "DeliveryNote": "000013",
+      "Export": "No",
+      "ID": 13,
+      "Id": 13,
+      "Location": "Commercial Bulk",
+      "OrderQty_x002e_": 7,
+      "PartNumber": "aB-0013",
+      "Resolution": null,
+      "Shift": "2",
+      "Status": "In Progress"
+    },
+    {
+      "ActualQty_x002e_": 7,
+      "AuditResult": "Pass",
+      "Date": "2026-11-03T06:00:00Z",
+      "Defects": {
+        "results": [
+          "Other recorded nonfailure category"
+        ]
+      },
+      "DeliveryNote": "000014",
+      "Export": "Yes",
+      "ID": 14,
+      "Id": 14,
+      "Location": "446",
+      "OrderQty_x002e_": 7,
+      "PartNumber": "aB-0014",
+      "Resolution": null,
+      "Shift": "3",
+      "Status": "Complete"
+    }
+  ],
+  "next": null,
+  "status": 200
+}

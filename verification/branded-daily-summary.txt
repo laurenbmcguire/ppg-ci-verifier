@@ -1,0 +1,16 @@
+Verification completed November 4, 2026, UTC.
+Python unittest discovery: 254 passed, 0 failures/errors.
+Controlled Node DOM/fetch UI regression tests: 6 passed, 0 failed/skipped.
+All web JavaScript syntax checks passed. Python compile checks passed.
+HTML IDs: 50 unique IDs, no duplicates.
+Original synthetic upgrade: all 27 original payload files remain byte-identical.
+
+Branded XLSX mapping now checks actual row-15 quantity columns, not decorative row 1.
+Known-value source differences and extra/missing records are detected; missing quantities remain unknown.
+Daily scope, per-shift breakdown, freshness, proposal, hash and private approval guards are tested.
+Source snapshots and check revisions are immutable; stale replay is rejected.
+Client workbook originals and formulas are not changed by inspection or reconciliation.
+No actual client records or independent source snapshots are included in this package.
+
+Not verified: live Vercel deployment, real Postgres instance, trusted reviewer authentication, real-browser rendering/device interaction.
+No credentials, deployment, upstream writes, live messages, business approval or customer release were performed.

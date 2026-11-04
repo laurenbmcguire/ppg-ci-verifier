@@ -1,0 +1,43 @@
+✔ health must explicitly enable development demo before revealing four bundled samples (12.318653ms)
+✔ each source-backed sample imports original bytes before comparing its separate evidence (6.137638ms)
+✔ sample loading locks concurrent sample clicks and selection through import, comparison and refresh (3.289078ms)
+✔ plain CSV sample imports without source reconciliation (1.854347ms)
+✔ import error unlocks controls and retains the available original (2.125157ms)
+✔ comparison error unlocks controls and retains the available original (3.511555ms)
+✔ Demo Accept change binds a single proposal to the exact review (13.176581ms)
+✔ Demo Reject change binds a single proposal to the exact review (2.093378ms)
+✔ batch decisions require explicit checkbox selection and clear it after success (2.530159ms)
+✔ apply rejects unreviewed proposal without a POST (4.684764ms)
+✔ apply rejects deny proposal without a POST (1.825307ms)
+✔ apply rejects hold proposal without a POST (1.664209ms)
+✔ accepted selected proposal creates and displays a new unapproved draft with cleared decisions (2.375866ms)
+✔ pending action prevents a second action and navigation even with direct handler invocation (3.260384ms)
+✔ late review response cannot replace newer selected spreadsheet detail (2.985198ms)
+✔ failed decision HTTP action reloads full spreadsheet and review without retrying POST (2.974321ms)
+✔ failed decision network action reloads full spreadsheet and review without retrying POST (2.305599ms)
+✔ failed apply HTTP action reloads full spreadsheet and review without retrying POST (1.451787ms)
+✔ failed apply network action reloads full spreadsheet and review without retrying POST (1.226976ms)
+✔ ineligible review displays notice and no decision or apply controls (1.207738ms)
+✔ download links accept only exact same-origin draft endpoint and lowercase 64-character hash (4.47963ms)
+✔ historical review exposes audit history, blocks decisions and navigates to its corrected draft (1.442683ms)
+✔ historical review with invalid successor hash has no navigation or mutation controls (5.064545ms)
+✔ pending comparison locks navigation and restores it after completion (8.749231ms)
+✔ starting comparison invalidates an earlier selection request (2.029572ms)
+✔ a delayed old selection cannot overwrite a completed comparison (1.747405ms)
+✔ replacement source inputs and refreshed list buttons inherit pending state (3.048743ms)
+✔ failed comparison unlocks navigation without applying a late selection (1.997182ms)
+✔ malformed source input releases the navigation lock (4.44046ms)
+✔ simulation controls require explicit health flag and never enable human approval (9.579848ms)
+✔ approve/deny/hold use exact bound payload; all current proposals selectable but only approved can apply (6.854363ms)
+✔ file read locks navigation, sample and duplicate action before asynchronous read completes (3.027111ms)
+✔ pending decision prevents navigation and duplicate decisions (2.247161ms)
+✔ refresh reloads selected evidence and disables stale decisions (2.131095ms)
+✔ bulk decisions require visible explicit selection, clear it, and reject mixed apply (3.060842ms)
+ℹ tests 35
+ℹ suites 0
+ℹ pass 35
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 161.431896

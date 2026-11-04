@@ -1,0 +1,14 @@
+✔ pending comparison locks navigation and restores it after completion (8.090183ms)
+✔ starting comparison invalidates an earlier selection request (2.47753ms)
+✔ a delayed old selection cannot overwrite a completed comparison (1.598993ms)
+✔ replacement source inputs and refreshed list buttons inherit pending state (2.615928ms)
+✔ failed comparison unlocks navigation without applying a late selection (1.625184ms)
+✔ malformed source input releases the navigation lock (2.945437ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 109.607719

@@ -1,0 +1,174 @@
+{
+  "examples": [
+    {
+      "artifact": {
+        "path": "synthetic_ppg_active_tabs.xlsx",
+        "sha256": "45f403fce99289eb9b325a77a3613593b13285728ca8debaad8dfde2674c0264",
+        "size_bytes": 7537
+      },
+      "expected": {
+        "approval_effective": false,
+        "finding_counts": {
+          "additional_sections_not_verified": 1,
+          "historical_supplied_source": 1,
+          "photo_evidence_not_verified": 1,
+          "quantity_missing": 2,
+          "reject_register_not_present": 1,
+          "shift_activity_unverified": 2,
+          "source_consistency_unverified": 1,
+          "source_evidence_blocker": 1,
+          "source_quantity_missing": 2,
+          "source_shift_coverage_unverified": 1,
+          "source_timezone_unverified": 1
+        },
+        "numeric_cells_checked": 4,
+        "numeric_values_compared": 4,
+        "record_count": 2,
+        "release_status": "held",
+        "send_enabled": false,
+        "source_difference_count": 0,
+        "source_reconciliation_status": "observed_values_compared_with_limits",
+        "source_write_enabled": false,
+        "template_id": "ppg-daily-active-tabs-report/4",
+        "template_mapping_status": "matched"
+      },
+      "id": "synthetic_ppg_active_tabs",
+      "purpose": "Known quantities agree; both rejected quantities remain unknown, not zero.",
+      "source": {
+        "path": "synthetic_ppg_active_tabs.source.json",
+        "sha256": "2de6eaa29e77fa636974610f353e3e1c9d1b32e563212bf499ca8944a8aa201d",
+        "size_bytes": 1422
+      },
+      "synthetic": true
+    },
+    {
+      "artifact": {
+        "path": "synthetic_ppg_source_mismatch.xlsx",
+        "sha256": "4001061cc097a2d09c619f187b245e51e2b8192240684181db7e1ef0eb2c5326",
+        "size_bytes": 7541
+      },
+      "expected": {
+        "approval_effective": false,
+        "finding_counts": {
+          "additional_sections_not_verified": 1,
+          "historical_supplied_source": 1,
+          "photo_evidence_not_verified": 1,
+          "quantity_missing": 2,
+          "reject_register_not_present": 1,
+          "shift_activity_unverified": 2,
+          "source_consistency_unverified": 1,
+          "source_evidence_blocker": 1,
+          "source_quantity_missing": 2,
+          "source_shift_coverage_unverified": 1,
+          "source_timezone_unverified": 1,
+          "source_value_difference": 1
+        },
+        "numeric_cells_checked": 4,
+        "numeric_values_compared": 4,
+        "record_count": 2,
+        "release_status": "held",
+        "send_enabled": false,
+        "source_difference_count": 1,
+        "source_reconciliation_status": "mismatch",
+        "source_write_enabled": false,
+        "template_id": "ppg-daily-active-tabs-report/4",
+        "template_mapping_status": "matched"
+      },
+      "id": "synthetic_ppg_source_mismatch",
+      "purpose": "Lot-2 certified quantity is 24 in workbook and 23 in separate source: exactly one numeric difference.",
+      "source": {
+        "path": "synthetic_ppg_source_mismatch.source.json",
+        "sha256": "40a08ad8dfce7f7c8eb185544b7a2ad86da895acca01ba28be4e242f7c187016",
+        "size_bytes": 1422
+      },
+      "synthetic": true
+    },
+    {
+      "artifact": {
+        "path": "synthetic_pratt_template_union.xlsx",
+        "sha256": "3b9819f54493ac99f14a26d11302828717eacc7d51f6a434b7440daac31bea52",
+        "size_bytes": 16841
+      },
+      "expected": {
+        "approval_effective": false,
+        "finding_counts": {
+          "additional_defect_alias_review": 1,
+          "historical_supplied_source": 1,
+          "nonfailure_defects_excluded": 1,
+          "source_completeness_unverified": 1,
+          "source_id_not_displayed": 1,
+          "source_list_identity_unverified": 1,
+          "source_timezone_unverified": 1,
+          "unreported_production_fields": 1
+        },
+        "numeric_cells_checked": 195,
+        "numeric_values_compared": 195,
+        "record_count": 5,
+        "release_status": "held",
+        "send_enabled": false,
+        "source_difference_count": 0,
+        "source_reconciliation_status": "observed_values_compared_with_limits",
+        "source_write_enabled": false,
+        "template_id": "pratt-kn-template-union/2",
+        "template_mapping_status": "matched"
+      },
+      "id": "synthetic_pratt_template_union",
+      "purpose": "Nine sheets; three completed Main audits and two completed Multi-pack children remain separate.",
+      "source": {
+        "path": "synthetic_pratt_template_union.source.json",
+        "sha256": "3de11cc73322421eeef0684427f3ae9d743ac1ddca340b574160099392cadeae",
+        "size_bytes": 5398
+      },
+      "synthetic": true
+    },
+    {
+      "artifact": {
+        "path": "synthetic_plain_numeric_issues.csv",
+        "sha256": "80d1ca5df8839d089281ebbec5a63545e6d0022bf84a362561a7b4af3f1a2f5a",
+        "size_bytes": 86
+      },
+      "expected": {
+        "approval_effective": null,
+        "finding_counts": {
+          "fractional_count": 1,
+          "inspected_count_mismatch": 1,
+          "invalid_numeric_value": 1,
+          "missing_cell": 1,
+          "negative_count_or_quantity": 1
+        },
+        "numeric_cells_checked": null,
+        "numeric_values_compared": null,
+        "record_count": null,
+        "release_status": "held",
+        "send_enabled": null,
+        "source_difference_count": null,
+        "source_reconciliation_status": null,
+        "source_write_enabled": null,
+        "template_id": null,
+        "template_mapping_status": null
+      },
+      "id": "synthetic_plain_numeric_issues",
+      "purpose": "Plain CSV: inconsistent counts, negative/fractional quantity, and missing value.",
+      "source": null,
+      "synthetic": true
+    }
+  ],
+  "generated_by": "python -m hosting.build_development_examples",
+  "provenance": "SYNTHETIC DEVELOPMENT ONLY. All rows are fictional, created from explicit fixture constants; no real workbook, private source, credentials, or live service used.",
+  "release_status": "held",
+  "schema": "verifier-development-examples/1",
+  "source_generation": "Separate explicit synthetic constants, not workbook extraction; matching fixtures test implementation consistency, not source authenticity.",
+  "supporting_source_snapshots": [
+    {
+      "path": "synthetic_pratt_main_snapshot.json",
+      "sha256": "84d144a9441a1e21a849d70faaab1408c857a0b6e63cc7bfee8863494d95ddd2",
+      "size_bytes": 1875
+    },
+    {
+      "path": "synthetic_pratt_multi_snapshot.json",
+      "sha256": "7466ee5ad7cd74f7c942cbedc2b01bda4cb5ba61f25045cc184568226c3ff5ed",
+      "size_bytes": 1156
+    }
+  ],
+  "synthetic": true
+}

@@ -1,0 +1,8 @@
+2026-11-03
+PASS: Python compilation for app/, hosting/, api/.
+PASS: node --check for web/ui.js, web/report-ui.js, web/spreadsheet-ui.js.
+PASS: HTML IDs unique; upload controls, storage notice, and script references present.
+PASS: vercel.json parses.
+PASS: Every original ZIP payload file remains byte-for-byte unchanged.
+NOT RUN: live Postgres, Vercel deployment smoke tests, browser rendering/interaction.
+Browser limitation: cloud browser returned ERR_CONNECTION_REFUSED for the command environment loopback server.

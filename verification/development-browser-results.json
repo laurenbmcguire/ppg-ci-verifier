@@ -1,0 +1,23 @@
+{
+  "engine": "real Chromium via Playwright",
+  "synthetic_only": true,
+  "status": "not_run",
+  "viewports": [],
+  "fixture_preparation": "passed",
+  "browser_assertions_executed": false,
+  "reason": "Chromium local IPC socket() Operation not permitted under default and escalated execution; launch attempts stopped.",
+  "planned_browser_xlsx_bridge": {
+    "status": "not_run",
+    "coverage": [
+      "uploaded XLSX review endpoint",
+      "individual Accept change and Reject change",
+      "rejected-selection apply blocked",
+      "explicit batch checkbox acceptance",
+      "accepted-only Excel draft",
+      "downloaded workbook changed-cell inspection",
+      "original fixture hash unchanged",
+      "reload and superseded-version controls absent"
+    ]
+  },
+  "python_compile": "passed"
+}

@@ -1,0 +1,11 @@
+test_demo_buttons_wrap_and_have_touch_height (__main__.DevelopmentLayoutStaticTests.test_demo_buttons_wrap_and_have_touch_height) ... ok
+test_local_scripts_exist (__main__.DevelopmentLayoutStaticTests.test_local_scripts_exist) ... ok
+test_long_workflow_hashes_and_input_width_guarded (__main__.DevelopmentLayoutStaticTests.test_long_workflow_hashes_and_input_width_guarded) ... ok
+test_mobile_breakpoint_and_minimum_grid_tracks (__main__.DevelopmentLayoutStaticTests.test_mobile_breakpoint_and_minimum_grid_tracks) ... ok
+test_mobile_viewport_declared (__main__.DevelopmentLayoutStaticTests.test_mobile_viewport_declared) ... ok
+test_upload_inputs_and_tables_have_overflow_containment (__main__.DevelopmentLayoutStaticTests.test_upload_inputs_and_tables_have_overflow_containment) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.002s
+
+OK

@@ -1,0 +1,9 @@
+PASS logo asset and dimensions
+PASS decision before findings in right sidebar
+PASS Ignore Accept Next present
+PASS done checkmark and acknowledgement text
+PASS marks bound to source revision and hash
+PASS fixed independent right panel
+PASS historical link removed
+PASS demo notice retained
+8 passed; 0 failed. Static inspection, not browser interaction.

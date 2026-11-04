@@ -1,0 +1,80 @@
+{
+  "started_at": "2026-11-04T16:48:46.133545+00:00",
+  "synthetic_only": true,
+  "browser_tested": false,
+  "release_status": "held",
+  "checks": [
+    "Real CLI loopback server and demo flag",
+    "All four packaged examples match expected findings and hashes over actual HTTP",
+    "Synthetic XLSX per-item reject/accept and explicit selection produce corrected downloadable workbook",
+    "Only K17 changes 24 to 23; other cell values/formulas and unknown rejects preserved",
+    "Corrected XLSX recheck reports zero numeric source differences but remains held",
+    "Superseded original refuses repeated decisions/apply and remains byte-identical",
+    "Individual rejection blocks apply",
+    "Atomic explicit batch accept and invalid batch rollback",
+    "Hold/unreviewed decisions block mixed apply",
+    "Selected accepted JSON draft only; original history stale and locked",
+    "Real approval remains unavailable",
+    "All uploads, comparison revisions, decisions, JSON/Excel drafts, downloads and audit survive actual CLI process restart"
+  ],
+  "samples": [
+    {
+      "id": "synthetic_ppg_active_tabs",
+      "file_hash": "45f403fce99289eb9b325a77a3613593b13285728ca8debaad8dfde2674c0264",
+      "record_count": 2,
+      "numeric_values_compared": 4,
+      "source_difference_count": 0,
+      "release_status": "held"
+    },
+    {
+      "id": "synthetic_ppg_source_mismatch",
+      "file_hash": "4001061cc097a2d09c619f187b245e51e2b8192240684181db7e1ef0eb2c5326",
+      "record_count": 2,
+      "numeric_values_compared": 4,
+      "source_difference_count": 1,
+      "release_status": "held"
+    },
+    {
+      "id": "synthetic_pratt_template_union",
+      "file_hash": "3b9819f54493ac99f14a26d11302828717eacc7d51f6a434b7440daac31bea52",
+      "record_count": 5,
+      "numeric_values_compared": 195,
+      "source_difference_count": 0,
+      "release_status": "held"
+    },
+    {
+      "id": "synthetic_plain_numeric_issues",
+      "file_hash": "80d1ca5df8839d089281ebbec5a63545e6d0022bf84a362561a7b4af3f1a2f5a",
+      "record_count": null,
+      "numeric_values_compared": null,
+      "source_difference_count": null,
+      "release_status": "held"
+    }
+  ],
+  "spreadsheet_draft": {
+    "original_hash": "4001061cc097a2d09c619f187b245e51e2b8192240684181db7e1ef0eb2c5326",
+    "draft_hash": "bec45c992c83bb199d1b4d27f42d88fcce85465bfb131f4d379519e956f05ea8",
+    "changed_cells": [
+      [
+        "1st Shift",
+        "K17",
+        24,
+        23
+      ]
+    ],
+    "source_differences_before": 1,
+    "source_differences_after": 0,
+    "unknown_rejects_preserved": true,
+    "release_status": "held"
+  },
+  "workflow": {
+    "initial_proposals": 3,
+    "selected_accepted_applied": 2,
+    "remaining_proposals": 1,
+    "draft_manifest_hash": "9a69492940c2402b0681f4e36a2124f8b82a3d7918258e5ef3c4f959563c868f",
+    "original_manifest_hash": "7e822fb8fce67ebe019325a13372c478ba982116cc41fbcdf9f339d777cf79bf",
+    "approval_effective": false
+  },
+  "status": "passed",
+  "finished_at": "2026-11-04T16:48:47.575975+00:00"
+}

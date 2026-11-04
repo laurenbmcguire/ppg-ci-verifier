@@ -1,0 +1,161 @@
+{
+  "schema_version": 2,
+  "synthetic": true,
+  "report_id": "synthetic-job-daily",
+  "version": "1",
+  "scope": {
+    "site_id": "synthetic-site",
+    "list_id": "synthetic-list",
+    "client_id": "synthetic-client",
+    "job_id": "synthetic-job",
+    "report_date": "2026-11-03",
+    "report_granularity": "daily"
+  },
+  "fields": [
+    {
+      "name": "inspected",
+      "type": "integer",
+      "required": true,
+      "total": true,
+      "nonnegative": true
+    },
+    {
+      "name": "certified",
+      "type": "integer",
+      "required": true,
+      "total": true,
+      "nonnegative": true
+    },
+    {
+      "name": "rejected",
+      "type": "integer",
+      "required": true,
+      "total": true,
+      "nonnegative": true
+    }
+  ],
+  "report": {
+    "records": [
+      {
+        "id": "row-1",
+        "values": {
+          "inspected": 10,
+          "certified": 8,
+          "rejected": 1
+        },
+        "shift_id": "1"
+      },
+      {
+        "id": "row-2",
+        "values": {
+          "inspected": 10,
+          "certified": 9,
+          "rejected": 1
+        },
+        "shift_id": "2"
+      }
+    ],
+    "totals": {
+      "inspected": 20,
+      "certified": 17,
+      "rejected": 2
+    },
+    "shift_breakdown": {
+      "1": {
+        "record_count": 1,
+        "totals": {
+          "inspected": 10,
+          "certified": 8,
+          "rejected": 1
+        }
+      },
+      "2": {
+        "record_count": 1,
+        "totals": {
+          "inspected": 10,
+          "certified": 9,
+          "rejected": 1
+        }
+      }
+    }
+  },
+  "source_snapshot": {
+    "source_reference": "synthetic://fixture",
+    "captured_at": "2026-11-03T12:02:00Z",
+    "complete": true,
+    "consistency": "confirmed",
+    "shift_complete": true,
+    "timezone_status": "confirmed",
+    "scope": {
+      "site_id": "synthetic-site",
+      "list_id": "synthetic-list",
+      "client_id": "synthetic-client",
+      "job_id": "synthetic-job",
+      "report_date": "2026-11-03",
+      "report_granularity": "daily"
+    },
+    "records": [
+      {
+        "id": "row-1",
+        "values": {
+          "inspected": 10,
+          "certified": 9,
+          "rejected": 1
+        },
+        "shift_id": "1"
+      },
+      {
+        "id": "row-2",
+        "values": {
+          "inspected": 10,
+          "certified": 9,
+          "rejected": 1
+        },
+        "shift_id": "2"
+      }
+    ],
+    "field_definitions_hash": "6813abb54128cff8c39077ace02b9646627367ac7e01c6e7d82daf4bd7117f01",
+    "member_shifts": [
+      {
+        "scope": {
+          "site_id": "synthetic-site",
+          "list_id": "synthetic-list",
+          "client_id": "synthetic-client",
+          "job_id": "synthetic-job",
+          "shift_id": "1",
+          "report_date": "2026-11-03"
+        },
+        "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "captured_at": "2026-11-03T12:00:00Z",
+        "complete": true,
+        "consistency": "confirmed",
+        "shift_complete": true,
+        "timezone_status": "confirmed",
+        "record_ids": [
+          "row-1"
+        ]
+      },
+      {
+        "scope": {
+          "site_id": "synthetic-site",
+          "list_id": "synthetic-list",
+          "client_id": "synthetic-client",
+          "job_id": "synthetic-job",
+          "shift_id": "2",
+          "report_date": "2026-11-03"
+        },
+        "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "captured_at": "2026-11-03T12:00:00Z",
+        "complete": true,
+        "consistency": "confirmed",
+        "shift_complete": true,
+        "timezone_status": "confirmed",
+        "record_ids": [
+          "row-2"
+        ]
+      }
+    ],
+    "shift_coverage_complete": true,
+    "source_revision": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  }
+}

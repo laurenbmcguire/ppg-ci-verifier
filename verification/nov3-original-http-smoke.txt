@@ -1,0 +1,10 @@
+PASS state endpoint returns working state
+PASS POST without session token is rejected
+PASS cross-origin POST is rejected
+PASS filesystem traversal not served
+PASS download has unapproved filename and watermark
+PASS stale edit returns conflict
+PASS unapproved generation returns conflict
+PASS duplicate requests are deduplicated
+PASS duplicate reminders deduplicated and unanswered remains unapproved
+PASS private download did not generate report

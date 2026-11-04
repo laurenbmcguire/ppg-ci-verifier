@@ -1,0 +1,57 @@
+{
+  "captured_at": "2026-11-04T00:00:00Z",
+  "complete": true,
+  "consistency": "unknown",
+  "evidence_blockers": [
+    "SYNTHETIC DEVELOPMENT DATA ONLY; not authenticated production evidence."
+  ],
+  "provenance_kind": "retained_supplied_snapshot",
+  "records": [
+    {
+      "date": "2026-11-03",
+      "field_presence": {
+        "certified": "present",
+        "inspected": "present",
+        "rejected": "absent"
+      },
+      "id": "1",
+      "identifier": "Lot-1",
+      "part": "Part-1",
+      "shift_id": "1",
+      "values": {
+        "certified": 10,
+        "inspected": 10,
+        "rejected": null
+      }
+    },
+    {
+      "date": "2026-11-03",
+      "field_presence": {
+        "certified": "present",
+        "inspected": "present",
+        "rejected": "absent"
+      },
+      "id": "2",
+      "identifier": "Lot-2",
+      "part": "Part-1",
+      "shift_id": "1",
+      "values": {
+        "certified": 24,
+        "inspected": 24,
+        "rejected": null
+      }
+    }
+  ],
+  "schema": "verifier-spreadsheet-source/1",
+  "scope": {
+    "job_id": "job",
+    "list_id": "list",
+    "project_number": "Synthetic-Job",
+    "report_date": "2026-11-03",
+    "site_id": "site"
+  },
+  "shift_coverage_complete": false,
+  "source_reference": "synthetic://development/ppg-separate-fixture",
+  "source_sha256": "aa93ec5c249d615bac4bc6616c025e080aed203b8c289e46c738c2747b57cf92",
+  "timezone_status": "unknown"
+}

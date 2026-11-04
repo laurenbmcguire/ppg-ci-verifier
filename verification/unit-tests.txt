@@ -1,0 +1,38 @@
+test_ambiguity_not_silently_corrected (test_review.ReviewTests) ... ok
+test_ambiguous_number_preserved_and_blocked (test_review.ReviewTests) ... ok
+test_approved_exact_bytes (test_review.ReviewTests) ... ok
+test_audit_sidecar_exists (test_review.ReviewTests) ... ok
+test_block_current_week (test_review.ReviewTests) ... ok
+test_changed_original_fail_closed (test_review.ReviewTests) ... ok
+test_conflicting_edit_rejected (test_review.ReviewTests) ... ok
+test_corrupt_approved_fail_closed (test_review.ReviewTests) ... ok
+test_corrupt_state_fails_closed (test_review.ReviewTests) ... ok
+test_edit_invalidates_approval (test_review.ReviewTests) ... ok
+test_explanation_not_required (test_review.ReviewTests) ... ok
+test_formula_download_blocked (test_review.ReviewTests) ... ok
+test_formula_injection_blocked (test_review.ReviewTests) ... ok
+test_generate_approved_and_retry (test_review.ReviewTests) ... ok
+test_initial_unreviewed (test_review.ReviewTests) ... ok
+test_leave_unreviewed_clears_approval (test_review.ReviewTests) ... ok
+test_original_immutable_through_edit (test_review.ReviewTests) ... ok
+test_orphan_artifact_not_authority (test_review.ReviewTests) ... ok
+test_private_download_unapproved_not_publication (test_review.ReviewTests) ... ok
+test_provenance_preserved (test_review.ReviewTests) ... ok
+test_reapprove_after_leaving (test_review.ReviewTests) ... ok
+test_reload_recovers_exact_approval (test_review.ReviewTests) ... ok
+test_repeated_approval_idempotent (test_review.ReviewTests) ... ok
+test_review_ack_required (test_review.ReviewTests) ... ok
+test_role_restricted (test_review.ReviewTests) ... ok
+test_same_value_is_noop (test_review.ReviewTests) ... ok
+test_separate_working_spreadsheet (test_review.ReviewTests) ... ok
+test_stale_approval_rejected (test_review.ReviewTests) ... ok
+test_unanswered_no_approval (test_review.ReviewTests) ... ok
+test_unapproved_report_blocked (test_review.ReviewTests) ... ok
+test_unassigned_reviewer_blocked (test_review.ReviewTests) ... ok
+test_validation_required (test_review.ReviewTests) ... ok
+test_volume_flag_and_zero_baseline (test_review.ReviewTests) ... ok
+
+----------------------------------------------------------------------
+Ran 33 tests in 0.423s
+
+OK

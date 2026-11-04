@@ -1,0 +1,48 @@
+test_boolean_and_float_wrong_type_receive_proposals (test_report_workflow.AuditRegressionTests.test_boolean_and_float_wrong_type_receive_proposals) ... ok
+test_huge_integer_blocks_without_overflow (test_report_workflow.AuditRegressionTests.test_huge_integer_blocks_without_overflow) ... ok
+test_large_fractional_total_is_not_rounded_clean (test_report_workflow.AuditRegressionTests.test_large_fractional_total_is_not_rounded_clean) ... ok
+test_uncertain_source_disables_proposals (test_report_workflow.AuditRegressionTests.test_uncertain_source_disables_proposals) ... ok
+test_absent_null_blank_zero_false_distinguished (test_report_workflow.WorkflowTests.test_absent_null_blank_zero_false_distinguished) ... ok
+test_bad_timestamp_no_proposals (test_report_workflow.WorkflowTests.test_bad_timestamp_no_proposals) ... ok
+test_bulk_correction_exact_ids_and_no_approval_transfer (test_report_workflow.WorkflowTests.test_bulk_correction_exact_ids_and_no_approval_transfer) ... ok
+test_certified_is_not_assumed_accepted (test_report_workflow.WorkflowTests.test_certified_is_not_assumed_accepted) ... ok
+test_concurrent_same_version_only_one_row (test_report_workflow.WorkflowTests.test_concurrent_same_version_only_one_row) ... ok
+test_decimal_sum_exact (test_report_workflow.WorkflowTests.test_decimal_sum_exact) ... ok
+test_duplicate_fields_rejected (test_report_workflow.WorkflowTests.test_duplicate_fields_rejected) ... ok
+test_duplicate_json_keys_and_nonfinite_rejected (test_report_workflow.WorkflowTests.test_duplicate_json_keys_and_nonfinite_rejected) ... ok
+test_duplicate_record_rejected (test_report_workflow.WorkflowTests.test_duplicate_record_rejected) ... ok
+test_empty_report_not_clean (test_report_workflow.WorkflowTests.test_empty_report_not_clean) ... ok
+test_equal_timestamp_conflicting_source_is_atomic (test_report_workflow.WorkflowTests.test_equal_timestamp_conflicting_source_is_atomic) ... ok
+test_exact_private_draft_approval (test_report_workflow.WorkflowTests.test_exact_private_draft_approval) ... ok
+test_findings_and_proposals_bounded (test_report_workflow.WorkflowTests.test_findings_and_proposals_bounded) ... ok
+test_human_identity_required_not_boolean_json (test_report_workflow.WorkflowTests.test_human_identity_required_not_boolean_json) ... ok
+test_idempotent_import (test_report_workflow.WorkflowTests.test_idempotent_import) ... ok
+test_incomplete_source_no_proposals (test_report_workflow.WorkflowTests.test_incomplete_source_no_proposals) ... ok
+test_individual_correction_does_not_silently_change_total (test_report_workflow.WorkflowTests.test_individual_correction_does_not_silently_change_total) ... ok
+test_invalid_bulk_selection_atomic (test_report_workflow.WorkflowTests.test_invalid_bulk_selection_atomic) ... ok
+test_invalid_source_no_proposals (test_report_workflow.WorkflowTests.test_invalid_source_no_proposals) ... ok
+test_match_is_not_source_authentication_or_release (test_report_workflow.WorkflowTests.test_match_is_not_source_authentication_or_release) ... ok
+test_missing_extra_record_proposals_are_explicit (test_report_workflow.WorkflowTests.test_missing_extra_record_proposals_are_explicit) ... ok
+test_missing_rejected_is_never_zero (test_report_workflow.WorkflowTests.test_missing_rejected_is_never_zero) ... ok
+test_missing_source_no_proposals (test_report_workflow.WorkflowTests.test_missing_source_no_proposals) ... ok
+test_new_source_invalidates_other_report_approval (test_report_workflow.WorkflowTests.test_new_source_invalidates_other_report_approval) ... ok
+test_new_version_invalidates_approval_effective (test_report_workflow.WorkflowTests.test_new_version_invalidates_approval_effective) ... ok
+test_old_snapshot_does_not_reset_source_head (test_report_workflow.WorkflowTests.test_old_snapshot_does_not_reset_source_head) ... ok
+test_optional_missing_total_remains_unknown (test_report_workflow.WorkflowTests.test_optional_missing_total_remains_unknown) ... ok
+test_pagination (test_report_workflow.WorkflowTests.test_pagination) ... ok
+test_presence_map_must_match (test_report_workflow.WorkflowTests.test_presence_map_must_match) ... ok
+test_recipient_mapping_change_new_hash_not_copied_approval (test_report_workflow.WorkflowTests.test_recipient_mapping_change_new_hash_not_copied_approval) ... ok
+test_report_ids_are_scope_bound (test_report_workflow.WorkflowTests.test_report_ids_are_scope_bound) ... ok
+test_same_version_changed_content_rejected (test_report_workflow.WorkflowTests.test_same_version_changed_content_rejected) ... ok
+test_scope_mismatch_no_proposals (test_report_workflow.WorkflowTests.test_scope_mismatch_no_proposals) ... ok
+test_stale_proposal_rejected (test_report_workflow.WorkflowTests.test_stale_proposal_rejected) ... ok
+test_tampered_stored_manifest_detected (test_report_workflow.WorkflowTests.test_tampered_stored_manifest_detected) ... ok
+test_uncertain_shift_snapshot_timezone_blocks_approval (test_report_workflow.WorkflowTests.test_uncertain_shift_snapshot_timezone_blocks_approval) ... ok
+test_unknown_field_and_text_total_rejected (test_report_workflow.WorkflowTests.test_unknown_field_and_text_total_rejected) ... ok
+test_unknown_mapping_blocks_proposals (test_report_workflow.WorkflowTests.test_unknown_mapping_blocks_proposals) ... ok
+test_unresolved_client_is_retained_but_blocking (test_report_workflow.WorkflowTests.test_unresolved_client_is_retained_but_blocking) ... ok
+
+----------------------------------------------------------------------
+Ran 43 tests in 0.110s
+
+OK

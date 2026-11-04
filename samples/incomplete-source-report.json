@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "report_id": "SYN-REPORT-003",
+  "version": "1",
+  "job_id": "SYN-JOB-001",
+  "period": {
+    "start": "2026-10-12",
+    "end": "2026-10-18"
+  },
+  "source_reference": "synthetic:fixture-001",
+  "report": {
+    "records": [
+      {
+        "id": "SYN-A",
+        "inspected": 10,
+        "accepted": 8,
+        "rejected": 2
+      },
+      {
+        "id": "SYN-B",
+        "inspected": 5,
+        "accepted": 4,
+        "rejected": 1
+      }
+    ],
+    "totals": {
+      "inspected": 15,
+      "accepted": 12,
+      "rejected": 3
+    }
+  },
+  "source_snapshot": {
+    "source_reference": "synthetic:fixture-001",
+    "job_id": "SYN-JOB-001",
+    "period": {
+      "start": "2026-10-12",
+      "end": "2026-10-18"
+    },
+    "complete": false,
+    "fetched_at": "2026-10-19T09:00:00Z",
+    "records": [
+      {
+        "id": "SYN-A",
+        "inspected": 10,
+        "accepted": 8,
+        "rejected": 2
+      },
+      {
+        "id": "SYN-B",
+        "inspected": 5,
+        "accepted": 4,
+        "rejected": 1
+      }
+    ]
+  }
+}

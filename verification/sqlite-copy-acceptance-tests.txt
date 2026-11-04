@@ -1,0 +1,29 @@
+test_backup_live_wal_restore (test_sqlite_copy.SQLiteTests.test_backup_live_wal_restore) ... ok
+test_bounds (test_sqlite_copy.SQLiteTests.test_bounds) ... ok
+test_commit_failure (test_sqlite_copy.SQLiteTests.test_commit_failure) ... ok
+test_corruption (test_sqlite_copy.SQLiteTests.test_corruption) ... ok
+test_crash_after_db_update_before_commit (test_sqlite_copy.SQLiteTests.test_crash_after_db_update_before_commit) ... ok
+test_crash_during_feature_operation (test_sqlite_copy.SQLiteTests.test_crash_during_feature_operation) ... ok
+test_database_url_ignored (test_sqlite_copy.SQLiteTests.test_database_url_ignored) ... ok
+test_directory_symlink_rejected (test_sqlite_copy.SQLiteTests.test_directory_symlink_rejected) ... ok
+test_exception_atomic_rollback (test_sqlite_copy.SQLiteTests.test_exception_atomic_rollback) ... ok
+test_foreign_application_id_unchanged (test_sqlite_copy.SQLiteTests.test_foreign_application_id_unchanged) ... ok
+test_foreign_database_unchanged (test_sqlite_copy.SQLiteTests.test_foreign_database_unchanged) ... ok
+test_http_commit_failure_returns_no_success (test_sqlite_copy.SQLiteTests.test_http_commit_failure_returns_no_success) ... ok
+test_http_guards_no_fallback (test_sqlite_copy.SQLiteTests.test_http_guards_no_fallback) ... ok
+test_immutable_originals (test_sqlite_copy.SQLiteTests.test_immutable_originals) ... ok
+test_independent_process_concurrency (test_sqlite_copy.SQLiteTests.test_independent_process_concurrency) ... ok
+test_lock_timeout (test_sqlite_copy.SQLiteTests.test_lock_timeout) ... ok
+test_nonloopback_bound_server_denied (test_sqlite_copy.SQLiteTests.test_nonloopback_bound_server_denied) ... ok
+test_read_preserves_revision (test_sqlite_copy.SQLiteTests.test_read_preserves_revision) ... ok
+test_restart_in_independent_process (test_sqlite_copy.SQLiteTests.test_restart_in_independent_process) ... ok
+test_serverless_refused (test_sqlite_copy.SQLiteTests.test_serverless_refused) ... ok
+test_stored_blob_rejected_before_loading (test_sqlite_copy.SQLiteTests.test_stored_blob_rejected_before_loading) ... ok
+test_stored_text_rejected (test_sqlite_copy.SQLiteTests.test_stored_text_rejected) ... ok
+test_synthetic_upload_http_restart (test_sqlite_copy.SQLiteTests.test_synthetic_upload_http_restart) ... ok
+test_wal_full_timeout_permissions (test_sqlite_copy.SQLiteTests.test_wal_full_timeout_permissions) ... ok
+
+----------------------------------------------------------------------
+Ran 24 tests in 3.127s
+
+OK

@@ -1,0 +1,13 @@
+{
+  "status": "passed",
+  "synthetic_only": true,
+  "real_launcher_processes": 2,
+  "parallel_http_clients": 6,
+  "committed_distinct_uploads": 24,
+  "uploads_after_full_process_restart": 24,
+  "sqlite_integrity": "ok",
+  "workspace_revision": 25,
+  "database_url_used": false,
+  "send_enabled": false,
+  "reviewer_identity_available": false
+}

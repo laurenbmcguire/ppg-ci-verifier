@@ -1,0 +1,8 @@
+PASS unique HTML IDs
+PASS report widget IDs exist
+PASS external scripts only
+PASS no inline event handlers
+PASS text-only rendering of imported strings
+PASS strict raw JSON forwarded for server validation
+PASS narrow-screen media rules present
+NOT RUN: browser rendering, interaction, mobile, Windows.

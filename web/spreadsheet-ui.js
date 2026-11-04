@@ -1,0 +1,204 @@
+'use strict';
+(() => {
+  const node = id => document.getElementById(id);
+  const make = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if (cls) e.className = cls; return e; };
+  const explanations = {
+    formula_not_evaluated: 'This cell contains a formula. It was retained but never executed or recalculated.',
+    csv_formula_injection_risk: 'Formula-like CSV text may execute when opened in a spreadsheet app. Review it before opening or distributing this file.',
+    blank_header: 'This column has no header, so its meaning is unclear.',
+    header_whitespace: 'This header has leading or trailing whitespace.',
+    duplicate_header: 'This header appears more than once. No automatic column mapping was made.',
+    inconsistent_row_width: 'This row has a different number of fields from the header.',
+    missing_cell: 'This cell is blank or missing. Confirm whether that is intentional.',
+    invalid_numeric_value: 'A conventional count or quantity column contains a value that is not a finite number.',
+    negative_count_or_quantity: 'A count or quantity is negative. Confirm whether that is allowed.',
+    fractional_count: 'A count is fractional rather than a whole number.',
+    total_mismatch: 'The stated total differs from the sum of earlier rows in this column.',
+    inspected_count_mismatch: 'Inspected does not equal accepted plus rejected in this row.',
+    rows_after_total_not_reconciled: 'Data appears after a Total row. The totals layout needs manual review.',
+    empty_sheet: 'This sheet is empty.',
+    no_data_rows: 'This sheet has headers but no data rows.',
+    no_quantity_mapping: 'No supported quantity columns were mapped. This sheet is unverified, not passed.'
+  };
+  let pending = false, selected = null, selectionVersion = 0, detailVersion = 0, developmentDemo = false;
+  function setBusy(value){pending=value;if(value)++selectionVersion;node('spreadsheet-file').disabled=value;node('spreadsheet-refresh').disabled=value;node('spreadsheet-list').querySelectorAll('button').forEach(button=>button.disabled=value);node('spreadsheet-detail').querySelectorAll('input').forEach(input=>input.disabled=value);node('spreadsheet-detail').querySelectorAll('button').forEach(button=>button.disabled=value);node('development-examples')?.querySelectorAll('button').forEach(button=>button.disabled=value)}
+  const message = (text, error = false) => { node('spreadsheet-message').textContent = text; node('spreadsheet-message').className = error ? 'intake-error' : ''; };
+  function detail(result) {
+    const detailTicket=++detailVersion;
+    const target = node('spreadsheet-detail'); target.replaceChildren();
+    target.append(make('h3', `${result.filename} · version ${result.version}`), make('div', result.source_reconciliation_status==='mismatch'?'Source mismatch · release held':result.template_id?(result.template_mapping_status==='incomplete'?'Template mapping incomplete · release held':'Mapped template checks · release held'):'Internal checks only · source not verified', 'result-badge unable_to_verify'), make('p', 'Original retained unchanged. These findings are not independent verification, approval, or permission to release a report.', 'hint'));
+    if(!result.template_id)target.append(make('p',`${result.numeric_columns_checked||0} supported quantity columns checked. ${result.internal_check_status==='unverified'?'No complete supported mapping: this is unverified.':'Only the documented internal checks were performed.'}`));
+    if(result.template_id){
+      target.append(make('p',`${result.record_count} ${result.template_id.startsWith('pratt-kn-')?'mapped audit-detail rows':'detail records'} · ${result.numeric_cells_checked} numeric cells checked · ${result.formula_count} formulas preserved without execution.`));
+      if(result.source_sha256)target.append(make('p',`${result.numeric_values_compared} known ${result.template_id.startsWith('pratt-kn-')?'numeric/audit':'quantity'} values compared to ${result.source_provenance_kind==='independently_retrieved'?'a separately retrieved source snapshot':'retained historical source evidence'}. Source authentication and human approval remain unconfirmed.`,'hint'));
+      (result.source_differences||[]).forEach(d=>{const box=make('div','','report-finding');box.append(make('strong',`${d.code} · ${d.sheet||'source'} ${d.row?'row '+d.row:''}`),make('p','Review only. No client workbook or source value was changed.'),make('pre',JSON.stringify({workbook_value:d.before,supplied_source_value:d.source_value},null,2)));target.append(box)});
+      const label=make('label','Compare separate source evidence (JSON)');const input=document.createElement('input');input.type='file';input.disabled=pending;input.accept='.json,application/json';label.append(input);target.append(label,make('p','Supply the documented source-evidence schema from a separate retrieval. The workbook itself is never used as source truth. Comparison preserves the original, formulas and prior review revisions.','hint'));
+      input.addEventListener('change',async()=>{const file=input.files[0];if(!file||pending)return;if(file.size>2*1024*1024){message('Source evidence must be no larger than 2 MiB.',true);return}setBusy(true);try{const source=JSON.parse(await file.text());const response=await fetch('/api/spreadsheets/reconcile',{method:'POST',headers:{'Content-Type':'application/json','X-Review-Token':'same-origin'},body:JSON.stringify({file_hash:result.file_hash,source})});const value=await response.json();if(!response.ok)throw Error(value.error||'Source comparison failed.');++selectionVersion;selected=result.file_hash;detail(value.item);await refresh();message(value.item.idempotent?'This exact source comparison is already the current review revision. Release remains held.':'Source comparison saved as a new review revision. Client workbook and source remain unchanged; release is held.')}catch(error){message(error.message,true)}finally{setBusy(false)}});
+    }
+    const findings = result.findings || [];
+    if (!findings.length) target.append(make('p', 'No supported internal issues found. This does not establish that the spreadsheet is accurate or complete.'));
+    findings.forEach(f => {
+      const box = make('div', '', 'report-finding');
+      box.append(make('strong', `${f.severity || 'Review'} · ${f.code || 'Finding'}`), make('p', f.message || explanations[f.code] || 'Review this finding in the original spreadsheet.'));
+      if (f.sheet || f.cell || f.row) box.append(make('small', [f.sheet, f.cell || (f.row ? `Row ${f.row}` : ''), f.column ? `Column ${f.column}` : ''].filter(Boolean).join(' · ')));
+      target.append(box);
+    });
+    if (result.findings_truncated) target.append(make('p', `Showing a bounded selection of ${result.finding_count || 'all'} findings. Review the original spreadsheet for the remainder.`, 'hint'));
+    showDemoReview(result,target,detailTicket);
+    const summary = document.createElement('details'); summary.append(make('summary', 'File, sheet, and provenance details'), make('pre', JSON.stringify(result, null, 2))); target.append(summary);
+  }
+  async function showDemoReview(result, target, detailTicket) {
+    if (!developmentDemo || !result.template_id || !result.source_sha256) return;
+    const panel = make('section', '', 'spreadsheet-demo-review');
+    target.append(panel);
+    const current = () => detailTicket === detailVersion && selected === result.file_hash;
+    const bindingOf = review => ({file_hash: review.file_hash, check_hash: review.check_hash, source_sha256: review.source_sha256});
+    async function call(path, payload) {
+      const response = await fetch(path, payload === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-Review-Token':'same-origin'},body:JSON.stringify(payload)});
+      const value = await response.json();
+      if (!response.ok) throw Error(value.error || 'The sample review action was not saved.');
+      return value;
+    }
+    function draw(review) {
+      if (!current()) return;
+      panel.replaceChildren();
+      panel.append(make('h3', 'Sample spreadsheet change review'), make('p', 'DEVELOPMENT SIMULATION ONLY. These choices are practice decisions, not Chris’s authenticated approval. The original and source are unchanged; release stays held.', 'intake-error'));
+      if (review.notice) panel.append(make('p', review.notice, 'hint'));
+      if (review.download_url && /^\/api\/spreadsheets\/demo\/download\?id=[0-9a-f]{64}$/.test(review.download_url)) {
+        const link = make('a', 'Download unapproved synthetic Excel draft'); link.href = review.download_url; link.download = ''; panel.append(link);
+      }
+      if (!review.eligible) return;
+      if (review.current_version === false) {
+        panel.append(make('p','A corrected draft supersedes this version. Its old decisions remain audit history only.','intake-error'));
+        if (/^[0-9a-f]{64}$/.test(review.superseded_by || '')) {
+          const open=make('button','Open latest corrected draft');open.disabled=pending;
+          open.addEventListener('click',()=>select(review.superseded_by).catch(error=>message(error.message,true)));panel.append(open);
+        }
+        const history=document.createElement('details');history.append(make('summary','Historical spreadsheet review'),make('pre',JSON.stringify({binding:bindingOf(review),decisions:review.decisions,events:review.events},null,2)));panel.append(history);
+        return;
+      }
+      const selectedProposals = [];
+      const binding = bindingOf(review);
+      async function act(ids, decision, apply = false) {
+        if (pending || !current()) return;
+        if (!ids.length) { message('Select at least one visible proposal.', true); return; }
+        if (apply && ids.some(id => !(review.decisions || []).some(d => d.proposal_id === id && d.decision === 'approve'))) {
+          message('Every selected spreadsheet proposal must be demo-accepted first. Rejected, held and unreviewed proposals cannot apply.', true); return;
+        }
+        setBusy(true);
+        try {
+          const answer = await call('/api/spreadsheets/demo/' + (apply ? 'apply' : 'decisions'), {...binding, proposal_ids:ids, ...(apply ? {} : {decision})});
+          if (!current()) return;
+          if (apply) {
+            ++selectionVersion; selected=answer.item.file_hash; detail(answer.item); await refresh();
+            message('New unapproved synthetic Excel draft created and checked. The original workbook and source are unchanged; review decisions do not carry forward.');
+          } else {
+            draw(answer.review);
+            message('Demo spreadsheet decisions saved for the exact file, source and comparison. Selection cleared; release held.');
+          }
+        } catch(error) {
+          message(error.message, true);
+          // An interrupted response can still have committed. Reload instead of retrying the action.
+          try { const latest=await call('/api/spreadsheet?id='+encodeURIComponent(result.file_hash)); if(current()){detail(latest);await refresh()} } catch(_) {}
+        } finally { setBusy(false); }
+      }
+      for (const proposal of review.proposals || []) {
+        const box=make('div','','report-finding');
+        const decision=(review.decisions||[]).find(d=>d.proposal_id===proposal.id);
+        const label=make('label',`${proposal.sheet} · ${proposal.cell} · ${proposal.field}`);
+        const check=document.createElement('input'); check.type='checkbox'; check.disabled=pending;
+        check.setAttribute('aria-label','Select spreadsheet proposal '+proposal.sheet+' '+proposal.cell);
+        label.append(check); selectedProposals.push({check,id:proposal.id});
+        box.append(label,make('pre',JSON.stringify({before:proposal.before,after:proposal.after},null,2)),make('p','Demo decision: '+(decision?decision.decision:'not reviewed'),'hint'));
+        for (const [choice,labelText] of [['approve','Demo Accept change'],['deny','Demo Reject change'],['hold','Demo Hold change']]) {
+          const button=make('button',labelText); button.disabled=pending; button.addEventListener('click',()=>act([proposal.id],choice)); box.append(button);
+        }
+        panel.append(box);
+      }
+      if (!(review.proposals||[]).length) panel.append(make('p','No supported numeric correction proposals for this version. Missing values and unsupported fields are never filled automatically.'));
+      else {
+        const selectedIds=()=>selectedProposals.filter(p=>p.check.checked&&!p.check.disabled).map(p=>p.id);
+        for (const [choice,labelText] of [['approve','Demo Accept selected changes'],['deny','Demo Reject selected changes'],['hold','Demo Hold selected changes']]) {
+          const button=make('button',labelText); button.disabled=pending; button.addEventListener('click',()=>act(selectedIds(),choice)); panel.append(button);
+        }
+        const apply=make('button','Create Excel draft from selected accepted changes'); apply.disabled=pending;
+        apply.addEventListener('click',()=>act(selectedIds(),null,true));panel.append(apply);
+      }
+      const audit=document.createElement('details');audit.append(make('summary','Spreadsheet decisions and exact version bindings'),make('pre',JSON.stringify({binding,decisions:review.decisions,events:review.events},null,2)));panel.append(audit);
+    }
+    try { const review=await call('/api/spreadsheets/demo/review?id='+encodeURIComponent(result.file_hash));draw(review); }
+    catch(error) { if(current())panel.append(make('p','Sample decision review unavailable: '+error.message,'hint')); }
+  }
+
+  async function select(fileHash) {
+    if(pending)return;
+    const requestVersion = ++selectionVersion;
+    const response = await fetch('/api/spreadsheet?id=' + encodeURIComponent(fileHash));
+    const result = await response.json(); if (!response.ok) throw Error(result.error || 'Could not load this version.');
+    if (requestVersion !== selectionVersion) return;
+    selected = fileHash; detail(result);
+    node('spreadsheet-list').querySelectorAll('button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.id === selected)));
+  }
+  async function refresh() {
+    const response = await fetch('/api/spreadsheets'); const result = await response.json();
+    if (!response.ok) throw Error(result.error || 'Could not load spreadsheet uploads.');
+    const list = node('spreadsheet-list'); list.replaceChildren();
+    if (!result.spreadsheets.length) list.append(make('p', 'No spreadsheets uploaded yet.', 'empty-state'));
+    result.spreadsheets.forEach(item => {
+      const button = make('button', '', 'report-card'); button.dataset.id = item.file_hash;button.disabled=pending;
+      button.setAttribute('aria-pressed', String(item.file_hash === selected));
+      button.append(make('strong', `${item.filename} · v${item.version}`), make('small', 'Internal checks only · source not verified'));
+      button.addEventListener('click', () => select(item.file_hash).catch(error => message(error.message, true))); list.append(button);
+    });
+    if (result.has_more) list.append(make('p', `Showing the latest ${result.limit} of ${result.count} uploaded versions.`, 'hint'));
+  }
+  node('spreadsheet-file').addEventListener('change', async event => {
+    const file = event.target.files[0]; if (!file || pending) return;
+    if (!/\.(csv|xlsx)$/i.test(file.name) || file.size < 1 || file.size > 2 * 1024 * 1024) { message('Choose a CSV or XLSX file between 1 byte and 2 MiB.', true); event.target.value = ''; return; }
+    setBusy(true);
+    try {
+      message('Reading and checking the spreadsheet…');
+      const content = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = () => reject(Error('Could not read this file.')); reader.readAsDataURL(file); });
+      const response = await fetch('/api/spreadsheets/import', {method:'POST', headers:{'Content-Type':'application/json','X-Review-Token':'same-origin'}, body:JSON.stringify({filename:file.name,content_base64:content})});
+      const result = await response.json(); if (!response.ok) throw Error(result.error || 'Spreadsheet was not saved.');
+      ++selectionVersion; selected = result.item.file_hash; detail(result.item); await refresh();
+      message(result.item.idempotent ? 'This exact file was already checked. Its original version was preserved.' : 'Internal checks saved and original preserved. Independent source verification and report release remain held.');
+    } catch (error) { message(error.message, true); }
+    finally { setBusy(false); event.target.value = ''; }
+  });
+  node('spreadsheet-refresh').addEventListener('click', () => refresh().then(() => message('Uploads refreshed from the private database.')).catch(error => message(error.message, true)));
+  async function loadDevelopmentExample(example){
+    if(pending)return;
+    setBusy(true);
+    const status=node('development-message');status.className='';status.textContent='Loading synthetic report and checking its separate example evidence…';
+    let saved=null;
+    try{
+      const response=await fetch('/api/spreadsheets/import',{method:'POST',headers:{'Content-Type':'application/json','X-Review-Token':'same-origin'},body:JSON.stringify({filename:example.filename,content_base64:example.content_base64})});
+      const value=await response.json();if(!response.ok)throw Error(value.error||'Synthetic sample import failed.');
+      let result=value.item;saved=result;
+      if(example.source){
+        const compared=await fetch('/api/spreadsheets/reconcile',{method:'POST',headers:{'Content-Type':'application/json','X-Review-Token':'same-origin'},body:JSON.stringify({file_hash:result.file_hash,source:example.source})});
+        const evidence=await compared.json();if(!compared.ok)throw Error(evidence.error||'Synthetic source comparison failed.');result=evidence.item;
+      }
+      ++selectionVersion;selected=result.file_hash;detail(result);await refresh();
+      status.textContent='Synthetic example ready. See its findings below. No actual client data, business approval or release.';
+      message('Development example checked. Original retained; release held.');
+      node('spreadsheet-upload')?.scrollIntoView({behavior:'smooth',block:'start'});
+    }catch(error){if(saved){++selectionVersion;selected=saved.file_hash;detail(saved);try{await refresh()}catch(_){} }const explanation=(saved?'Original sample was saved, but its comparison did not finish. ':'')+error.message;status.className='intake-error';status.textContent=explanation;message(explanation,true)}
+    finally{setBusy(false)}
+  }
+  if(node('development-lab')&&Array.isArray(globalThis.CI_DEVELOPMENT_EXAMPLES)){
+    fetch('/api/health').then(response=>response.json()).then(health=>{
+      if(health.development_demo!==true)return;
+      developmentDemo=true;document.body?.classList?.add('development-mode');
+      node('development-lab').hidden=false;
+      const target=node('development-examples');
+      globalThis.CI_DEVELOPMENT_EXAMPLES.forEach(example=>{
+        const button=make('button','','development-example');button.dataset.example=example.id;button.disabled=pending;
+        button.append(make('strong',example.title),make('small',example.description));
+        button.addEventListener('click',()=>loadDevelopmentExample(example));target.append(button);
+      });
+    }).catch(error=>message('Development examples unavailable: '+error.message,true));
+  }
+  refresh().catch(error => message(error.message, true));
+})();

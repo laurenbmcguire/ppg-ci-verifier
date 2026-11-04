@@ -1,0 +1,168 @@
+{
+  "binding_sha256": "441fc3964c42349ffb8fae1ed1cad0b8cf660e6f7c0cc8cd3047af4837f2ad8e",
+  "capture_time_status": "recorded",
+  "captured_at": "2026-11-04T03:20:00Z",
+  "expected_workbook_sha256": "3b9819f54493ac99f14a26d11302828717eacc7d51f6a434b7440daac31bea52",
+  "library_file_id": "synthetic-development-file",
+  "lists": {
+    "main": {
+      "list_key": "DCA Main Audit",
+      "original_sha256": "84d144a9441a1e21a849d70faaab1408c857a0b6e63cc7bfee8863494d95ddd2",
+      "records": [
+        {
+          "actual_quantity": 7,
+          "audit_result": "Pass",
+          "comments": null,
+          "comments_presence": "absent",
+          "defects": [],
+          "delivery_note": "000011",
+          "export": "No",
+          "id": 11,
+          "id_alias": 11,
+          "location": "Commercial Bulk",
+          "order_quantity": 7,
+          "part_number": "aB-0011",
+          "resolution": [],
+          "shift": "1",
+          "source_date": "2026-11-03T06:00:00Z",
+          "status": "Complete"
+        },
+        {
+          "actual_quantity": 7,
+          "audit_result": "Fail",
+          "comments": null,
+          "comments_presence": "absent",
+          "defects": [
+            "Export Documents Missing & Not legible",
+            "Back Label Missing & Not legible"
+          ],
+          "delivery_note": "000012",
+          "export": "Yes",
+          "id": 12,
+          "id_alias": 12,
+          "location": "Commercial Bulk",
+          "order_quantity": 7,
+          "part_number": "aB-0012",
+          "resolution": [
+            "Inspect at shipping"
+          ],
+          "shift": "1",
+          "source_date": "2026-11-03T06:00:00Z",
+          "status": "Complete"
+        },
+        {
+          "actual_quantity": 7,
+          "audit_result": null,
+          "comments": null,
+          "comments_presence": "absent",
+          "defects": [],
+          "delivery_note": "000013",
+          "export": "No",
+          "id": 13,
+          "id_alias": 13,
+          "location": "Commercial Bulk",
+          "order_quantity": 7,
+          "part_number": "aB-0013",
+          "resolution": [],
+          "shift": "2",
+          "source_date": "2026-11-03T06:00:00Z",
+          "status": "In Progress"
+        },
+        {
+          "actual_quantity": 7,
+          "audit_result": "Pass",
+          "comments": null,
+          "comments_presence": "absent",
+          "defects": [
+            "Other recorded nonfailure category"
+          ],
+          "delivery_note": "000014",
+          "export": "Yes",
+          "id": 14,
+          "id_alias": 14,
+          "location": "446",
+          "order_quantity": 7,
+          "part_number": "aB-0014",
+          "resolution": [],
+          "shift": "3",
+          "source_date": "2026-11-03T06:00:00Z",
+          "status": "Complete"
+        }
+      ],
+      "source_reference": "synthetic://development/main",
+      "source_run_id": null,
+      "terminal_page_observed": true
+    },
+    "multi": {
+      "list_key": "Multi-pack",
+      "original_sha256": "7466ee5ad7cd74f7c942cbedc2b01bda4cb5ba61f25045cc184568226c3ff5ed",
+      "records": [
+        {
+          "actual_quantity": 7,
+          "audit_result": "Pass",
+          "comments": null,
+          "comments_presence": "absent",
+          "defects": [],
+          "delivery_note": "000011",
+          "export": "No",
+          "id": 11,
+          "id_alias": 11,
+          "location": "Commercial Bulk",
+          "order_quantity": 7,
+          "part_number": "aB-0011",
+          "resolution": [],
+          "shift": "1",
+          "source_date": "2026-11-03T06:00:00Z",
+          "status": "Complete"
+        },
+        {
+          "actual_quantity": 7,
+          "audit_result": "Pass",
+          "comments": null,
+          "comments_presence": "absent",
+          "defects": [],
+          "delivery_note": "000012",
+          "export": "No",
+          "id": 12,
+          "id_alias": 12,
+          "location": "Commercial Bulk",
+          "order_quantity": 7,
+          "part_number": "aB-0012",
+          "resolution": [],
+          "shift": "1",
+          "source_date": "2026-11-03T06:00:00Z",
+          "status": "In Progress"
+        },
+        {
+          "actual_quantity": 7,
+          "audit_result": "Pass",
+          "comments": null,
+          "comments_presence": "absent",
+          "defects": [],
+          "delivery_note": "000013",
+          "export": "No",
+          "id": 13,
+          "id_alias": 13,
+          "location": "Commercial Bulk",
+          "order_quantity": 7,
+          "part_number": "aB-0013",
+          "resolution": [],
+          "shift": "2",
+          "source_date": "2026-11-03T06:00:00Z",
+          "status": "Complete"
+        }
+      ],
+      "source_reference": "synthetic://development/multi",
+      "source_run_id": null,
+      "terminal_page_observed": true
+    }
+  },
+  "main_grain": "DCA Main Audit list + ID, Status Complete",
+  "multi_grain": "Multi-pack list + ID, separately displayed; not added to Main",
+  "provenance_kind": "retained_supplied_snapshot",
+  "report_date": "2026-11-03",
+  "schema": "verifier-pratt-source/1",
+  "source_reference": "separate hash-bound Main and multi-pack retained snapshots",
+  "source_sha256": "9a0f6c955defb215d3c06f891ce9ee2248212df74c8ed050f7dffc6ff2046948",
+  "synthetic_provenance": "Entirely fictional, separately authored source rows. No service was accessed."
+}

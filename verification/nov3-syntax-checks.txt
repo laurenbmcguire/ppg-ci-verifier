@@ -1,0 +1,3 @@
+PASS /opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python3 -m compileall -q app
+PASS node --check app/ui.js
+PASS node --check app/report-ui.js

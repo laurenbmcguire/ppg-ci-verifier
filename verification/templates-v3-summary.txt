@@ -1,0 +1,19 @@
+Verification completed November 4,2026 UTC.
+Python unittest discovery:353 passed, 0 failures/errors.
+Controlled Node DOM/fetch UI regression tests:6 passed, 0 failed/skipped.
+All web JavaScript syntax checks passed; Python compile checks passed.
+HTML IDs: 50 unique, no duplicates.
+Original synthetic upgrade: all 27 original files remain byte-identical.
+
+PPG original, sectioned, all-fields and active-tabs templates map actual inspection quantity cells.
+Missing shift/photo tabs never establish zero activity, completion or clean photos.
+Pratt original and 9-sheet union preserve separate Main/child audit grains.
+Empty checks, missing quantities, unsupported rates and ambiguous SUMIF semantics never pass.
+Before/source differences, duplicate-group counts and stale source rows stay review-only.
+Immutable originals/checks, exact version hashes and unknown capture-time handling tested.
+Protected HTTP dispatch, source schema checks, same-origin guards and rollback tested.
+
+Not verified: live Vercel deployment, real Postgres instance, trusted reviewer authentication,
+real-browser rendering/device interaction, live scheduled capture or delivery.
+No client records/source snapshots are bundled with code. Actual checks are in a separate private artifact.
+No credentials, deployment, upstream writes, live messages, business approval or client release performed.

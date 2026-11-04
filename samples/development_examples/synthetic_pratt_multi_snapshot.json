@@ -1,0 +1,51 @@
+{
+  "data": [
+    {
+      "ActualQty_x002e_": 7,
+      "AuditResult": "Pass",
+      "Date": "2026-11-03T06:00:00Z",
+      "Defect": null,
+      "DeliveryNote": "000011",
+      "Export": "No",
+      "ID": 11,
+      "Id": 11,
+      "Location": "Commercial Bulk",
+      "OrderQty_x002e_": 7,
+      "PartNumber": "aB-0011",
+      "Shift_x002e_": "1",
+      "Status": "Complete"
+    },
+    {
+      "ActualQty_x002e_": 7,
+      "AuditResult": "Pass",
+      "Date": "2026-11-03T06:00:00Z",
+      "Defect": null,
+      "DeliveryNote": "000012",
+      "Export": "No",
+      "ID": 12,
+      "Id": 12,
+      "Location": "Commercial Bulk",
+      "OrderQty_x002e_": 7,
+      "PartNumber": "aB-0012",
+      "Shift_x002e_": "1",
+      "Status": "In Progress"
+    },
+    {
+      "ActualQty_x002e_": 7,
+      "AuditResult": "Pass",
+      "Date": "2026-11-03T06:00:00Z",
+      "Defect": null,
+      "DeliveryNote": "000013",
+      "Export": "No",
+      "ID": 13,
+      "Id": 13,
+      "Location": "Commercial Bulk",
+      "OrderQty_x002e_": 7,
+      "PartNumber": "aB-0013",
+      "Shift_x002e_": "2",
+      "Status": "Complete"
+    }
+  ],
+  "next": null,
+  "status": 200
+}
