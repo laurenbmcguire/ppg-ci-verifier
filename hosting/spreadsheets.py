@@ -20,7 +20,7 @@ MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 MAX_FINDINGS = 200
-CHECKER_VERSION = '2026-11-04-adaptive-v3'
+CHECKER_VERSION = '2026-11-04-adaptive-v4'
 
 
 class SpreadsheetError(ValueError):
@@ -67,7 +67,8 @@ def formula_flags(formula):
         flags.append('external_reference_formula')
     if _WEB_FN.search(code):
         flags.append('web_function_formula')
-    if _HYPERLINK_FN.search(code):
+    # HYPERLINK("#'Sheet'!A1", ...) only jumps inside the workbook; that is navigation, not an external link.
+    if _HYPERLINK_FN.search(code) and not re.fullmatch(r'(?:[^"]|"")*?\bHYPERLINK\s*\(\s*"#[^"]*"[^()]*\)\s*', formula or '', re.I | re.S):
         flags.append('hyperlink_formula')
     if _DDE.search(code):
         flags.append('dde_or_macro_call_formula')

@@ -194,7 +194,7 @@ class SpreadsheetTests(unittest.TestCase):
                 result = inspect_spreadsheet('test.xlsx', xlsx(extra={'extra.xml': xml}))
                 self.assertIn(code, result['finding_counts'])
                 self.assertIn(code, result['external_content'])
-        for ordinary in ('SUM(Table1[Qty])', 'tbl[[#This Row],[Qty]]', 'TEXTJOIN("|",TRUE,A1:A3)', 'IF(A1="https://x",1,0)', '[0]!LocalName'):
+        for ordinary in ('HYPERLINK("#\'1st Shift\'!A1","1st shift detail  >")', 'SUM(Table1[Qty])', 'tbl[[#This Row],[Qty]]', 'TEXTJOIN("|",TRUE,A1:A3)', 'IF(A1="https://x",1,0)', '[0]!LocalName'):
             xml = '<root><definedName>' + ordinary.replace('"', '&quot;') + '</definedName></root>'
             with self.subTest(ordinary=ordinary):
                 self.assertNotIn('external_content', inspect_spreadsheet('test.xlsx', xlsx(extra={'extra.xml': xml})))
