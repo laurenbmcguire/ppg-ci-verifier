@@ -68,6 +68,7 @@
     { const n = possibleErrors(result).filter(i => i.severity !== 'info').length;
       const open = make('button', n ? `Review possible errors (${n})` : 'Review possible errors', n ? 'primary errors-open' : 'errors-open');
       open.type = 'button'; open.addEventListener('click', () => showErrorsPopup(result)); target.append(open); }
+    target.append(baselinePanel(result));
     target.append(aiPanel(result));
     if(!result.template_id)target.append(make('p',`${result.numeric_columns_checked||0} supported quantity columns checked. ${result.internal_check_status==='unverified'?'No complete supported mapping: this is unverified.':'Only the documented internal checks were performed.'}`));
     if(result.mapping_mode==='adaptive'){
@@ -121,6 +122,8 @@
       key: 'sp:' + (f.code || '') + ':' + (f.sheet || '') + ':' + (f.row || i) + ':' + (f.field || ''),
       source: 'SharePoint', severity: 'high', where: [f.sheet && f.sheet !== 'SharePoint comparison' ? f.sheet : '', f.row ? `row ${f.row}` : ''].filter(Boolean).join(' · '),
       text: f.message || f.code}));
+    ((result.baseline || {}).findings || []).forEach((f, i) => items.push({
+      key: 'usual:' + f.code + ':' + i, source: 'Usual day', severity: f.severity || 'medium', where: 'Whole report', text: f.message}));
     const ai = result.ai_review || {};
     (ai.status === 'done' ? ai.issues : []).forEach((f, i) => items.push({
       key: 'ai:' + i + ':' + (f.sheet || '') + ':' + (f.cell || f.row || '') + ':' + (f.issue || '').slice(0, 40),
@@ -149,6 +152,8 @@
     [['high', 'High'], ['medium', 'Medium'], ['low', 'Low'], ['info', 'Info']].forEach(([k, label]) => { if (counts[k]) chips.append(make('span', `${counts[k]} ${label}`, 'chip chip-' + k)); });
     status.append(chips);
     status.append(make('p', 'SharePoint: ' + (sp.status === 'match' ? `matches (${sp.matched_rows} rows, totals agree)` : sp.status === 'differences' ? `${(sp.findings || []).length} difference(s)` : sp.message || 'not compared yet'), 'hint'));
+    const bl = result.baseline || {};
+    status.append(make('p', 'Usual day: ' + (bl.message || 'not compared yet'), 'hint'));
     status.append(make('p', 'AI review: ' + (ai.status === 'done' ? (ai.summary || `${ai.issues.length} suggestion(s)`) : ai.message || 'not run yet'), 'hint'));
     const tabs = make('div', '', 'errors-tabs'); const list = make('div', '', 'errors-list');
     let filter = 'All';
@@ -173,7 +178,7 @@
       });
       tabs.querySelectorAll('button').forEach(b => b.classList.toggle('active-tab', b.dataset.filter === filter));
     }
-    ['All', 'Automatic check', 'SharePoint', 'AI suggestion'].forEach(name => {
+    ['All', 'Automatic check', 'SharePoint', 'Usual day', 'AI suggestion'].forEach(name => {
       const n = name === 'All' ? items.length : items.filter(i => i.source === name).length;
       if (name !== 'All' && !n) return;
       const b = make('button', `${name === 'Automatic check' ? 'Automatic checks' : name === 'AI suggestion' ? 'AI suggestions' : name} (${n})`); b.dataset.filter = name; b.type = 'button';
@@ -189,6 +194,39 @@
     dialog.addEventListener('close', () => dialog.remove());
     dialog.addEventListener('click', e => { if (e.target === dialog) dialog.close(); });
     document.body.append(dialog); draw(); updateProgress(); dialog.showModal(); done.focus();
+  }
+  function baselinePanel(result) {
+    const bl = result.baseline || {};
+    const box = make('section', '', 'report-finding baseline-panel');
+    box.append(make('strong', 'Compared with the usual day'));
+    if (bl.status === 'normal' || bl.status === 'unusual') {
+      box.append(make('p', bl.message, bl.status === 'unusual' ? 'intake-error' : 'hint'));
+      const table = document.createElement('table'); table.className = 'baseline-table';
+      const head = table.insertRow(); ['', 'This report', 'Usual (median)', 'Range'].forEach(h => { const th = document.createElement('th'); th.textContent = h; head.append(th); });
+      [['scans', 'Scans / rows'], ['inspected', 'Parts inspected'], ['rejected', 'Rejects'], ['reject_rate', 'Reject rate']].forEach(([k, label]) => {
+        const u = (bl.usual || {})[k]; if (!u) return;
+        const row = table.insertRow(); const flagged = (bl.findings || []).some(f => f.field === k || (k === 'reject_rate' && f.code === 'unusual_reject_rate'));
+        if (flagged) row.className = 'baseline-flag';
+        [label, (bl.today || {})[k] ?? '—', u.median, `${u.low} – ${u.high}`].forEach(v => { row.insertCell().textContent = v; });
+      });
+      box.append(table);
+      const sources = [...new Set((bl.history || []).map(h => h.source === 'saved report' ? 'reports saved here' : 'earlier SharePoint exports'))].join(' and ');
+      box.append(make('small', `Based on ${bl.days} earlier day(s) of ${bl.job} from ${sources}. A different day is not always wrong — it's a prompt to check.`));
+    } else {
+      box.append(make('p', bl.message || 'Not compared yet.', 'hint'));
+    }
+    const run = make('button', bl.status ? 'Compare again' : 'Compare with usual day'); run.type = 'button'; run.disabled = pending;
+    run.addEventListener('click', async () => {
+      if (pending) return; setBusy(true);
+      try {
+        message('Looking up earlier days for this job…');
+        const answer = await post('/api/spreadsheets/baseline', {file_hash: result.file_hash});
+        ++selectionVersion; selected = answer.item.file_hash; detail(answer.item); await refresh();
+        message((answer.item.baseline || {}).message || 'Compared.');
+      } catch (error) { message(error.message, true); } finally { setBusy(false); }
+    });
+    box.append(run);
+    return box;
   }
   function aiPanel(result) {
     const ai = result.ai_review || {};

@@ -59,3 +59,13 @@ html{scroll-behavior:smooth}.nav{display:block;text-decoration:none}.nav:hover{b
 .errors-note{padding:0 24px 16px;margin:0}
 .errors-open{margin:6px 0 10px}
 @media(max-width:600px){.errors-head,.errors-status,.errors-tabs,.errors-list,.errors-foot{padding-left:16px;padding-right:16px}.errors-foot{flex-wrap:wrap}}
+
+.baseline-panel{border-left:4px solid #2d6a8a}
+.baseline-table{border-collapse:collapse;margin:8px 0;font-size:13px;width:100%;max-width:560px;min-width:0;table-layout:auto}
+.baseline-table td:first-child{color:#1b3437;font-size:13px}.baseline-table td:nth-child(2){min-width:0}
+.baseline-table th:first-child,.baseline-table td:first-child{white-space:nowrap;width:38%}
+.baseline-panel button{display:block;margin-top:10px}
+.baseline-panel small{display:block}
+.baseline-table th,.baseline-table td{text-align:left;padding:5px 8px;border-bottom:1px solid #e3eae6}
+.baseline-table th{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#536966}
+.baseline-flag td{background:#fdf0d5;font-weight:600}

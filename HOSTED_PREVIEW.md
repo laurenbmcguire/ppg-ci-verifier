@@ -99,3 +99,11 @@ data-entry and spreadsheet problems (`hosting/common_issues.py`):
 
 Column detection also understands descriptive headers (`Quantity Inspected 8 Wheel Weights per Vehicle`,
 `Suspect Wheel Position Quantity`, `VIN Inspected`, `LF Condition`) and unlabeled `=SUM()` total rows.
+
+## Compared with the usual day
+
+After each upload the report's scans (rows), parts inspected, rejects and reject rate are compared with the
+same job's usual day: the median of up to 15 earlier days, taken from reports saved in the verifier and, when
+there are fewer than 5, from the job's earlier SharePoint daily exports. At least 3 earlier days are needed.
+Flagged: scans or inspected below half or above double the usual (high below a quarter / above 4×), and a
+reject rate that moves 15+ points and doubles or halves. Shown in the pop-up ("Usual day") and the report detail.

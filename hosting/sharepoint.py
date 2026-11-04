@@ -116,3 +116,32 @@ def fetch_export(job, day, opener=None):
             return filename, content, dict(site=name, path=path, web_url=item.get('webUrl'),
                                            modified=item.get('lastModifiedDateTime'), job=job, day=day)
     raise SharePointNotFound(f'No SharePoint daily export found for {job} on {day}.' + (f' Looked in {len(tried)} place(s).' if tried else ' No client sites are configured.'))
+
+
+def recent_exports(job, before_day, limit=10, opener=None):
+    """Earlier daily exports for a job: [(day, filename, bytes)], newest first, up to `limit`. Read-only."""
+    import re as _re
+    if not configured() or not job or not before_day:
+        return []
+    folder = os.environ.get('SHAREPOINT_EXPORT_FOLDER', 'Daily Data Exports').strip('/')
+    for name, site_id in _sites(opener):
+        listing = _get(f'/sites/{site_id}/drive/root:/{urllib.parse.quote(f"{folder}/{job}")}:/children?$select=name,folder&$top=500', opener)
+        if not listing:
+            continue
+        days = sorted((c['name'] for c in listing.get('value', []) if c.get('folder') is not None
+                       and _re.fullmatch(r'\d{4}-\d{2}-\d{2}', c.get('name', '')) and c['name'] < before_day), reverse=True)
+        out = []
+        for day in days:
+            if len(out) >= limit:
+                break
+            for ext in ('csv', 'xlsx'):
+                filename = f'{job} {day}.{ext}'
+                item = _get(f'/sites/{site_id}/drive/root:/{urllib.parse.quote(f"{folder}/{job}/{day}/{filename}")}', opener)
+                if not item:
+                    continue
+                content = _get(f'/sites/{site_id}/drive/items/{item["id"]}/content', opener, raw=True)
+                if content:
+                    out.append((day, filename, content))
+                    break
+        return out
+    return []

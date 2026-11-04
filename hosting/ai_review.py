@@ -94,7 +94,9 @@ def _context(item, raw):
     columns = [dict(sheet=s.get('name'), tables=[dict(header_row=t.get('header_row'), columns={k: v.get('header') for k, v in (t.get('columns') or {}).items()},
                                                       rows=t.get('data_row_count'), kind=t.get('kind')) for t in (s.get('tables') or [])])
                for s in (item.get('sheets') or [])]
-    meta = dict(filename=item['filename'], report_identity=item.get('report_identity'), report_day=item.get('report_day'),
+    bl = item.get('baseline') or {}
+    usual_day = {k: bl.get(k) for k in ('status', 'message', 'today', 'usual', 'days') if bl.get(k) is not None}
+    meta = dict(usual_day_comparison=usual_day or 'not compared', filename=item['filename'], report_identity=item.get('report_identity'), report_day=item.get('report_day'),
                 totals=item.get('totals'), detected_columns=columns, sheet_text_truncated=truncated)
     return meta, checks, sharepoint, text
 

@@ -174,6 +174,32 @@ class handler(BaseHTTPRequestHandler):
         with self.store().session() as directory:
             return SpreadsheetInbox(directory).record_lookup(file_hash, status, message, job, day)
 
+    def baseline_check(self, file_hash):
+        """Compare the report with the job's usual day (saved reports first, then earlier SharePoint exports)."""
+        from hosting.baseline import compare_to_usual, stats_from_result, stats_from_rows, MIN_DAYS
+        from hosting.source_compare import identify, parse_export, SourceError
+        with self.store().session() as directory:
+            inbox = SpreadsheetInbox(directory)
+            item = inbox.get(file_hash)
+            job, day = identify(item.get('filename'), item)
+            history = inbox.history_for(job, day, exclude_hash=file_hash)
+        if len(history) < 5 and job and day and sharepoint_configured():
+            from hosting.sharepoint import recent_exports, SharePointError
+            have = {h['day'] for h in history}
+            try:
+                for d, name, raw in recent_exports(job, day, limit=10):
+                    if d in have:
+                        continue
+                    try:
+                        history.append(dict(stats_from_rows(parse_export(name, raw)), day=d, source='SharePoint export'))
+                    except SourceError:
+                        continue
+            except SharePointError:
+                debug_log()
+        baseline = compare_to_usual(stats_from_result(item), history, job, day)
+        with self.store().session() as directory:
+            return SpreadsheetInbox(directory).record_baseline(file_hash, baseline)
+
     def ai_review(self, file_hash):
         from hosting.ai_review import review, AIReviewNotConfigured, AIReviewError
         with self.store().session() as directory:
@@ -274,11 +300,11 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/baseline', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
-            if not route.startswith('/api/workflow/') and route not in ('/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
+            if not route.startswith('/api/workflow/') and route not in ('/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/baseline','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= limit:
                 return self.fail(413, 'Request size is invalid.')
@@ -286,12 +312,12 @@ class handler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 raise Conflict('Incomplete request body.')
             content_type, headers = 'application/json; charset=utf-8', {}
-            if route in ('/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review'):
+            if route in ('/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/baseline'):
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
                 if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                     raise Conflict('Valid spreadsheet version ID required.')
-                run = self.sharepoint_check if route.endswith('/sharepoint') else self.ai_review
+                run = {'sharepoint': self.sharepoint_check, 'ai-review': self.ai_review, 'baseline': self.baseline_check}[route.rsplit('/', 1)[1]]
                 return self.send(200, encode_json({'item': run(file_hash)}))
             with self.store().session() as directory:
                 review, inbox = Review(directory), ReportInbox(directory / 'report-intake')
@@ -394,6 +420,16 @@ class handler(BaseHTTPRequestHandler):
                         body = encode_json({'item': self.sharepoint_check(item['file_hash'])})
                 except Exception:
                     debug_log()  # the upload itself was saved; lookup can be retried from the UI
+            if route in ('/api/spreadsheets/upload/finish', '/api/spreadsheets/import'):
+                try:
+                    item = json.loads(body)['item']
+                    if not (item.get('idempotent') and (item.get('baseline') or {}).get('status')):
+                        updated = self.baseline_check(item['file_hash'])
+                        if item.get('idempotent'):
+                            updated = dict(updated, idempotent=True)
+                        body = encode_json({'item': updated})
+                except Exception:
+                    debug_log()  # the upload itself was saved; the comparison can be re-run from the UI
             if route in ('/api/spreadsheets/upload/finish', '/api/spreadsheets/import') and ai_review_configured():
                 try:
                     item = json.loads(body)['item']

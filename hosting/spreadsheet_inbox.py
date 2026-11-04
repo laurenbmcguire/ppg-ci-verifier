@@ -142,6 +142,34 @@ class SpreadsheetInbox:
             result.pop('check_hash', None); result.pop('checked_at', None)
             result['ai_review'] = ai_review
             return self.save_check(db, result)
+    def history_for(self, job, day, exclude_hash=None):
+        """Day totals of earlier saved reports for the same job (latest version per file, one entry per day)."""
+        from hosting.source_compare import identify
+        from hosting.baseline import stats_from_result
+        if not job:
+            return []
+        out = []
+        with self.connect() as db:
+            hashes = [r[0] for r in db.execute('SELECT DISTINCT file_hash FROM spreadsheets').fetchall()]
+            for file_hash in hashes:
+                if file_hash == exclude_hash:
+                    continue
+                row = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=? ORDER BY seq DESC LIMIT 1', (file_hash,)).fetchone()
+                result = self.latest(db, file_hash, json.loads(row[0]))
+                j, d = identify(result.get('filename'), result)
+                if not d or d == day or (j or '').upper() != job.upper() or not result.get('record_count'):
+                    continue
+                out.append(dict(stats_from_result(result), day=d, source='saved report', received_at=result.get('received_at', '')))
+        out.sort(key=lambda h: (h['day'], h['received_at']), reverse=True)
+        return [{k: v for k, v in h.items() if k != 'received_at'} for h in out]
+    def record_baseline(self, file_hash, baseline):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            original, _ = self._original(db, file_hash)
+            result = dict(self.latest(db, file_hash, original))
+            result.pop('check_hash', None); result.pop('checked_at', None)
+            result['baseline'] = baseline
+            return self.save_check(db, result)
     def list(self):
         with self.connect() as db:
             rows = db.execute('SELECT result_json FROM spreadsheets ORDER BY seq DESC LIMIT 100').fetchall()
