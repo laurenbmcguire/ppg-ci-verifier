@@ -170,6 +170,41 @@ class SpreadsheetInbox:
             result.pop('check_hash', None); result.pop('checked_at', None)
             result['baseline'] = baseline
             return self.save_check(db, result)
+    def fix_proposals(self, file_hash):
+        from hosting.fixes import proposals
+        item = self.get(file_hash)
+        _, raw = self.original_bytes(file_hash)
+        return dict(file_hash=file_hash, filename=item['filename'], proposals=proposals(item, item['filename'], raw),
+                    applied=item.get('fixes_applied') or [])
+    def apply_fixes(self, file_hash, approved):
+        """Write a corrected copy with the approved changes as a new upload; the original is untouched."""
+        from hosting.fixes import apply_fixes, fixed_filename
+        if not isinstance(approved, list) or not 1 <= len(approved) <= 500 or not all(isinstance(c, dict) for c in approved):
+            raise ValueError('Send 1 to 500 approved changes.')
+        item = self.get(file_hash)
+        _, raw = self.original_bytes(file_hash)
+        fixed = apply_fixes(item['filename'], raw, approved)
+        new_item = self.ingest(fixed_filename(item['filename']), fixed)
+        record = dict(fixed_file_hash=new_item['file_hash'], fixed_filename=new_item['filename'],
+                      applied_at=datetime.now(timezone.utc).isoformat(),
+                      changes=[{k: c.get(k) for k in ('sheet', 'cell', 'before', 'after', 'reason', 'source')} for c in approved])
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            original, _ = self._original(db, file_hash)
+            result = dict(self.latest(db, file_hash, original))
+            result.pop('check_hash', None); result.pop('checked_at', None)
+            result['fixes_applied'] = (result.get('fixes_applied') or []) + [record]
+            self.save_check(db, result)
+            fixed_original, _ = self._original(db, new_item['file_hash'])
+            fixed_result = dict(self.latest(db, new_item['file_hash'], fixed_original))
+            fixed_result.pop('check_hash', None); fixed_result.pop('checked_at', None)
+            fixed_result['fixed_from'] = dict(file_hash=file_hash, filename=item['filename'], version=item.get('version'), changes=record['changes'])
+            new_item = self.save_check(db, fixed_result)
+        return new_item
+    def download(self, file_hash):
+        with self.connect() as db:
+            original, raw = self._original(db, file_hash)
+        return original['filename'], raw
     def list(self):
         with self.connect() as db:
             rows = db.execute('SELECT result_json FROM spreadsheets ORDER BY seq DESC LIMIT 100').fetchall()

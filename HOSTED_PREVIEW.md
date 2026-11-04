@@ -107,3 +107,14 @@ same job's usual day: the median of up to 15 earlier days, taken from reports sa
 there are fewer than 5, from the job's earlier SharePoint daily exports. At least 3 earlier days are needed.
 Flagged: scans or inspected below half or above double the usual (high below a quarter / above 4×), and a
 reject rate that moves 15+ points and doubles or halves. Shown in the pop-up ("Usual day") and the report detail.
+
+## Fix & download
+
+The **Fixes** tab in the pop-up (or **Fix & download** in a report's detail) lists changes the verifier can make
+for you: SharePoint values for differing scans, look-alike characters (`8O1…` → `801…`), hidden characters and
+stray spaces, the most common spelling of a defect/condition/auditor/area, numbers typed as text, Certified =
+Inspected − Rejected, and AI suggestions that name a cell. Accept or reject each one (the value can be edited
+first). **Download fixed version** writes only the accepted changes into a copy of the workbook (formatting and
+formulas kept, formula cells never overwritten, Excel recalculates on open), saves it as a new version named
+`… (fixed).xlsx`, re-checks it, and downloads it. The original file is never changed. Downloads above ~4 MB are
+limited by Vercel's response size.

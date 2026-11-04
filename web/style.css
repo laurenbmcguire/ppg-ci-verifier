@@ -74,3 +74,14 @@ html{scroll-behavior:smooth}.nav{display:block;text-decoration:none}.nav:hover{b
 
 .hosted-mode .legacy-demo,.hosted-mode #dataset-banner,.hosted-mode .mode-switch,.hosted-mode #workflow-sample,.hosted-mode #development-lab,.hosted-mode header .identity{display:none!important}
 .hosted-mode main{margin-right:0}
+
+.fix-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0 10px}.fix-bar .errors-progress{margin-right:auto}
+.fix-item{padding:12px;margin:8px 0;border:1px solid #e3eae6;border-left:4px solid #6b5bd2;border-radius:8px}
+.fix-item.fix-accepted{border-left-color:#2f7a63;background:#f1f8f4}.fix-item.fix-rejected{opacity:.55}
+.fix-change{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}
+.fix-before{font-family:ui-monospace,Menlo,monospace;background:#fbe1dc;color:#9a2b1c;padding:3px 8px;border-radius:5px;text-decoration:line-through;overflow-wrap:anywhere}
+.fix-arrow{color:#536966}
+.fix-change input{font-family:ui-monospace,Menlo,monospace;padding:6px 8px;border:1px solid #adc1b8;border-radius:5px;min-width:160px;max-width:100%;background:#e6f2ec}
+.fix-actions{display:flex;gap:8px;margin-top:6px}.fix-actions button{padding:7px 14px}
+.fix-hint{background:#efeafd;color:#3f3290;padding:8px 10px;border-radius:6px;margin:8px 0;font-size:13px}
+.download-link{display:inline-block;margin:6px 0 10px 10px;font-size:13px;color:#1a6654;font-weight:600}

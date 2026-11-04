@@ -67,7 +67,11 @@
     target.append(make('h3', `${result.filename} · version ${result.version}`), make('div', result.sharepoint&&result.sharepoint.status==='match'?'Matches SharePoint · release held':result.sharepoint&&result.sharepoint.status==='differences'?'Differs from SharePoint · release held':result.source_reconciliation_status==='mismatch'?'Source mismatch · release held':result.mapping_mode==='adaptive'?'Columns detected automatically · release held':result.template_id?(result.template_mapping_status==='incomplete'?'Template mapping incomplete · release held':'Mapped template checks · release held'):'Internal checks only · source not verified', 'result-badge unable_to_verify'), make('p', 'Original retained unchanged. These findings are not independent verification, approval, or permission to release a report.', 'hint'));
     { const n = possibleErrors(result).filter(i => i.severity !== 'info').length;
       const open = make('button', n ? `Review possible errors (${n})` : 'Review possible errors', n ? 'primary errors-open' : 'errors-open');
-      open.type = 'button'; open.addEventListener('click', () => showErrorsPopup(result)); target.append(open); }
+      open.type = 'button'; open.addEventListener('click', () => showErrorsPopup(result)); target.append(open);
+      const fix = make('button', 'Fix & download', 'errors-open'); fix.type = 'button'; fix.addEventListener('click', () => showErrorsPopup(result, 'Fixes')); target.append(fix);
+      const dl = make('a', 'Download this version', 'download-link'); dl.href = '/api/spreadsheets/download?id=' + result.file_hash; dl.download = result.filename; target.append(dl);
+      if (result.fixed_from) target.append(make('p', `Fixed copy of "${result.fixed_from.filename}" v${result.fixed_from.version} with ${result.fixed_from.changes.length} approved change(s): ` + result.fixed_from.changes.map(c => `${c.sheet}!${c.cell} ${c.before || '(blank)'} → ${c.after}`).join('; '), 'hint'));
+      (result.fixes_applied || []).forEach(f => target.append(make('p', `Fixed version made ${new Date(f.applied_at).toLocaleString()}: "${f.fixed_filename}" (${f.changes.length} change(s)).`, 'hint'))); }
     target.append(baselinePanel(result));
     target.append(aiPanel(result));
     if(!result.template_id)target.append(make('p',`${result.numeric_columns_checked||0} supported quantity columns checked. ${result.internal_check_status==='unverified'?'No complete supported mapping: this is unverified.':'Only the documented internal checks were performed.'}`));
@@ -135,7 +139,7 @@
   const reviewedKey = hash => 'ci-reviewed:' + hash;
   const loadReviewed = hash => { try { return new Set(JSON.parse(localStorage.getItem(reviewedKey(hash)) || '[]')); } catch (e) { return new Set(); } };
   const saveReviewed = (hash, set) => { try { localStorage.setItem(reviewedKey(hash), JSON.stringify([...set])); } catch (e) { /* per-browser convenience only */ } };
-  function showErrorsPopup(result) {
+  function showErrorsPopup(result, startTab) {
     document.getElementById('errors-dialog')?.remove();
     const items = possibleErrors(result), reviewed = loadReviewed(result.file_hash);
     const dialog = document.createElement('dialog'); dialog.id = 'errors-dialog'; dialog.className = 'errors-dialog';
@@ -156,10 +160,72 @@
     status.append(make('p', 'Usual day: ' + (bl.message || 'not compared yet'), 'hint'));
     status.append(make('p', 'AI review: ' + (ai.status === 'done' ? (ai.summary || `${ai.issues.length} suggestion(s)`) : ai.message || 'not run yet'), 'hint'));
     const tabs = make('div', '', 'errors-tabs'); const list = make('div', '', 'errors-list');
-    let filter = 'All';
+    let filter = startTab || 'All';
+    // ---- proposed fixes (loaded from the server; decisions kept in this browser until download)
+    const fixKey = 'ci-fixes:' + result.file_hash;
+    let fixes = [], decisions = {};
+    try { decisions = JSON.parse(localStorage.getItem(fixKey) || '{}'); } catch (e) { decisions = {}; }
+    const saveDecisions = () => { try { localStorage.setItem(fixKey, JSON.stringify(decisions)); } catch (e) { /* convenience only */ } };
+    const approved = () => fixes.filter(f => (decisions[f.id] || {}).state === 'accepted');
+    const downloadBtn = make('button', 'Download fixed version', 'primary'); downloadBtn.type = 'button'; downloadBtn.hidden = true;
+    const updateDownload = () => { const n = approved().length; downloadBtn.hidden = !fixes.length; downloadBtn.disabled = !n || pending; downloadBtn.textContent = n ? `Download fixed version (${n} change${n === 1 ? '' : 's'})` : 'Accept fixes to download a fixed version'; };
+    function drawFixes() {
+      list.replaceChildren();
+      if (!fixes.length) { list.append(make('p', 'No automatic fixes to propose for this report. Issues without a clear correct value need a person to fix them in the file.', 'hint')); return; }
+      const bar = make('div', '', 'fix-bar');
+      const acceptHigh = make('button', 'Accept all high-confidence'); acceptHigh.type = 'button';
+      acceptHigh.addEventListener('click', () => { fixes.filter(f => f.confidence === 'high').forEach(f => { decisions[f.id] = {state: 'accepted', after: (decisions[f.id] || {}).after ?? f.after}; }); saveDecisions(); drawFixes(); updateDownload(); });
+      const clear = make('button', 'Clear decisions'); clear.type = 'button';
+      clear.addEventListener('click', () => { decisions = {}; saveDecisions(); drawFixes(); updateDownload(); });
+      bar.append(make('span', `${approved().length} of ${fixes.length} accepted`, 'errors-progress'), acceptHigh, clear);
+      list.append(bar);
+      fixes.forEach(f => {
+        const d = decisions[f.id] || {};
+        const row = make('div', '', 'fix-item' + (d.state === 'accepted' ? ' fix-accepted' : d.state === 'rejected' ? ' fix-rejected' : ''));
+        const meta = make('div', '', 'errors-meta');
+        meta.append(make('span', f.source, 'errors-source'), make('span', `${f.sheet} · ${f.cell}`, 'errors-where'));
+        if (f.confidence !== 'high') meta.append(make('span', 'check carefully', 'chip chip-medium'));
+        const change = make('div', '', 'fix-change');
+        const input = document.createElement('input'); input.value = d.after ?? f.after; input.setAttribute('aria-label', `New value for ${f.sheet} ${f.cell}`);
+        input.addEventListener('change', () => { decisions[f.id] = {state: d.state || 'accepted', after: input.value}; saveDecisions(); drawFixes(); updateDownload(); });
+        change.append(make('span', f.before === '' ? '(blank)' : f.source === 'Clean-up' ? f.before.replace(/ /g, '·').replace(/[\u00a0]/g, '⍽').replace(/[\u200b-\u200d\u2060\ufeff]/g, '¤') : f.before, 'fix-before'), make('span', '→', 'fix-arrow'), input);
+        const accept = make('button', d.state === 'accepted' ? '✓ Accepted' : 'Accept', d.state === 'accepted' ? 'primary' : ''); accept.type = 'button';
+        accept.addEventListener('click', () => { decisions[f.id] = {state: d.state === 'accepted' ? undefined : 'accepted', after: input.value}; saveDecisions(); drawFixes(); updateDownload(); });
+        const reject = make('button', d.state === 'rejected' ? '✕ Rejected' : 'Reject'); reject.type = 'button';
+        reject.addEventListener('click', () => { decisions[f.id] = {state: d.state === 'rejected' ? undefined : 'rejected', after: input.value}; saveDecisions(); drawFixes(); updateDownload(); });
+        const actions = make('div', '', 'fix-actions'); actions.append(accept, reject);
+        row.append(meta, change, make('p', f.reason, 'hint'), actions);
+        list.append(row);
+      });
+    }
+    downloadBtn.addEventListener('click', async () => {
+      const changes = approved().map(f => ({id: f.id, sheet: f.sheet, cell: f.cell, before: f.before, after: (decisions[f.id] || {}).after ?? f.after,
+        kind: String((decisions[f.id] || {}).after ?? f.after) === f.after ? f.kind : (f.kind === 'number' && !isNaN(Number((decisions[f.id] || {}).after)) ? 'number' : 'text'), reason: f.reason, source: f.source}));
+      if (!changes.length || pending) return;
+      setBusy(true); downloadBtn.disabled = true; downloadBtn.textContent = 'Building fixed version…';
+      try {
+        const answer = await post('/api/spreadsheets/apply-fixes', {file_hash: result.file_hash, changes});
+        const link = document.createElement('a'); link.href = '/api/spreadsheets/download?id=' + answer.item.file_hash; link.download = answer.item.filename;
+        document.body.append(link); link.click(); link.remove();
+        decisions = {}; saveDecisions();
+        dialog.close();
+        ++selectionVersion; selected = answer.item.file_hash; detail(answer.item); await refresh();
+        message(`Fixed version saved as "${answer.item.filename}" (version ${answer.item.version}) with ${changes.length} approved change(s), re-checked, and downloaded. The original is unchanged.`);
+      } catch (error) { message(error.message, true); downloadBtn.textContent = 'Download fixed version'; }
+      finally { setBusy(false); updateDownload(); }
+    });
+    post('/api/spreadsheets/fixes', {file_hash: result.file_hash}).then(answer => {
+      fixes = answer.proposals || [];
+      fixes.forEach(f => { if (decisions[f.id] === undefined) return; });
+      const tab = make('button', `Fixes (${fixes.length})`); tab.dataset.filter = 'Fixes'; tab.type = 'button';
+      tab.addEventListener('click', () => { filter = 'Fixes'; draw(); }); tabs.prepend(tab);
+      if (fixes.length && !startTab) status.append(make('p', `${fixes.length} fix(es) can be applied automatically — open the Fixes tab to accept or reject them, then download a fixed version.`, 'fix-hint'));
+      updateDownload(); draw();
+    }).catch(() => {});
     const progress = make('span', '', 'errors-progress');
     const updateProgress = () => { const n = items.filter(i => reviewed.has(i.key)).length; progress.textContent = items.length ? `${n} of ${items.length} reviewed` : ''; };
     function draw() {
+      if (filter === 'Fixes') { drawFixes(); tabs.querySelectorAll('button').forEach(b => b.classList.toggle('active-tab', b.dataset.filter === filter)); return; }
       list.replaceChildren();
       const shown = items.filter(i => filter === 'All' || i.source === filter);
       if (!shown.length) list.append(make('p', items.length ? 'Nothing in this group.' : 'The automatic checks, SharePoint comparison and AI review found nothing to flag. This does not prove the report is correct.', 'hint'));
@@ -189,7 +255,7 @@
     all.addEventListener('click', () => { items.forEach(i => reviewed.add(i.key)); saveReviewed(result.file_hash, reviewed); draw(); updateProgress(); });
     const done = make('button', 'Done', 'primary'); done.type = 'button'; done.addEventListener('click', () => dialog.close());
     if (!items.length) all.hidden = true;
-    foot.append(progress, all, done);
+    foot.append(progress, all, downloadBtn, done);
     dialog.append(head, status, tabs, list, foot, make('p', 'Ticks are saved in this browser only. Reviewing here does not approve or release the report.', 'hint errors-note'));
     dialog.addEventListener('close', () => dialog.remove());
     dialog.addEventListener('click', e => { if (e.target === dialog) dialog.close(); });

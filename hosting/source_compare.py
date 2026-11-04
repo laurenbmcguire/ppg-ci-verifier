@@ -59,10 +59,17 @@ def compare(report_rows, source_rows, meta=None):
     meta = dict(meta or {})
     findings, counts = [], Counter()
 
-    def finding(code, message, sheet=None, row=None, **extra):
+    def finding(code, message, sheet=None, row=None, column=None, **extra):
         counts[code] += 1
         if len(findings) < MAX_FINDINGS:
-            findings.append(dict(code=code, sheet=sheet or 'SharePoint comparison', row=row, column=None, message=message, **extra))
+            findings.append(dict(code=code, sheet=sheet or 'SharePoint comparison', row=row, column=column, message=message, **extra))
+
+    def cell_of(rep, field):
+        from hosting.fixes import col_letter
+        if field in FIELDS and rep['columns'].get(field):
+            return f'{col_letter(rep["columns"][field] - 1)}{rep["row"]}'
+        letter = (rep.get('label_columns') or {}).get('identifier' if field == 'identifier' else field)
+        return f'{letter}{rep["row"]}' if letter else None
 
     # Duplicates inside the SharePoint export itself.
     by_id = defaultdict(list)
@@ -95,7 +102,7 @@ def compare(report_rows, source_rows, meta=None):
         for f, a, b in diffs:
             differences += 1
             finding('differs_from_sharepoint', f'{ident}: {NAMES[f]} is {_fmt(a)} in the report but {_fmt(b)} on SharePoint.',
-                    rep['sheet'], rep['row'], field=f, report_value=_fmt(a), sharepoint_value=_fmt(b))
+                    rep['sheet'], rep['row'], field=f, report_value=_fmt(a), sharepoint_value=_fmt(b), cell=cell_of(rep, f))
 
     leftovers = []
     for rep in report_rows:
@@ -120,7 +127,7 @@ def compare(report_rows, source_rows, meta=None):
             del unmatched_source[id(twin)]  # one finding for the typo, not also "missing from report"
             compare_pair(rep, twin)
             finding('identifier_typo_vs_sharepoint', f'Identifier {ident} is not on SharePoint; SharePoint has {suggestion}, which looks like the same scan with a typo.',
-                    rep['sheet'], rep['row'], report_value=ident, sharepoint_value=suggestion)
+                    rep['sheet'], rep['row'], report_value=ident, sharepoint_value=suggestion, field='identifier', cell=cell_of(rep, 'identifier'))
         else:
             finding('not_on_sharepoint', f'Identifier {ident} is in the report but not in the SharePoint export for this job and date.', rep['sheet'], rep['row'])
 

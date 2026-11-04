@@ -242,6 +242,15 @@ class handler(BaseHTTPRequestHandler):
                     else:
                         body=encode_json(demo.get(file_hash));content_type='application/json; charset=utf-8';headers={}
                 return self.send(200,body,content_type,headers)
+            if route == '/api/spreadsheets/download':
+                file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
+                if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                with self.store().session() as directory:
+                    filename, raw = SpreadsheetInbox(directory).download(file_hash)
+                safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', filename)[:180] or 'report'
+                kind = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if safe.lower().endswith('.xlsx') else 'text/csv; charset=utf-8'
+                return self.send(200, raw, kind, {'Content-Disposition': f'attachment; filename="{safe}"'})
             if route in FILES:
                 name = FILES[route]
                 return self.send(200, (ROOT / 'web' / name).read_bytes(), TYPES[name.rsplit('.', 1)[1]])
@@ -300,11 +309,11 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/baseline', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
-            if not route.startswith('/api/workflow/') and route not in ('/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/baseline','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
+            if not route.startswith('/api/workflow/') and route not in ('/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/baseline','/api/spreadsheets/fixes','/api/spreadsheets/apply-fixes','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= limit:
                 return self.fail(413, 'Request size is invalid.')
@@ -312,6 +321,27 @@ class handler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 raise Conflict('Incomplete request body.')
             content_type, headers = 'application/json; charset=utf-8', {}
+            if route in ('/api/spreadsheets/fixes', '/api/spreadsheets/apply-fixes'):
+                payload = json.loads(raw)
+                file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                from hosting.fixes import FixError
+                try:
+                    if route.endswith('/fixes'):
+                        with self.store().session() as directory:
+                            return self.send(200, encode_json(SpreadsheetInbox(directory).fix_proposals(file_hash)))
+                    with self.store().session() as directory:
+                        fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, payload.get('changes'))
+                except FixError as exc:
+                    raise Conflict(str(exc))
+                for step in (self.sharepoint_check if sharepoint_configured() else None, self.baseline_check):
+                    if step:
+                        try:
+                            fixed = step(fixed['file_hash'])
+                        except Exception:
+                            debug_log()
+                return self.send(200, encode_json({'item': fixed}))
             if route in ('/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/baseline'):
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
