@@ -10,6 +10,10 @@ This copy now has two run modes. Local SQLite behavior is unchanged.
 | Access control | same computer only | Vercel Authentication (SSO protection = all) on the project |
 | Demo endpoints | `--demo` | disabled (never on Vercel) |
 
+## Live URL
+
+**https://ppg-ci-verifier-git-preview-lauren-mc-guire-llc.vercel.app** — sign in with the Vercel account (Lauren McGuire LLC team). Anonymous visitors are redirected to the Vercel login. Verified Nov 4, 2026: `/api/health` → `"storage": "vercel-postgres"`, first snapshot committed as revision 1.
+
 ## What is deployed
 
 - Vercel project: `ppg-ci-verifier` (team Lauren McGuire LLC, Hobby plan, $0).
@@ -23,18 +27,24 @@ Supabase free plan allows 2 active projects and both were in use, so the app use
 
 - schema `ci_verifier`, table `ci_verifier.ci_verifier_state` (from `hosting/schema.sql`)
 - login role `ci_verifier`: `search_path=ci_verifier`, no rights on `public`, only `SELECT/INSERT/UPDATE` on that one table, connection limit 10
-- connection via the Supabase session pooler on port 5432 (IPv4), `sslmode=require`
+- connection via the Supabase session pooler `aws-0-us-east-1.pooler.supabase.com:5432` (IPv4), user `ci_verifier.<project-ref>`, `sslmode=require` (the `aws-1` pooler does not know this project's tenant)
 - nothing pre-existing in that project was altered; dropping schema `ci_verifier` and role `ci_verifier` removes everything
 
 To move to a dedicated database later (e.g. Neon free tier from the Vercel Marketplace), apply `hosting/schema.sql` there and change `DATABASE_URL`; the whole workspace is one row, so copy `payload`/`revision` across.
 
 ## Redeploying after changes
 
+Source of truth is GitHub: `laurenbmcguire/ppg-ci-verifier` (private). `main` is Vercel's production branch, and the app refuses production, so deployments come from the `preview` branch:
+
 ```sh
-cd <this folder>
 python -m unittest discover -s tests        # 443 tests
-vercel deploy                               # preview; never `--prod`
+git push origin main                        # keep history on main
+git push origin main:preview                # this is what deploys
 ```
+
+Then create the deployment from the `preview` ref (Vercel dashboard → Deploy, the Vercel MCP `create_deployment` with gitSource ref `preview`, or `vercel deploy` from a checkout). A stray deploy of `main` is harmless: it returns 403 on every route.
+
+`CI_DEBUG_LOG=1` (preview env var) writes storage exception type/location and the underlying driver message to Vercel runtime logs — never request bodies. Remove it when diagnostics are no longer needed.
 
 Then open the deployment URL while signed in to Vercel. Anonymous visitors get the Vercel sign-in wall; `/api/health` should report `"storage": "vercel-postgres"`.
 
