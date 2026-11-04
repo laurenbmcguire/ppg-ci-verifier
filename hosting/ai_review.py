@@ -154,7 +154,12 @@ def _post(body, opener=None):
     except urllib.error.HTTPError as exc:
         hint = {401: ' Check the API key.', 403: ' The API key is not allowed to use this model.', 429: ' Rate limit or credit limit reached; try again shortly.',
                 529: ' Claude is overloaded; try again shortly.'}.get(exc.code, '')
-        raise AIReviewError(f'AI review failed (HTTP {exc.code}).{hint}') from None
+        detail = ''
+        try:
+            detail = str((json.loads(exc.read() or b'{}').get('error') or {}).get('message') or '')[:300]
+        except Exception:
+            pass
+        raise AIReviewError(f'AI review failed (HTTP {exc.code}).{hint}' + (f' Claude said: {detail}' if detail else '')) from None
     except (urllib.error.URLError, TimeoutError, ValueError):
         raise AIReviewError('Could not reach Claude for the AI review. Try again.') from None
 
