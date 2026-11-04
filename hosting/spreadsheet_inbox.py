@@ -127,6 +127,21 @@ class SpreadsheetInbox:
             result.pop('check_hash', None); result.pop('checked_at', None)
             result['sharepoint'] = dict(status=status, message=message, job=job, day=day)
             return self.save_check(db, result)
+    def original_bytes(self, file_hash):
+        with self.connect() as db:
+            original, raw = self._original(db, file_hash)
+        return original, raw
+    def record_ai_review(self, file_hash, ai_review):
+        """Save Claude's suggestions with the current check. They never change findings or status."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            original, _ = self._original(db, file_hash)
+            result = dict(self.latest(db, file_hash, original))
+            if ai_review.get('status') != 'done' and (result.get('ai_review') or {}).get('status') == 'done':
+                return result  # keep the last real review when a retry fails
+            result.pop('check_hash', None); result.pop('checked_at', None)
+            result['ai_review'] = ai_review
+            return self.save_check(db, result)
     def list(self):
         with self.connect() as db:
             rows = db.execute('SELECT result_json FROM spreadsheets ORDER BY seq DESC LIMIT 100').fetchall()

@@ -29,3 +29,8 @@ html{scroll-behavior:smooth}.nav{display:block;text-decoration:none}.nav:hover{b
 /* The development flow puts workbook decisions next to the workbook, not the unrelated legacy CSV sidebar. */
 .development-mode .legacy-demo{display:none}.development-mode main{margin-right:0}
 .spreadsheet-demo-review{margin:20px 0;padding:16px;border:2px solid #47796a;border-radius:10px;background:#f6fbf8}.spreadsheet-demo-review button{min-height:44px;margin:6px 6px 0 0;white-space:normal}.spreadsheet-demo-review label{display:block}.spreadsheet-demo-review input[type=checkbox]{width:20px;height:20px;vertical-align:middle;margin-left:10px}.spreadsheet-demo-review a{display:inline-block;min-height:44px;padding:10px 0;color:#1a6654;font-weight:650}@media(max-width:760px){.spreadsheet-demo-review button{display:block;width:100%;margin-top:12px}.development-mode main{min-width:0}}
+
+.ai-panel{border-left:4px solid #6b5bd2}
+.ai-issue{margin:.6rem 0;padding:.5rem .7rem;border-radius:6px;background:rgba(107,91,210,.06)}
+.ai-issue p{margin:.2rem 0}
+.ai-high{border-left:3px solid #c0392b}.ai-medium{border-left:3px solid #d68910}.ai-low{border-left:3px solid #7f8c8d}

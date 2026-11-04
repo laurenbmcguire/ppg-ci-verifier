@@ -57,6 +57,11 @@ def hosted_store():
     return _HOSTED_STORE
 
 
+def ai_review_configured():
+    from hosting.ai_review import configured
+    return configured()
+
+
 def sharepoint_configured():
     from hosting.sharepoint import configured
     return configured()
@@ -158,6 +163,21 @@ class handler(BaseHTTPRequestHandler):
         with self.store().session() as directory:
             return SpreadsheetInbox(directory).record_lookup(file_hash, status, message, job, day)
 
+    def ai_review(self, file_hash):
+        from hosting.ai_review import review, AIReviewNotConfigured, AIReviewError
+        with self.store().session() as directory:
+            inbox = SpreadsheetInbox(directory)
+            item = inbox.get(file_hash)
+            _, raw = inbox.original_bytes(file_hash)
+        try:
+            outcome = review(item, raw)  # network call outside any DB transaction
+        except AIReviewNotConfigured as exc:
+            outcome = dict(status='not_configured', message=str(exc))
+        except AIReviewError as exc:
+            outcome = dict(status='error', message=str(exc))
+        with self.store().session() as directory:
+            return SpreadsheetInbox(directory).record_ai_review(file_hash, outcome)
+
     def do_GET(self):
         route = self.checked_route()
         if route is None:
@@ -210,7 +230,7 @@ class handler(BaseHTTPRequestHandler):
                         raise Conflict('Valid spreadsheet version ID required.')
                     data = SpreadsheetInbox(directory).get(file_hash)
                 else:
-                    data = {'status': 'ready', 'storage': getattr(self.store(), 'storage_label', 'unconfigured'), 'live_connectors_enabled': False, 'sharepoint_configured': sharepoint_configured(), 'spreadsheet_scope': 'internal_checks_only', 'send_enabled': False, 'reviewer_identity_available': False, 'prototype': True, 'local_only': not hosted_preview(), 'development_demo': self.demo_enabled()}
+                    data = {'status': 'ready', 'storage': getattr(self.store(), 'storage_label', 'unconfigured'), 'live_connectors_enabled': False, 'sharepoint_configured': sharepoint_configured(), 'ai_review_configured': ai_review_configured(), 'spreadsheet_scope': 'internal_checks_only', 'send_enabled': False, 'reviewer_identity_available': False, 'prototype': True, 'local_only': not hosted_preview(), 'development_demo': self.demo_enabled()}
                 body = encode_json(data)
             return self.send(200, body)
         except (Conflict, IntakeError, ValueError) as exc:
@@ -233,11 +253,11 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
-            if not route.startswith('/api/workflow/') and route not in ('/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
+            if not route.startswith('/api/workflow/') and route not in ('/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= limit:
                 return self.fail(413, 'Request size is invalid.')
@@ -245,12 +265,13 @@ class handler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 raise Conflict('Incomplete request body.')
             content_type, headers = 'application/json; charset=utf-8', {}
-            if route == '/api/spreadsheets/sharepoint':
+            if route in ('/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review'):
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
                 if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                     raise Conflict('Valid spreadsheet version ID required.')
-                return self.send(200, encode_json({'item': self.sharepoint_check(file_hash)}))
+                run = self.sharepoint_check if route.endswith('/sharepoint') else self.ai_review
+                return self.send(200, encode_json({'item': run(file_hash)}))
             with self.store().session() as directory:
                 review, inbox = Review(directory), ReportInbox(directory / 'report-intake')
                 if route in ('/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply'):
@@ -352,6 +373,13 @@ class handler(BaseHTTPRequestHandler):
                         body = encode_json({'item': self.sharepoint_check(item['file_hash'])})
                 except Exception:
                     debug_log()  # the upload itself was saved; lookup can be retried from the UI
+            if route in ('/api/spreadsheets/upload/finish', '/api/spreadsheets/import') and ai_review_configured():
+                try:
+                    item = json.loads(body)['item']
+                    if not (item.get('ai_review') or {}).get('status') == 'done':
+                        body = encode_json({'item': self.ai_review(item['file_hash'])})
+                except Exception:
+                    debug_log()  # the upload itself was saved; AI review can be retried from the UI
             return self.send(200, body, content_type, headers)
         except (Conflict, IntakeError, ValueError, TypeError, KeyError) as exc:
             return self.fail(409, str(exc))

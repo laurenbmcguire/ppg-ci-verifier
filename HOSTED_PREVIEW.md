@@ -59,3 +59,18 @@ Then open the deployment URL while signed in to Vercel. Anonymous visitors get t
 ## Tests added
 
 `tests/test_hosted_preview.py` covers the host gate (only deployment URLs, only preview, only with the flag) and Postgres commit semantics (commit, rollback on caller error, commit failure never reported as success, missing URL fails closed). One inherited assertion in `tests/test_vercel.py` that required a preview host to always be denied was updated to the new behavior.
+
+## AI review (possible issues)
+
+Each uploaded report is also read by Claude, which lists possible issues (duplicates, typos, odd numbers,
+missing info, totals, outliers) for a person to double-check. Suggestions never change the file, the
+automatic checks or the release status. **Run AI review** in a report's detail re-runs it.
+
+Turn it on: Vercel → ppg-ci-verifier → Settings → Environment Variables (Preview):
+
+| Name | Value | Type |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | an API key from console.anthropic.com | **Sensitive** |
+| `AI_REVIEW_MODEL` | optional, default `claude-sonnet-5-5` | Plain |
+
+Then redeploy the `preview` branch. The report's cell contents are sent to the Anthropic API for each review.

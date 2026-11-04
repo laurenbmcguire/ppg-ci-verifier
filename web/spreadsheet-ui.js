@@ -65,6 +65,7 @@
     const detailTicket=++detailVersion;
     const target = node('spreadsheet-detail'); target.replaceChildren();
     target.append(make('h3', `${result.filename} · version ${result.version}`), make('div', result.sharepoint&&result.sharepoint.status==='match'?'Matches SharePoint · release held':result.sharepoint&&result.sharepoint.status==='differences'?'Differs from SharePoint · release held':result.source_reconciliation_status==='mismatch'?'Source mismatch · release held':result.mapping_mode==='adaptive'?'Columns detected automatically · release held':result.template_id?(result.template_mapping_status==='incomplete'?'Template mapping incomplete · release held':'Mapped template checks · release held'):'Internal checks only · source not verified', 'result-badge unable_to_verify'), make('p', 'Original retained unchanged. These findings are not independent verification, approval, or permission to release a report.', 'hint'));
+    target.append(aiPanel(result));
     if(!result.template_id)target.append(make('p',`${result.numeric_columns_checked||0} supported quantity columns checked. ${result.internal_check_status==='unverified'?'No complete supported mapping: this is unverified.':'Only the documented internal checks were performed.'}`));
     if(result.mapping_mode==='adaptive'){
       if(result.recognized_template)target.append(make('p','This looks like a known PPG/Pratt report with a different layout, so the columns were detected automatically.','hint'));
@@ -98,6 +99,43 @@
     if (result.findings_truncated) target.append(make('p', `Showing a bounded selection of ${result.finding_count || 'all'} findings. Review the original spreadsheet for the remainder.`, 'hint'));
     showDemoReview(result,target,detailTicket);
     const summary = document.createElement('details'); summary.append(make('summary', 'File, sheet, and provenance details'), make('pre', JSON.stringify(result, null, 2))); target.append(summary);
+  }
+  function aiPanel(result) {
+    const ai = result.ai_review || {};
+    const box = make('section', '', 'report-finding ai-panel');
+    box.append(make('strong', 'AI review — possible issues'));
+    if (ai.status === 'done') {
+      const c = ai.counts || {};
+      box.append(make('p', ai.summary || ''), make('p', ai.issues.length ? `${ai.issues.length} possible issue(s): ${c.high || 0} high · ${c.medium || 0} medium · ${c.low || 0} low.` : 'Claude did not spot anything beyond the automatic checks.', 'hint'));
+      ai.issues.forEach(issue => {
+        const item = make('div', '', 'ai-issue ai-' + issue.severity);
+        const where = [issue.sheet, issue.cell || (issue.row ? `row ${issue.row}` : '')].filter(Boolean).join(' · ');
+        item.append(make('strong', `${issue.severity.toUpperCase()} · ${issue.category.replace('_', ' ')}${where ? ' · ' + where : ''}`), make('p', issue.issue));
+        if (issue.why) item.append(make('p', 'Why: ' + issue.why, 'hint'));
+        if (issue.check) item.append(make('p', 'Check: ' + issue.check, 'hint'));
+        box.append(item);
+      });
+      if (ai.sheet_text_truncated) box.append(make('p', 'This workbook is very large, so Claude read only the first part of it.', 'hint'));
+      box.append(make('small', `${ai.notice || 'AI suggestions to double-check.'} Reviewed ${new Date(ai.reviewed_at).toLocaleString()} · ${ai.model}.`));
+    } else if (ai.status) {
+      box.append(make('p', ai.message || 'AI review did not run.', ai.status === 'error' ? 'intake-error' : 'hint'));
+    } else {
+      box.append(make('p', 'Not reviewed by AI yet.', 'hint'));
+    }
+    const run = make('button', ai.status === 'done' ? 'Run AI review again' : 'Run AI review');
+    run.disabled = pending;
+    run.addEventListener('click', async () => {
+      if (pending) return; setBusy(true);
+      try {
+        message('Claude is reading the report… this can take up to a minute.');
+        const answer = await post('/api/spreadsheets/ai-review', {file_hash: result.file_hash});
+        ++selectionVersion; selected = answer.item.file_hash; detail(answer.item); await refresh();
+        const r = answer.item.ai_review || {};
+        message(r.status === 'done' ? `AI review finished: ${r.issues.length} possible issue(s).` : r.message || 'AI review finished.', r.status !== 'done');
+      } catch (error) { message(error.message, true); } finally { setBusy(false); }
+    });
+    box.append(run);
+    return box;
   }
   function sharepointPanel(result) {
     const sp = result.sharepoint || {};
@@ -278,7 +316,7 @@
         message(partCount > 1 ? `Uploading part ${index + 1} of ${partCount} (${mib(Math.min(file.size, (index + 1) * CHUNK))} of ${mib(file.size)})…` : 'Uploading…');
         await post('/api/spreadsheets/upload/part', {upload_id: uploadId, index, content_base64: await toBase64(file.slice(index * CHUNK, (index + 1) * CHUNK))});
       }
-      message('Checking the spreadsheet… large workbooks can take a minute.');
+      message('Checking the spreadsheet (and SharePoint / AI review when set up)… this can take a minute.');
       const result = await post('/api/spreadsheets/upload/finish', {upload_id: uploadId, filename: file.name, part_count: partCount, sha256});
       ++selectionVersion; selected = result.item.file_hash; detail(result.item); await refresh();
       message(result.item.idempotent ? 'This exact file was already checked. Its original version was preserved.' : 'Internal checks saved and original preserved. Independent source verification and report release remain held.');
