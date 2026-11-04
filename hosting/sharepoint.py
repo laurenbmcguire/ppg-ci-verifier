@@ -115,7 +115,11 @@ def fetch_export(job, day, opener=None):
                 continue
             return filename, content, dict(site=name, path=path, web_url=item.get('webUrl'),
                                            modified=item.get('lastModifiedDateTime'), job=job, day=day)
-    raise SharePointNotFound(f'No SharePoint daily export found for {job} on {day}.' + (f' Looked in {len(tried)} place(s).' if tried else ' No client sites are configured.'))
+    found = list_day(job, day, opener)
+    if found:
+        return found
+    raise SharePointNotFound(f'No SharePoint data found for {job} on {day}: no daily export file, and no "Data #{job}" list with rows for that day.'
+                             + (f' Looked in {len(tried) // 2} site(s).' if tried else ' No client sites are configured.'))
 
 
 def recent_exports(job, before_day, limit=10, opener=None):
@@ -143,5 +147,111 @@ def recent_exports(job, before_day, limit=10, opener=None):
                 if content:
                     out.append((day, filename, content))
                     break
-        return out
-    return []
+        if out:
+            return out
+    return list_history(job, before_day, limit, opener)
+
+
+# ---------------------------------------------------------------- the job's own SharePoint data list
+# Field crews' scans live in a list named "Data #<job>" on the client site (the daily exports are built from it).
+
+_SKIP_FIELDS = {'id', 'ContentType', 'Modified', 'Created', 'AuthorLookupId', 'EditorLookupId', '_UIVersionString', 'Attachments',
+                'Edit', 'LinkTitleNoMenu', 'LinkTitle', 'ItemChildCount', 'FolderChildCount', '_ComplianceFlags', '_ComplianceTag',
+                '_ComplianceTagWrittenTime', '_ComplianceTagUserId', 'AppAuthorLookupId', 'AppEditorLookupId', '@odata.etag', 'DocIcon'}
+_list_cache = {}
+LIST_TTL = 120
+
+
+def _find_list(job, opener=None):
+    want = {f'data #{job}'.lower(), f'data#{job}'.lower(), f'data {job}'.lower(), job.lower()}
+    for name, site_id in _sites(opener):
+        lists = _get(f'/sites/{site_id}/lists?$select=id,displayName,webUrl&$top=500', opener) or {}
+        for lst in lists.get('value', []):
+            if (lst.get('displayName') or '').strip().lower() in want:
+                return name, site_id, lst
+    return None
+
+
+def _list_items(job, opener=None):
+    """(site name, list info, column display names, items) for the job's data list, cached briefly."""
+    key = job.upper()
+    hit = _list_cache.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    found = _find_list(job, opener)
+    if not found:
+        _list_cache[key] = (time.time() + LIST_TTL, None)
+        return None
+    name, site_id, lst = found
+    cols = (_get(f'/sites/{site_id}/lists/{lst["id"]}/columns?$select=name,displayName,hidden,readOnly&$top=500', opener) or {}).get('value', [])
+    names = {c['name']: c.get('displayName') or c['name'] for c in cols if not c.get('hidden') and not c.get('readOnly')}
+    items, url = [], f'/sites/{site_id}/lists/{lst["id"]}/items?$expand=fields&$top=999'
+    while url and len(items) < 50000:
+        page = _get(url, opener) or {}
+        items.extend(page.get('value', []))
+        url = page.get('@odata.nextLink')
+    value = (name, lst, names, items)
+    _list_cache[key] = (time.time() + LIST_TTL, value)
+    return value
+
+
+def _item_day(item):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    fields = item.get('fields') or {}
+    stamp = fields.get('Date0') or fields.get('Date') or item.get('createdDateTime')
+    if not stamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(stamp).replace('Z', '+00:00'))
+    except ValueError:
+        return str(stamp)[:10]
+    if dt.tzinfo is None:
+        return dt.date().isoformat()
+    return dt.astimezone(ZoneInfo('America/Chicago')).date().isoformat()
+
+
+def _items_csv(names, items):
+    import csv, io
+    order = [n for n in names if n not in _SKIP_FIELDS]
+    extra = sorted({k for it in items for k in (it.get('fields') or {}) if k not in names and k not in _SKIP_FIELDS
+                    and not k.startswith('_') and not k.endswith('LookupId') and not k.startswith('@')})
+    keys = order + extra
+    out = io.StringIO(newline='')
+    w = csv.writer(out)
+    w.writerow([names.get(k, k) for k in keys])
+    for it in items:
+        f = it.get('fields') or {}
+        w.writerow(['' if f.get(k) is None else (f[k] if not isinstance(f[k], (dict, list)) else json.dumps(f[k])) for k in keys])
+    return out.getvalue().encode('utf-8')
+
+
+def list_day(job, day, opener=None):
+    """(filename, csv bytes, meta) built from the job's data list for one day, or None."""
+    if not configured() or not job or not day:
+        return None
+    data = _list_items(job, opener)
+    if not data:
+        return None
+    site, lst, names, items = data
+    rows = [it for it in items if _item_day(it) == day]
+    if not rows:
+        return None
+    modified = max((it.get('lastModifiedDateTime') or '') for it in rows) or None
+    return (f'{job} {day} (SharePoint list).csv', _items_csv(names, rows),
+            dict(site=site, path=f'list: {lst.get("displayName")}', web_url=lst.get('webUrl'), modified=modified,
+                 job=job, day=day, source_kind='list', rows=len(rows)))
+
+
+def list_history(job, before_day, limit=10, opener=None):
+    """[(day, filename, csv bytes)] from the job's data list for earlier days, newest first."""
+    data = _list_items(job, opener) if configured() and job and before_day else None
+    if not data:
+        return []
+    _, _, names, items = data
+    by_day = {}
+    for it in items:
+        d = _item_day(it)
+        if d and d < before_day:
+            by_day.setdefault(d, []).append(it)
+    return [(d, f'{job} {d} (SharePoint list).csv', _items_csv(names, by_day[d])) for d in sorted(by_day, reverse=True)[:limit]]
