@@ -65,6 +65,9 @@
     const detailTicket=++detailVersion;
     const target = node('spreadsheet-detail'); target.replaceChildren();
     target.append(make('h3', `${result.filename} · version ${result.version}`), make('div', result.sharepoint&&result.sharepoint.status==='match'?'Matches SharePoint · release held':result.sharepoint&&result.sharepoint.status==='differences'?'Differs from SharePoint · release held':result.source_reconciliation_status==='mismatch'?'Source mismatch · release held':result.mapping_mode==='adaptive'?'Columns detected automatically · release held':result.template_id?(result.template_mapping_status==='incomplete'?'Template mapping incomplete · release held':'Mapped template checks · release held'):'Internal checks only · source not verified', 'result-badge unable_to_verify'), make('p', 'Original retained unchanged. These findings are not independent verification, approval, or permission to release a report.', 'hint'));
+    { const n = possibleErrors(result).filter(i => i.severity !== 'info').length;
+      const open = make('button', n ? `Review possible errors (${n})` : 'Review possible errors', n ? 'primary errors-open' : 'errors-open');
+      open.type = 'button'; open.addEventListener('click', () => showErrorsPopup(result)); target.append(open); }
     target.append(aiPanel(result));
     if(!result.template_id)target.append(make('p',`${result.numeric_columns_checked||0} supported quantity columns checked. ${result.internal_check_status==='unverified'?'No complete supported mapping: this is unverified.':'Only the documented internal checks were performed.'}`));
     if(result.mapping_mode==='adaptive'){
@@ -99,6 +102,92 @@
     if (result.findings_truncated) target.append(make('p', `Showing a bounded selection of ${result.finding_count || 'all'} findings. Review the original spreadsheet for the remainder.`, 'hint'));
     showDemoReview(result,target,detailTicket);
     const summary = document.createElement('details'); summary.append(make('summary', 'File, sheet, and provenance details'), make('pre', JSON.stringify(result, null, 2))); target.append(summary);
+  }
+
+  // ---- Pop-up: every possible error for this upload, in one list to work through ----
+  const INFO_CODES = new Set(['hyperlink_formula', 'external_hyperlink', 'known_template_layout_differs']);
+  const HIGH_CODES = /duplicate|total|differs|missing_from_report|not_on_sharepoint|typo|mismatch|exceeds|future|invalid/;
+  const sevRank = {high: 0, medium: 1, low: 2, info: 3};
+  function possibleErrors(result) {
+    const items = [];
+    (result.findings || []).forEach((f, i) => items.push({
+      key: 'check:' + (f.code || '') + ':' + (f.sheet || '') + ':' + (f.cell || f.row || i),
+      source: 'Automatic check', severity: INFO_CODES.has(f.code) ? 'info' : HIGH_CODES.test(f.code || '') ? 'high' : 'medium',
+      where: [f.sheet, f.cell || (f.row ? `row ${f.row}` : ''), f.column ? `column ${f.column}` : ''].filter(Boolean).join(' · '),
+      text: f.message || explanations[f.code] || f.code || 'Review this finding.'}));
+    const sp = result.sharepoint || {};
+    (sp.findings || []).forEach((f, i) => items.push({
+      key: 'sp:' + (f.code || '') + ':' + (f.sheet || '') + ':' + (f.row || i) + ':' + (f.field || ''),
+      source: 'SharePoint', severity: 'high', where: [f.sheet && f.sheet !== 'SharePoint comparison' ? f.sheet : '', f.row ? `row ${f.row}` : ''].filter(Boolean).join(' · '),
+      text: f.message || f.code}));
+    const ai = result.ai_review || {};
+    (ai.status === 'done' ? ai.issues : []).forEach((f, i) => items.push({
+      key: 'ai:' + i + ':' + (f.sheet || '') + ':' + (f.cell || f.row || '') + ':' + (f.issue || '').slice(0, 40),
+      source: 'AI suggestion', severity: f.severity || 'medium',
+      where: [f.sheet, f.cell || (f.row ? `row ${f.row}` : '')].filter(Boolean).join(' · '),
+      text: f.issue, why: f.why, check: f.check}));
+    return items.sort((a, b) => sevRank[a.severity] - sevRank[b.severity]);
+  }
+  const reviewedKey = hash => 'ci-reviewed:' + hash;
+  const loadReviewed = hash => { try { return new Set(JSON.parse(localStorage.getItem(reviewedKey(hash)) || '[]')); } catch (e) { return new Set(); } };
+  const saveReviewed = (hash, set) => { try { localStorage.setItem(reviewedKey(hash), JSON.stringify([...set])); } catch (e) { /* per-browser convenience only */ } };
+  function showErrorsPopup(result) {
+    document.getElementById('errors-dialog')?.remove();
+    const items = possibleErrors(result), reviewed = loadReviewed(result.file_hash);
+    const dialog = document.createElement('dialog'); dialog.id = 'errors-dialog'; dialog.className = 'errors-dialog';
+    dialog.setAttribute('aria-labelledby', 'errors-title');
+    const head = make('div', '', 'errors-head');
+    const title = make('h2', items.filter(i => i.severity !== 'info').length ? 'Possible errors to review' : 'No possible errors found'); title.id = 'errors-title';
+    const close = make('button', '✕', 'errors-close'); close.setAttribute('aria-label', 'Close'); close.addEventListener('click', () => dialog.close());
+    head.append(title, close);
+    const counts = {high: 0, medium: 0, low: 0, info: 0}; items.forEach(i => counts[i.severity]++);
+    const sp = result.sharepoint || {}, ai = result.ai_review || {};
+    const status = make('div', '', 'errors-status');
+    status.append(make('p', `${result.filename} · version ${result.version}`, 'errors-file'));
+    const chips = make('div', '', 'errors-chips');
+    [['high', 'High'], ['medium', 'Medium'], ['low', 'Low'], ['info', 'Info']].forEach(([k, label]) => { if (counts[k]) chips.append(make('span', `${counts[k]} ${label}`, 'chip chip-' + k)); });
+    status.append(chips);
+    status.append(make('p', 'SharePoint: ' + (sp.status === 'match' ? `matches (${sp.matched_rows} rows, totals agree)` : sp.status === 'differences' ? `${(sp.findings || []).length} difference(s)` : sp.message || 'not compared yet'), 'hint'));
+    status.append(make('p', 'AI review: ' + (ai.status === 'done' ? (ai.summary || `${ai.issues.length} suggestion(s)`) : ai.message || 'not run yet'), 'hint'));
+    const tabs = make('div', '', 'errors-tabs'); const list = make('div', '', 'errors-list');
+    let filter = 'All';
+    const progress = make('span', '', 'errors-progress');
+    const updateProgress = () => { const n = items.filter(i => reviewed.has(i.key)).length; progress.textContent = items.length ? `${n} of ${items.length} reviewed` : ''; };
+    function draw() {
+      list.replaceChildren();
+      const shown = items.filter(i => filter === 'All' || i.source === filter);
+      if (!shown.length) list.append(make('p', items.length ? 'Nothing in this group.' : 'The automatic checks, SharePoint comparison and AI review found nothing to flag. This does not prove the report is correct.', 'hint'));
+      shown.forEach(item => {
+        const row = make('label', '', 'errors-item sev-' + item.severity + (reviewed.has(item.key) ? ' is-reviewed' : ''));
+        const box = document.createElement('input'); box.type = 'checkbox'; box.checked = reviewed.has(item.key);
+        box.addEventListener('change', () => { box.checked ? reviewed.add(item.key) : reviewed.delete(item.key); row.classList.toggle('is-reviewed', box.checked); saveReviewed(result.file_hash, reviewed); updateProgress(); });
+        const body = make('div', '', 'errors-body');
+        const meta = make('div', '', 'errors-meta');
+        meta.append(make('span', item.severity.toUpperCase(), 'chip chip-' + item.severity), make('span', item.source, 'errors-source'));
+        if (item.where) meta.append(make('span', item.where, 'errors-where'));
+        body.append(meta, make('p', item.text, 'errors-text'));
+        if (item.why) body.append(make('p', 'Why: ' + item.why, 'hint'));
+        if (item.check) body.append(make('p', 'Check: ' + item.check, 'hint'));
+        row.append(box, body); list.append(row);
+      });
+      tabs.querySelectorAll('button').forEach(b => b.classList.toggle('active-tab', b.dataset.filter === filter));
+    }
+    ['All', 'Automatic check', 'SharePoint', 'AI suggestion'].forEach(name => {
+      const n = name === 'All' ? items.length : items.filter(i => i.source === name).length;
+      if (name !== 'All' && !n) return;
+      const b = make('button', `${name === 'Automatic check' ? 'Automatic checks' : name === 'AI suggestion' ? 'AI suggestions' : name} (${n})`); b.dataset.filter = name; b.type = 'button';
+      b.addEventListener('click', () => { filter = name; draw(); }); tabs.append(b);
+    });
+    const foot = make('div', '', 'errors-foot');
+    const all = make('button', 'Mark all reviewed'); all.type = 'button';
+    all.addEventListener('click', () => { items.forEach(i => reviewed.add(i.key)); saveReviewed(result.file_hash, reviewed); draw(); updateProgress(); });
+    const done = make('button', 'Done', 'primary'); done.type = 'button'; done.addEventListener('click', () => dialog.close());
+    if (!items.length) all.hidden = true;
+    foot.append(progress, all, done);
+    dialog.append(head, status, tabs, list, foot, make('p', 'Ticks are saved in this browser only. Reviewing here does not approve or release the report.', 'hint errors-note'));
+    dialog.addEventListener('close', () => dialog.remove());
+    dialog.addEventListener('click', e => { if (e.target === dialog) dialog.close(); });
+    document.body.append(dialog); draw(); updateProgress(); dialog.showModal(); done.focus();
   }
   function aiPanel(result) {
     const ai = result.ai_review || {};
@@ -319,6 +408,7 @@
       message('Checking the spreadsheet (and SharePoint / AI review when set up)… this can take a minute.');
       const result = await post('/api/spreadsheets/upload/finish', {upload_id: uploadId, filename: file.name, part_count: partCount, sha256});
       ++selectionVersion; selected = result.item.file_hash; detail(result.item); await refresh();
+      showErrorsPopup(result.item);
       message(result.item.idempotent ? 'This exact file was already checked. Its original version was preserved.' : 'Internal checks saved and original preserved. Independent source verification and report release remain held.');
     } catch (error) { message(error.message, true); }
     finally { setBusy(false); }
