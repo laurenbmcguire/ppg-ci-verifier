@@ -5,6 +5,7 @@ import re
 import os
 from pathlib import Path
 import sys
+import traceback
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlsplit
 
@@ -63,6 +64,15 @@ def allowed_host(host):
         return host.lower() in hosted_hosts()
     return (local_environment() and os.environ.get('CI_LOCAL_DEV') == '1'
             and urlsplit('http://' + host).hostname in ('127.0.0.1', 'localhost'))
+
+
+def debug_log():
+    """Operator-enabled diagnostics only (CI_DEBUG_LOG=1): exception type and message to stderr, never request bodies."""
+    if os.environ.get('CI_DEBUG_LOG') == '1':
+        exc_type, exc, tb = sys.exc_info()
+        frame = traceback.extract_tb(tb)[-1] if tb else None
+        where = f'{frame.filename.rsplit("/", 1)[-1]}:{frame.lineno}' if frame else '?'
+        print(f'[ci-verifier] {exc_type.__name__ if exc_type else "?"} at {where}: {exc}', file=sys.stderr, flush=True)
 
 
 class handler(BaseHTTPRequestHandler):
@@ -177,6 +187,7 @@ class handler(BaseHTTPRequestHandler):
         except StorageUnavailable as exc:
             return self.fail(503, str(exc))
         except Exception:
+            debug_log()
             return self.fail(503, 'Durable storage is unavailable. No success was confirmed; reload before retrying.')
 
     def do_POST(self):
@@ -278,4 +289,5 @@ class handler(BaseHTTPRequestHandler):
         except StorageUnavailable as exc:
             return self.fail(503, str(exc))
         except Exception:
+            debug_log()
             return self.fail(503, 'Durable storage is unavailable. No success was confirmed; reload before retrying.')
