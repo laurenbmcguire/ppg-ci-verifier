@@ -98,6 +98,7 @@ class SpreadsheetInbox:
         if not source_raw:
             raise ValueError('The SharePoint export is empty.')
         source_rows = parse_export(source_name, source_raw)
+        self.get(file_hash)  # make sure the report's own checks are current before layering the comparison
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             original, raw = self._original(db, file_hash)
@@ -116,6 +117,7 @@ class SpreadsheetInbox:
                 result['internal_check_status'] = 'findings'
             return self.save_check(db, result)
     def record_lookup(self, file_hash, status, message, job=None, day=None):
+        self.get(file_hash)
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             original, _ = self._original(db, file_hash)
@@ -147,7 +149,15 @@ class SpreadsheetInbox:
             suffix='.xlsx' if result['filename'].lower().endswith('.xlsx') else '.csv'
             raw=files_for(self.root).get('uploads/'+file_hash+suffix)
             if hashlib.sha256(raw).hexdigest()!=file_hash:raise ValueError('Stored original integrity mismatch.')
-            return self.ingest(result['filename'],raw)
+            previous=result.get('sharepoint') or {}
+            fresh=self.ingest(result['filename'],raw)
+            if previous.get('status') in ('match','differences') and previous.get('source_sha256'):
+                # Re-run the last SharePoint comparison with the stored export so it reflects the new checks.
+                name=previous.get('source_filename') or 'export.csv'
+                stored=files_for(self.root).get('uploads/'+previous['source_sha256']+('.xlsx' if name.lower().endswith('.xlsx') else '.csv'))
+                meta={k:previous[k] for k in ('origin','source_label','site','path','web_url','modified','job','day') if k in previous}
+                return self.compare_source(file_hash,name,stored,meta)
+            return fresh
         return result
     def latest(self,db,file_hash,fallback):
         row=db.execute('SELECT result_json FROM spreadsheet_checks WHERE file_hash=? ORDER BY seq DESC LIMIT 1',(file_hash,)).fetchone()

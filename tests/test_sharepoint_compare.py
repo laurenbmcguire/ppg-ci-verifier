@@ -149,6 +149,17 @@ class InboxCompareTests(unittest.TestCase):
             self.assertEqual(result['source_reconciliation_status'], 'mismatch')
             self.assertEqual(result['internal_check_status'], 'findings')
 
+    def test_recheck_keeps_and_reruns_the_comparison(self):
+        with tempfile.TemporaryDirectory() as root:
+            inbox = SpreadsheetInbox(root)
+            item = inbox.ingest('r.xlsx', build())
+            inbox.compare_source(item['file_hash'], '2230-OWENS-BASCO 2026-10-07.csv', source_csv(), {'origin': 'sharepoint', 'site': 'BriggsStratton_Auburn'})
+            with patch('hosting.spreadsheet_inbox.CHECKER_VERSION', 'future-version'), patch('hosting.spreadsheets.CHECKER_VERSION', 'future-version'):
+                again = inbox.get(item['file_hash'])
+            self.assertEqual(again['checker_version'], 'future-version')
+            self.assertEqual(again['sharepoint']['status'], 'match')
+            self.assertEqual(again['sharepoint']['site'], 'BriggsStratton_Auburn')
+
     def test_lookup_status_is_recorded(self):
         with tempfile.TemporaryDirectory() as root:
             inbox = SpreadsheetInbox(root)
