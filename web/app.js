@@ -414,7 +414,13 @@
         h('span', {class: 'k ready'}, `Will change in the download (${counts.ready})`),
         h('span', {class: 'k fx'}, 'Formula')),
       ...[tabs, scroller, cellPanel(m), g.truncated ? h('p', {class: 'note'}, 'Large sheet: only the first rows and columns are shown.') : null].filter(Boolean));
-    if (scroll && first) requestAnimationFrame(() => { scroller.scrollTop = Math.max(0, first.offsetTop - 80); scroller.scrollLeft = Math.max(0, first.offsetLeft - 120); });
+    if (scroll) requestAnimationFrame(() => {
+      scroller.scrollTop = 0; scroller.scrollLeft = 0;
+      if (!first) return;
+      const box = scroller.getBoundingClientRect(), cell = first.getBoundingClientRect();
+      if (cell.bottom > box.bottom - 10) scroller.scrollTop = cell.top - box.top - 80;
+      if (cell.right > box.right - 10) scroller.scrollLeft = cell.left - box.left - 120;
+    });
   }
   function cellPanel(m) {
     const g = state.grid, addr = state.gridCell; if (!addr) return null;
