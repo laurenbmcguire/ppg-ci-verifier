@@ -82,3 +82,19 @@ class ChatTests(unittest.TestCase):
                         opener=lambda r, timeout=None: FakeResponse(json.dumps(body).encode()))
         self.assertEqual(out['reply'], 'It is on hold because of the totals.')
         self.assertEqual(out['changes'], [])
+
+
+class SummaryTests(unittest.TestCase):
+    @patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test'})
+    def test_ids_map_back_and_every_change_is_grouped(self):
+        from hosting import ai_review
+        body = {'model': 'm', 'content': [{'type': 'tool_use', 'name': 'write_summary', 'input': {
+            'headline': 'Two things to fix.', 'next_steps': ['Apply', 'Send'],
+            'error_groups': [{'title': 'Typo', 'severity': 'high', 'count': 9, 'explanation': 'x', 'issue_ids': ['i1', 'i9']}],
+            'change_groups': [{'title': 'Fix typo', 'explanation': 'y', 'risk': 'safe', 'change_ids': ['c1', 'c1', 'c7']}]}}]}
+        out = ai_review.summarize_fixes({'filename': NAME}, [{'key': 'k1', 'text': 'a'}], [{'id': 'f1'}, {'id': 'f2'}], {},
+                                        opener=lambda r, timeout=None: FakeResponse(json.dumps(body).encode()))
+        self.assertEqual(out['error_groups'][0]['issue_keys'], ['k1'])
+        self.assertEqual(out['error_groups'][0]['count'], 1)
+        self.assertEqual(out['change_groups'][0]['fix_ids'], ['f1'])
+        self.assertEqual(out['change_groups'][1]['fix_ids'], ['f2'])  # leftovers land in "Other changes"

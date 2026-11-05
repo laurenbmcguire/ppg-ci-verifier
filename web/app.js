@@ -127,6 +127,7 @@
         h('div', {class: 'meta'}, `${dayLabel(rv.day)}. ${r.filename}, version ${r.version}, uploaded ${ago(r.received_at)}.`))));
     wrap.append(h('div', {class: 'actions'},
       h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, 'Download report'),
+      h('button', {type: 'button', class: 'btn chat-btn', onclick: () => openFixer(false)}, 'AI worksheet fixer'),
       h('button', {type: 'button', class: 'btn chat-btn', onclick: openChat}, 'Chat with Claude'),
       h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download original'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('sharepoint', 'Checking SharePoint…')}, 'Check SharePoint again'),
@@ -332,6 +333,7 @@
     drawGrid();
     updateDownloads();
     if (!state.chatBusy) drawChat();
+    drawFixer();
   }
   function readyChanges() {
     if (!state.report) return {accepted: [], dec: {}, edits: {}, total: 0};
@@ -658,6 +660,79 @@
     if (!td || !wrap) return;
     if (!quiet) $('sheet-block').scrollIntoView({behavior: 'smooth', block: 'start'});
     reveal(wrap, td, true);
+  }
+
+  // ---------------- AI worksheet fixer: Claude's summary of the errors and of the suggested changes
+  async function openFixer(refresh) {
+    let dlg = $('fixer-dialog');
+    if (!dlg) { dlg = h('dialog', {id: 'fixer-dialog', class: 'fixer', 'aria-labelledby': 'fixer-title'}); document.body.append(dlg);
+      dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); }); }
+    if (!dlg.open) dlg.showModal();
+    const hash = state.report.file_hash;
+    state.fixerCache ||= {};
+    if (refresh || !state.fixerCache[hash]) {
+      dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('span', {class: 'spin'}), h('h2', {id: 'fixer-title'}, 'AI worksheet fixer'),
+        h('p', {}, 'Claude is summarizing the errors and the suggested changes…')));
+      if (!state.fixes) for (let i = 0; i < 40 && !state.fixes; i++) await new Promise(r => setTimeout(r, 250));
+      const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
+      const extra = Object.values(edits).map(e => ({id: 'edit:' + editId(e.sheet, e.cell), sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: e.reason || 'Edited by reviewer', source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit'}));
+      const skip = Object.entries(dec).filter(([, d]) => d?.state === 'rejected').map(([id]) => id);
+      try {
+        state.fixerCache[hash] = await api('/api/spreadsheets/ai-summary', {file_hash: hash, extra, skip});
+      } catch (e) {
+        if (state.report?.file_hash === hash) dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('h2', {id: 'fixer-title'}, 'AI worksheet fixer'), h('p', {class: 'note'}, e.message),
+          h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Close'), h('button', {type: 'button', class: 'btn primary', onclick: () => openFixer(true)}, 'Try again'))));
+        return;
+      }
+      if (state.report?.file_hash !== hash) return;
+    }
+    drawFixer();
+  }
+  function drawFixer() {
+    const dlg = $('fixer-dialog'); if (!dlg?.open || !state.report) return;
+    const sum = state.fixerCache?.[state.report.file_hash]; if (!sum) return;
+    const byId = Object.fromEntries((state.fixes || []).map(f => [f.id, f]));
+    const edits = store.get(editsKey(), {});
+    const changeOf = id => id.startsWith('edit:') ? (() => { const e = edits[id.slice(5)]; return e ? {...e, id, source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit'} : null; })() : byId[id];
+    const stateOf = id => id.startsWith('edit:') ? (edits[id.slice(5)] ? 'accepted' : 'gone') : (store.get(decisionsKey(), {})[id]?.state || (edits[editId(byId[id]?.sheet, byId[id]?.cell)] ? 'replaced' : null));
+    const applyIds = ids => { const d = store.get(decisionsKey(), {}); let n = 0; for (const id of ids) { const f = byId[id]; if (f && !d[id]?.state && !edits[editId(f.sheet, f.cell)]) { d[id] = {state: 'accepted', after: f.after}; n++; } } store.set(decisionsKey(), d); return n; };
+    const unapply = ids => { const d = store.get(decisionsKey(), {}); for (const id of ids) if (d[id]?.state === 'accepted') delete d[id]; store.set(decisionsKey(), d); };
+    const refresh = () => { drawFixes(); drawFixer(); };
+    const issuesNow = walkIssues();
+    const allIds = sum.change_groups.flatMap(g => g.fix_ids).filter(id => changeOf(id));
+    const waiting = allIds.filter(id => !stateOf(id));
+    const ready = readyChanges().total;
+    const sev = {high: 'Must fix', medium: 'Should fix', low: 'Tidy-up'};
+    dlg.replaceChildren(
+      h('div', {class: 'fixer-top'}, h('div', {}, h('p', {class: 'eyebrow'}, 'AI WORKSHEET FIXER'), h('h2', {id: 'fixer-title'}, state.report.review.job || state.report.filename)),
+        h('button', {type: 'button', class: 'btn ghost small', onclick: () => openFixer(true)}, 'Refresh summary'),
+        h('button', {type: 'button', class: 'btn ghost small', onclick: () => dlg.close()}, 'Close')),
+      h('div', {class: 'fixer-body'},
+        h('p', {class: 'fixer-headline'}, sum.headline),
+        sum.next_steps?.length ? h('ol', {class: 'fixer-steps'}, sum.next_steps.map(x => h('li', {}, x))) : null,
+        h('div', {class: 'fixer-cols'},
+          h('section', {}, h('h3', {}, `Summary of errors · ${sum.error_groups.reduce((a, g) => a + (g.count || 0), 0)}`),
+            sum.error_groups.length ? sum.error_groups.map(g => h('div', {class: 'fx-card err ' + g.severity},
+              h('div', {class: 'fx-head'}, h('span', {class: 'chip-sev'}, sev[g.severity] || 'Check'), h('b', {}, g.title), h('span', {class: 'fx-count'}, String(g.count))),
+              h('p', {}, g.explanation),
+              g.examples?.length ? h('ul', {class: 'fx-ex'}, g.examples.map(e => h('li', {}, e))) : null,
+              g.issue_keys?.length ? h('button', {type: 'button', class: 'btn small', onclick: () => { const i = issuesNow.findIndex(x => g.issue_keys.includes(x.key)); dlg.close(); openWalk(Math.max(0, i)); }}, 'Show in sheet') : null))
+            : h('p', {class: 'note'}, 'No open errors.')),
+          h('section', {}, h('h3', {}, `Summary of suggested changes · ${allIds.length}`),
+            sum.change_groups.length ? sum.change_groups.map(g => {
+              const ids = g.fix_ids.filter(id => changeOf(id)), open = ids.filter(id => !stateOf(id)), done = ids.filter(id => stateOf(id) === 'accepted');
+              return h('div', {class: 'fx-card chg-card' + (open.length ? '' : ' done')},
+                h('div', {class: 'fx-head'}, h('span', {class: 'risk ' + g.risk}, g.risk === 'safe' ? 'Safe' : 'Check first'), h('b', {}, g.title), h('span', {class: 'fx-count'}, String(ids.length))),
+                h('p', {}, g.explanation),
+                h('ul', {class: 'fx-ex mono'}, ids.slice(0, 5).map(id => { const c = changeOf(id); return h('li', {}, h('button', {type: 'button', class: 'cellref', onclick: () => { dlg.close(); showCell(c.sheet, c.cell); }}, `${c.sheet} ${c.cell}`), ' ', h('s', {}, c.before || '(blank)'), ' → ', h('b', {}, c.after || '(blank)')); }),
+                  ids.length > 5 ? h('li', {class: 'more'}, `…and ${ids.length - 5} more`) : null),
+                h('div', {class: 'fx-act'}, open.length ? h('button', {type: 'button', class: 'btn primary small', onclick: () => { const n = applyIds(open); toast(`${n} change${n === 1 ? '' : 's'} added.`); refresh(); }}, open.length === 1 ? (ids.length === 1 ? 'Apply this change' : 'Apply the last one') : `Apply ${open.length === ids.length ? 'these' : 'the other'} ${open.length}`) : h('span', {class: 'tagok'}, `✓ ${done.length} applied`),
+                  done.length && !g.fix_ids.every(id => id.startsWith('edit:')) ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { unapply(done); refresh(); }}, 'Undo') : null));
+            }) : h('p', {class: 'note'}, 'No suggested changes. Use the chat or the sheet to make your own.')))),
+      h('div', {class: 'fixer-bar'}, h('span', {}, ready ? `${ready} change${ready === 1 ? '' : 's'} ready for the corrected copy` : 'No changes chosen yet'),
+        waiting.length ? h('button', {type: 'button', class: 'btn', onclick: () => { const n = applyIds(waiting); toast(`${n} change${n === 1 ? '' : 's'} added.`); refresh(); }}, `Apply all ${waiting.length}`) : null,
+        h('button', {type: 'button', class: 'btn primary', disabled: !ready && !waiting.length, onclick: () => { applyIds(waiting); dlg.close(); drawFixes(); downloadWithChanges(); }},
+          waiting.length ? 'Apply all and download' : 'Download corrected copy')));
   }
 
   // ---------------- guided review: one issue at a time, shown in the sheet
