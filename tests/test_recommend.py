@@ -133,3 +133,23 @@ class Endpoints(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class IndexBudget(unittest.TestCase):
+    def test_index_missing_stops_on_time(self):
+        import time
+        from hosting.spreadsheet_inbox import SpreadsheetInbox
+        inbox = SpreadsheetInbox.__new__(SpreadsheetInbox)
+        calls = []
+
+        class DB:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def execute(self, *a):
+                class R:
+                    def fetchall(_): return [{'file_hash': str(i)} for i in range(10)]
+                return R()
+        inbox.connect = lambda: DB()
+        inbox.index_vins = lambda h: (calls.append(h), time.sleep(0.2))
+        left = inbox.index_missing(seconds=0.5)
+        self.assertLessEqual(len(calls), 4); self.assertEqual(left, 10 - len(calls))

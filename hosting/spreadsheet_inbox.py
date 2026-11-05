@@ -318,13 +318,20 @@ class SpreadsheetInbox:
             db.execute('DELETE FROM vin_index WHERE file_hash=?', (file_hash,))
             db.executemany('INSERT INTO vin_index (ident, shown, file_hash, sheet, row) VALUES (?,?,?,?,?)', rows)
             db.execute('INSERT OR IGNORE INTO vin_indexed (file_hash) VALUES (?)', (file_hash,))
-    def index_missing(self, budget=40):
-        """Index reports uploaded before the index existed (a few at a time). Returns how many are still left."""
+    def index_missing(self, budget=40, seconds=4.0):
+        """Index reports uploaded before the index existed, a few at a time and never for more than `seconds`
+        (the whole workspace is locked while a request runs, so this must stay short). Returns how many are left."""
+        import time
+        stop = time.monotonic() + seconds
         with self.connect() as db:
             todo = [r['file_hash'] for r in db.execute('SELECT file_hash FROM spreadsheets WHERE file_hash NOT IN (SELECT file_hash FROM vin_indexed) ORDER BY seq DESC').fetchall()]
+        done = 0
         for h in todo[:budget]:
+            if time.monotonic() >= stop:
+                break
             self.index_vins(h)
-        return max(0, len(todo) - budget)
+            done += 1
+        return len(todo) - done
     def find_vin(self, query, limit=50):
         from hosting.source_compare import identify
         q = self.vin_key(query)
@@ -344,7 +351,7 @@ class SpreadsheetInbox:
         out = [dict(identifier=x['shown'], exact=x['ident'] == q, file_hash=x['file_hash'], sheet=x['sheet'], row=x['row'], **meta[x['file_hash']]) for x in hits]
         out.sort(key=lambda m: (not m['exact'], m['day'] or '', m['filename']), reverse=False)
         return dict(query=query, results=out, still_indexing=left)
-    def repeats_elsewhere(self, file_hash, limit=20):
+    def repeats_elsewhere(self, file_hash, limit=20, index_old=True):
         """VINs in this report that are also in the same job's report for a different day: a re-sent old file, or a car counted twice."""
         from hosting.source_compare import identify
         item = self.get(file_hash)
@@ -352,7 +359,8 @@ class SpreadsheetInbox:
         if not job or not day:
             return []
         self.index_vins(file_hash)
-        self.index_missing()
+        if index_old:
+            self.index_missing(budget=3, seconds=2.0)   # older reports get indexed a few per view, never blocking for long
         with self.connect() as db:
             rows = db.execute('SELECT DISTINCT b.ident, b.shown, b.file_hash FROM vin_index a JOIN vin_index b ON a.ident = b.ident AND b.file_hash != a.file_hash '
                               'WHERE a.file_hash=? LIMIT 2000', (file_hash,)).fetchall()
@@ -373,8 +381,12 @@ class SpreadsheetInbox:
         out.sort(key=lambda x: (x['day'], x['vin']))
         return out[:limit] if limit else out
     def vins_in(self, file_hashes):
-        """{file_hash: set of VIN keys}."""
+        """{file_hash: set of VIN keys}. Indexing old reports stops after a few seconds; the rest are indexed on later views."""
+        import time
+        stop = time.monotonic() + 6.0
         for h in file_hashes:
+            if time.monotonic() >= stop:
+                break
             self.index_vins(h)
         out = {h: set() for h in file_hashes}
         with self.connect() as db:

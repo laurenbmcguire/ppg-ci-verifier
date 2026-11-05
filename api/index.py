@@ -715,7 +715,7 @@ class handler(BaseHTTPRequestHandler):
                     except Exception:
                         waiting = 0
                     try:
-                        repeats = inbox.repeats_elsewhere(file_hash)
+                        repeats = inbox.repeats_elsewhere(file_hash, index_old=False)
                     except Exception:
                         repeats = []
                     facts = dict(recommend.report_facts(item, summarize(item), waiting), vins_on_other_days=repeats[:10], vins_on_other_days_count=len(repeats))

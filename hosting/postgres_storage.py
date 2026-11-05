@@ -44,6 +44,7 @@ class PostgresWorkspace:
                 # Bounded waits; one row lock serializes concurrent requests.
                 cur.execute("SET LOCAL lock_timeout = '5s'")
                 cur.execute("SET LOCAL statement_timeout = '120s'")
+                cur.execute("SET LOCAL idle_in_transaction_session_timeout = '120s'")  # a stalled request never holds the workspace lock for long
                 cur.execute('INSERT INTO ci_verifier_state(namespace) VALUES (%s) ON CONFLICT DO NOTHING', (NAMESPACE,))
                 cur.execute('SELECT payload, revision FROM ci_verifier_state WHERE namespace=%s FOR UPDATE', (NAMESPACE,))
                 row = cur.fetchone()
