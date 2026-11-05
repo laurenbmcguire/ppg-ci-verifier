@@ -23,12 +23,9 @@ from hosting.sqlite_storage import local_environment, SQLiteWorkspace
 
 FILES = {'/development-examples.js': 'development-examples.js', '/': 'index.html', '/ui.js': 'ui.js', '/report-ui.js': 'report-ui.js',
          '/style.css': 'style.css', '/spreadsheet-ui.js': 'spreadsheet-ui.js', '/workflow-ui.js':'workflow-ui.js', '/assets/ppg-client-intelligence.png': 'assets/ppg-client-intelligence.png',
-         '/app.js': 'app.js', '/app.css': 'app.css', '/assets/fonts/barlow-400.woff2': 'assets/fonts/barlow-400.woff2',
-         '/assets/fonts/barlow-500.woff2': 'assets/fonts/barlow-500.woff2', '/assets/fonts/barlow-600.woff2': 'assets/fonts/barlow-600.woff2',
-         '/assets/fonts/barlow-condensed-600.woff2': 'assets/fonts/barlow-condensed-600.woff2',
-         '/assets/fonts/barlow-condensed-700.woff2': 'assets/fonts/barlow-condensed-700.woff2'}
+         '/app.js': 'app.js', '/app.css': 'app.css'}
 TYPES = {'html': 'text/html; charset=utf-8', 'js': 'text/javascript; charset=utf-8',
-         'css': 'text/css; charset=utf-8', 'png': 'image/png', 'woff2': 'font/woff2'}
+         'css': 'text/css; charset=utf-8', 'png': 'image/png'}
 MAX_RESPONSE_BYTES = 3 * 1024 * 1024
 
 def encode_json(data):

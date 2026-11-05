@@ -28,10 +28,10 @@ PLAIN = {
 
 
 def _plain(f):
-    text = f.get('message')
-    if text:
-        return text
     code = f.get('code') or ''
+    text = f.get('message')
+    if text and text.strip() != code:
+        return text
     return PLAIN.get(code) or (code.replace('_', ' ').capitalize() + '.')
 
 

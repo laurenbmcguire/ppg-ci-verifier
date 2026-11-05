@@ -3,38 +3,52 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PPG Report Desk</title>
+<title>PPG Verifier • Review desk</title>
 <link rel="icon" href="/assets/ppg-client-intelligence.png">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<header class="bar">
-  <a class="brand" href="#" aria-label="PPG Report Desk home"><img src="/assets/ppg-client-intelligence.png" alt=""><span>Report Desk</span></a>
+<aside class="rail" aria-label="Navigation">
+  <div class="brand"><img src="/assets/ppg-client-intelligence.png" alt="PPG Quality Client Intelligence"></div>
+  <a class="nav active" href="#">Reports &amp; review</a>
+  <label class="nav" for="file-input">Upload report</label>
   <div class="connections" id="connections" aria-label="Connections"></div>
-  <label class="upload-button" for="file-input">Upload report<input id="file-input" type="file" accept=".xlsx,.csv" multiple></label>
-</header>
+  <div class="rail-note">PPG VERIFIER<br>Cloud database<br><br>Behind Vercel sign-in.<br>Nothing is sent to clients.</div>
+</aside>
 
-<main class="desk" id="desk">
-  <aside class="queue" id="queue" aria-label="Reports">
-    <div class="queue-tools">
-      <input id="search" type="search" placeholder="Search job, file or date" aria-label="Search reports">
-      <div class="segmented" role="group" aria-label="Show">
-        <button type="button" data-filter="attention" class="on">Needs attention</button>
-        <button type="button" data-filter="all">All</button>
+<main class="shell">
+  <img class="mobile-brand" src="/assets/ppg-client-intelligence.png" alt="PPG Quality Client Intelligence">
+  <header class="top">
+    <div>
+      <p class="eyebrow">REVIEW DESK / PPG VERIFIER</p>
+      <h1>End-of-shift reports</h1>
+      <p>Upload a report and it is checked for duplicates, typos and math, compared with SharePoint and the job’s usual day, and read by AI. Accept fixes and download a corrected copy. The original is never changed.</p>
+    </div>
+    <label class="upload-button primary" for="file-input">Upload report<input id="file-input" type="file" accept=".xlsx,.csv" multiple></label>
+  </header>
+
+  <div class="desk" id="desk">
+    <section class="queue card" id="queue" aria-label="Reports">
+      <div class="queue-tools">
+        <input id="search" type="search" placeholder="Search job, file or date" aria-label="Search reports">
+        <div class="segmented" role="group" aria-label="Show">
+          <button type="button" data-filter="attention" class="on">Needs attention</button>
+          <button type="button" data-filter="all">All</button>
+        </div>
       </div>
-    </div>
-    <div id="uploads" aria-live="polite"></div>
-    <div id="queue-list" class="queue-list"></div>
-  </aside>
+      <div id="uploads" aria-live="polite"></div>
+      <div id="queue-list" class="queue-list"></div>
+    </section>
 
-  <section class="report" id="report" aria-live="polite">
-    <div class="empty" id="empty">
-      <div class="tag tag-big tag-idle"><span>Ready</span></div>
-      <h1>Drop an end-of-shift report here</h1>
-      <p>Excel or CSV, any layout. Each upload is checked for duplicates, typos and math, compared with SharePoint and with the job's usual day, and read by AI. You can accept fixes and download a corrected copy. The original is never changed.</p>
-      <label class="upload-button big" for="file-input">Choose a report</label>
-    </div>
-  </section>
+    <section class="report" id="report" aria-live="polite">
+      <div class="empty card" id="empty">
+        <h2>Pick a report or upload one</h2>
+        <p>Drop an Excel (.xlsx) or CSV end-of-shift report anywhere on this page, or use Upload report. Any layout works.</p>
+        <label class="upload-button primary" for="file-input">Choose a report</label>
+      </div>
+    </section>
+  </div>
+  <footer>PPG Verifier • Cloud database • Behind Vercel sign-in • Reviewer identity is not yet tracked • No automatic business sign-off</footer>
 </main>
 
 <div class="drop" id="drop" hidden><div><strong>Drop to check</strong><span>Excel (.xlsx) or CSV</span></div></div>
