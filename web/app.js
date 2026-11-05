@@ -127,6 +127,7 @@
         h('div', {class: 'meta'}, `${dayLabel(rv.day)}. ${r.filename}, version ${r.version}, uploaded ${ago(r.received_at)}.`))));
     wrap.append(h('div', {class: 'actions'},
       h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, 'Download report'),
+      h('button', {type: 'button', class: 'btn chat-btn', onclick: openChat}, 'Chat with Claude'),
       h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download original'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('sharepoint', 'Checking SharePoint…')}, 'Check SharePoint again'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('baseline', 'Comparing with earlier days…')}, 'Compare with usual day'),
@@ -141,6 +142,7 @@
     wrap.append(h('div', {class: 'dlbar', id: 'dlbar', hidden: true}, h('span', {}), h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, 'Download report')));
     $('report').replaceChildren(wrap);
     updateDownloads();
+    drawChat();
     if (state.fixes) drawFixes();
     state.grid = null; state.gridSheet = null; state.gridCell = null;
     loadGrid();
@@ -278,7 +280,8 @@
       const input = h('input', {value: e.after, 'aria-label': `New value for ${e.sheet} ${e.cell}`, onchange: ev => {
         const all = store.get(editsKey(), {}); if (all[id]) { all[id].after = ev.target.value; store.set(editsKey(), all); drawFixes(); } }});
       panel.append(h('div', {class: 'fix accepted mine'},
-        h('div', {class: 'where'}, `Your edit · ${e.sheet}, cell ${e.cell}` + (e.header ? ` (${e.header})` : '')),
+        h('div', {class: 'where'}, `${e.source === 'Claude' ? 'Claude (chat)' : 'Your edit'} · ${e.sheet}, cell ${e.cell}` + (e.header ? ` (${e.header})` : '')),
+        e.reason ? h('p', {class: 'why'}, e.reason) : null,
         h('div', {class: 'choose'}, h('button', {type: 'button', class: 'btn small', onclick: () => {
           const all = store.get(editsKey(), {}); delete all[id]; store.set(editsKey(), all); drawFixes(); }}, 'Remove')),
         h('div', {class: 'change'}, h('span', {class: 'before'}, e.before === '' ? '(blank)' : e.before), h('span', {'aria-hidden': 'true'}, '→'),
@@ -301,6 +304,7 @@
     block.append(panel);
     drawGrid();
     updateDownloads();
+    if (!state.chatBusy) drawChat();
   }
   function readyChanges() {
     if (!state.report) return {accepted: [], dec: {}, edits: {}, total: 0};
@@ -331,7 +335,7 @@
       });
       for (const e of Object.values(edits || {})) {
         const numeric = e.after.trim() !== '' && !isNaN(Number(e.after.replace(/,/g, ''))) && (e.before === '' || !isNaN(Number(e.before)));
-        changes.push({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: 'Edited by reviewer', source: 'Your edit', kind: numeric ? 'number' : 'text'});
+        changes.push({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: e.reason || 'Edited by reviewer', source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit', kind: numeric ? 'number' : 'text'});
       }
       const answer = await api('/api/spreadsheets/apply-fixes', {file_hash: state.report.file_hash, changes});
       store.set(decisionsKey(), {}); store.set(editsKey(), {});
@@ -457,6 +461,106 @@
         h('span', {class: 'k fx'}, 'Formula')),
       ...[tabs, scroller, cellPanel(m), g.truncated ? h('p', {class: 'note'}, 'Large sheet: only the first rows and columns are shown.') : null].filter(Boolean));
     if (scroll) requestAnimationFrame(() => reveal(scroller, first, false));
+  }
+
+  // ---------------- chat with Claude: ask questions, have it make the changes
+  const chatKey = () => 'rd-chat:' + state.report.file_hash;
+  function queuedList() {
+    const c = readyChanges();
+    return [...c.accepted.map(f => ({sheet: f.sheet, cell: f.cell, before: f.before, after: c.dec[f.id]?.after ?? f.after, source: f.source})),
+      ...Object.values(c.edits).map(e => ({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, source: e.source || 'Your edit'}))];
+  }
+  function applyChat(msg) {
+    const edits = store.get(editsKey(), {}), dec = store.get(decisionsKey(), {});
+    msg.prev = {};
+    for (const u of msg.undo || []) {
+      const id = editId(u.sheet, u.cell);
+      if (edits[id]) { msg.prev[id] = edits[id]; delete edits[id]; }
+      for (const f of state.fixes || []) if (f.sheet === u.sheet && f.cell === u.cell && dec[f.id]?.state === 'accepted') { dec[f.id] = {state: 'rejected', after: dec[f.id].after}; (msg.rejected ||= []).push(f.id); }
+    }
+    for (const ch of msg.changes || []) {
+      const id = editId(ch.sheet, ch.cell);
+      if (!(id in msg.prev)) msg.prev[id] = edits[id] || null;
+      edits[id] = {sheet: ch.sheet, cell: ch.cell, before: ch.before, after: ch.after, header: '', source: 'Claude', reason: ch.reason};
+    }
+    msg.applied = true;
+    store.set(editsKey(), edits); store.set(decisionsKey(), dec);
+  }
+  function undoChat(msg) {
+    const edits = store.get(editsKey(), {}), dec = store.get(decisionsKey(), {});
+    for (const [id, prev] of Object.entries(msg.prev || {})) { if (prev) edits[id] = prev; else delete edits[id]; }
+    for (const fid of msg.rejected || []) if (dec[fid]) dec[fid].state = 'accepted';
+    msg.applied = false;
+    store.set(editsKey(), edits); store.set(decisionsKey(), dec);
+  }
+  function openChat() {
+    let panel = $('chat');
+    if (!panel) {
+      panel = h('aside', {id: 'chat', class: 'chat', 'aria-label': 'Chat with Claude'});
+      document.body.append(panel);
+    }
+    panel.hidden = false; document.body.classList.add('chatting');
+    drawChat(); panel.querySelector('textarea')?.focus();
+  }
+  function closeChat() { const p = $('chat'); if (p) p.hidden = true; document.body.classList.remove('chatting'); }
+  function drawChat() {
+    const panel = $('chat'); if (!panel || panel.hidden || !state.report) return;
+    const log = store.get(chatKey(), []);
+    const save = () => store.set(chatKey(), log);
+    const list = h('div', {class: 'chat-log', 'aria-live': 'polite'});
+    if (!log.length) list.append(h('div', {class: 'chat-hello'},
+      h('p', {}, 'Tell me what to change in this report, or ask about anything in it. I make the changes in a corrected copy; nothing is final until you download it.'),
+      h('div', {class: 'chat-ideas'}, ['Why is this report on hold?', 'Fix everything you safely can', 'Make the defect reason spellings match', 'Clear any duplicate rows']
+        .map(t => h('button', {type: 'button', class: 'chip', onclick: () => send(t)}, t)))));
+    for (const m of log) {
+      if (m.role === 'user') { list.append(h('div', {class: 'msg me'}, m.content)); continue; }
+      const n = (m.changes || []).length, u = (m.undo || []).length;
+      list.append(h('div', {class: 'msg ai' + (m.error ? ' err' : '')}, h('div', {class: 'txt'}, m.content),
+        n || u ? h('div', {class: 'chg'},
+          h('div', {class: 'chg-head'}, h('b', {}, m.applied ? `✓ ${n ? `Changed ${n} cell${n === 1 ? '' : 's'}` : ''}${n && u ? ', ' : ''}${u ? `undid ${u}` : ''}` : 'Changes undone'),
+            h('button', {type: 'button', class: 'btn small', onclick: () => { m.applied ? undoChat(m) : applyChat(m); save(); drawFixes(); drawChat(); }}, m.applied ? 'Undo' : 'Redo')),
+          h('ul', {}, (m.changes || []).slice(0, 30).map(ch => h('li', {}, h('button', {type: 'button', class: 'cellref', onclick: () => showCell(ch.sheet, ch.cell)}, `${ch.sheet} ${ch.cell}`), ' ',
+            h('s', {}, ch.before || '(blank)'), ' → ', h('b', {}, ch.after || '(blank)'))), (m.changes || []).length > 30 ? h('li', {}, `…and ${(m.changes || []).length - 30} more`) : null),
+          (m.dropped || []).length ? h('p', {class: 'skipnote'}, `Skipped ${m.dropped.length}: ` + m.dropped.slice(0, 4).map(d => `${d.cell} (${d.why})`).join(', ')) : null) : null));
+    }
+    if (state.chatBusy) list.append(h('div', {class: 'msg ai'}, h('span', {class: 'spin'}), ' Claude is reading the report…'));
+    const box = h('textarea', {rows: 2, placeholder: 'e.g. Change the auditor on every row to Robert Swanke', 'aria-label': 'Message to Claude'});
+    box.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(box.value); } });
+    const c = readyChanges();
+    panel.replaceChildren(
+      h('div', {class: 'chat-top'}, h('b', {}, 'Chat with Claude'), h('span', {class: 'hint'}, state.report.review?.job || ''),
+        log.length ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { store.set(chatKey(), []); drawChat(); }}, 'New chat') : null,
+        h('button', {type: 'button', class: 'btn ghost small', onclick: closeChat}, 'Close')),
+      list,
+      h('form', {class: 'chat-send', onsubmit: e => { e.preventDefault(); send(box.value); }}, box,
+        h('button', {type: 'submit', class: 'btn primary', disabled: !!state.chatBusy}, 'Send')),
+      c.total ? h('div', {class: 'chat-dl'}, h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, `Download with ${c.total} change${c.total === 1 ? '' : 's'}`)) : null);
+    requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
+    async function send(text) {
+      text = (text || '').trim(); if (!text || state.chatBusy) return;
+      const hash = state.report.file_hash;
+      log.push({role: 'user', content: text}); save();
+      state.chatBusy = true; drawChat();
+      try {
+        const out = await api('/api/spreadsheets/chat', {file_hash: hash, messages: log.filter(m => !m.error).map(m => ({role: m.role, content: m.content})), queued: queuedList()});
+        if (state.report?.file_hash !== hash) return;
+        const msg = {role: 'assistant', content: out.reply || 'Done.', changes: out.changes || [], undo: out.undo || [], dropped: out.dropped || []};
+        if (msg.changes.length || msg.undo.length) applyChat(msg);
+        log.push(msg); save();
+        drawFixes();
+        if (msg.changes[0]) showCell(msg.changes[0].sheet, msg.changes[0].cell, true);
+      } catch (e) {
+        log.push({role: 'assistant', content: e.message, error: true}); save();
+      } finally { state.chatBusy = false; drawChat(); }
+    }
+  }
+  async function showCell(sheet, cell, quiet) {
+    if (!state.grid || state.grid.sheet !== sheet) await loadGrid(sheet);
+    state.gridCell = cell; drawGrid();
+    const td = document.querySelector(`#sheet-block td[data-cell="${cell}"]`), wrap = document.querySelector('#sheet-block .gridwrap');
+    if (!td || !wrap) return;
+    if (!quiet) $('sheet-block').scrollIntoView({behavior: 'smooth', block: 'start'});
+    reveal(wrap, td, true);
   }
 
   // ---------------- guided review: one issue at a time, shown in the sheet

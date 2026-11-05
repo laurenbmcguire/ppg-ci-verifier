@@ -349,3 +349,42 @@ def make_ai_fixes(item, raw, issues, opener=None):
         kept.append(dict(f, before=shown, id=_pid(f['sheet'], f['cell'], f['after'])))
     return dict(status='done', model=answer['model'], made_at=datetime.now(timezone.utc).isoformat(),
                 fixes=kept, skipped=answer['skipped'], dropped=dropped)
+
+
+def validate_changes(item, raw, changes):
+    """Keep only changes that fit the file exactly (current value matches, not a formula, one per cell)."""
+    from hosting.fixes import _sources, _cell_value, _show, _addr, FixError
+    sources, _ = _sources(item['filename'], raw)
+    kept, seen, dropped = [], set(), []
+    for f in changes:
+        try:
+            _addr(f['cell'])
+            current = _cell_value(sources, f['sheet'], f['cell'])
+        except FixError as exc:
+            dropped.append(dict(f, why=str(exc)))
+            continue
+        shown = _show(current)
+        if isinstance(current, str) and current.startswith('='):
+            dropped.append(dict(f, why='formula cell')); continue
+        if (f['sheet'], f['cell']) in seen:
+            dropped.append(dict(f, why='same cell twice')); continue
+        if f['after'] == shown:
+            dropped.append(dict(f, why='already that value')); continue
+        if f['before'].strip() != shown.strip():
+            dropped.append(dict(f, why=f'cell holds "{shown}"')); continue
+        seen.add((f['sheet'], f['cell']))
+        kept.append(dict(f, before=shown))
+    return kept, dropped
+
+
+def chat_turn(item, raw, issues, messages, queued, opener=None):
+    from hosting import ai_review
+    try:
+        answer = ai_review.chat(item, raw, issues, messages, queued, opener=opener)
+    except ai_review.AIReviewNotConfigured as exc:
+        return dict(status='not_configured', message=str(exc))
+    except ai_review.AIReviewError as exc:
+        return dict(status='error', message=str(exc))
+    kept, dropped = validate_changes(item, raw, answer['changes'])
+    return dict(status='done', reply=answer['reply'], changes=kept, undo=answer['undo'],
+                dropped=[dict(sheet=d['sheet'], cell=d['cell'], why=d.get('why')) for d in dropped])

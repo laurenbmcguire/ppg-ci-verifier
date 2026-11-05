@@ -191,6 +191,36 @@ table.grid{border-collapse:collapse;font:12px/1.35 -apple-system,BlinkMacSystemF
 .cp-edit label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:var(--btn-ink);flex:1;min-width:200px}
 .cp-edit input{font:13px ui-monospace,Menlo,monospace;padding:8px;border:1px solid var(--btn-line);border-radius:6px}
 
+/* chat with Claude */
+.chat{position:fixed;top:0;right:0;bottom:0;z-index:40;width:420px;max-width:100vw;background:#fff;border-left:1px solid var(--line);box-shadow:-10px 0 30px rgba(20,60,59,.12);display:flex;flex-direction:column}
+body.chatting .shell{margin-right:420px}
+.chat-top{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--line);background:#143c3b;color:#f0f7f4}
+.chat-top b{font-size:15px}
+.chat-top .hint{flex:1;font-size:12px;color:#b1cbc4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-top .btn{color:#f0f7f4;border-color:transparent;background:none}
+.chat-top .btn:hover{background:#29504d}
+.chat-log{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:10px;background:#f6f9f7}
+.chat-hello p{margin:0 0 12px;color:var(--muted);font-size:14px}
+.chat-ideas{display:flex;flex-wrap:wrap;gap:6px}
+.msg{max-width:92%;padding:10px 13px;border-radius:12px;font-size:14px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
+.msg.me{align-self:flex-end;background:var(--green);color:#fff;border-bottom-right-radius:4px}
+.msg.ai{align-self:flex-start;background:#fff;border:1px solid var(--line);border-bottom-left-radius:4px;color:var(--ink)}
+.msg.ai.err{background:#ffe5dc;color:#7c3422;border-color:#f3c3b4}
+.chg{margin-top:10px;padding-top:10px;border-top:1px solid var(--line-2);white-space:normal}
+.chg-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;color:var(--ok-ink)}
+.chg ul{margin:8px 0 0;padding:0;list-style:none;font-size:12px;display:grid;gap:4px}
+.chg li{font-family:ui-monospace,Menlo,monospace;overflow-wrap:anywhere}
+.chg s{color:#a0463a}
+.cellref{border:0;background:#e4f1ec;color:var(--green);padding:1px 6px;border-radius:4px;font:600 11px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer}
+.chg .skipnote{margin:8px 0 0;font-size:12px;color:var(--med-ink)}
+.chat-send{display:flex;gap:8px;padding:12px;border-top:1px solid var(--line)}
+.chat-send textarea{flex:1;resize:none;font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:9px 11px;border:1px solid var(--btn-line);border-radius:8px;color:var(--ink)}
+.chat-send .btn{align-self:stretch}
+.chat-dl{padding:0 12px 12px}
+.chat-dl .btn{width:100%}
+.btn.chat-btn{border-color:var(--green);color:var(--green)}
+@media (max-width:1200px){body.chatting .shell{margin-right:0}.chat{width:min(420px,100vw)}}
+
 /* download bar */
 .dlbar{position:sticky;bottom:12px;z-index:5;display:flex;align-items:center;gap:14px;margin-top:16px;padding:14px 18px;background:#143c3b;color:#f0f7f4;border-radius:10px;box-shadow:0 10px 30px rgba(20,60,59,.3)}
 .dlbar span{flex:1;font-size:14px}

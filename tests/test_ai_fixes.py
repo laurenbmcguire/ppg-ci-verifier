@@ -51,3 +51,34 @@ class AIFixTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             out = make_ai_fixes({'filename': NAME, 'findings': []}, self.raw, [dict(severity='high', text='x')])
         self.assertEqual(out['status'], 'not_configured')
+
+
+def chat_opener(reply, changes, undo=()):
+    body = {'model': 'test-model', 'content': [{'type': 'tool_use', 'name': 'respond_to_reviewer', 'input': {'reply': reply, 'changes': changes, 'undo': list(undo)}}]}
+    return lambda request, timeout=None: FakeResponse(json.dumps(body).encode())
+
+
+class ChatTests(unittest.TestCase):
+    @patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test'})
+    def test_chat_turn_validates_changes(self):
+        from hosting.spreadsheet_inbox import chat_turn
+        raw = build(ROWS)
+        item = {'filename': NAME, 'findings': [], 'sheets': [], 'totals': {}}
+        out = chat_turn(item, raw, [], [{'role': 'user', 'content': 'set area'}], [],
+                        opener=chat_opener('Done.', [dict(sheet='1st Shift', cell='C16', before='', after='VPC', reason='blank'),
+                                                     dict(sheet='1st Shift', cell='K17', before='27', after='99', reason='formula')],
+                                           [dict(sheet='1st Shift', cell='E17')]))
+        self.assertEqual(out['status'], 'done')
+        self.assertEqual(out['reply'], 'Done.')
+        self.assertEqual([c['cell'] for c in out['changes']], ['C16'])
+        self.assertEqual(out['dropped'][0]['why'], 'formula cell')
+        self.assertEqual(out['undo'], [dict(sheet='1st Shift', cell='E17')])
+
+    @patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test'})
+    def test_plain_text_answer_is_accepted(self):
+        from hosting.spreadsheet_inbox import chat_turn
+        body = {'model': 'm', 'content': [{'type': 'text', 'text': 'It is on hold because of the totals.'}]}
+        out = chat_turn({'filename': NAME, 'findings': []}, build(ROWS), [], [{'role': 'user', 'content': 'why hold?'}], [],
+                        opener=lambda r, timeout=None: FakeResponse(json.dumps(body).encode()))
+        self.assertEqual(out['reply'], 'It is on hold because of the totals.')
+        self.assertEqual(out['changes'], [])
