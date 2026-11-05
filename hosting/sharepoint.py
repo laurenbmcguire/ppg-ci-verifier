@@ -413,3 +413,44 @@ def list_history(job, before_day, limit=10, opener=None, schedule=None):
         if d and d < before_day:
             by_day.setdefault(d, []).append(it)
     return [(d, f'{job} {d} (SharePoint list).csv', _items_csv(names, by_day[d])) for d in sorted(by_day, reverse=True)[:limit]]
+
+
+# ---------------------------------------------------------------- clients: one per company, from the client sites
+_clients_cache = {'until': 0, 'value': None}
+CLIENTS_TTL = 1800
+
+
+NICE_NAMES = {'BriggsStratton': 'Briggs & Stratton', 'PrattWhitney': 'Pratt & Whitney', 'Hyundai': 'Hyundai (HMMA)'}
+
+
+def _words(name):
+    """'BriggsStratton' -> 'Briggs Stratton', 'HyundaiMobisAlabama' -> 'Hyundai Mobis Alabama', 'Lear' -> 'Lear'."""
+    return re.sub(r'(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', ' ', name.replace('-', ' ')).strip()
+
+
+def clients(opener=None, refresh=False):
+    """[{client, sites: [{site, location, url}], jobs: [{job, number, site}]}], one per company, from each client
+    site's "Data #<job>" lists. Cached for 30 minutes."""
+    if not configured():
+        raise SharePointNotConfigured('SharePoint is not connected.')
+    if not refresh and _clients_cache['value'] is not None and _clients_cache['until'] > time.time():
+        return _clients_cache['value']
+    out = {}
+    for name, site_id in _sites(opener):
+        company, _, location = name.partition('_')
+        c = out.setdefault(company, dict(client=NICE_NAMES.get(company) or _words(company), key=company, sites=[], jobs=[]))
+        site = _get(f'/sites/{site_id}?$select=webUrl,displayName', opener) or {}
+        c['sites'].append(dict(site=name, location=_words(location) if location else '', url=site.get('webUrl')))
+        lists = _get(f'/sites/{site_id}/lists?$select=id,displayName,webUrl&$top=500', opener) or {}
+        for lst in lists.get('value', []):
+            title = (lst.get('displayName') or '').strip()
+            if not title.lower().startswith('data #'):
+                continue
+            job = title[6:].strip()
+            numbers = sorted({t for t in re.split(r'[^0-9]+', job) if len(t) >= 3})
+            c['jobs'].append(dict(job=job, numbers=numbers, site=name, url=lst.get('webUrl')))
+    value = sorted(out.values(), key=lambda c: c['client'].lower())
+    for c in value:
+        c['jobs'].sort(key=lambda j: j['job'])
+    _clients_cache.update(until=time.time() + CLIENTS_TTL, value=value)
+    return value

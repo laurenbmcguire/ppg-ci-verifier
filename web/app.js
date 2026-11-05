@@ -50,15 +50,49 @@
       h('span', {class: 'conn' + (hh.ai_review_configured ? ' on' : '')}, h('i'), hh.ai_review_configured ? 'AI review on' : 'AI review off'));
   }).catch(() => {});
 
+  // ---------------------------------------------------------------- client tabs: one per client site on SharePoint
+  state.client = store.get('rd-client', '');
+  const jobNumbers = job => String(job || '').match(/\d{3,}/g) || [];
+  function clientOf(job) {
+    if (!job) return null;
+    const nums = jobNumbers(job), up = String(job).toUpperCase();
+    for (const c of state.clients || []) for (const j of c.jobs) if (j.job.toUpperCase() === up || nums.some(n => j.numbers.includes(n))) return c.key;
+    return null;
+  }
+  const inClient = job => !state.client || (state.client === '_none' ? !clientOf(job) : clientOf(job) === state.client);
+  const clientName = () => (state.clients || []).find(c => c.key === state.client)?.client || (state.client === '_none' ? 'other' : '');
+  async function loadClients(refresh) {
+    try { const out = await api('/api/clients', refresh ? {refresh: true} : {}); state.clients = out.clients || []; state.clientsError = out.error || null; }
+    catch (e) { state.clients = []; }
+    if (state.client && state.client !== '_none' && !state.clients.some(c => c.key === state.client)) { state.client = ''; store.set('rd-client', ''); }
+    drawClientTabs(); drawQueue();
+    if (location.hash === '#today') showToday();
+  }
+  function drawClientTabs() {
+    const bar = $('clienttabs'); if (!bar) return;
+    const cl = state.clients || [];
+    bar.hidden = !cl.length; if (!cl.length) return;
+    const ofKey = (r, key) => key === '' || (key === '_none' ? !clientOf(r.review?.job) : clientOf(r.review?.job) === key);
+    const need = key => state.list.filter(r => ofKey(r, key) && r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
+    const tab = (key, label, title) => { const n = need(key);
+      return h('button', {type: 'button', role: 'tab', class: state.client === key ? 'on' : '', 'aria-selected': String(state.client === key), title: title || null,
+        onclick: () => { state.client = key; store.set('rd-client', key); drawClientTabs(); drawQueue(); if (location.hash === '#today') showToday(); }},
+        label, n ? h('i', {title: `${n} report${n === 1 ? '' : 's'} need attention`}, String(n)) : null); };
+    const unmatched = state.list.some(r => r.review?.job && !clientOf(r.review.job));
+    bar.replaceChildren(...[tab('', 'All clients'),
+      ...cl.map(c => tab(c.key, c.client, `${c.sites.map(x => x.location || x.site).join(', ')}: ${c.jobs.length} job${c.jobs.length === 1 ? '' : 's'} on SharePoint`)),
+      unmatched ? tab('_none', 'Other', 'Reports whose job is not on a client site') : null].filter(Boolean));
+  }
+
   // ---------------------------------------------------------------- queue
   async function loadList() {
     const data = await api('/api/spreadsheets');
     state.list = data.spreadsheets || [];
-    drawQueue();
+    drawQueue(); drawClientTabs();
   }
   function drawQueue() {
     const q = state.search.trim().toLowerCase();
-    let rows = state.list.filter(r => !q || [r.filename, r.review?.job, r.review?.day].some(v => (v || '').toLowerCase().includes(q)));
+    let rows = state.list.filter(r => inClient(r.review?.job) && (!q || [r.filename, r.review?.job, r.review?.day].some(v => (v || '').toLowerCase().includes(q))));
     if (state.filter === 'attention') rows = rows.filter(r => !r.review || r.review.status !== 'clear');
     if (state.filter === 'review') rows = rows.filter(r => r.review?.review_state === 'waiting');
     document.querySelectorAll('.segmented button').forEach(b => b.classList.toggle('on', b.dataset.filter === state.filter));
@@ -73,7 +107,7 @@
     }
     if (!rows.length) {
       list.append(h('p', {class: 'queue-empty'}, state.list.length
-        ? (state.filter === 'review' && !q ? 'Nothing is waiting for review.' : state.filter === 'attention' && !q ? 'Every report is clear. Switch to All to see them.' : 'No reports match that search.')
+        ? (state.client && !q && !state.list.some(r => inClient(r.review?.job)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'Nothing is waiting for review.' : state.filter === 'attention' && !q ? 'Every report is clear. Switch to All to see them.' : 'No reports match that search.')
         : 'No reports yet. Upload an end-of-shift report to start.'));
       return;
     }
@@ -108,6 +142,8 @@
   function select(hash) { if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
   window.addEventListener('hashchange', route);
   async function route() {
+    document.body.classList.remove('reportmode');
+    document.body.dataset.page = (location.hash.match(/^#(today|overview|periods|checks|api)$/) || [])[1] || 'reports';
     document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === (['#api', '#checks', '#periods', '#today', '#overview'].includes(location.hash) ? location.hash : '#')));
     if (location.hash === '#overview') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showOverview(); return; }
     if (location.hash === '#today') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showToday(); return; }
@@ -143,51 +179,112 @@
 
   function drawReport() {
     const r = state.report, rv = r.review;
-    const wrap = h('div', {class: 'sheetwrap'});
-    wrap.append(h('button', {type: 'button', class: 'back', onclick: () => { location.hash = ''; }}, '‹ All reports'));
-    // header with the inspection tag
-    wrap.append(h('div', {class: 'head'},
-      h('div', {class: `tag tag-big tag-${rv.status}`}, STATUS[rv.status], h('small', {}, statusNote(rv))),
-      h('div', {}, h('h1', {}, rv.job || r.filename),
-        h('div', {class: 'meta'}, `${dayLabel(rv.day)}. ${r.filename}, version ${r.version}, uploaded ${ago(r.received_at)}.`))));
-    wrap.append(h('div', {class: 'actions'},
-      h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r)),
-      !r.approval && (r.review_request || {}).status !== 'waiting' ? h('button', {type: 'button', class: 'btn', onclick: () => reviewForm('request')}, 'Send for review') : null,
-      h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download report'),
-      h('button', {type: 'button', class: 'btn chat-btn', onclick: () => openFixer(false)}, 'AI worksheet fixer'),
-      h('button', {type: 'button', class: 'btn chat-btn', onclick: () => openDashboard(false)}, 'Create dashboard'),
-      h('button', {type: 'button', class: 'btn chat-btn', onclick: openChat}, 'Chat with Claude'),
-      h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download original'),
-      h('button', {type: 'button', class: 'btn', onclick: () => rerun('sharepoint', 'Checking SharePoint…')}, 'Check SharePoint again'),
-      h('button', {type: 'button', class: 'btn', onclick: () => rerun('baseline', 'Comparing with earlier days…')}, 'Compare with usual day'),
-      h('button', {type: 'button', class: 'btn', onclick: () => rerun('ai-review', 'Claude is reading the report…')}, rv.ai.status === 'done' ? 'Run AI review again' : 'Run AI review')));
-    if (r.built) wrap.append(builtBanner(r));
-    wrap.append(h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)));
-    wrap.append(h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
-    wrap.append(h('div', {id: 'shiftfix'}, ...[shiftCard(rv)].filter(Boolean)));
-    wrap.append(h('div', {id: 'finish'}));
-    wrap.append(h('div', {id: 'recs'}));
-    wrap.append(numbers(r));
-    wrap.append(nexusBlock(r));
-    wrap.append(h('section', {class: 'block', id: 'sheet-block'}, h('header', {}, h('h2', {}, 'Spreadsheet'), h('p', {}, 'Loading the file…'))));
-    wrap.append(h('section', {class: 'block', id: 'fixes-block'}, h('header', {}, h('h2', {}, 'Fixes'), h('p', {}, 'Loading suggested fixes…'))));
-    wrap.append(issuesBlock(rv));
-    wrap.append(sourcesBlock(r));
-    if ((r.other_days || []).length) wrap.append(h('section', {class: 'block', id: 'otherdays'},
-      h('header', {}, h('h2', {}, 'Already reported on another day'), h('p', {}, `${r.other_days.length >= 20 ? '20 or more' : r.other_days.length} VIN${r.other_days.length === 1 ? '' : 's'} in this report ${r.other_days.length === 1 ? 'is' : 'are'} also in another day's report for ${rv.job}. An old file sent again, or a car counted twice?`)),
-      h('ul', {class: 'otherdays'}, Object.values(r.other_days.reduce((g, x) => { (g[x.file_hash] ||= {...x, vins: []}).vins.push(x.vin); return g; }, {}))
-        .map(g => h('li', {}, h('b', {}, shortDay(g.day)), ' ', h('a', {href: '#r=' + g.file_hash}, g.filename), h('span', {}, g.vins.join(', ')))))));
-    const tl = timelineBlock(r); if (tl) wrap.append(tl);
-    wrap.append(readBlock(r));
-    if (rv.fixed_from || rv.fixes_applied) wrap.append(historyBlock(r));
-    wrap.append(h('div', {class: 'dlbar', id: 'dlbar', hidden: true}, h('span', {}), h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, 'Download report')));
-    $('report').replaceChildren(wrap);
+    document.body.classList.add('reportmode');
+    state.sideTab ||= 'fixes';
+    const close = e => e.target.closest('details')?.removeAttribute('open');
+    const more = h('details', {class: 'more-menu'}, h('summary', {class: 'btn'}, 'More'),
+      h('div', {class: 'menu'},
+        !r.approval && (r.review_request || {}).status !== 'waiting' ? h('button', {type: 'button', onclick: e => { close(e); reviewForm('request'); }}, 'Send for review') : null,
+        h('button', {type: 'button', onclick: e => { close(e); openDashboard(false); }}, 'Create dashboard'),
+        h('a', {href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename, onclick: close}, 'Download the original file')));
+    const head = h('div', {class: 'rhead'},
+      h('button', {type: 'button', class: 'back', onclick: () => { location.hash = ''; }}, '‹ All reports'),
+      h('div', {class: 'rtitle'},
+        h('span', {class: `tag tag-${rv.status}`, title: statusNote(rv)}, STATUS[rv.status], h('small', {}, statusNote(rv))),
+        h('h1', {}, rv.job || r.filename),
+        h('span', {class: 'meta'}, `${dayLabel(rv.day)} · ${r.filename} · version ${r.version} · uploaded ${ago(r.received_at)}`)),
+      h('div', {class: 'ractions'}, more,
+        h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download report'),
+        h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
+    const status = h('div', {class: 'rstatus'},
+      h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
+      h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
+    const ws = h('div', {class: 'workspace'},
+      h('section', {class: 'sheetpane', id: 'sheet-block', 'aria-label': 'Spreadsheet'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Loading the spreadsheet…')),
+      h('aside', {class: 'sidepane', id: 'side', 'aria-label': 'Facts and fixes'}));
+    $('report').replaceChildren(h('div', {class: 'rws'}, head, status, ws));
+    state.grid = null; state.gridSheet = null; state.gridCell = null; state.issueNav = null;
+    drawSide();
     updateDownloads();
-    drawChat();
-    loadReportRecs(false);
-    if (state.fixes) drawFixes();
-    state.grid = null; state.gridSheet = null; state.gridCell = null;
     loadGrid();
+  }
+
+  // ---------------- right-hand panel: Fixes (issues grouped by severity and type, suggested fixes), Facts, Ask Claude
+  const reviewedSet = () => new Set(store.get('rd-reviewed:' + state.report.file_hash, []));
+  function showSide(tab) { if (state.sideTab !== tab) { state.sideTab = tab; drawSide(); } }
+  function drawSideTabs() {
+    const bar = $('sidetabs'); if (!bar || !state.report) return;
+    const done = reviewedSet(), open = walkIssues().filter(i => !done.has(i.key)).length, tab = state.sideTab;
+    const btn = (id, label, badge) => h('button', {type: 'button', role: 'tab', class: tab === id ? 'on' : '', 'aria-selected': String(tab === id),
+      onclick: () => { if (id === 'claude') state.chatUnread = false; showSide(id); }}, label, badge ? h('i', {}, badge) : null);
+    bar.replaceChildren(btn('fixes', 'Fixes', open ? String(open) : null), btn('facts', 'Facts'), btn('claude', 'Ask Claude', state.chatUnread ? 'new' : null));
+  }
+  function drawSide() {
+    const side = $('side'), r = state.report; if (!side || !r) return;
+    const rv = r.review, tab = state.sideTab || 'fixes';
+    const body = h('div', {class: 'sidebody', id: 'side-body'});
+    side.replaceChildren(h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
+    drawSideTabs();
+    if (tab === 'fixes') {
+      body.append(h('div', {id: 'cellslot'}), h('div', {id: 'finish'}), h('div', {id: 'shiftfix'}, ...[shiftCard(rv)].filter(Boolean)), issuesBlock(rv),
+        h('section', {class: 'block', id: 'fixes-block'}, h('header', {}, h('h2', {}, 'Suggested fixes'), h('p', {}, 'Loading suggested fixes…'))));
+      drawCellSlot();
+      if (state.fixes) drawFixes(); else updateFinish();
+    } else if (tab === 'facts') {
+      body.append(h('div', {id: 'recs'}), numbers(r));
+      if (r.built) body.append(builtBanner(r));
+      body.append(sourcesBlock(r));
+      if ((r.other_days || []).length) body.append(h('section', {class: 'block', id: 'otherdays'},
+        h('header', {}, h('h2', {}, 'Already reported on another day'), h('p', {}, `${r.other_days.length >= 20 ? '20 or more' : r.other_days.length} VIN${r.other_days.length === 1 ? '' : 's'} in this report ${r.other_days.length === 1 ? 'is' : 'are'} also in another day's report for ${rv.job}. An old file sent again, or a car counted twice?`)),
+        h('ul', {class: 'otherdays'}, Object.values(r.other_days.reduce((g, x) => { (g[x.file_hash] ||= {...x, vins: []}).vins.push(x.vin); return g; }, {}))
+          .map(g => h('li', {}, h('b', {}, shortDay(g.day)), ' ', h('a', {href: '#r=' + g.file_hash}, g.filename), h('span', {}, g.vins.join(', ')))))));
+      body.append(nexusBlock(r));
+      const tl = timelineBlock(r); if (tl) body.append(tl);
+      body.append(readBlock(r));
+      if (rv.fixed_from || rv.fixes_applied || r.fixed_from || (r.fixes_applied || []).length) body.append(historyBlock(r));
+      loadReportRecs(false);
+    } else {
+      body.append(h('div', {id: 'chat', class: 'chat embedded', 'aria-label': 'Ask Claude'}));
+      drawChat();
+      body.querySelector('textarea')?.focus();
+    }
+  }
+  // the selected cell (and the issue being stepped through) at the top of the Fixes tab
+  function drawCellSlot() {
+    const slot = $('cellslot'); if (!slot || !state.report) return;
+    const list = walkIssues(), idx = state.issueNav, issue = idx != null ? list[idx] : null;
+    const kids = [];
+    if (issue) {
+      const done = reviewedSet();
+      const markNext = () => { done.add(issue.key); store.set('rd-reviewed:' + state.report.file_hash, [...done]); updateFinish();
+        const nextOpen = list.findIndex((x, k) => k > idx && !done.has(x.key)); if (nextOpen >= 0) focusIssue(nextOpen); else { state.issueNav = null; drawSide(); toast('That was the last open issue.'); } };
+      kids.push(h('div', {class: 'issuenav sev-' + issue.severity},
+        h('div', {class: 'in-top'}, h('span', {class: 'sev ' + issue.severity}), h('b', {}, `Issue ${idx + 1} of ${list.length}`), h('span', {class: 'in-type'}, issueType(issue)),
+          h('button', {type: 'button', class: 'btn ghost small', onclick: () => { state.issueNav = null; state.gridCell = null; drawGrid(); drawSide(); }}, 'Close')),
+        h('p', {class: 'in-text'}, issue.text),
+        issue.check ? h('p', {class: 'hint'}, 'Check: ' + issue.check) : null,
+        issue.verdict_reason ? h('p', {class: 'hint'}, 'Claude: ' + issue.verdict_reason) : null,
+        !issue.sheet && !issue.row ? h('p', {class: 'hint'}, 'This one is about the report as a whole, not one cell.') : null,
+        h('div', {class: 'in-nav'},
+          h('button', {type: 'button', class: 'btn small', disabled: idx === 0, onclick: () => focusIssue(idx - 1)}, '‹ Previous'),
+          h('button', {type: 'button', class: 'btn small', disabled: idx >= list.length - 1, onclick: () => focusIssue(idx + 1)}, 'Next ›'),
+          h('button', {type: 'button', class: 'btn primary small', onclick: markNext}, done.has(issue.key) ? 'Reviewed · next open' : 'Mark reviewed and next'))));
+    }
+    if (state.grid && state.gridCell) { const p = cellPanel(marks(), !!issue); if (p) kids.push(p); }
+    slot.replaceChildren(...kids);
+  }
+  async function focusIssue(index) {
+    const list = walkIssues(); if (!list.length || !state.report) return;
+    index = Math.max(0, Math.min(index, list.length - 1));
+    const i = list[index];
+    state.issueNav = index; state.sideTab = 'fixes';
+    const sheet = i.sheet || state.gridSheet;
+    const cell = i.cell && splitCell(i.cell) ? String(i.cell).toUpperCase() : i.row ? `A${Number(i.row)}` : null;
+    if (sheet && (!state.grid || state.grid.sheet !== sheet)) await loadGrid(sheet, true);
+    state.gridCell = cell;
+    drawSide(); drawGrid();
+    const td = cell && document.querySelector(`#sheet-block td[data-cell="${cell}"]`), wrap = document.querySelector('#sheet-block .gridwrap');
+    if (td && wrap) reveal(wrap, td, true);
   }
 
   function numbers(r) {
@@ -277,47 +374,9 @@
   const editsKey = () => 'rd-edits:' + state.report.file_hash;
   const editId = (sheet, cell) => `${sheet}!${cell}`;
 
-  // Row editor: shows one row's cells with their headers; changed cells become "Your edit" fixes.
-  async function rowEditor(sheet, row, note, flagCell) {
-    const box = h('div', {class: 'editor'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Loading the row…'));
-    try {
-      const data = await api('/api/spreadsheets/cells', {file_hash: state.report.file_hash, sheet, row});
-      const edits = store.get(editsKey(), {});
-      const inputs = [];
-      const grid = h('div', {class: 'cells'});
-      for (const c of data.cells) {
-        const saved = edits[editId(data.sheet, c.cell)];
-        const input = h('input', {value: saved ? saved.after : c.value, disabled: c.formula, 'aria-label': `${c.header || c.cell} (${c.cell})`});
-        if (!c.formula) inputs.push({c, input});
-        grid.append(h('label', {class: 'cellbox' + (c.formula ? ' formula' : '') + (saved ? ' edited' : '') + (flagCell && c.cell === String(flagCell).toUpperCase() ? ' flag' : '')},
-          h('span', {}, c.header || 'Column', h('small', {}, c.cell + (c.formula ? ' · formula' : ''))), input));
-      }
-      const save = () => {
-        const all = store.get(editsKey(), {});
-        let n = 0;
-        for (const {c, input} of inputs) {
-          const id = editId(data.sheet, c.cell);
-          if (input.value !== c.value) { all[id] = {sheet: data.sheet, cell: c.cell, before: c.before, after: input.value, header: c.header}; n++; }
-          else delete all[id];
-        }
-        store.set(editsKey(), all);
-        toast(n ? `${n} edit${n === 1 ? '' : 's'} added to Fixes. Download the fixed version when you're ready.` : 'No changes on this row.');
-        box.remove(); drawFixes();
-      };
-      box.replaceChildren(
-        h('p', {class: 'note'}, `${data.sheet}, row ${data.row}` + (data.header_row ? ` (headers on row ${data.header_row})` : '') + (note ? ` · ${note}` : '') + '. Change any value, then save.'),
-        grid,
-        h('div', {class: 'editbar'},
-          h('button', {type: 'button', class: 'btn primary small', onclick: save}, 'Save edits'),
-          h('button', {type: 'button', class: 'btn small', onclick: () => { inputs.forEach(({input}) => { input.value = ''; }); }}, 'Clear the whole row'),
-          h('button', {type: 'button', class: 'btn ghost small', onclick: () => box.remove()}, 'Cancel')));
-      (inputs.find(x => flagCell && x.c.cell === String(flagCell).toUpperCase()) || inputs[0])?.input.focus();
-    } catch (e) { box.replaceChildren(h('p', {class: 'note'}, e.message)); }
-    return box;
-  }
-
   function drawFixes() {
-    const block = $('fixes-block'); if (!block || !state.fixes) return;
+    const block = $('fixes-block'); if (!state.fixes) return;
+    if (!block) { drawGrid(); updateDownloads(); if (!state.chatBusy) drawChat(); updateFinish(); drawSideTabs(); return; }
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
     const editList = Object.entries(edits);
     const fixes = state.fixes.filter(f => !edits[editId(f.sheet, f.cell)]);
@@ -325,9 +384,9 @@
     const total = accepted.length + editList.length;
     block.replaceChildren();
     const save = d => { store.set(decisionsKey(), d); drawFixes(); };
-    block.append(h('header', {}, h('h2', {}, 'Fixes'),
+    block.append(h('header', {}, h('h2', {}, 'Suggested fixes'),
       h('p', {}, fixes.length ? `${fixes.length} suggested${fixes.some(f => f.source === 'AI fix') ? ', including Claude\'s' : ''}. Accept the ones you want, or edit any cell yourself, then download a corrected copy.`
-        : state.aiFixing ? 'Claude is reading the report and writing fixes for the issues below…' : 'No fixes yet. Let AI fix the issues, use "Fix this" on an issue below, or edit any cell here.'),
+        : state.aiFixing ? 'Claude is reading the report and writing fixes for the issues above…' : 'No fixes yet. Let AI fix the issues, or click any cell in the sheet to change it.'),
       h('div', {class: 'right'},
         state.aiOn ? h('button', {type: 'button', class: 'btn small' + (state.aiFix?.status === 'done' ? '' : ' primary'), disabled: state.aiFixing, onclick: () => runAiFixes(false)},
           state.aiFixing ? [h('span', {class: 'spin'}), ' Claude is fixing…'] : state.aiFix?.status === 'done' ? 'Ask AI to fix again' : 'Let AI fix the issues') : null,
@@ -379,15 +438,6 @@
         h('div', {class: 'change'}, h('span', {class: 'before'}, e.before === '' ? '(blank)' : e.before), h('span', {'aria-hidden': 'true'}, '→'),
           e.after === '' ? h('span', {class: 'blank'}, '(blank)') : null, input)));
     }
-    // edit any cell
-    const sheets = (state.report.sheets || []).map(x => x.name).filter(Boolean);
-    const sheetPick = h('select', {'aria-label': 'Sheet'}, sheets.map(n => h('option', {value: n}, n)));
-    const rowPick = h('input', {type: 'number', min: '1', placeholder: 'Row', 'aria-label': 'Row number', class: 'rownum'});
-    const slot = h('div', {});
-    const openRow = async () => { if (!rowPick.value) { rowPick.focus(); return; } slot.replaceChildren(await rowEditor(sheetPick.value, Number(rowPick.value))); };
-    rowPick.addEventListener('keydown', e => { if (e.key === 'Enter') openRow(); });
-    panel.append(h('div', {class: 'anycell'}, h('span', {}, 'Edit any cell:'), sheets.length > 1 ? sheetPick : null, rowPick,
-      h('button', {type: 'button', class: 'btn small', onclick: openRow}, 'Open row')), slot);
     panel.append(h('div', {class: 'fixbar'},
       h('span', {}, total ? `${total} change${total === 1 ? '' : 's'} ready` + (editList.length ? ` (${editList.length} yours)` : '') : 'No changes yet'),
       total ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { store.set(decisionsKey(), {}); store.set(editsKey(), {}); drawFixes(); }}, 'Clear all') : null,
@@ -397,8 +447,8 @@
     drawGrid();
     updateDownloads();
     if (!state.chatBusy) drawChat();
-    drawFixer();
     updateFinish();
+    drawSideTabs();
   }
   function readyChanges() {
     if (!state.report) return {accepted: [], dec: {}, edits: {}, total: 0};
@@ -409,14 +459,11 @@
   function downloadWithChanges() {
     const c = readyChanges();
     if (!c.total) { const a = h('a', {href: '/api/spreadsheets/download?id=' + state.report.file_hash, download: state.report.filename}); document.body.append(a); a.click(); a.remove(); return; }
-    $('walk-dialog')?.open && $('walk-dialog').close();
     applyFixes(c.accepted, c.dec, c.edits);
   }
   function updateDownloads() {
     const c = readyChanges(), label = c.total ? `Download with ${c.total} change${c.total === 1 ? '' : 's'}` : 'Download report';
     for (const b of document.querySelectorAll('.dl-changes')) { b.textContent = state.busy ? 'Building the fixed copy…' : label; b.disabled = !!state.busy; }
-    const bar = $('dlbar');
-    if (bar) { bar.hidden = !c.total; const t = bar.querySelector('span'); if (t) t.textContent = `${c.total} change${c.total === 1 ? '' : 's'} ready. The download is a corrected copy; your original stays as it is.`; }
   }
   async function applyFixes(accepted, dec, edits, opts = {}) {
     if (state.busy) return; state.busy = true; drawFixes(); updateDownloads();
@@ -464,7 +511,7 @@
     for (const e of Object.values(edits)) add(e.sheet, e.cell, 'ready', {...e, source: 'Your edit'});
     return {cells, rows, perSheet};
   }
-  async function loadGrid(sheet) {
+  async function loadGrid(sheet, quiet) {
     const block = $('sheet-block'); if (!block) return;
     const hash = state.report.file_hash;
     if (!sheet) { // open the sheet with the most to look at
@@ -474,8 +521,8 @@
     try {
       const g = await api('/api/spreadsheets/sheet', {file_hash: hash, sheet});
       if (state.selected !== hash) return;
-      state.grid = g; state.gridSheet = g.sheet; drawGrid(true);
-    } catch (e) { block.replaceChildren(h('header', {}, h('h2', {}, 'Spreadsheet')), h('p', {class: 'note'}, e.message)); }
+      state.grid = g; state.gridSheet = g.sheet; if (!quiet) drawGrid(true);
+    } catch (e) { block.replaceChildren(h('p', {class: 'note'}, e.message)); }
   }
   // One sheet as an HTML table. opts: onlyRows (Set of row numbers), selected (cell), focus {cell, row}
   function buildGrid(g, m, opts = {}) {
@@ -543,22 +590,29 @@
     for (const [k, list] of Object.entries(m.cells)) if (k.startsWith(sheet + '!')) for (const x of list) counts[x.kind === 'issue' ? 'flag' : x.kind]++;
     const tabs = h('div', {class: 'tabs', role: 'tablist'}, (g.sheets || []).map(n => h('button', {type: 'button', role: 'tab', class: n === sheet ? 'on' : '', 'aria-selected': String(n === sheet),
       onclick: () => { state.gridCell = null; loadGrid(n); }}, n, m.perSheet[n] ? h('i', {}, String(m.perSheet[n])) : null)));
-    table.addEventListener('click', e => { const td = e.target.closest('td[data-cell]'); if (td) { state.gridCell = td.dataset.cell; drawGrid(); } });
+    table.addEventListener('click', e => {
+      const td = e.target.closest('td[data-cell]'); if (!td) return;
+      state.gridCell = td.dataset.cell; state.issueNav = null;
+      if (state.sideTab !== 'fixes') { state.sideTab = 'fixes'; drawSide(); }
+      drawGrid();
+      $('side-body')?.scrollTo({top: 0, behavior: 'smooth'});
+    });
+    const old = block.querySelector('.gridwrap'), keep = old && !scroll ? [old.scrollTop, old.scrollLeft] : null;
     const scroller = h('div', {class: 'gridwrap'}, table);
-    const issueCount = (state.report.review.issues || []).filter(i => i.severity !== 'info').length;
+    const flagged = counts.flag + Object.keys(m.rows).filter(k => k.startsWith(sheet + '!')).length;
     block.replaceChildren(
-      h('header', {}, h('h2', {}, 'Spreadsheet'),
-        h('p', {}, 'The file as it is now. Click any cell to see what is wrong with it or to change it.'),
-        h('div', {class: 'right'},
-          issueCount ? h('button', {type: 'button', class: 'btn primary small', onclick: () => openWalk(0)}, `Go through the ${issueCount} issue${issueCount === 1 ? '' : 's'}`) : null,
-          h('label', {class: 'only'}, h('input', {type: 'checkbox', checked: onlyChanged, onchange: e => { state.gridOnlyMarked = e.target.checked; drawGrid(true); }}), 'Only rows with something to fix'))),
+      h('div', {class: 'sheetbar'}, tabs,
+        h('label', {class: 'only'}, h('input', {type: 'checkbox', checked: onlyChanged, onchange: e => { state.gridOnlyMarked = e.target.checked; drawGrid(true); }}), 'Only rows to fix')),
+      scroller,
       h('div', {class: 'legend'},
-        h('span', {class: 'k iss high'}, `Flagged (${counts.flag + Object.keys(m.rows).filter(k => k.startsWith(sheet + '!')).length})`),
+        h('span', {class: 'k iss high'}, `Flagged (${flagged})`),
         h('span', {class: 'k fixme'}, `Suggested fix (${counts.fix})`),
         h('span', {class: 'k ready'}, `Will change in the download (${counts.ready})`),
-        h('span', {class: 'k fx'}, 'Formula')),
-      ...[tabs, scroller, cellPanel(m), g.truncated ? h('p', {class: 'note'}, 'Large sheet: only the first rows and columns are shown.') : null].filter(Boolean));
+        h('span', {class: 'k fx'}, 'Formula'),
+        g.truncated ? h('span', {class: 'note'}, 'Large sheet: only the first rows and columns are shown.') : null));
+    if (keep) { scroller.scrollTop = keep[0]; scroller.scrollLeft = keep[1]; }
     if (scroll) requestAnimationFrame(() => reveal(scroller, first, false));
+    drawCellSlot();
   }
 
   // ---------------- chat with Claude: ask questions, have it make the changes
@@ -616,12 +670,9 @@
     store.set(chatKey(), log);
     autoOpenChat(); drawChat();
   }
-  function autoOpenChat() {
-    const hash = state.report.file_hash, key = 'rd-chat-opened:' + hash;
-    if (store.get(key, false) || $('chat')?.hidden === false) return;
-    const go = () => { if (state.report?.file_hash === hash) { store.set(key, true); openChat(); } };
-    const dlg = $('result-dialog');
-    if (dlg?.open) dlg.addEventListener('close', go, {once: true}); else go();
+  function autoOpenChat() {  // Claude's first read is ready: flag the Ask Claude tab rather than pulling you away from the fixes
+    if (state.sideTab === 'claude') return;
+    state.chatUnread = true; drawSideTabs();
   }
   function doFixes(msg, ids) {
     const dec = store.get(decisionsKey(), {}), byId = Object.fromEntries((state.fixes || []).map(f => [f.id, f]));
@@ -636,18 +687,10 @@
     msg.done = []; store.set(decisionsKey(), dec);
   }
 
-  function openChat() {
-    let panel = $('chat');
-    if (!panel) {
-      panel = h('aside', {id: 'chat', class: 'chat', 'aria-label': 'Chat with Claude'});
-      document.body.append(panel);
-    }
-    panel.hidden = false; document.body.classList.add('chatting');
-    drawChat(); panel.querySelector('textarea')?.focus();
-  }
-  function closeChat() { const p = $('chat'); if (p) p.hidden = true; document.body.classList.remove('chatting'); }
+  function openChat() { showSide('claude'); }
+  function closeChat() { if (state.sideTab === 'claude') showSide('fixes'); }
   function drawChat() {
-    const panel = $('chat'); if (!panel || panel.hidden || !state.report) return;
+    const panel = $('chat'); if (!panel || !state.report) return;
     const log = store.get(chatKey(), []);
     const save = () => store.set(chatKey(), log);
     const list = h('div', {class: 'chat-log', 'aria-live': 'polite'});
@@ -669,8 +712,8 @@
               : h('button', {type: 'button', class: 'btn primary small', onclick: () => {
                   const n = doFixes(m, m.offer || []); log.push({role: 'assistant', content: n ? `Done. I queued ${n} fix${n === 1 ? '' : 'es'}; they're green in the sheet. Download when you're ready, or tell me anything else to change.` : 'Those fixes were already decided.'});
                   save(); drawFixes(); drawChat(); if (offer[0]) showCell(offer[0].sheet, offer[0].cell, true); }}, `Do all ${offer.length} fix${offer.length === 1 ? '' : 'es'}`)) : null,
-            h('button', {type: 'button', class: 'btn small', onclick: () => openWalk(0)}, 'Go through them with me'),
-            offer.length && !done ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { closeChat(); $('fixes-block')?.scrollIntoView({behavior: 'smooth'}); }}, "I'll pick") : null)));
+            h('button', {type: 'button', class: 'btn small', onclick: () => focusIssue(0)}, 'Go through them with me'),
+            offer.length && !done ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { showSide('fixes'); $('fixes-block')?.scrollIntoView({behavior: 'smooth'}); }}, "I'll pick") : null)));
         continue;
       }
       const n = (m.changes || []).length, u = (m.undo || []).length;
@@ -687,15 +730,13 @@
       state.reviewing === state.report.file_hash ? ' Claude is reading the whole report…' : state.verifying === state.report.file_hash ? ' Claude is double-checking each flagged item against the actual cells…' : ' Claude is working out fixes for the real issues…'));
     const box = h('textarea', {rows: 2, placeholder: 'e.g. Change the auditor on every row to Robert Swanke', 'aria-label': 'Message to Claude'});
     box.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(box.value); } });
-    const c = readyChanges();
     panel.replaceChildren(
-      h('div', {class: 'chat-top'}, h('b', {}, 'Chat with Claude'), h('span', {class: 'hint'}, state.report.review?.job || ''),
-        log.length ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { store.set(chatKey(), []); drawChat(); }}, 'New chat') : null,
-        h('button', {type: 'button', class: 'btn ghost small', onclick: closeChat}, 'Close')),
+      h('div', {class: 'chat-top'}, h('b', {}, 'Ask Claude about this report'),
+        log.length ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { store.set(chatKey(), []); drawChat(); }}, 'New chat') : null),
       list,
       h('form', {class: 'chat-send', onsubmit: e => { e.preventDefault(); send(box.value); }}, box,
         h('button', {type: 'submit', class: 'btn primary', disabled: !!state.chatBusy}, 'Send')),
-      ...(c.total ? [h('div', {class: 'chat-dl'}, h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, `Download with ${c.total} change${c.total === 1 ? '' : 's'}`))] : []));
+    );
     requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
     async function send(text) {
       text = (text || '').trim(); if (!text || state.chatBusy) return;
@@ -727,7 +768,6 @@
     state.gridCell = cell; drawGrid();
     const td = document.querySelector(`#sheet-block td[data-cell="${cell}"]`), wrap = document.querySelector('#sheet-block .gridwrap');
     if (!td || !wrap) return;
-    if (!quiet) $('sheet-block').scrollIntoView({behavior: 'smooth', block: 'start'});
     reveal(wrap, td, true);
   }
 
@@ -817,9 +857,9 @@
     const r = state.report, newer = (r.fixes_applied || []).slice(-1)[0];
     const scrollTo = id => () => $(id)?.scrollIntoView({behavior: 'smooth', block: 'start'});
     return ({
-      fix_issues: {label: 'Fix them', run: () => openWalk(0)},
-      review_fixes: {label: 'Show the fixes', run: scrollTo('fixes-block')},
-      fix_shifts: {label: 'Show the rows', run: scrollTo('shiftfix')},
+      fix_issues: {label: 'Fix them', run: () => focusIssue(0)},
+      review_fixes: {label: 'Show the fixes', run: () => { showSide('fixes'); scrollTo('fixes-block')(); }},
+      fix_shifts: {label: 'Show the rows', run: () => { showSide('fixes'); scrollTo('shiftfix')(); }},
       recheck_sharepoint: {label: 'Check SharePoint', run: () => rerun('sharepoint', 'Checking SharePoint…')},
       send_for_review: {label: 'Send for review', run: () => { reviewForm('request'); scrollTo('reviewstate')(); }},
       approve_send: {label: 'Send', run: openSend},
@@ -977,7 +1017,9 @@
     if (!await load()) return;
     const sp = {};
     const draw = () => {
-      const day = data.day, rows = data.jobs;
+      const day = data.day, rows = data.jobs.filter(r => inClient(r.job));
+      const client = (state.clients || []).find(c => c.key === state.client);
+      const unwatched = client ? client.jobs.filter(j => !data.jobs.some(r => r.job.toUpperCase() === j.job.toUpperCase() || jobNumbers(r.job).some(n => j.numbers.includes(n)))) : [];
       const label = new Date(day + 'T12:00:00').toLocaleDateString('en-US', {weekday: 'long', month: 'long', day: 'numeric'});
       const counts = {send: 0, missing: 0, hold: 0};
       for (const r of rows) {
@@ -1014,6 +1056,10 @@
             for (const [i, r] of readyJobs.entries()) { e.target.textContent = `Building ${i + 1} of ${readyJobs.length}…`; await buildReport(r.job, day, false, null, true); }
             showToday(); }}, `Build ${readyJobs.length} ready report${readyJobs.length === 1 ? '' : 's'}`) : null),
         h('p', {class: 'note'}, 'A job is ready to build 45 minutes after its last scan, so breaks and lunches are not taken as the end of the shift. Built reports are checked like uploads; nothing is sent until someone approves it.'),
+        unwatched.length ? h('div', {class: 'clientwatch'}, h('span', {}, `${client.client} has ${unwatched.length} job${unwatched.length === 1 ? '' : 's'} on SharePoint you are not watching: ${unwatched.slice(0, 6).map(j => j.job).join(', ')}${unwatched.length > 6 ? '…' : ''}`),
+          h('button', {type: 'button', class: 'btn small', onclick: async e => { e.target.disabled = true; e.target.textContent = 'Adding…';
+            for (const j of unwatched) if (!await load({add: j.job})) return;
+            draw(); fetchScans(); }}, `Watch ${unwatched.length === 1 ? 'it' : `all ${unwatched.length}`}`)) : null,
         h('div', {class: 'numbers five'},
           h('div', {}, h('b', {}, fmt(rows.length)), h('span', {}, 'Jobs')),
           h('div', {}, h('b', {class: counts.missing ? 'bad' : ''}, fmt(counts.missing)), h('span', {}, 'Yesterday’s reports missing')),
@@ -1493,209 +1539,21 @@
   }
   const sendLabel = r => (r.sent || []).some(x => x.sent) ? 'Sent to client' : r.approval ? 'Send to client' : 'Approve and send';
 
-  // ---------------- AI worksheet fixer: Claude's summary of the errors and of the suggested changes
-  async function openFixer(refresh) {
-    let dlg = $('fixer-dialog');
-    if (!dlg) { dlg = h('dialog', {id: 'fixer-dialog', class: 'fixer', 'aria-labelledby': 'fixer-title'}); document.body.append(dlg);
-      dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); }); }
-    if (!dlg.open) dlg.showModal();
-    const hash = state.report.file_hash;
-    state.fixerCache ||= {};
-    if (refresh || !state.fixerCache[hash]) {
-      dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('span', {class: 'spin'}), h('h2', {id: 'fixer-title'}, 'AI worksheet fixer'),
-        h('p', {}, 'Claude is summarizing the errors and the suggested changes…')));
-      if (!state.fixes) for (let i = 0; i < 40 && !state.fixes; i++) await new Promise(r => setTimeout(r, 250));
-      const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
-      const extra = Object.values(edits).map(e => ({id: 'edit:' + editId(e.sheet, e.cell), sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: e.reason || 'Edited by reviewer', source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit'}));
-      const skip = Object.entries(dec).filter(([, d]) => d?.state === 'rejected').map(([id]) => id);
-      try {
-        state.fixerCache[hash] = await api('/api/spreadsheets/ai-summary', {file_hash: hash, extra, skip});
-        if (state.fixerSel) delete state.fixerSel[hash];
-      } catch (e) {
-        if (state.report?.file_hash === hash) dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('h2', {id: 'fixer-title'}, 'AI worksheet fixer'), h('p', {class: 'note'}, e.message),
-          h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Close'), h('button', {type: 'button', class: 'btn primary', onclick: () => openFixer(true)}, 'Try again'))));
-        return;
-      }
-      if (state.report?.file_hash !== hash) return;
-    }
-    drawFixer();
-  }
-  function drawFixer() {
-    const dlg = $('fixer-dialog'); if (!dlg?.open || !state.report) return;
-    const hash = state.report.file_hash, sum = state.fixerCache?.[hash]; if (!sum) return;
-    const byId = Object.fromEntries((state.fixes || []).map(f => [f.id, f]));
-    const edits = store.get(editsKey(), {});
-    const changeOf = id => id.startsWith('edit:') ? (() => { const e = edits[id.slice(5)]; return e ? {...e, id, source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit'} : null; })() : byId[id];
-    const stateOf = id => id.startsWith('edit:') ? (edits[id.slice(5)] ? 'accepted' : 'gone') : (store.get(decisionsKey(), {})[id]?.state || (edits[editId(byId[id]?.sheet, byId[id]?.cell)] ? 'replaced' : null));
-    const applyIds = ids => { const d = store.get(decisionsKey(), {}); let n = 0; for (const id of ids) { const f = byId[id]; if (f && !d[id]?.state && !edits[editId(f.sheet, f.cell)]) { d[id] = {state: 'accepted', after: f.after}; n++; } } store.set(decisionsKey(), d); return n; };
-    const unapply = ids => { const d = store.get(decisionsKey(), {}); for (const id of ids) if (d[id]?.state === 'accepted') delete d[id]; store.set(decisionsKey(), d); };
-    const issuesNow = walkIssues();
-    const allIds = sum.change_groups.flatMap(g => g.fix_ids).filter(id => changeOf(id));
-    const waiting = allIds.filter(id => !stateOf(id));
-    // selection: starts with everything that is still waiting; kept per report while the pop-up is used
-    state.fixerSel ||= {};
-    if (!state.fixerSel[hash]) state.fixerSel[hash] = new Set(waiting);
-    const sel = state.fixerSel[hash];
-    for (const id of [...sel]) if (!waiting.includes(id)) sel.delete(id);
-    state.fixerOpen ||= new Set();
-    const chosen = waiting.filter(id => sel.has(id));
-    const ready = readyChanges().total;
-    const redraw = () => { drawFixes(); drawFixer(); };
-    const sev = {high: 'Must fix', medium: 'Should fix', low: 'Tidy-up'};
-    const box = (checked, mixed, onchange, label) => { const c = h('input', {type: 'checkbox', checked, 'aria-label': label, onchange}); c.indeterminate = !!mixed; return c; };
-    dlg.replaceChildren(
-      h('div', {class: 'fixer-top'}, h('div', {}, h('p', {class: 'eyebrow'}, 'AI WORKSHEET FIXER'), h('h2', {id: 'fixer-title'}, state.report.review.job || state.report.filename)),
-        h('button', {type: 'button', class: 'btn ghost small', onclick: () => openFixer(true)}, 'Refresh summary'),
-        h('button', {type: 'button', class: 'btn ghost small', onclick: () => dlg.close()}, 'Close')),
-      h('div', {class: 'fixer-body'},
-        h('p', {class: 'fixer-headline'}, sum.headline),
-        sum.next_steps?.length ? h('ol', {class: 'fixer-steps'}, sum.next_steps.map(x => h('li', {}, x))) : null,
-        h('div', {class: 'fixer-cols'},
-          h('section', {}, h('h3', {}, `Summary of errors · ${sum.error_groups.reduce((a, g) => a + (g.count || 0), 0)}`),
-            sum.error_groups.length ? sum.error_groups.map(g => h('div', {class: 'fx-card err ' + g.severity},
-              h('div', {class: 'fx-head'}, h('span', {class: 'chip-sev'}, sev[g.severity] || 'Check'), h('b', {}, g.title), h('span', {class: 'fx-count'}, String(g.count))),
-              h('p', {}, g.explanation),
-              g.examples?.length ? h('ul', {class: 'fx-ex'}, g.examples.map(e => h('li', {}, e))) : null,
-              g.issue_keys?.length ? h('button', {type: 'button', class: 'btn small', onclick: () => { const i = issuesNow.findIndex(x => g.issue_keys.includes(x.key)); dlg.close(); openWalk(Math.max(0, i)); }}, 'Show in sheet') : null))
-            : h('p', {class: 'note'}, 'No open errors.')),
-          h('section', {},
-            h('div', {class: 'fx-selhead'}, h('h3', {}, `Summary of suggested changes · ${allIds.length}`),
-              waiting.length ? h('span', {class: 'fx-selall'},
-                h('button', {type: 'button', class: 'linkish', onclick: () => { waiting.forEach(id => sel.add(id)); drawFixer(); }}, 'Select all'), ' · ',
-                h('button', {type: 'button', class: 'linkish', onclick: () => { sel.clear(); drawFixer(); }}, 'Select none')) : null),
-            sum.change_groups.length ? sum.change_groups.map((g, gi) => {
-              const ids = g.fix_ids.filter(id => changeOf(id)), open = ids.filter(id => !stateOf(id)), done = ids.filter(id => stateOf(id) === 'accepted');
-              const picked = open.filter(id => sel.has(id)).length, expanded = state.fixerOpen.has(gi), shown = expanded ? ids : ids.slice(0, 6);
-              return h('div', {class: 'fx-card chg-card' + (open.length ? '' : ' done')},
-                h('label', {class: 'fx-head'},
-                  open.length ? box(picked === open.length, picked > 0 && picked < open.length, e => { open.forEach(id => e.target.checked ? sel.add(id) : sel.delete(id)); drawFixer(); }, `Select all in ${g.title}`) : null,
-                  h('span', {class: 'risk ' + g.risk}, g.risk === 'safe' ? 'Safe' : 'Check first'), h('b', {}, g.title),
-                  h('span', {class: 'fx-count'}, open.length ? `${picked} of ${open.length}` : String(ids.length))),
-                h('p', {}, g.explanation),
-                h('ul', {class: 'fx-list'}, shown.map(id => { const c = changeOf(id), st = stateOf(id);
-                  return h('li', {class: st ? 'applied' : ''},
-                    st ? h('span', {class: 'okmark', title: st === 'accepted' ? 'Will be in the download' : 'Replaced by your own value'}, st === 'accepted' ? '✓' : '–')
-                      : box(sel.has(id), false, e => { e.target.checked ? sel.add(id) : sel.delete(id); drawFixer(); }, `${c.sheet} ${c.cell}`),
-                    h('button', {type: 'button', class: 'cellref', onclick: () => { dlg.close(); showCell(c.sheet, c.cell); }}, `${c.sheet} ${c.cell}`),
-                    h('span', {class: 'mono'}, h('s', {}, c.before || '(blank)'), ' → ', h('b', {}, c.after || '(blank)'))); }),
-                  ids.length > 6 ? h('li', {class: 'more'}, h('button', {type: 'button', class: 'linkish', onclick: () => { expanded ? state.fixerOpen.delete(gi) : state.fixerOpen.add(gi); drawFixer(); }},
-                    expanded ? 'Show fewer' : `Show all ${ids.length}`)) : null),
-                done.length && !g.fix_ids.every(id => id.startsWith('edit:')) ? h('div', {class: 'fx-act'}, h('span', {class: 'tagok'}, `✓ ${done.length} applied`),
-                  h('button', {type: 'button', class: 'btn ghost small', onclick: () => { unapply(done); done.forEach(id => sel.add(id)); redraw(); }}, 'Undo')) : null);
-            }) : h('p', {class: 'note'}, 'No suggested changes. Use the chat or the sheet to make your own.')))),
-      h('div', {class: 'fixer-bar'}, h('span', {}, (chosen.length ? `${chosen.length} of ${waiting.length} selected` : waiting.length ? 'Nothing selected' : 'All suggested changes decided') + (ready ? ` · ${ready} ready for the corrected copy` : '')),
-        h('button', {type: 'button', class: 'btn', disabled: !chosen.length, onclick: () => { const n = applyIds(chosen); toast(`${n} change${n === 1 ? '' : 's'} applied.`); redraw(); }}, `Apply selected (${chosen.length})`),
-        h('button', {type: 'button', class: 'btn primary', disabled: !chosen.length && !ready, onclick: () => { applyIds(chosen); dlg.close(); drawFixes(); downloadWithChanges(); }},
-          chosen.length ? 'Apply selected and download' : 'Download corrected copy')));
-  }
-
-  // ---------------- guided review: one issue at a time, shown in the sheet
-  const gridCache = {};
-  async function sheetFor(name) {
-    const hash = state.report.file_hash, key = hash + '|' + (name || '');
-    if (gridCache[key]) return gridCache[key];
-    if (state.grid && state.grid.sheet === name) return (gridCache[key] = state.grid);
-    return (gridCache[key] = await api('/api/spreadsheets/sheet', {file_hash: hash, sheet: name}));
-  }
-  const walkIssues = () => allIssues(state.report.review).filter(i => i.severity !== 'info');
+  const walkIssues = () => {
+    const list = allIssues(state.report.review).filter(i => i.severity !== 'info');
+    const rank = {high: 0, medium: 1, low: 2}, size = {};
+    for (const i of list) { const k = i.severity + '|' + issueType(i); size[k] = (size[k] || 0) + 1; }
+    return list.map((i, n) => ({i, n})).sort((a, b) => (rank[a.i.severity] ?? 3) - (rank[b.i.severity] ?? 3)
+      || size[b.i.severity + '|' + issueType(b.i)] - size[a.i.severity + '|' + issueType(a.i)]
+      || issueType(a.i).localeCompare(issueType(b.i)) || a.n - b.n).map(x => x.i);
+  };
   function fixesFor(issue) {
     const dec = store.get(decisionsKey(), {});
     const rowNo = Number(issue.row) || splitCell(issue.cell)?.[1];
     return (state.fixes || []).filter(f => f.sheet === (issue.sheet || f.sheet) && (issue.cell ? f.cell === String(issue.cell).toUpperCase() : rowNo && splitCell(f.cell)?.[1] === rowNo))
       .map(f => ({...f, after: dec[f.id]?.after ?? f.after, state: dec[f.id]?.state}));
   }
-  async function openWalk(index) {
-    const issues = walkIssues(); if (!issues.length) return;
-    let dlg = $('walk-dialog');
-    if (!dlg) { dlg = h('dialog', {id: 'walk-dialog', class: 'walk', 'aria-labelledby': 'walk-title'}); document.body.append(dlg);
-      dlg.addEventListener('close', () => { drawFixes(); const old = $('issues'); if (old && state.report) old.replaceWith(issuesBlock(state.report.review)); }); }
-    state.walk = {index: Math.max(0, Math.min(index, issues.length - 1)), target: null};
-    if (!dlg.open) dlg.showModal();
-    await drawWalk();
-  }
-  async function drawWalk() {
-    const dlg = $('walk-dialog'); if (!dlg) return;
-    const issues = walkIssues(), w = state.walk, issue = issues[w.index];
-    const reviewedKey = 'rd-reviewed:' + state.report.file_hash, done = new Set(store.get(reviewedKey, []));
-    const markDone = () => { done.add(issue.key); store.set(reviewedKey, [...done]); updateFinish(); };
-    const next = () => { markDone(); if (w.index < issues.length - 1) { w.index++; w.target = null; drawWalk(); } else finish(); };
-    const finish = () => {
-      const ready = (state.fixes || []).filter(f => store.get(decisionsKey(), {})[f.id]?.state === 'accepted').length + Object.keys(store.get(editsKey(), {})).length;
-      dlg.replaceChildren(h('div', {class: 'walk-end'},
-        h('h2', {id: 'walk-title'}, 'All issues gone through'),
-        h('p', {}, ready ? `${ready} change${ready === 1 ? '' : 's'} ready. Download the fixed version to get a corrected copy; it is checked again automatically.` : 'No changes were chosen.'),
-        h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => { w.index = 0; drawWalk(); }}, 'Start over'),
-          h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Close'),
-          ready ? h('button', {type: 'button', class: 'btn primary', onclick: downloadWithChanges}, `Download with ${ready} change${ready === 1 ? '' : 's'}`) : null)));
-    };
-    const sheetName = issue.sheet || state.grid?.sheet || (state.report.sheets || [])[0]?.name;
-    const head = h('div', {class: 'walk-top'},
-      h('b', {id: 'walk-title'}, `Issue ${w.index + 1} of ${issues.length}`),
-      h('div', {class: 'walk-bar'}, h('i', {})),
-      h('button', {type: 'button', class: 'btn primary small dl-changes', onclick: downloadWithChanges}, 'Download report'),
-      h('button', {type: 'button', class: 'btn ghost small', onclick: () => dlg.close()}, 'Close'));
-    head.querySelector('.walk-bar i').style.width = Math.round((w.index + 1) / issues.length * 100) + '%';
-    requestAnimationFrame(updateDownloads);
-    const gridBox = h('div', {class: 'walk-grid gridwrap'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Opening the sheet…'));
-    const side = h('div', {class: 'walk-side'});
-    dlg.replaceChildren(head, h('div', {class: 'walk-body'}, h('div', {class: 'walk-left'}, h('div', {class: 'walk-where'}, `${sheetName || 'Sheet'}${issue.cell ? ' · cell ' + issue.cell : issue.row ? ' · row ' + issue.row : ' · whole report'}`), gridBox), side));
-    // issue card
-    const fixes = fixesFor(issue);
-    const target = w.target || (issue.cell ? String(issue.cell).toUpperCase() : fixes[0]?.cell || null);
-    side.append(h('div', {class: 'walk-issue ' + issue.severity},
-      h('span', {class: 'chip-sev'}, {high: 'Must fix', medium: 'Check', low: 'Minor'}[issue.severity] || 'Check'), h('span', {class: 'src'}, issue.source),
-      h('p', {class: 'text'}, issue.text), issue.why ? h('p', {class: 'hint'}, 'Why: ' + issue.why) : null, issue.check ? h('p', {class: 'hint'}, 'Check: ' + issue.check) : null,
-      done.has(issue.key) ? h('p', {class: 'hint done'}, '✓ Reviewed') : null));
-    // suggested fixes
-    const applyFix = f => { const d = store.get(decisionsKey(), {}); d[f.id] = {state: 'accepted', after: f.after}; store.set(decisionsKey(), d); toast(`${f.sheet} ${f.cell} will change to "${f.after || '(blank)'}".`); next(); };
-    if (fixes.length) side.append(h('div', {class: 'walk-fix'}, h('h3', {}, fixes.length > 1 ? 'Suggested fixes' : 'Suggested fix'),
-      fixes.map(f => h('div', {class: 'wf' + (f.state === 'accepted' ? ' on' : '')},
-        h('div', {}, h('small', {}, `${f.source} · ${f.cell}`), h('div', {class: 'change'}, h('s', {}, f.before || '(blank)'), ' → ', h('b', {}, f.after || '(blank)')), f.reason ? h('small', {}, f.reason) : null),
-        f.state === 'accepted' ? h('span', {class: 'tagok'}, '✓ Will apply') : h('button', {type: 'button', class: 'btn primary small', onclick: () => applyFix(f)}, 'Apply this fix')))));
-    else side.append(h('p', {class: 'note walk-none'}, state.aiFixing ? 'Claude is still working out fixes…' : issue.source === 'Usual day' ? 'This compares the whole day with usual days, so there is no single cell to change. Check the scans, then mark it reviewed.' : 'No automatic fix for this one. Enter the right value yourself below, or mark it reviewed if nothing needs to change.'));
-    // own value
-    const own = h('div', {class: 'walk-own'});
-    side.append(own);
-    // nav
-    side.append(h('div', {class: 'walk-nav'},
-      h('button', {type: 'button', class: 'btn small', disabled: w.index === 0, onclick: () => { w.index--; w.target = null; drawWalk(); }}, '‹ Back'),
-      h('button', {type: 'button', class: 'btn small', onclick: next}, done.has(issue.key) ? 'Next ›' : 'No change needed ›'),
-      h('button', {type: 'button', class: 'btn ghost small', onclick: () => { if (w.index < issues.length - 1) { w.index++; w.target = null; drawWalk(); } else finish(); }}, 'Skip for now')));
-    // sheet
-    let g;
-    try { g = await sheetFor(sheetName); } catch (e) { gridBox.replaceChildren(h('p', {class: 'note'}, e.message)); }
-    if (state.walk !== w || !g) return;
-    const m = marks();
-    const focus = target ? {cell: target} : issue.row ? {row: Number(issue.row)} : null;
-    const {table, focusEl} = buildGrid(g, m, {focus, selected: w.target});
-    table.addEventListener('click', e => { const td = e.target.closest('td[data-cell]'); if (td) { w.target = td.dataset.cell; drawWalk(); } });
-    gridBox.replaceChildren(table);
-    requestAnimationFrame(() => reveal(gridBox, focusEl, true));
-    // own value box for the target cell
-    if (target) {
-      const [c, r] = splitCell(target), shown = g.rows[r - 1]?.[c] ?? '', formula = (g.formulas || []).includes(target);
-      const edits = store.get(editsKey(), {}), mine = edits[editId(g.sheet, target)];
-      if (formula) own.append(h('h3', {}, `Your own fix · ${target}`), h('p', {class: 'note'}, `${target} is a formula (shows ${shown || 'blank'}). Click one of the cells it uses in the sheet to change that instead.`));
-      else {
-        const input = h('input', {value: mine ? mine.after : shown, 'aria-label': `Your value for ${target}`});
-        const apply = async () => {
-          let before = shown;
-          try { const d = await api('/api/spreadsheets/cells', {file_hash: state.report.file_hash, sheet: g.sheet, row: r}); before = (d.cells.find(x => x.cell === target) || {}).before ?? shown; } catch (e) { /* use shown */ }
-          if (input.value === before) { toast('That is the value already in the file.'); return; }
-          const all = store.get(editsKey(), {}); all[editId(g.sheet, target)] = {sheet: g.sheet, cell: target, before, after: input.value, header: ''}; store.set(editsKey(), all);
-          // your value replaces any suggested fix for the same cell
-          toast(`${target} will change to "${input.value || '(blank)'}".`); next();
-        };
-        input.addEventListener('keydown', e => { if (e.key === 'Enter') apply(); });
-        own.append(h('h3', {}, fixes.length ? 'Or apply it yourself' : 'Apply it yourself'),
-          h('p', {class: 'hint'}, `Cell ${target}` + (w.target ? '' : ' · click another cell in the sheet to change that one instead')),
-          h('div', {class: 'own-row'}, input, h('button', {type: 'button', class: 'btn small', onclick: apply}, mine ? 'Update my value' : 'Apply my value')));
-        if (!fixes.length) input.focus();
-      }
-    } else own.append(h('h3', {}, 'Apply it yourself'), h('p', {class: 'hint'}, 'Click the cell you want to change in the sheet.'));
-  }
-
-  function cellPanel(m) {
+  function cellPanel(m, underIssue) {
     const g = state.grid, addr = state.gridCell; if (!addr) return null;
     const [c, r] = splitCell(addr), sheet = g.sheet;
     const list = m.cells[`${sheet}!${addr}`] || [], rowIssues = m.rows[`${sheet}!${r}`] || [];
@@ -1714,7 +1572,7 @@
     const dec = store.get(decisionsKey(), {});
     return h('div', {class: 'cellpanel'},
       h('div', {class: 'cp-head'}, h('b', {}, `${sheet} · ${addr}`), formula ? h('span', {class: 'tagf'}, 'formula') : null,
-        h('button', {type: 'button', class: 'btn ghost small', onclick: () => { state.gridCell = null; drawGrid(); }}, 'Close')),
+        underIssue ? null : h('button', {type: 'button', class: 'btn ghost small', onclick: () => { state.gridCell = null; drawGrid(); }}, 'Close')),
       ...list.filter(x => x.kind === 'issue').map(x => h('p', {class: 'cp-issue ' + x.item.severity}, x.item.text, x.item.check ? h('small', {}, 'Check: ' + x.item.check) : null)),
       ...rowIssues.map(i => h('p', {class: 'cp-issue ' + i.severity}, `Row ${r}: ${i.text}`)),
       ...list.filter(x => x.kind !== 'issue' && x.item.id).map(x => h('div', {class: 'cp-fix'},
@@ -1731,43 +1589,77 @@
   }
 
   // ---------------- issues
+  const ISSUE_TYPES = [
+    ['Scans on the wrong shift', /wrong_shift/],
+    ['Does not match SharePoint', /sharepoint|not_on_sharepoint|missing_from_report|differs_from|unmatched_report_row/],
+    ['Duplicates', /duplicate/],
+    ['Typos and bad VINs or part numbers', /typo|vin_|identifier_unusual|fill_series|leading_zeros/],
+    ['Totals that do not add up', /total|summary|mismatch|exceeds|reject_log/],
+    ['Blank or missing values', /missing|blank|placeholder/],
+    ['Numbers stored as text or bad values', /text|numeric|spaces|fraction|negative|scientific|excel_error|hidden|garbled|wrong_column/],
+    ['Wrong or future dates', /date/],
+    ['Already reported on another day', /other_day/],
+    ['Different from the usual day', /unusual|baseline/],
+  ];
+  const SEVERITIES = [['high', 'Must fix'], ['medium', 'Check'], ['low', 'Minor']];
+  function issueType(i) {
+    if (i.source === 'AI review') return 'Found by AI review';
+    const code = i.code || '';
+    for (const [name, re] of ISSUE_TYPES) if (re.test(code)) return name;
+    return i.source === 'Usual day' ? 'Different from the usual day' : 'Other checks';
+  }
+  // Issues grouped by severity, then by type; click one to see it in the sheet.
   function issuesBlock(rv) {
     const reviewedKey = 'rd-reviewed:' + state.report.file_hash;
-    const done = new Set(store.get(reviewedKey, []));
-    const issues = allIssues(rv).filter(i => i.severity !== 'info');
+    const done = reviewedSet();
+    const issues = walkIssues();
     const info = (rv.issues || []).filter(i => i.severity === 'info');
     const dismissed = (rv.dismissed || []).filter(i => !new Set(store.get(restoredKey(), [])).has(i.key));
-    const sources = ['All', ...new Set(issues.map(i => i.source))];
     const block = h('section', {class: 'block', id: 'issues'});
+    state.openGroups ||= {};
+    const setDone = (keys, on) => { keys.forEach(k => on ? done.add(k) : done.delete(k)); store.set(reviewedKey, [...done]); draw(); updateFinish(); drawSideTabs(); };
     const draw = () => {
-      const shown = issues.filter(i => state.issueSource === 'All' || i.source === state.issueSource);
       const left = issues.filter(i => !done.has(i.key)).length;
-      block.replaceChildren(h('header', {}, h('h2', {}, 'Issues'),
-        h('p', {}, issues.length ? `${left} of ${issues.length} not yet reviewed` + (rv.verify?.status === 'done' ? ' · double-checked by Claude' : state.verifying ? ' · Claude is double-checking…' : '') : dismissed.length ? 'Nothing left: Claude checked every flagged item and none are real problems.' : 'Nothing flagged by the checks, SharePoint, the usual-day comparison or AI.'),
-        issues.length ? h('div', {class: 'right'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => openWalk(Math.max(0, issues.findIndex(i => !done.has(i.key))))}, left < issues.length && left ? 'Continue reviewing' : 'Go through them one by one')) : null));
-      if (!issues.length) { if (dismissed.length) block.append(dismissedList(dismissed)); if (info.length) block.append(infoNote(info)); return; }
-      if (sources.length > 2) block.append(h('div', {class: 'filters', role: 'group', 'aria-label': 'Filter issues'}, sources.map(s =>
-        h('button', {type: 'button', class: 'chip' + (state.issueSource === s ? ' on' : ''), onclick: () => { state.issueSource = s; state.showAll = false; draw(); }},
-          s === 'All' ? `All ${issues.length}` : `${s} ${issues.filter(i => i.source === s).length}`))));
-      const panel = h('div', {class: 'panel'});
-      const limit = state.showAll ? shown.length : 25;
-      for (const i of shown.slice(0, limit)) {
-        const box = h('input', {type: 'checkbox', checked: done.has(i.key), onchange: e => {
-          e.target.checked ? done.add(i.key) : done.delete(i.key); store.set(reviewedKey, [...done]); draw(); updateFinish(); }});
-        const rowNo = Number(i.row) || Number(String(i.cell || '').replace(/^[A-Z]+/i, '')) || null;
-        const badge = i.restored ? h('span', {class: 'vb unsure'}, 'Put back by you') : i.verdict === 'valid' ? h('span', {class: 'vb ok'}, '✓ Claude confirmed') : i.verdict === 'unsure' ? h('span', {class: 'vb unsure'}, 'Claude unsure') : null;
-        const body = h('div', {}, h('p', {class: 'src'}, [i.source, i.where].filter(Boolean).join(' · '), badge ? ' ' : null, badge), h('p', {class: 'text'}, i.text),
-          i.verdict_reason && !i.restored ? h('p', {class: 'hint'}, 'Claude: ' + i.verdict_reason) : null,
-          i.why ? h('p', {class: 'hint'}, 'Why: ' + i.why) : null, i.check ? h('p', {class: 'hint'}, 'Check: ' + i.check) : null);
-        const fixBtn = rowNo ? h('button', {type: 'button', class: 'btn small', onclick: async () => {
-          const open = body.querySelector('.editor'); if (open) { open.remove(); return; }
-          body.append(await rowEditor(i.sheet || (state.report.sheets || [])[0]?.name, rowNo, i.cell ? `flagged cell ${i.cell} is outlined` : null, i.cell)); }}, 'Fix this') : null;
-        panel.append(h('div', {class: 'issue' + (done.has(i.key) ? ' done' : '')},
-          h('span', {class: 'sev ' + i.severity, title: i.severity}), body,
-          h('div', {class: 'side'}, h('button', {type: 'button', class: 'btn small', onclick: () => openWalk(issues.indexOf(i))}, 'Show in sheet'), fixBtn, h('label', {}, box, 'Reviewed'))));
+      const cur = state.issueNav != null ? issues[state.issueNav]?.key : null;
+      block.replaceChildren(h('header', {}, h('h2', {}, 'Issues to fix'),
+        h('p', {}, issues.length ? `${left} of ${issues.length} still open, grouped by severity and type. Click one to see it in the sheet.`
+          + (rv.verify?.status === 'done' ? ' Double-checked by Claude.' : state.verifying ? ' Claude is double-checking…' : '')
+          : dismissed.length ? 'Nothing left: Claude checked every flagged item and none are real problems.' : 'Nothing flagged by the checks, SharePoint, the usual-day comparison or AI.'),
+        left ? h('div', {class: 'right'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => focusIssue(Math.max(0, issues.findIndex(i => !done.has(i.key))))},
+          left < issues.length ? 'Next open issue' : 'Start with the first')) : null));
+      for (const [sev, label] of SEVERITIES) {
+        const ofSev = issues.filter(i => i.severity === sev); if (!ofSev.length) continue;
+        const openSev = ofSev.filter(i => !done.has(i.key)).length;
+        const sec = h('div', {class: 'sevgroup sev-' + sev},
+          h('h3', {}, h('span', {class: 'sev ' + sev}), label, h('small', {}, openSev ? `${openSev} open of ${ofSev.length}` : `all ${ofSev.length} reviewed`)));
+        const groups = {};
+        for (const i of ofSev) (groups[issueType(i)] ||= []).push(i);
+        for (const [type, list] of Object.entries(groups).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
+          const gk = state.report.file_hash + '|' + sev + '|' + type, openT = list.filter(i => !done.has(i.key)).length;
+          const isOpen = state.openGroups[gk] ?? (openT > 0 && (sev === 'high' || list.some(i => i.key === cur) || Object.keys(groups).length === 1));
+          const det = h('details', {class: 'itype', open: isOpen || list.some(i => i.key === cur)},
+            h('summary', {}, h('b', {}, type), h('span', {class: 'cnt' + (openT ? '' : ' ok')}, openT ? `${openT} open` : '✓ reviewed'), h('span', {class: 'tot'}, String(list.length))));
+          det.addEventListener('toggle', () => { state.openGroups[gk] = det.open; });
+          const ul = h('ul', {class: 'ilist'});
+          const limit = state.openGroups[gk + '|all'] ? list.length : 25;
+          for (const i of list.slice(0, limit)) {
+            const fx = fixesFor(i).filter(f => f.state !== 'rejected');
+            const badge = i.restored ? 'Put back by you' : i.verdict === 'valid' ? '✓ Claude confirmed' : i.verdict === 'unsure' ? 'Claude unsure' : null;
+            ul.append(h('li', {class: 'iitem' + (done.has(i.key) ? ' done' : '') + (i.key === cur ? ' cur' : '')},
+              h('input', {type: 'checkbox', checked: done.has(i.key), 'aria-label': 'Mark reviewed', title: 'Reviewed', onchange: e => setDone([i.key], e.target.checked)}),
+              h('button', {type: 'button', class: 'iopen', onclick: () => focusIssue(issues.indexOf(i))},
+                h('span', {class: 'itext'}, i.text),
+                h('span', {class: 'iwhere'}, [i.where, i.source].filter(Boolean).join(' · '),
+                  badge ? h('em', {}, badge) : null,
+                  fx.length ? h('em', {class: 'ifix'}, fx.some(f => f.state === 'accepted') ? '✓ fix accepted' : `${fx.length} fix ready`) : null))));
+          }
+          if (list.length > limit) ul.append(h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => { state.openGroups[gk + '|all'] = true; draw(); }}, `Show all ${list.length}`)));
+          det.append(ul);
+          if (openT > 1) det.append(h('button', {type: 'button', class: 'linkish markall', onclick: () => setDone(list.map(i => i.key), true)}, `Mark all ${openT} reviewed`));
+          sec.append(det);
+        }
+        block.append(sec);
       }
-      if (shown.length > limit) panel.append(h('button', {type: 'button', class: 'more', onclick: () => { state.showAll = true; draw(); }}, `Show all ${shown.length}`));
-      block.append(panel);
       if (dismissed.length) block.append(dismissedList(dismissed));
       if (info.length) block.append(infoNote(info));
     };
@@ -1896,12 +1788,14 @@
         h('button', {type: 'button', class: 'btn primary', onclick: async () => { dialog.close();
           if (rv.status === 'clear') return;
           for (let i = 0; i < 40 && !(state.report?.file_hash === hash && state.fixes); i++) await new Promise(r => setTimeout(r, 250));
-          if (state.report?.file_hash === hash) openWalk(0); }},
+          if (state.report?.file_hash === hash) focusIssue(0); }},
           rv.status === 'clear' ? 'Open report' : 'Go through the issues')));
     dialog.showModal();
   }
   $('result-dialog').addEventListener('click', e => { if (e.target === $('result-dialog')) $('result-dialog').close(); });
 
   // ---------------------------------------------------------------- start
+  document.addEventListener('click', e => { for (const d of document.querySelectorAll('.more-menu[open]')) if (!d.contains(e.target)) d.removeAttribute('open'); });
+  loadClients();
   loadList().then(route).catch(e => { $('queue-list').replaceChildren(h('p', {class: 'queue-empty'}, e.message)); });
 })();
