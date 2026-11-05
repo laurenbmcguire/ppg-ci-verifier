@@ -567,8 +567,10 @@ def summarize_fixes(item, issues, changes, numbers, opener=None):
     groups, used = [], set()
     for g in a.get('change_groups') or []:
         if isinstance(g, dict) and g.get('title'):
-            ids = [cid[x] for x in g.get('change_ids') or [] if x in cid and cid[x] not in used]
-            used.update(ids)
+            ids = []
+            for x in g.get('change_ids') or []:
+                if x in cid and cid[x] not in used:
+                    used.add(cid[x]); ids.append(cid[x])
             if ids:
                 groups.append(dict(title=str(g['title'])[:200], explanation=str(g.get('explanation') or '')[:600],
                                    risk='safe' if g.get('risk') == 'safe' else 'check', fix_ids=ids))
