@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 import re
 
 TEMPLATE_ID = 'adaptive-columns/1'
-SCAN_ROWS = 120
+SCAN_ROWS = 400
 MAX_FINDINGS = 300
 MAX_RECORDS_RETURNED = 500
 
@@ -269,8 +269,9 @@ class Checker:
             self.result['findings_truncated'] = True
 
 
-def scan(sources, cached=None):
-    """Find tables and rows. Returns (sheets, records, stats)."""
+def scan(sources, cached=None, layout_specs=None):
+    """Find tables and rows. Returns (sheets, records, stats).
+    layout_specs (from hosting.ai_layout) name the tables directly; sheets without one use header keywords."""
     cached = cached or {}
     sheets, records = [], []
     stats = Counter()
@@ -278,26 +279,37 @@ def scan(sources, cached=None):
         rows = list(rows)
         crow = list(cached.get(title, []))
         sheet = dict(name=title, row_count=len(rows), tables=[], data_row_count=0, mapping_status='no_quantity_columns')
+        specs = sorted((t for t in (layout_specs or []) if t['sheet'] == title), key=lambda t: t['header_row'])
+        spec_at = {t['header_row']: t for t in specs}
         best = (0, None, {}, {})
-        for r, row in enumerate(rows[:SCAN_ROWS], 1):
-            m, lab = _header_map(row)
-            if m and _text_cells(row) >= 2 and len(m) > best[0]:
-                best = (len(m), r, m, lab)
+        if specs:
+            t0 = specs[0]
+            best = (1, t0['header_row'], *_spec_maps(t0))
+        else:
+            for r, row in enumerate(rows[:SCAN_ROWS], 1):
+                m, lab = _header_map(row)
+                if m and _text_cells(row) >= 2 and len(m) > best[0]:
+                    best = (len(m), r, m, lab)
         if best[1] is None:
             sheets.append(sheet)
             continue
         sheet['mapping_status'] = 'adaptive'
+        if specs:
+            sheet['layout_source'] = 'ai'
         table = None
+        active = None
 
         def start(r, m, lab):
-            nonlocal table
+            nonlocal table, active
             heads = rows[r - 1]
-            is_totals_block = all(norm(heads[i]).startswith('total') for i in m.values())
+            active = spec_at.get(r)
+            is_totals_block = active['kind'] == 'totals' if active else all(norm(heads[i]).startswith('total') for i in m.values())
             table = dict(index=len(sheet['tables']), header_row=r, kind='totals' if is_totals_block else 'detail',
                          columns={f: dict(column=column_letter(i), header=str(heads[i]).strip()) for f, i in m.items()},
                          labels={k: dict(column=column_letter(i), header=str(heads[i]).strip()) for k, i in lab.items()},
                          mapping=m, label_map=lab, data_row_count=0, total_rows=[],
-                         condition_cols=[i for i, h in enumerate(heads) if label_for_header(h) == 'condition'])
+                         condition_cols=([lab['condition']] if active and 'condition' in lab else
+                                         [i for i, h in enumerate(heads) if label_for_header(h) == 'condition']))
             sheet['tables'].append(table)
 
         start(best[1], best[2], best[3])
@@ -307,7 +319,15 @@ def scan(sources, cached=None):
             cget = (lambda i: crw[i] if i < len(crw) else None)
             stats['rows'] += 1
             stats['cells'] += len(row)
-            m, lab = _header_map(row)
+            if specs:
+                if r in spec_at:
+                    start(r, *_spec_maps(spec_at[r]))
+                    continue
+                if active is None or r < active['first_data_row'] or r > active['last_data_row']:
+                    continue
+                m, lab = {}, {}
+            else:
+                m, lab = _header_map(row)
             ident_col = table['label_map'].get('identifier')
             looks_like_data = (any(i in table['condition_cols'] and len(norm(row[i]).split()) <= 2 for i in m.values())  # 'OK' / 'SUSPECT' values, not headers
                                or (ident_col is not None and ident_col < len(row) and isinstance(row[ident_col], str)
@@ -351,6 +371,11 @@ def scan(sources, cached=None):
     return sheets, records, stats
 
 
+def _spec_maps(spec):
+    cols = spec['columns']
+    return ({f: i for f, i in cols.items() if f in QTY}, {k: i for k, i in cols.items() if k in LABELS})
+
+
 SUMMARY_SHEETS = {'summary', 'dashboard', 'overview', 'totals', 'day summary', 'daily summary', 'recap'}
 
 
@@ -383,8 +408,19 @@ def _sum(rows, field):
 
 
 def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
-    """Return an adaptive result if any quantity column is found in any sheet, else None."""
+    """Return an adaptive result if any quantity column is found in any sheet, else None.
+    When AI layout detection is set up, Claude maps the tables on every sheet each time; its reading is used
+    when it finds more inspection rows than the header-keyword detection."""
+    sources = [(title, list(rows)) for title, rows in sources]
     sheets, records, stats = scan(sources, cached)
+    layout = None
+    from hosting import ai_layout
+    found = ai_layout.detect(sources, cached)
+    if found:
+        unit_sources, specs = ai_layout.apply_units(sources, found)
+        a_sheets, a_records, a_stats = scan(unit_sources, cached, layout_specs=specs)
+        if _detail_count(a_records) > _detail_count(records):
+            sheets, records, stats, layout = a_sheets, a_records, a_stats, dict(found, tables=specs)
     if not any(s['mapping_status'] == 'adaptive' for s in sheets):
         return None
     result = dict(base, template_id=TEMPLATE_ID, mapping_mode='adaptive', template_mapping_status='matched',
@@ -394,6 +430,18 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
     result['limitations'] = list(base.get('limitations', [])) + [
         'Quantity columns were detected automatically from header text; review the detected columns.',
         'Formulas are never executed. Where Excel saved a result for a formula, that saved result was checked.']
+    if layout:
+        result['layout_source'] = 'ai'
+        result['ai_layout'] = dict(model=layout.get('model'), notes=layout.get('notes'), tables=[
+            dict(sheet=t['sheet'], kind=t['kind'], header_row=t['header_row'], first_data_row=t['first_data_row'],
+                 last_data_row=t['last_data_row'], one_row_per_unit=t['one_row_per_unit'], why=t['why'],
+                 columns={f: column_letter(i) for f, i in t['columns'].items()}) for t in layout['tables']])
+        result['limitations'].insert(0, 'Claude found the inspection tables in this file (header keywords alone did not find them all); '
+                                        'review the detected tables and columns.')
+        if any(t['one_row_per_unit'] for t in layout['tables']):
+            result['limitations'].insert(1, 'Scan-list tables count each row as one inspected part; rejected = rows whose condition is a reject value.')
+    else:
+        result['layout_source'] = 'keywords'
     finding = Checker(result)
 
     for sheet in sheets:
@@ -622,6 +670,11 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
         internal_check_status='unverified' if not numeric else ('findings' if issues else 'no_findings_in_checks_performed'))
     result['_detail_records'] = detail  # internal, removed before saving
     return result
+
+
+def _detail_count(records):
+    return sum(1 for r in records if r['table_kind'] == 'detail' and not r['is_total']
+               and any(st in KNOWN for st in r['states'].values()))
 
 
 def export_record(r):

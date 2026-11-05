@@ -329,8 +329,9 @@ def inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) -
     result.update(row_count=total_rows, cell_count=total_cells, finding_counts=dict(counts),
                   numeric_columns_checked=sum(len(s['numeric_columns_checked']) for s in result['sheets']),
                   internal_check_status='unverified' if not any(s['numeric_columns_checked'] for s in result['sheets']) else ('findings' if counts else 'no_findings_in_checks_performed'))
-    if result['internal_check_status'] == 'unverified':
-        # No first-row quantity headers: look for them anywhere, in any layout.
+    result['record_count'] = sum(s['data_row_count'] for s in result['sheets'] if s['numeric_columns_checked'])
+    if result['internal_check_status'] == 'unverified' or not result['record_count']:
+        # No first-row quantity headers (or no rows under them): look for the tables anywhere, in any layout.
         from hosting.adaptive_reports import inspect_adaptive
         rows = sources if fmt == 'xlsx' else [('CSV', list(csv.reader(io.StringIO(decoded, newline=''), strict=True)))]
         adaptive = inspect_adaptive(rows, pristine, cached=_cached_rows(raw) if fmt == 'xlsx' else None, hidden=_hidden(raw) if fmt == 'xlsx' else None)
@@ -365,7 +366,7 @@ def _hidden(raw):
 
 def _exact_or_adaptive(strict, sources, pristine, raw):
     """Keep an exact template match; otherwise use automatic column detection for this layout."""
-    if strict.get('template_mapping_status') == 'matched':
+    if strict.get('template_mapping_status') == 'matched' and strict.get('record_count'):
         return strict
     from datetime import date as _date
     from hosting.adaptive_reports import inspect_adaptive
