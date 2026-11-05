@@ -91,5 +91,7 @@ class ListNameMatchTests(unittest.TestCase):
         self.assertEqual(_list_match('2230-OWENS-BASCO', 'Data #2230-OWENS-BASCO'), 2)
         self.assertEqual(_list_match('HANDS-HMMA-2219', 'Data #2219 HMMA'), 1)
         self.assertEqual(_list_match('HANDS-HMMA-2219', 'Data #2230-OWENS-BASCO'), 0)
+        self.assertEqual(_list_match('HANDS-HMMA-2219', 'Data 2219HANDSHMMA'), 2)
+        self.assertEqual(_list_match('HANDS-HMMA-2219', 'Something', 'https://ppgquality.sharepoint.com/sites/Hyundai_Montgomery/Lists/Data%202219HANDSHMMA'), 2)
         self.assertEqual(_list_match('HANDS-HMMA-2219', 'Documents'), 0)
         self.assertEqual(_list_match('HANDS-HMMA-2219', '2219 Site Pages'), 0)

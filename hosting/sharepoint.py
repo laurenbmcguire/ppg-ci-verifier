@@ -174,16 +174,24 @@ def _tokens(text):
     return frozenset(t for t in re.split(r'[^a-z0-9]+', (text or '').lower()) if t and t != 'data')
 
 
-def _list_match(job, display):
-    """2 = same job written in any order ("Data #2219-HANDS-HMMA" for HANDS-HMMA-2219), 1 = same job number, 0 = no."""
-    name = (display or '').strip().lower()
-    if not name.startswith('data') and name != (job or '').lower():
-        return 0
-    want, have = _tokens(job), _tokens(display)
-    if want and want == have:
-        return 2
-    numbers = {t for t in want if t.isdigit() and len(t) >= 3}
-    return 1 if numbers and numbers & have else 0
+def _list_match(job, display, web_url=''):
+    """2 = same job written in any order or run together ("Data #2219-HANDS-HMMA", "Data 2219HANDSHMMA" for
+    HANDS-HMMA-2219), 1 = same job number, 0 = no."""
+    best = 0
+    tail = urllib.parse.unquote((web_url or '').rstrip('/').split('/Lists/')[-1].split('/')[0]) if '/Lists/' in (web_url or '') else ''
+    for text in (display, tail):
+        name = (text or '').strip().lower()
+        if not name or (not name.startswith('data') and name != (job or '').lower()):
+            continue
+        want, have = _tokens(job), _tokens(text)
+        compact = re.sub(r'[^a-z0-9]', '', name)
+        compact = compact[4:] if compact.startswith('data') else compact
+        if want and (want == have or (all(t in compact for t in want) and len(compact) == sum(len(t) for t in want))):
+            return 2
+        numbers = {t for t in want if t.isdigit() and len(t) >= 3}
+        if numbers and any(n in compact for n in numbers):
+            best = 1
+    return best
 
 
 def _find_list(job, opener=None):
@@ -196,7 +204,7 @@ def _find_list(job, opener=None):
         for lst in lists.get('value', []):
             if (lst.get('displayName') or '').lower().startswith('data #'):
                 _seen_lists.append(lst['displayName'])
-            score = _list_match(job, lst.get('displayName'))
+            score = _list_match(job, lst.get('displayName'), lst.get('webUrl'))
             if score == 2:
                 return name, site_id, lst
             if score == 1 and best is None:
