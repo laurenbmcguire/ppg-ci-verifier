@@ -32,6 +32,9 @@ class SpreadsheetInbox:
             db.execute('CREATE TABLE IF NOT EXISTS spreadsheet_sources (source_hash TEXT PRIMARY KEY, source_json TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS client_contacts (job TEXT PRIMARY KEY, contacts_json TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS vin_index (ident TEXT NOT NULL, shown TEXT NOT NULL, file_hash TEXT NOT NULL, sheet TEXT, row INTEGER)')
+            db.execute('CREATE INDEX IF NOT EXISTS vin_index_ident ON vin_index (ident)')
+            db.execute('CREATE TABLE IF NOT EXISTS vin_indexed (file_hash TEXT PRIMARY KEY)')
             db.execute('CREATE TABLE IF NOT EXISTS dashboards (file_hash TEXT PRIMARY KEY, versions_json TEXT NOT NULL, messages_json TEXT NOT NULL, updated_at TEXT NOT NULL)')
             db.execute('''CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
                 prefix TEXT NOT NULL, can_send INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_used TEXT, revoked_at TEXT)''')
@@ -67,6 +70,10 @@ class SpreadsheetInbox:
             db.execute('INSERT INTO spreadsheets(file_hash,filename,version,result_json) VALUES(?,?,?,?)',
                        (file_hash, filename, version, json.dumps(result, allow_nan=False)))
             result=self.save_check(db,result)
+        try:
+            self.index_vins(file_hash)
+        except Exception:
+            pass  # search falls back to indexing later
         return dict(result, idempotent=False)
     def store_part(self, upload_id, index, raw):
         if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < 100000:
@@ -182,7 +189,36 @@ class SpreadsheetInbox:
         record = dict(by=approver, note=' '.join(str(note or '').split())[:500], at=datetime.now(timezone.utc).isoformat(),
                       status=rv['status'], open_must_fix=must, open_to_check=(rv['counts'].get('medium', 0) + rv['counts'].get('low', 0)),
                       overridden=bool(must and override), filename=item['filename'], version=item.get('version'))
-        return self._update(file_hash, lambda r: r.__setitem__('approval', record))
+        def change(r):
+            r['approval'] = record
+            if (r.get('review_request') or {}).get('status') in ('waiting', 'sent_back'):
+                rr = dict(r['review_request'])
+                rr.update(status='approved', reviewer=approver, answered_at=record['at'])
+                rr['history'] = (rr.get('history') or []) + [dict(action='approve', by=approver, note=record['note'], at=record['at'])]
+                r['review_request'] = rr
+        return self._update(file_hash, change)
+    def review_action(self, file_hash, action, by, note=''):
+        """Ask a reviewer (usually the boss) to sign the report off, or send it back with a comment."""
+        by = ' '.join(str(by or '').split())[:80]
+        note = ' '.join(str(note or '').split())[:1000]
+        if not by:
+            raise ValueError('Type your name.')
+        if action not in ('request', 'send_back'):
+            raise ValueError('Unknown review action.')
+        if action == 'send_back' and not note:
+            raise ValueError('Say what needs changing, so it can be fixed.')
+        now = datetime.now(timezone.utc).isoformat()
+        def change(r):
+            rr = dict(r.get('review_request') or {})
+            hist = list(rr.get('history') or [])
+            hist.append(dict(action=action, by=by, note=note, at=now))
+            if action == 'request':
+                rr.update(status='waiting', by=by, note=note, at=now)
+            else:
+                rr.update(status='sent_back', reviewer=by, comment=note, answered_at=now)
+            rr['history'] = hist[-20:]
+            r['review_request'] = rr
+        return self._update(file_hash, change)
     def record_send(self, file_hash, record):
         return self._update(file_hash, lambda r: r.__setitem__('sent', (r.get('sent') or []) + [record]))
     def contacts_for(self, job):
@@ -253,11 +289,70 @@ class SpreadsheetInbox:
                           scans=float(rv['scans']) if rv.get('scans') is not None else None, inspected=rv.get('inspected'), rejected=rv.get('rejected'),
                           approved=rv.get('approved'), sent_at=rv.get('sent_at'), uploads=len(cands))
         return out
+    def all_results(self):
+        with self.connect() as db:
+            rows = db.execute('SELECT file_hash, result_json FROM spreadsheets').fetchall()
+            return [self.latest(db, r['file_hash'], json.loads(r['result_json'])) for r in rows]
     def jobs(self):
         from hosting.source_compare import identify
         with self.connect() as db:
             rows = db.execute('SELECT result_json FROM spreadsheets').fetchall()
         return sorted({j.upper() for j in (identify(json.loads(r['result_json']).get('filename'), json.loads(r['result_json']))[0] for r in rows) if j})
+    # ---------------- VIN / identifier index: which reports a VIN is in
+    @staticmethod
+    def vin_key(text):
+        return re.sub(r'[^A-Z0-9]', '', str(text or '').upper())
+    def index_vins(self, file_hash):
+        from hosting.spreadsheets import report_records
+        with self.connect() as db:
+            if db.execute('SELECT 1 FROM vin_indexed WHERE file_hash=?', (file_hash,)).fetchone():
+                return
+            original, raw = self._original(db, file_hash)
+        try:
+            recs = [r for r in report_records(original['filename'], raw) if r.get('table_kind') == 'detail']
+        except Exception:
+            recs = []
+        rows = [(self.vin_key(r['labels'].get('identifier')), str(r['labels'].get('identifier')).strip(), file_hash, r['sheet'], r['row'])
+                for r in recs if self.vin_key((r.get('labels') or {}).get('identifier'))]
+        with self.connect() as db:
+            db.execute('DELETE FROM vin_index WHERE file_hash=?', (file_hash,))
+            db.executemany('INSERT INTO vin_index (ident, shown, file_hash, sheet, row) VALUES (?,?,?,?,?)', rows)
+            db.execute('INSERT OR IGNORE INTO vin_indexed (file_hash) VALUES (?)', (file_hash,))
+    def index_missing(self, budget=40):
+        """Index reports uploaded before the index existed (a few at a time). Returns how many are still left."""
+        with self.connect() as db:
+            todo = [r['file_hash'] for r in db.execute('SELECT file_hash FROM spreadsheets WHERE file_hash NOT IN (SELECT file_hash FROM vin_indexed) ORDER BY seq DESC').fetchall()]
+        for h in todo[:budget]:
+            self.index_vins(h)
+        return max(0, len(todo) - budget)
+    def find_vin(self, query, limit=50):
+        from hosting.source_compare import identify
+        q = self.vin_key(query)
+        if len(q) < 4:
+            raise ValueError('Type at least 4 letters or digits of the VIN or identifier.')
+        left = self.index_missing()
+        with self.connect() as db:
+            hits = db.execute('SELECT ident, shown, file_hash, sheet, row FROM vin_index WHERE ident = ? OR ident LIKE ? ORDER BY ident = ? DESC LIMIT ?',
+                              (q, f'%{q}%', q, limit)).fetchall()
+            meta = {}
+            for h in {x['file_hash'] for x in hits}:
+                base = json.loads(db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (h,)).fetchone()['result_json'])
+                result = self.latest(db, h, base)
+                job, day = identify(result.get('filename'), result)
+                meta[h] = dict(filename=result['filename'], version=result.get('version'), job=job, day=day,
+                               corrected=bool(result.get('fixed_from')), sent=any(x.get('sent') for x in result.get('sent') or []))
+        out = [dict(identifier=x['shown'], exact=x['ident'] == q, file_hash=x['file_hash'], sheet=x['sheet'], row=x['row'], **meta[x['file_hash']]) for x in hits]
+        out.sort(key=lambda m: (not m['exact'], m['day'] or '', m['filename']), reverse=False)
+        return dict(query=query, results=out, still_indexing=left)
+    def vins_in(self, file_hashes):
+        """{file_hash: set of VIN keys}."""
+        for h in file_hashes:
+            self.index_vins(h)
+        out = {h: set() for h in file_hashes}
+        with self.connect() as db:
+            for h in file_hashes:
+                out[h] = {r['ident'] for r in db.execute('SELECT ident FROM vin_index WHERE file_hash=?', (h,)).fetchall()}
+        return out
     # ---------------- settings (shift times, reviewer rules)
     def setting(self, key, default=None):
         with self.connect() as db:
@@ -463,7 +558,7 @@ class SpreadsheetInbox:
             raw=files_for(self.root).get('uploads/'+file_hash+suffix)
             if hashlib.sha256(raw).hexdigest()!=file_hash:raise ValueError('Stored original integrity mismatch.')
             previous=result.get('sharepoint') or {}
-            keep={k:result[k] for k in ('approval','sent','fixes_applied','fixed_from') if result.get(k)}
+            keep={k:result[k] for k in ('approval','sent','fixes_applied','fixed_from','review_request') if result.get(k)}
             fresh=self.ingest(result['filename'],raw)
             if keep:
                 fresh=self._update(file_hash,lambda r:r.update(keep))

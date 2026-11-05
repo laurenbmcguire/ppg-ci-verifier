@@ -303,6 +303,82 @@ def _by_time(names, rows, schedule):
     return names, out, scans
 
 
+def timeline(rows, schedule):
+    """Internal scan timeline for the review screen (never sent to clients): scans per half hour in plant time,
+    first and last scan per shift, long gaps, scans outside every shift, per-person activity, and shift picks
+    that flip back and forth, which the end-of-shift routine lists as red flags."""
+    from hosting.shifts import local_time, assign, number, clock, _minutes
+    pts = []
+    for it in rows:
+        local = local_time(_stamp(it))
+        if not local:
+            continue
+        f = it.get('fields') or {}
+        who = (((it.get('createdBy') or {}).get('user') or {}).get('displayName')) or f.get('Author') or None
+        shift = assign(local, schedule)[0]
+        picked = f.get('ShiftPicked', f.get('Shift'))
+        pts.append((local, shift, who, None if picked in (None, '') else str(picked)))
+    if not pts:
+        return None
+    pts.sort(key=lambda p: p[0])
+    buckets = {}
+    for local, *_ in pts:
+        key = local.replace(minute=0 if local.minute < 30 else 30, second=0, microsecond=0)
+        buckets[key] = buckets.get(key, 0) + 1
+    flags = []
+    gaps = []
+    for (a, sa, *_), (b, sb, *_) in zip(pts, pts[1:]):
+        mins = (b - a).total_seconds() / 60
+        if mins >= 45 and sa and sb and sa['name'] == sb['name']:
+            gaps.append(dict(start=a.isoformat(), end=b.isoformat(), minutes=round(mins), shift=sa['name']))
+    for g in gaps[:3]:
+        flags.append(f'No scans for {g["minutes"]} minutes on {g["shift"]} shift ({_hm(g["start"])} to {_hm(g["end"])}). A break, or a problem on the line?')
+    if len(gaps) > 3:
+        flags.append(f'{len(gaps) - 3} more gap(s) of 45 minutes or longer; see the timeline.')
+    outside = [p for p in pts if not p[1]]
+    if outside:
+        flags.append(f'{len(outside)} scan(s) fall outside every shift (first at {outside[0][0].strftime("%I:%M %p").lstrip("0")}). Check the shift times or the scans.')
+    per_shift = {}
+    for local, shift, who, picked in pts:
+        if shift:
+            per_shift.setdefault(shift['name'], []).append((local, who))
+    shifts_out = []
+    for sh in schedule:
+        got = per_shift.get(sh['name'])
+        if not got:
+            continue
+        first, last = got[0][0], got[-1][0]
+        start_m = _minutes(sh['start']); first_m = first.hour * 60 + first.minute
+        late = (first_m - start_m) % 1440
+        if 60 <= late < 600 and len(got) >= 5:
+            flags.append(f'First {sh["name"]}-shift scan was at {first.strftime("%I:%M %p").lstrip("0")}, {late // 60} h {late % 60} min after the shift started.')
+        shifts_out.append(dict(name=sh['name'], start=sh['start'], end=sh['end'], scans=len(got), first=first.isoformat(), last=last.isoformat()))
+    people = {}
+    for local, shift, who, picked in pts:
+        if who:
+            p = people.setdefault(who, dict(name=who, scans=0, first=local, last=local, shifts=set()))
+            p['scans'] += 1; p['last'] = local
+            if shift:
+                p['shifts'].add(shift['name'])
+    for p in people.values():
+        if len(p['shifts']) > 1:
+            flags.append(f'{p["name"]} scanned on more than one shift ({", ".join(sorted(p["shifts"]))}), {p["first"].strftime("%I:%M %p").lstrip("0")} to {p["last"].strftime("%I:%M %p").lstrip("0")}. A phone handed over without logging out?')
+    picks = [p[3] for p in pts if p[3]]
+    flips = sum(1 for a, b, c in zip(picks, picks[1:], picks[2:]) if a == c != b)
+    if flips:
+        flags.append(f'The picked shift flips back and forth {flips} time(s) in a row of scans (like 1, 2, 1). A wrong pick or a swapped phone?')
+    return dict(zone='Central', first=pts[0][0].isoformat(), last=pts[-1][0].isoformat(), scans=len(pts),
+                buckets=[dict(at=k.isoformat(), scans=v) for k, v in sorted(buckets.items())],
+                shifts=shifts_out, gaps=gaps[:20], outside=len(outside), flags=flags,
+                people=[dict(name=p['name'], scans=p['scans'], first=p['first'].isoformat(), last=p['last'].isoformat(), shifts=sorted(p['shifts']))
+                        for p in sorted(people.values(), key=lambda p: p['first'])][:30])
+
+
+def _hm(iso):
+    from datetime import datetime
+    return datetime.fromisoformat(iso).strftime('%I:%M %p').lstrip('0')
+
+
 def list_day(job, day, opener=None, schedule=None):
     """(filename, csv bytes, meta) built from the job's data list for one day, or None.
     With shift times, the day runs from the first shift's start to the last shift's end, and each scan's
@@ -321,7 +397,7 @@ def list_day(job, day, opener=None, schedule=None):
                 job=job, day=day, source_kind='list', rows=len(rows))
     if schedule:
         names, rows, scans = _by_time(names, rows, schedule)
-        meta.update(scan_shifts=scans, shift_times=schedule)
+        meta.update(scan_shifts=scans, shift_times=schedule, timeline=timeline(rows, schedule))
     return (f'{job} {day} (SharePoint list).csv', _items_csv(names, rows), meta)
 
 

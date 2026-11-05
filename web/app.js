@@ -60,11 +60,20 @@
     const q = state.search.trim().toLowerCase();
     let rows = state.list.filter(r => !q || [r.filename, r.review?.job, r.review?.day].some(v => (v || '').toLowerCase().includes(q)));
     if (state.filter === 'attention') rows = rows.filter(r => !r.review || r.review.status !== 'clear');
+    if (state.filter === 'review') rows = rows.filter(r => r.review?.review_state === 'waiting');
     document.querySelectorAll('.segmented button').forEach(b => b.classList.toggle('on', b.dataset.filter === state.filter));
     const list = $('queue-list'); list.replaceChildren();
+    const vh = state.vinHits;
+    if (vh && vh.query === state.search) {
+      list.append(h('div', {class: 'vinhits'}, h('b', {}, vh.results.length ? `“${vh.query}” is in ${vh.results.length} report row${vh.results.length === 1 ? '' : 's'}` : `“${vh.query}” is not in any report`),
+        ...vh.results.slice(0, 12).map(m => h('button', {type: 'button', class: 'vinhit', onclick: () => select(m.file_hash)},
+          h('span', {}, h('b', {}, m.identifier), ` · ${m.job || 'Unknown job'} · ${shortDay(m.day) || 'no date'}`),
+          h('span', {class: 'file'}, `${m.sheet}, row ${m.row} · ${m.filename}${m.corrected ? ' (corrected copy)' : ''}${m.sent ? ' · sent' : ''}`))),
+        vh.still_indexing ? h('p', {class: 'note'}, `Still indexing ${vh.still_indexing} older report(s); search again in a moment.`) : null));
+    }
     if (!rows.length) {
       list.append(h('p', {class: 'queue-empty'}, state.list.length
-        ? (state.filter === 'attention' && !q ? 'Every report is clear. Switch to All to see them.' : 'No reports match that search.')
+        ? (state.filter === 'review' && !q ? 'Nothing is waiting for review.' : state.filter === 'attention' && !q ? 'Every report is clear. Switch to All to see them.' : 'No reports match that search.')
         : 'No reports yet. Upload an end-of-shift report to start.'));
       return;
     }
@@ -79,18 +88,29 @@
         'aria-label': `${rv.job || r.filename}, ${STATUS[rv.status] || 'Check'}, ${count}`},
         h('span', {class: 'tag tag-' + rv.status}, STATUS[rv.status] || 'Check'),
         h('span', {class: 'job'}, (rv.job || 'Unknown job') + (rv.fixed_from ? ' (fixed)' : '')),
-        h('span', {class: 'count'}, rv.sent_at ? 'Sent' : rv.approved ? 'Approved' : count),
+        h('span', {class: 'count'}, rv.sent_at ? 'Sent' : rv.approved ? 'Approved' : rv.review_state === 'waiting' ? 'For review' : rv.review_state === 'sent_back' ? 'Sent back' : count),
         h('span', {class: 'file'}, `${r.filename} · v${r.version} · ${ago(r.received_at)}`)));
     }
   }
-  $('search').addEventListener('input', e => { state.search = e.target.value; drawQueue(); });
+  let vinTimer;
+  $('search').addEventListener('input', e => {
+    state.search = e.target.value; drawQueue();
+    clearTimeout(vinTimer);
+    const q = state.search.replace(/[^A-Za-z0-9]/g, '');
+    if (q.length < 5 || !/\d/.test(q)) { state.vinHits = null; return; }
+    vinTimer = setTimeout(async () => {
+      try { const out = await api('/api/vins/search', {q: state.search}); if (state.search === out.query) { state.vinHits = out; drawQueue(); } } catch (err) { /* plain list filtering still works */ }
+    }, 350);
+  });
   document.querySelectorAll('.segmented button').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.filter; store.set('rd-filter', state.filter); drawQueue(); }));
 
   // ---------------------------------------------------------------- routing
   function select(hash) { if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
   window.addEventListener('hashchange', route);
   async function route() {
-    document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === (['#api', '#checks', '#periods'].includes(location.hash) ? location.hash : '#')));
+    document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === (['#api', '#checks', '#periods', '#today', '#overview'].includes(location.hash) ? location.hash : '#')));
+    if (location.hash === '#overview') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showOverview(); return; }
+    if (location.hash === '#today') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showToday(); return; }
     if (location.hash === '#periods') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showPeriods(); return; }
     if (location.hash === '#checks') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showChecks(); return; }
     if (location.hash === '#api') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showApi(); return; }
@@ -132,6 +152,7 @@
         h('div', {class: 'meta'}, `${dayLabel(rv.day)}. ${r.filename}, version ${r.version}, uploaded ${ago(r.received_at)}.`))));
     wrap.append(h('div', {class: 'actions'},
       h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r)),
+      !r.approval && (r.review_request || {}).status !== 'waiting' ? h('button', {type: 'button', class: 'btn', onclick: () => reviewForm('request')}, 'Send for review') : null,
       h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download report'),
       h('button', {type: 'button', class: 'btn chat-btn', onclick: () => openFixer(false)}, 'AI worksheet fixer'),
       h('button', {type: 'button', class: 'btn chat-btn', onclick: () => openDashboard(false)}, 'Create dashboard'),
@@ -140,6 +161,7 @@
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('sharepoint', 'Checking SharePoint…')}, 'Check SharePoint again'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('baseline', 'Comparing with earlier days…')}, 'Compare with usual day'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('ai-review', 'Claude is reading the report…')}, rv.ai.status === 'done' ? 'Run AI review again' : 'Run AI review')));
+    wrap.append(h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)));
     wrap.append(h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
     wrap.append(h('div', {id: 'shiftfix'}, ...[shiftCard(rv)].filter(Boolean)));
     wrap.append(h('div', {id: 'finish'}));
@@ -148,6 +170,7 @@
     wrap.append(h('section', {class: 'block', id: 'fixes-block'}, h('header', {}, h('h2', {}, 'Fixes'), h('p', {}, 'Loading suggested fixes…'))));
     wrap.append(issuesBlock(rv));
     wrap.append(sourcesBlock(r));
+    const tl = timelineBlock(r); if (tl) wrap.append(tl);
     wrap.append(readBlock(r));
     if (rv.fixed_from || rv.fixes_applied) wrap.append(historyBlock(r));
     wrap.append(h('div', {class: 'dlbar', id: 'dlbar', hidden: true}, h('span', {}), h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, 'Download report')));
@@ -753,6 +776,185 @@
         h('button', {type: 'button', class: 'btn', onclick: downloadFinal}, 'Download final report'),
         h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, 'Send it to the client for me'))));
     if (!dlg.open) dlg.showModal();
+  }
+
+  // ---------------- review and sign-off: send a report to the boss, who approves it or sends it back with a comment
+  function reviewState(r) {
+    const rr = r.review_request || {};
+    const link = () => { const url = location.origin + location.pathname + '#r=' + r.file_hash; navigator.clipboard?.writeText(url).then(() => toast('Link copied. Paste it in Teams or an email to the reviewer.'), () => toast(url)); };
+    if (rr.status === 'waiting') return h('div', {class: 'reviewstate', id: 'reviewbox'},
+      h('div', {}, h('b', {}, 'Waiting for review'), h('span', {}, `${rr.by} asked ${ago(rr.at)}${rr.note ? `: “${rr.note}”` : '.'}`)),
+      h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => openSend()}, 'Approve'),
+        h('button', {type: 'button', class: 'btn small', onclick: () => reviewForm('send_back')}, 'Send back with a comment'),
+        h('button', {type: 'button', class: 'btn ghost small', onclick: link}, 'Copy link for the reviewer')));
+    if (rr.status === 'sent_back') return h('div', {class: 'reviewstate back', id: 'reviewbox'},
+      h('div', {}, h('b', {}, `Sent back by ${rr.reviewer}`), h('span', {}, `“${rr.comment}” (${ago(rr.answered_at)})`)),
+      h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn small', onclick: () => reviewForm('request')}, 'Send for review again')));
+    return null;
+  }
+  function reviewForm(action) {
+    const slot = $('reviewstate'); if (!slot) return;
+    const who = h('input', {type: 'text', placeholder: 'Your name', value: store.get('rd-approver', ''), 'aria-label': 'Your name'});
+    const note = h('textarea', {rows: 2, placeholder: action === 'request' ? 'Note for the reviewer (optional), e.g. “Fixed the two duplicate VINs; please check the totals.”' : 'What needs changing?', 'aria-label': 'Note'});
+    const go = async () => {
+      try {
+        store.set('rd-approver', who.value.trim());
+        const out = await api('/api/spreadsheets/review', {file_hash: state.report.file_hash, action, by: who.value, note: note.value});
+        state.report = {...state.report, ...out.item, review: {...state.report.review, review_state: out.item.review_request?.status}};
+        toast(action === 'request' ? 'Sent for review. Copy the link to let the reviewer know.' : 'Sent back with your comment.');
+        drawReport(); loadList();
+      } catch (e) { toast(e.message, true); }
+    };
+    slot.replaceChildren(h('div', {class: 'reviewstate' + (action === 'send_back' ? ' back' : '')},
+      h('div', {class: 'reviewform'}, h('b', {}, action === 'request' ? 'Send this report for review' : 'Send it back with a comment'), who, note,
+        h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn ghost small', onclick: () => slot.replaceChildren(...[reviewState(state.report)].filter(Boolean))}, 'Cancel'),
+          h('button', {type: 'button', class: 'btn primary small', onclick: go}, action === 'request' ? 'Send for review' : 'Send back')))));
+    note.focus();
+  }
+
+  // ---------------- executive overview across every job
+  async function showOverview() {
+    const wrap = h('div', {class: 'sheetwrap apiwrap'});
+    $('report').replaceChildren(wrap);
+    state.ovDays ||= 30;
+    wrap.replaceChildren(h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Adding up every report…'));
+    let o;
+    try { o = await api('/api/overview', {days: state.ovDays}); } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
+    if (location.hash !== '#overview') return;
+    const t = o.totals, top = Math.max(1, ...o.categories.map(c => c.count));
+    const ctx = what => ({id: `o:${o.days}:${o.end}:${what}`, noun: what === 'slides' ? 'slide show' : 'dashboard', title: `Quality overview, ${o.label}`,
+      ideas: what === 'slides' ? ['Add a slide on our three biggest catches', 'Make it 4 slides for a quick update', 'Add a slide comparing jobs side by side', 'Use a white theme'] :
+        ['Lead with errors caught per job', 'One clean page for printing', 'Add a chart of reports sent on time by job', 'White background'],
+      create: rebuild => api('/api/overview/artifact', {days: o.days, what, rebuild}), chat: message => api('/api/overview/artifact/chat', {days: o.days, what, message}),
+      undo: () => api('/api/overview/artifact/undo', {days: o.days, what})});
+    const pct = v => v == null ? '—' : v.toFixed(v < 10 ? 1 : 0) + '%';
+    wrap.replaceChildren(...[
+      h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Quality overview'), h('div', {class: 'meta'}, `Every job: ${o.label.replace(/^Last/, 'the last')}. What the verifier caught before any client saw it, and how reliably reports went out.`))),
+      h('div', {class: 'periodbar'}, h('div', {class: 'pseg'}, [7, 30, 90].map(d => h('button', {type: 'button', class: state.ovDays === d ? 'on' : '', onclick: () => { state.ovDays = d; showOverview(); }}, `${d} days`))),
+        h('button', {type: 'button', class: 'btn primary', onclick: () => openArtifact(ctx('slides'))}, 'Create executive slide show'),
+        h('button', {type: 'button', class: 'btn', onclick: () => openArtifact(ctx('dashboard'))}, 'Create overview dashboard')),
+      h('div', {class: 'ovhero'}, h('b', {}, fmt(t.caught)), h('span', {}, `errors caught and fixed before the client saw them, across ${fmt(t.reports)} daily reports for ${fmt(t.jobs)} job${t.jobs === 1 ? '' : 's'}. ${fmt(t.must_fix)} were must-fix.`)),
+      h('div', {class: 'numbers five'},
+        h('div', {}, h('b', {}, fmt(t.corrected)), h('span', {}, 'Corrected before sending')),
+        h('div', {}, h('b', {}, `${fmt(t.sent)} of ${fmt(t.reports)}`), h('span', {}, 'Sent from the verifier')),
+        h('div', {}, h('b', {}, pct(t.on_time_pct)), h('span', {}, 'Sent on time')),
+        h('div', {}, h('b', {}, t.turnaround == null ? '—' : `${t.turnaround} h`), h('span', {}, 'Upload to sent')),
+        h('div', {}, h('b', {class: t.open ? 'bad' : ''}, fmt(t.open)), h('span', {}, 'Still on Hold'))),
+      h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'What was caught'), h('p', {}, 'By kind of error, from the first upload of each daily report.')),
+        o.categories.length ? h('div', {class: 'ovbars'}, o.categories.map(c => h('div', {class: 'ovbar'}, h('span', {}, c.reason), h('div', {}, (() => { const i = h('i'); i.style.width = `${c.count / top * 100}%`; return i; })()), h('em', {}, fmt(c.count)))))
+          : h('p', {class: 'note'}, 'Nothing caught in this period.')),
+      h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'By job')),
+        h('div', {class: 'tablewrap'}, h('table', {class: 'keys pdays'},
+          h('thead', {}, h('tr', {}, ['Job', 'Days', 'Inspected', 'Reject rate', 'Errors caught', 'Corrected', 'Sent', 'On time', 'Upload to sent', ''].map(x => h('th', {}, x)))),
+          h('tbody', {}, o.jobs.map(j => h('tr', {}, h('td', {}, h('b', {}, j.job)), h('td', {}, fmt(j.days)), h('td', {}, fmt(j.inspected)), h('td', {}, pct(j.rate)),
+            h('td', {}, fmt(j.caught)), h('td', {}, fmt(j.corrected)), h('td', {}, `${fmt(j.sent)} of ${fmt(j.days)}`), h('td', {}, fmt(j.on_time)), h('td', {}, j.turnaround == null ? '—' : `${j.turnaround} h`),
+            h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => { state.periodQuery = {kind: o.days > 7 ? 'month' : 'week', day: o.end, job: j.job}; location.hash = 'periods'; }}, 'Details')))))))),
+    ].filter(Boolean));
+  }
+
+  // ---------------- Today: every job's day at a glance
+  async function showToday() {
+    const wrap = h('div', {class: 'sheetwrap apiwrap'});
+    $('report').replaceChildren(wrap);
+    state.todayDay ||= null;
+    let data;
+    const load = async extra => {
+      try { data = await api('/api/today', {day: state.todayDay, ...(extra || {})}); } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return false; }
+      return location.hash === '#today';
+    };
+    wrap.replaceChildren(h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Looking at every job…'));
+    if (!await load()) return;
+    const sp = {};
+    const draw = () => {
+      const day = data.day, rows = data.jobs;
+      const label = new Date(day + 'T12:00:00').toLocaleDateString('en-US', {weekday: 'long', month: 'long', day: 'numeric'});
+      const counts = {send: 0, missing: 0, hold: 0};
+      for (const r of rows) {
+        const y = r.yesterday, s = sp[r.job];
+        if (y && !y.sent_at) counts.send++;
+        if (y && y.status === 'hold') counts.hold++;
+        if (!y && s?.yesterday) counts.missing++;
+      }
+      const shift = d => { const x = new Date(day + 'T12:00:00'); x.setDate(x.getDate() + d); state.todayDay = x.toISOString().slice(0, 10); showToday(); };
+      const repCell = (rep, scans, when) => rep
+        ? h('td', {}, h('a', {href: '#r=' + rep.file_hash}, h('span', {class: 'tag tag-' + rep.status}, STATUS[rep.status])), ' ',
+            h('span', {class: rep.sent_at ? 'ok' : 'warn'}, rep.sent_at ? 'Sent' : rep.approved ? 'Approved, not sent' : 'Not sent'))
+        : h('td', {}, scans ? h('span', {class: 'differs'}, `Missing (${fmt(scans)} scans on SharePoint)`) : h('span', {class: 'quiet'}, when === 'today' ? 'Not uploaded yet' : '—'));
+      const addBox = h('input', {type: 'text', placeholder: 'Add a job to watch, e.g. HANDS-HMMA-2219', 'aria-label': 'Job number'});
+      wrap.replaceChildren(
+        h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Today'), h('div', {class: 'meta'}, 'Every job’s day at a glance: scans on SharePoint so far, and where each daily report stands.'))),
+        h('div', {class: 'periodbar'}, h('div', {class: 'pnav'}, h('button', {type: 'button', class: 'btn small', 'aria-label': 'Previous day', onclick: () => shift(-1)}, '‹'),
+          h('b', {}, label), h('button', {type: 'button', class: 'btn small', 'aria-label': 'Next day', onclick: () => shift(1)}, '›'))),
+        h('div', {class: 'numbers five'},
+          h('div', {}, h('b', {}, fmt(rows.length)), h('span', {}, 'Jobs')),
+          h('div', {}, h('b', {class: counts.missing ? 'bad' : ''}, fmt(counts.missing)), h('span', {}, 'Yesterday’s reports missing')),
+          h('div', {}, h('b', {class: counts.hold ? 'bad' : ''}, fmt(counts.hold)), h('span', {}, 'On Hold')),
+          h('div', {}, h('b', {}, fmt(counts.send)), h('span', {}, 'Still to send')),
+          h('div', {}, h('b', {}, fmt(rows.reduce((n, r) => n + (sp[r.job]?.today || 0), 0))), h('span', {}, 'Scans today so far'))),
+        h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Jobs')),
+          rows.length ? h('div', {class: 'tablewrap'}, h('table', {class: 'keys pdays'},
+            h('thead', {}, h('tr', {}, ['Job', 'Yesterday’s report', 'Today so far', 'Today’s report', ''].map(x => h('th', {}, x)))),
+            h('tbody', {}, rows.map(r => {
+              const s = sp[r.job];
+              const today = !data.sharepoint_on ? h('span', {class: 'quiet'}, 'SharePoint off') : s === undefined ? h('span', {class: 'quiet'}, h('span', {class: 'spin'}), ' checking…')
+                : s?.error ? h('span', {class: 'quiet', title: s.error}, 'Could not read SharePoint') : !s?.found ? h('span', {class: 'quiet'}, 'No “Data #” list found')
+                : s.today ? h('span', {}, h('b', {}, fmt(s.today)), ' scans', s.last ? ` · last ${new Date(s.last).toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago'})}` : '',
+                    Object.keys(s.shifts || {}).length ? h('span', {class: 'quiet'}, ' · ' + Object.entries(s.shifts).map(([k, v]) => `${k} ${fmt(v)}`).join(' · ')) : null)
+                : h('span', {class: 'quiet'}, 'No scans yet');
+              return h('tr', {},
+                h('td', {}, h('b', {}, r.job)),
+                repCell(r.yesterday, s?.yesterday, 'yesterday'),
+                h('td', {}, today),
+                repCell(r.today, 0, 'today'),
+                h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => { state.periodQuery = {kind: 'week', day, job: r.job}; location.hash = 'periods'; }}, 'Week'),
+                  r.watched ? h('button', {type: 'button', class: 'btn ghost small', onclick: async () => { if (await load({remove: r.job})) draw(); }}, 'Stop watching') : null));
+            })))) : h('p', {class: 'note'}, 'No jobs yet. Upload a daily report, or add a job to watch below.'),
+          h('div', {class: 'keyform addjob'}, addBox, h('button', {type: 'button', class: 'btn', onclick: async () => { if (!addBox.value.trim()) return; if (await load({add: addBox.value})) { draw(); fetchScans(); } }}, 'Watch job'))));
+    };
+    const fetchScans = async () => {
+      if (!data.sharepoint_on) return;
+      const queue = data.jobs.map(r => r.job).filter(j => sp[j] === undefined);
+      const worker = async () => { while (queue.length) { const j = queue.shift(); try { sp[j] = (await api('/api/today/job', {job: j, day: data.day})).sharepoint; } catch (e) { sp[j] = {error: e.message}; } if (location.hash === '#today') draw(); } };
+      await Promise.all([worker(), worker(), worker()]);
+    };
+    draw(); fetchScans();
+  }
+
+  // ---------------- scan timeline from SharePoint (internal: never part of what the client receives)
+  function timelineBlock(r) {
+    const t = (r.sharepoint || {}).timeline;
+    if (!t || !t.buckets?.length) return null;
+    const at = iso => new Date(iso);
+    const hm = iso => at(iso).toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago'});
+    const t0 = at(t.buckets[0].at).getTime(), t1 = at(t.buckets[t.buckets.length - 1].at).getTime() + 30 * 60000;
+    const span = Math.max(t1 - t0, 3600000), W = 1000, H = 150, top = Math.max(...t.buckets.map(b => b.scans));
+    const xOf = ms => 40 + (ms - t0) / span * (W - 60);
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const el = (tag, attrs, text) => { const n = document.createElementNS(svgNS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); if (text != null) n.textContent = text; return n; };
+    const svg = el('svg', {viewBox: `0 0 ${W} ${H + 30}`, width: '100%', role: 'img', 'aria-label': 'Scans per half hour'});
+    const colors = ['#e6f2ec', '#eef3f8', '#f7f1e3', '#f3eaf3'];
+    (t.shifts || []).forEach((s, i) => {
+      const a = Math.max(t0, at(s.first).getTime() - 15 * 60000), b = Math.min(t1, at(s.last).getTime() + 15 * 60000);
+      svg.append(el('rect', {x: xOf(a), y: 0, width: Math.max(4, xOf(b) - xOf(a)), height: H, fill: colors[i % 4], rx: 4}));
+      svg.append(el('text', {x: xOf(a) + 6, y: 14, 'font-size': 12, fill: '#55706b', 'font-weight': 600}, `${s.name} shift · ${s.scans} scans`));
+    });
+    const bw = (W - 60) * 30 * 60000 / span;
+    for (const b of t.buckets) {
+      const h = b.scans / top * (H - 28), x = xOf(at(b.at).getTime());
+      svg.append(el('rect', {x: x + 1, y: H - h, width: Math.max(2, bw - 2), height: h, fill: '#20594d', rx: 2}, null));
+    }
+    for (const g of t.gaps || []) svg.append(el('rect', {x: xOf(at(g.start).getTime()), y: H - 4, width: Math.max(2, xOf(at(g.end).getTime()) - xOf(at(g.start).getTime())), height: 4, fill: '#c0392b'}));
+    for (let ms = Math.ceil(t0 / 3600000) * 3600000; ms <= t1; ms += 3600000 * Math.max(1, Math.ceil(span / 3600000 / 9)))
+      svg.append(el('text', {x: xOf(ms), y: H + 20, 'font-size': 12, 'text-anchor': 'middle', fill: '#55706b'}, hm(new Date(ms).toISOString())));
+    const people = t.people || [];
+    return h('section', {class: 'block'},
+      h('header', {}, h('h2', {}, 'Scan timeline'),
+        h('p', {}, `${fmt(t.scans)} scans from ${hm(t.first)} to ${hm(t.last)} (plant time), by half hour. Red marks are gaps of 45 minutes or more. For your review only; never sent to the client.`)),
+      h('div', {class: 'panel tlpanel'}, svg),
+      t.flags.length ? h('ul', {class: 'pfind tlflags'}, t.flags.map(f => h('li', {class: 'medium'}, f))) : h('p', {class: 'note'}, 'No red flags: steady scanning inside the shift times.'),
+      people.length ? h('details', {class: 'tlpeople'}, h('summary', {}, `Who scanned (${people.length})`),
+        h('table', {class: 'keys'}, h('thead', {}, h('tr', {}, ['Name', 'Scans', 'First', 'Last', 'Shifts'].map(x => h('th', {}, x)))),
+          h('tbody', {}, people.map(p => h('tr', {}, h('td', {}, p.name), h('td', {}, fmt(p.scans)), h('td', {}, hm(p.first)), h('td', {}, hm(p.last)), h('td', {}, p.shifts.join(', '))))))) : null);
   }
 
   // ---------------- dashboards and slide shows: built from the data, shown in a sandbox, changed by talking to Claude, downloadable

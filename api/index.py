@@ -304,8 +304,9 @@ class handler(BaseHTTPRequestHandler):
                 from hosting import periods
                 q = parse_qs(urlsplit(self.path).query)
                 art = q.get('key', [''])[0]
-                parsed = periods.parse_key(art)
-                if not parsed:
+                from hosting import overview as ov
+                parsed, over = periods.parse_key(art), ov.parse_key(art)
+                if not parsed and not over:
                     raise Conflict('Unknown dashboard or slide show.')
                 with self.store().session() as directory:
                     dash = SpreadsheetInbox(directory).dashboard(art)
@@ -313,7 +314,9 @@ class handler(BaseHTTPRequestHandler):
                     return self.fail(404, 'Not created yet.')
                 headers = {'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; "
                                                       "base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-popups allow-modals"}
-                if q.get('download') == ['1']:
+                if q.get('download') == ['1'] and over:
+                    headers['Content-Disposition'] = f'attachment; filename="PPG Quality Overview {"Slides" if over[2] == "slides" else "Dashboard"} {over[1].isoformat()}.html"'
+                elif q.get('download') == ['1']:
                     job, kind, start, what = parsed
                     headers['Content-Disposition'] = f'attachment; filename="{re.sub(r"[^A-Za-z0-9 ._()-]", "_", job)} {"Weekly" if kind == "week" else "Monthly"} {"Slides" if what == "slides" else "Dashboard"} {start.isoformat()}.html"'
                 return self.send(200, dash['html'].encode('utf-8'), 'text/html; charset=utf-8', headers)
@@ -412,7 +415,7 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/overview', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload', '/api/periods/check-file') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
@@ -627,6 +630,99 @@ class handler(BaseHTTPRequestHandler):
                 now = datetime.now(timezone.utc).isoformat()
                 with self.store().session() as directory:
                     return done(SpreadsheetInbox(directory).save_dashboard(file_hash, page, [dict(role='user', text=request, at=now), dict(role='assistant', text=reply, at=now)]))
+            if route in ('/api/today', '/api/today/job'):
+                from hosting import periods
+                from zoneinfo import ZoneInfo
+                payload = json.loads(raw) or {}
+                day = payload.get('day') or datetime.now(ZoneInfo('America/Chicago')).date().isoformat()
+                try:
+                    d0 = datetime.fromisoformat(day).date()
+                except ValueError:
+                    raise Conflict('Pick a valid date.')
+                if route.endswith('/job'):
+                    job = ' '.join(str(payload.get('job') or '').split()).upper()
+                    if not job:
+                        raise Conflict('Which job?')
+                    with self.store().session() as directory:
+                        schedule = SpreadsheetInbox(directory).shift_schedule(job)
+                    try:
+                        sp = periods.day_scans(job, d0.isoformat(), schedule)  # network call outside any DB transaction
+                    except Exception as exc:
+                        debug_log()
+                        sp = dict(error=str(exc)[:200])
+                    return self.send(200, encode_json(dict(job=job, sharepoint=sp)))
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    watch = inbox.setting('today_jobs', []) or []
+                    add = ' '.join(str(payload.get('add') or '').split()).upper()[:60]
+                    if add and add not in watch:
+                        watch = inbox.set_setting('today_jobs', watch + [add])
+                    if payload.get('remove'):
+                        watch = inbox.set_setting('today_jobs', [j for j in watch if j != str(payload['remove']).upper()])
+                    from datetime import timedelta
+                    recent = set()
+                    for r in inbox.list()['spreadsheets']:
+                        rv = r.get('review') or {}
+                        if rv.get('job') and rv.get('day') and rv['day'] >= (d0 - timedelta(days=21)).isoformat():
+                            recent.add(rv['job'].upper())
+                    jobs = sorted(set(watch) | recent)
+                    rows = []
+                    for job in jobs:
+                        reps = inbox.reports_for(job, d0 - timedelta(days=1), d0)
+                        rows.append(dict(job=job, watched=job in watch, today=reps.get(d0.isoformat()), yesterday=reps.get((d0 - timedelta(days=1)).isoformat())))
+                return self.send(200, encode_json(dict(day=d0.isoformat(), jobs=rows, sharepoint_on=sharepoint_configured())))
+            if route == '/api/spreadsheets/review':
+                payload = json.loads(raw)
+                file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                with self.store().session() as directory:
+                    item = SpreadsheetInbox(directory).review_action(file_hash, payload.get('action'), payload.get('by'), payload.get('note'))
+                return self.send(200, encode_json({'item': item}))
+            if route.startswith('/api/overview'):
+                from hosting import overview as ov
+                from hosting import dashboard as dash_mod
+                from urllib.parse import quote
+                from zoneinfo import ZoneInfo
+                payload = json.loads(raw) or {}
+                days = payload.get('days') if payload.get('days') in (7, 30, 90) else 30
+                end = datetime.now(ZoneInfo('America/Chicago')).date()
+                with self.store().session() as directory:
+                    o = ov.build(SpreadsheetInbox(directory).all_results(), days, end)
+                if route == '/api/overview':
+                    return self.send(200, encode_json(o))
+                what = 'slides' if payload.get('what') == 'slides' else 'dashboard'
+                art_key = ov.key(days, end, what)
+                def art_reply(d):
+                    return self.send(200, encode_json(dict({k: d[k] for k in ('undo', 'messages', 'updated_at')}, ai_on=ai_review_configured(), what=what,
+                                                           view=f'/api/artifacts/view?key={quote(art_key)}&v={quote(d["updated_at"])}',
+                                                           download=f'/api/artifacts/view?key={quote(art_key)}&download=1')))
+                with self.store().session() as directory:
+                    current = SpreadsheetInbox(directory).dashboard(art_key)
+                if route.endswith('/undo'):
+                    with self.store().session() as directory:
+                        return art_reply(SpreadsheetInbox(directory).undo_dashboard(art_key))
+                if route == '/api/overview/artifact':
+                    if current and payload.get('rebuild') is not True:
+                        return art_reply(current)
+                    page = dash_mod.build_overview_slides(o) if what == 'slides' else dash_mod.build_overview_page(o)
+                    with self.store().session() as directory:
+                        return art_reply(SpreadsheetInbox(directory).save_dashboard(art_key, page, reset=True))
+                request = ' '.join(str(payload.get('message') or '').split())[:2000]
+                if not request or not current:
+                    raise Conflict('Say what to change.' if current else 'Create it first.')
+                from hosting import ai_review
+                try:
+                    page, reply = ai_review.edit_dashboard(current['html'], o, current['messages'], request, what=what)
+                except (ai_review.AIReviewNotConfigured, ai_review.AIReviewError) as exc:
+                    raise Conflict(str(exc))
+                now = datetime.now(timezone.utc).isoformat()
+                with self.store().session() as directory:
+                    return art_reply(SpreadsheetInbox(directory).save_dashboard(art_key, page, [dict(role='user', text=request, at=now), dict(role='assistant', text=reply, at=now)]))
+            if route == '/api/vins/search':
+                payload = json.loads(raw)
+                with self.store().session() as directory:
+                    return self.send(200, encode_json(SpreadsheetInbox(directory).find_vin((payload or {}).get('q'))))
             if route.startswith('/api/periods'):
                 from hosting import periods
                 from urllib.parse import quote
@@ -649,6 +745,15 @@ class handler(BaseHTTPRequestHandler):
                     file_check = inbox.setting(f'filecheck|{job}|{kind}|{start.isoformat()}', None)
                 sp_days, sp_note = periods.sharepoint_days(job, start, end, schedule)  # network call outside any DB transaction
                 period = periods.assemble(job, kind, start, end, label, reports, sp_days, sp_note)
+                if len(reports) > 1:
+                    try:
+                        with self.store().session() as directory:
+                            got = SpreadsheetInbox(directory).vins_in([r['file_hash'] for r in reports.values()])
+                        by_hash = {r['file_hash']: d for d, r in reports.items()}
+                        extra = periods.cross_day({by_hash[h]: v for h, v in got.items()})
+                        period['findings'] = sorted(extra + period['findings'], key=lambda f: ({'high': 0, 'medium': 1, 'low': 2}[f['severity']], f['day'] or ''))
+                    except Exception:
+                        debug_log()
                 what = 'slides' if payload.get('what') == 'slides' else 'dashboard'
                 art_key = periods.key(job, kind, start, what)
                 def art_reply(d):

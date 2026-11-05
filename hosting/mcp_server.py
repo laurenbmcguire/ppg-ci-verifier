@@ -32,6 +32,9 @@ TOOLS = [
     dict(name='get_report', title='Get a report',
          description='One report: status, numbers (scans, inspected, rejected), every issue with sheet/cell, SharePoint and usual-day comparison, approval and send history, corrected copy.',
          inputSchema=dict(S(id=ID), required=['id']), annotations=dict(readOnlyHint=True)),
+    dict(name='find_vin', title='Find a VIN',
+         description='Which end-of-shift reports a VIN or identifier is in (full or partial, at least 4 characters): job, day, tab, row, and whether it was sent. Use it for "was this car inspected?" questions.',
+         inputSchema=dict(S(query={'type': 'string'}), required=['query']), annotations=dict(readOnlyHint=True)),
     dict(name='get_fixes', title='Suggested fixes',
          description='Suggested cell changes for a report (from the checks and from Claude), each with sheet, cell, before, after and reason.',
          inputSchema=dict(S(id=ID), required=['id']), annotations=dict(readOnlyHint=True)),
@@ -122,6 +125,8 @@ def _call(h, key, name, a):
         return ops.op_list(h, a.get('status'), a.get('job'))
     if name == 'get_report':
         return ops.op_get(h, a.get('id'))
+    if name == 'find_vin':
+        return ops.op_find_vin(h, a.get('query'))
     if name == 'get_fixes':
         return ops.op_fixes(h, a.get('id'))
     if name == 'apply_fixes':

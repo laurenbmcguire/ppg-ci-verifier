@@ -115,6 +115,7 @@ def summarize(result, with_issues=True, use_verdicts=True):
                fixed_from=(result.get('fixed_from') or {}).get('filename'), fixes_applied=len(result.get('fixes_applied') or []),
                verify=dict(status=verify.get('status') or 'not_run', dismissed=len(dismissed), message=verify.get('message')),
                approved=(result.get('approval') or {}).get('by'),
+               review_state=(result.get('review_request') or {}).get('status'),
                sent_at=next((x.get('at') for x in reversed(result.get('sent') or []) if x.get('sent')), None))
     if with_issues:
         out['issues'] = issues

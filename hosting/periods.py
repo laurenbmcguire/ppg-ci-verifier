@@ -208,3 +208,48 @@ def data_for(period, dailies):
                 reasons=[dict(reason=k, count=v) for k, v in reasons.most_common(12)],
                 parts=[dict(part=k, **v) for k, v in sorted(parts.items(), key=lambda kv: -kv[1]['inspected'])[:20]],
                 generated=datetime.now(timezone.utc).strftime('%Y-%m-%d'))
+
+
+def cross_day(vins_by_day):
+    """Findings for VINs that are in more than one day's report: possibly inspected or billed twice."""
+    days_of = defaultdict(list)
+    for d, vins in sorted(vins_by_day.items()):
+        for v in vins:
+            days_of[v].append(d)
+    dup = {v: ds for v, ds in days_of.items() if len(ds) > 1}
+    out = []
+    for v, ds in sorted(dup.items(), key=lambda kv: kv[1])[:15]:
+        names = ' and '.join(date.fromisoformat(d).strftime('%a %b ') + str(date.fromisoformat(d).day) for d in ds)
+        out.append(dict(severity='high', day=ds[-1], text=f'{v} is in the daily reports for {names}. Inspected twice, or billed twice?'))
+    if len(dup) > 15:
+        out.append(dict(severity='high', day=None, text=f'{len(dup) - 15} more VIN(s) appear in more than one day\'s report.'))
+    return out
+
+
+def day_scans(job, day, schedule=None):
+    """SharePoint activity for one job: scans for the day and the day before, last scan time, scans per shift."""
+    from hosting import sharepoint
+    from hosting.shifts import local_time, assign
+    if not sharepoint.configured():
+        return None
+    data = sharepoint._list_items(job)
+    if not data:
+        return dict(found=False)
+    d0 = date.fromisoformat(day)
+    prev = (d0 - timedelta(days=1)).isoformat()
+    out = dict(found=True, list=data[1].get('displayName'), today=0, yesterday=0, last=None, shifts={})
+    last = None
+    for it in data[3]:
+        d = sharepoint._item_day(it, schedule)
+        if d == day:
+            out['today'] += 1
+            local = local_time(sharepoint._stamp(it))
+            if local:
+                last = max(last, local) if last else local
+                sh = assign(local, schedule)[0] if schedule else None
+                if sh:
+                    out['shifts'][sh['name']] = out['shifts'].get(sh['name'], 0) + 1
+        elif d == prev:
+            out['yesterday'] += 1
+    out['last'] = last.isoformat() if last else None
+    return out

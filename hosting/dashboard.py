@@ -401,3 +401,69 @@ def build_slides(d):
 <body><main class="deck">{''.join(slides)}</main>
 <div class="nav"><button id="prev" type="button">‹</button><span id="n"></span><button id="next" type="button">›</button><button id="all" type="button">All slides</button></div>
 <script>{SLIDE_JS}</script></body></html>"""
+
+
+# ---------------------------------------------------------------- executive overview (all jobs)
+def _pctf(v, digits=1):
+    return '—' if v is None else f'{v:.{digits}f}%'
+
+
+def _ov_kpis(o):
+    t = o['totals']
+    return [('Errors caught before the client', _fmt(t['caught']), 'rej'), ('Daily reports checked', _fmt(t['reports']), ''),
+            ('Corrected before sending', _fmt(t['corrected']), ''), ('Sent on time', '—' if t['on_time_pct'] is None else f'{t["on_time_pct"]:.0f}%', ''),
+            ('Parts inspected', _fmt(t['inspected']), '')]
+
+
+def _ov_table(o):
+    rows = ''.join(f'<tr><td>{_e(j["job"])}</td><td class="num">{_fmt(j["days"])}</td><td class="num">{_fmt(j["inspected"])}</td>'
+                   f'<td class="num">{_pctf(j["rate"])}</td><td class="num">{_fmt(j["caught"])}</td>'
+                   f'<td class="num">{_fmt(j["corrected"])}</td><td class="num">{_fmt(j["sent"])} of {_fmt(j["days"])}</td></tr>' for j in o['jobs'])
+    return ('<table><thead><tr><th>Job</th><th class="num">Days</th><th class="num">Inspected</th><th class="num">Reject rate</th>'
+            '<th class="num">Errors caught</th><th class="num">Corrected</th><th class="num">Sent</th></tr></thead><tbody>'
+            + (rows or '<tr><td colspan="7" class="empty">No reports in this period.</td></tr>') + '</tbody></table>')
+
+
+def build_overview_page(o):
+    t = o['totals']
+    kpi_html = ''.join(f'<div class="kpi {c}"><b>{v}</b><span>{_e(k)}</span></div>' for k, v, c in _ov_kpis(o))
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PPG Quality: Quality Overview, {_e(o['label'])}</title><style>{CSS}</style></head>
+<body>
+<header class="band"><div class="brand">PPG QUALITY</div><h1>Quality overview</h1><p>{_e(o['label'])} · {_fmt(t['jobs'])} job{'s' if t['jobs'] != 1 else ''}</p></header>
+<main class="wrap">
+<section class="kpis">{kpi_html}</section>
+<section class="grid">
+<div class="card"><h2>What was caught</h2><p class="sub">{_fmt(t['caught'])} errors found and fixed before the client saw them, {_fmt(t['must_fix'])} of them must-fix.</p>{_hbars(o['categories'][:9], lambda i: i['reason'], lambda i: i['count'], '#c0392b')}</div>
+<div class="card"><h2>Reports out the door</h2><p class="sub">Daily reports sent to clients from the verifier.</p>
+{_hbars([dict(reason='Sent', count=t['sent']), dict(reason='Sent on time', count=t['on_time']), dict(reason='Corrected first', count=t['corrected']), dict(reason='Still on Hold', count=t['open'])], lambda i: i['reason'], lambda i: i['count'])}
+<p class="sub" style="margin-top:12px">{'Typical time from upload to sent: ' + _fmt(t['turnaround'], 1) + ' hours.' if t['turnaround'] is not None else ''}</p></div>
+<div class="card wide"><h2>By job</h2><div class="scroll">{_ov_table(o)}</div></div>
+</section>
+<footer>Prepared by PPG Quality from the daily end-of-shift reports checked in the verifier, {_e(o['start'])} to {_e(o['end'])}, on {_e(o['generated'])}.</footer>
+</main></body></html>"""
+
+
+def build_overview_slides(o):
+    t = o['totals']
+    foot = f'<div class="foot"><span>PPG Quality · Quality overview</span><span>{_e(o["label"])}</span></div>'
+    tiles = ''.join(f'<div class="tile {c}"><b>{v}</b><span>{_e(k)}</span></div>' for k, v, c in _ov_kpis(o))
+    worst = sorted([j for j in o['jobs'] if j['rate'] is not None], key=lambda j: -j['rate'])[:6]
+    slides = [
+        f'<section class="slide title"><div class="brand">PPG QUALITY</div><h1>Quality overview</h1><p>{_e(o["label"])}</p>{foot}</section>',
+        f'<section class="slide"><h2>At a glance</h2><p class="lede">{_fmt(t["reports"])} daily reports across {_fmt(t["jobs"])} jobs; {_fmt(t["caught"])} errors caught before any client saw them.</p><div class="body"><div class="tiles">{tiles}</div></div>{foot}</section>',
+        f'<section class="slide"><h2>What we caught</h2><p class="lede">Every one found and fixed before the report went out.</p><div class="body">{_hbars(o["categories"][:8], lambda i: i["reason"], lambda i: i["count"], "#c0392b")}</div>{foot}</section>',
+        f'<section class="slide"><h2>Reports out the door</h2><p class="lede">{_fmt(t["sent"])} sent{", " + _pctf(t["on_time_pct"], 0) + " on time" if t["on_time_pct"] is not None else ""}{"; typically " + _fmt(t["turnaround"], 1) + " hours from upload to sent" if t["turnaround"] is not None else ""}.</p><div class="body">'
+        + _hbars([dict(reason='Sent', count=t['sent']), dict(reason='Sent on time', count=t['on_time']), dict(reason='Corrected first', count=t['corrected']), dict(reason='Still on Hold', count=t['open'])], lambda i: i['reason'], lambda i: i['count'])
+        + f'</div>{foot}</section>',
+        f'<section class="slide"><h2>Reject rate by job</h2><p class="lede">Highest first.</p><div class="body">{_hbars([dict(reason=j["job"], count=round(j["rate"], 1)) for j in worst], lambda i: i["reason"], lambda i: i["count"], "#20594d", "%")}</div>{foot}</section>',
+        f'<section class="slide"><h2>By job</h2><p class="lede">{_fmt(t["jobs"])} jobs.</p><div class="body">{_ov_table(o)}</div>{foot}</section>',
+        f'<section class="slide title"><div class="brand">PPG QUALITY</div><h1>Thank you</h1><p>The client never finds an error we did not find first.</p>{foot}</section>',
+    ]
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PPG Quality: Quality Overview, {_e(o['label'])}</title><style>{SLIDE_CSS}</style></head>
+<body><main class="deck">{''.join(slides)}</main>
+<div class="nav"><button id="prev" type="button">‹</button><span id="n"></span><button id="next" type="button">›</button><button id="all" type="button">All slides</button></div>
+<script>{SLIDE_JS}</script></body></html>"""

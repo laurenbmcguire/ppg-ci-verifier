@@ -21,6 +21,7 @@ ENDPOINTS = [
     ('GET', '/api/v1', 'This list. No key needed.'),
     ('GET', '/api/v1/reports', 'Latest 100 reports with status. Optional ?status=hold|check|clear&job=...'),
     ('POST', '/api/v1/reports', 'Upload a report: {"filename": "...xlsx", "content_base64": "..."} (up to 4 MB). Runs every check (SharePoint, usual day, AI when on) and returns the result.'),
+    ('GET', '/api/v1/vins?q=...', 'Which reports a VIN or identifier is in (full or partial, at least 4 characters).'),
     ('GET', '/api/v1/reports/{id}', 'One report: status, numbers, every issue, approval and send history.'),
     ('GET', '/api/v1/reports/{id}/fixes', 'Suggested cell changes (checks and Claude).'),
     ('POST', '/api/v1/reports/{id}/fixes', 'Make a corrected copy: {"accept": "all"} or {"ids": [...]} and/or {"changes": [{"sheet","cell","after","reason"}]}. Returns the new report (it is checked again). The original is never changed.'),
@@ -223,6 +224,11 @@ def op_send_preview(h, file_hash):
     return delivery.info(h.store(), file_hash)
 
 
+def op_find_vin(h, q):
+    with h.store().session() as directory:
+        return SpreadsheetInbox(directory).find_vin(q)
+
+
 def shift_fix(h, file_hash):
     """Corrected copy with every wrong-shift row on its shift's tab (or taken out). Returns (item, moved, removed)."""
     from hosting.fixes import relocate_rows, FixError
@@ -267,6 +273,9 @@ def handle(h, method, route, send):
             return send(200, index())
         key = _key(h)
         query = dict(p.split('=', 1) for p in (h.path.split('?', 1)[1].split('&') if '?' in h.path else []) if '=' in p)
+        if path == '/api/v1/vins' and method == 'GET':
+            from urllib.parse import unquote_plus
+            return send(200, op_find_vin(h, unquote_plus(query.get('q', ''))))
         if path == '/api/v1/reports':
             if method == 'GET':
                 return send(200, op_list(h, query.get('status'), query.get('job', '').replace('%20', ' ') or None))
