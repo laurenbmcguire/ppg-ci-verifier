@@ -303,6 +303,63 @@ def run(sources, cached, sheets, detail, finding, hidden=None):
             finding('comment_count_mismatch', r['sheet'], r['row'], r['columns'].get('rejected'),
                     message=f'Comment "{_clip(note)}" adds up to {sum(counts)}, but Rejected is {nok}.')
 
+    # 12. Identifier format: VIN letters and check digit, lengths that differ from the rest, Excel fill-down series, lost leading zeros.
+    idrows = [(r, _key(r['labels'].get('identifier') or '')) for r in detail if _key(r['labels'].get('identifier') or '')]
+    lengths = Counter(len(k) for _, k in idrows)
+    usual, n_usual = lengths.most_common(1)[0] if lengths else (0, 0)
+    vins = [(r, k) for r, k in idrows if len(k) == 17]
+    vin_report = len(vins) >= 3 and len(vins) >= 0.6 * len(idrows)
+    if vin_report:
+        passing = sum(1 for _, k in vins if vin_check_digit(k) == k[8])
+        check_digits_used = passing >= max(3, 0.8 * len(vins))   # North American VINs carry a check digit; others may not
+        flagged = 0
+        for r, k in vins:
+            if flagged >= 40:
+                break
+            bad = sorted(set(ch for ch in k if ch in 'IOQ'))
+            if bad:
+                flagged += 1
+                finding('vin_has_i_o_q', r['sheet'], r['row'], r['label_columns'].get('identifier'),
+                        message=f'VIN "{r["labels"]["identifier"]}" contains {", ".join(bad)}. Real VINs never use I, O or Q, so it is probably a misread 1 or 0.')
+            elif check_digits_used and vin_check_digit(k) != k[8]:
+                flagged += 1
+                finding('vin_check_digit_wrong', r['sheet'], r['row'], r['label_columns'].get('identifier'),
+                        message=f'VIN "{r["labels"]["identifier"]}" fails the VIN check digit (9th character should be {vin_check_digit(k)}), so a character was probably typed or scanned wrong.')
+    if n_usual >= 5 and usual >= 8 and n_usual >= 0.8 * len(idrows):
+        odd = [(r, k) for r, k in idrows if len(k) != usual][:20]
+        for r, k in odd:
+            finding('identifier_unusual_length', r['sheet'], r['row'], r['label_columns'].get('identifier'),
+                    message=f'Identifier "{r["labels"]["identifier"]}" has {len(k)} characters; {n_usual} of the {len(idrows)} identifiers have {usual}. A character may be missing or extra.')
+    tail = re.compile(r'^(.*?)(\d+)$')
+    steps = []
+    for (a, ka), (b, kb) in zip(idrows, idrows[1:]):
+        ma, mb = tail.match(ka), tail.match(kb)
+        steps.append(bool(a['sheet'] == b['sheet'] and b['row'] == a['row'] + 1 and ma and mb and ma.group(1) == mb.group(1)
+                          and len(ka) >= 10 and int(mb.group(2)) == int(ma.group(2)) + 1))
+    if steps and sum(steps) < 0.5 * len(steps):   # identifiers that are normally sequential (scan numbers) are fine
+        run_start = None
+        for i, step in enumerate(steps + [False]):
+            if step and run_start is None:
+                run_start = i
+            elif not step and run_start is not None:
+                if i - run_start >= 3:
+                    r0, k0 = idrows[run_start]
+                    finding('fill_series_identifiers', r0['sheet'], r0['row'], r0['label_columns'].get('identifier'),
+                            message=f'{i - run_start + 1} identifiers in a row count up by one from "{r0["labels"]["identifier"]}". That is what Excel does when a cell is dragged down; check they were really scanned.')
+                run_start = None
+    by_stripped = defaultdict(set)
+    for r in detail:
+        part = (r['labels'].get('part') or '').strip()
+        if part:
+            by_stripped[_key(part).lstrip('0')].add(_key(part))
+    for stripped, forms in by_stripped.items():
+        if stripped and len(forms) > 1:
+            longest, shortest = max(forms, key=len), min(forms, key=len)
+            if longest != shortest:
+                row = next(r for r in detail if _key(r['labels'].get('part') or '') == shortest)
+                finding('leading_zeros_lost', row['sheet'], row['row'], row['label_columns'].get('part'),
+                        message=f'Part number "{shortest}" is "{longest}" without its leading zero(s). Excel drops leading zeros from numbers; enter part numbers as text.')
+
 
 def _col(index):
     letters, n = '', index + 1
@@ -315,3 +372,19 @@ def _col(index):
 def _clip(text, n=60):
     text = re.sub(r'[\x00-\x1f]', '·', str(text))
     return text if len(text) <= n else text[:n - 1] + '…'
+
+
+VIN_VALUES = dict(zip('ABCDEFGHJKLMNPRSTUVWXYZ', [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 7, 9, 2, 3, 4, 5, 6, 7, 8, 9]))
+VIN_WEIGHTS = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2]
+
+
+def vin_check_digit(vin):
+    """The 9th character a 17-character North American VIN should have ('X' for 10); '?' if it has letters VINs never use."""
+    total = 0
+    for ch, w in zip(vin, VIN_WEIGHTS):
+        v = int(ch) if ch.isdigit() else VIN_VALUES.get(ch)
+        if v is None:
+            return '?'
+        total += v * w
+    d = total % 11
+    return 'X' if d == 10 else str(d)

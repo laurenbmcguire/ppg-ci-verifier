@@ -609,3 +609,23 @@ table.pdays td .btn{margin-right:6px}
 @media (max-width:760px){.ovbar{grid-template-columns:1fr 60px}.ovbar > div{grid-column:1/-1}}
 
 .segmented button{font-size:12px;padding:7px 4px}
+
+/* recommendations: next steps from the checks and Claude */
+.recs header{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:4px 14px}
+.recs header p{order:3;flex:1 0 100%;margin:0}
+.recsbar{display:flex;align-items:center;gap:10px}
+.recsbusy{margin:0;font-size:13px}
+.reclist{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:8px}
+.rec{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:flex-start;padding:11px 12px;border:1px solid var(--line);border-left-width:4px;border-radius:8px;background:#fff}
+.rec.pri-high{border-left-color:var(--high)}
+.rec.pri-medium{border-left-color:var(--med)}
+.rec.pri-low{border-left-color:var(--low)}
+.rectext{flex:1 1 220px;min-width:0}
+.recpri{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:1px}
+.rec.pri-high .recpri{color:var(--high)}
+.rectext b{display:block;color:var(--ink);font-size:14px}
+.rectext p{margin:3px 0 0;font-size:13px}
+.rectext small{display:block;margin-top:4px;font-size:12px;color:var(--faint)}
+.otherdays{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:8px}
+.otherdays li{padding:9px 12px;border:1px solid var(--line);border-left:4px solid var(--med);border-radius:8px;background:#fff;font-size:13px}
+.otherdays li span{display:block;margin-top:3px;color:var(--muted);overflow-wrap:anywhere}

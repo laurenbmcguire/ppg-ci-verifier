@@ -344,6 +344,34 @@ class SpreadsheetInbox:
         out = [dict(identifier=x['shown'], exact=x['ident'] == q, file_hash=x['file_hash'], sheet=x['sheet'], row=x['row'], **meta[x['file_hash']]) for x in hits]
         out.sort(key=lambda m: (not m['exact'], m['day'] or '', m['filename']), reverse=False)
         return dict(query=query, results=out, still_indexing=left)
+    def repeats_elsewhere(self, file_hash, limit=20):
+        """VINs in this report that are also in the same job's report for a different day: a re-sent old file, or a car counted twice."""
+        from hosting.source_compare import identify
+        item = self.get(file_hash)
+        job, day = identify(item.get('filename'), item)
+        if not job or not day:
+            return []
+        self.index_vins(file_hash)
+        self.index_missing()
+        with self.connect() as db:
+            rows = db.execute('SELECT DISTINCT b.ident, b.shown, b.file_hash FROM vin_index a JOIN vin_index b ON a.ident = b.ident AND b.file_hash != a.file_hash '
+                              'WHERE a.file_hash=? LIMIT 2000', (file_hash,)).fetchall()
+            meta = {}
+            for h in {r['file_hash'] for r in rows}:
+                found = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (h,)).fetchone()
+                if found:
+                    result = self.latest(db, h, json.loads(found['result_json']))
+                    j, d = identify(result.get('filename'), result)
+                    meta[h] = dict(job=(j or '').upper(), day=d, filename=result['filename'])
+        out, seen = [], set()
+        for r in rows:
+            o = meta.get(r['file_hash'])
+            if not o or o['job'] != job.upper() or not o['day'] or o['day'] == day or (r['ident'], o['day']) in seen:
+                continue
+            seen.add((r['ident'], o['day']))
+            out.append(dict(vin=r['shown'], day=o['day'], filename=o['filename'], file_hash=r['file_hash']))
+        out.sort(key=lambda x: (x['day'], x['vin']))
+        return out[:limit] if limit else out
     def vins_in(self, file_hashes):
         """{file_hash: set of VIN keys}."""
         for h in file_hashes:

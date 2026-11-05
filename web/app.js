@@ -165,11 +165,16 @@
     wrap.append(h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
     wrap.append(h('div', {id: 'shiftfix'}, ...[shiftCard(rv)].filter(Boolean)));
     wrap.append(h('div', {id: 'finish'}));
+    wrap.append(h('div', {id: 'recs'}));
     wrap.append(numbers(r));
     wrap.append(h('section', {class: 'block', id: 'sheet-block'}, h('header', {}, h('h2', {}, 'Spreadsheet'), h('p', {}, 'Loading the file…'))));
     wrap.append(h('section', {class: 'block', id: 'fixes-block'}, h('header', {}, h('h2', {}, 'Fixes'), h('p', {}, 'Loading suggested fixes…'))));
     wrap.append(issuesBlock(rv));
     wrap.append(sourcesBlock(r));
+    if ((r.other_days || []).length) wrap.append(h('section', {class: 'block', id: 'otherdays'},
+      h('header', {}, h('h2', {}, 'Already reported on another day'), h('p', {}, `${r.other_days.length >= 20 ? '20 or more' : r.other_days.length} VIN${r.other_days.length === 1 ? '' : 's'} in this report ${r.other_days.length === 1 ? 'is' : 'are'} also in another day's report for ${rv.job}. An old file sent again, or a car counted twice?`)),
+      h('ul', {class: 'otherdays'}, Object.values(r.other_days.reduce((g, x) => { (g[x.file_hash] ||= {...x, vins: []}).vins.push(x.vin); return g; }, {}))
+        .map(g => h('li', {}, h('b', {}, shortDay(g.day)), ' ', h('a', {href: '#r=' + g.file_hash}, g.filename), h('span', {}, g.vins.join(', ')))))));
     const tl = timelineBlock(r); if (tl) wrap.append(tl);
     wrap.append(readBlock(r));
     if (rv.fixed_from || rv.fixes_applied) wrap.append(historyBlock(r));
@@ -177,6 +182,7 @@
     $('report').replaceChildren(wrap);
     updateDownloads();
     drawChat();
+    loadReportRecs(false);
     if (state.fixes) drawFixes();
     state.grid = null; state.gridSheet = null; state.gridCell = null;
     loadGrid();
@@ -778,6 +784,50 @@
     if (!dlg.open) dlg.showModal();
   }
 
+  // ---------------- recommendations: next steps from the checks and Claude's analysis, with one-click actions
+  const PRI = {high: 'Do first', medium: 'Soon', low: 'When you can'};
+  function recsBlock(recs, {ask, act, scope}) {
+    if (!recs) return null;
+    const items = recs.items || [];
+    const busy = h('span', {class: 'note recsbusy', hidden: true}, h('span', {class: 'spin'}), ' Claude is reading the results…');
+    const askBtn = recs.ai_on ? h('button', {type: 'button', class: 'btn small', onclick: async e => {
+      e.target.disabled = true; busy.hidden = false;
+      try { await ask(); } catch (err) { toast(err.message, true); e.target.disabled = false; busy.hidden = true; } }},
+      recs.source === 'ai' ? 'Ask Claude again' : 'Ask Claude for recommendations') : null;
+    const src = recs.source === 'ai' ? `From Claude's analysis of ${scope}, ${ago(recs.made_at)}.` : `From the checks on ${scope}.` + (recs.ai_on ? ' Ask Claude for a deeper read.' : '');
+    return h('section', {class: 'block recs', 'aria-label': 'Recommendations'},
+      h('header', {}, h('h2', {}, 'Recommendations'), h('p', {}, src), h('div', {class: 'recsbar'}, askBtn, busy)),
+      recs.note ? h('p', {class: 'note'}, recs.note) : null,
+      items.length ? h('ol', {class: 'reclist'}, items.map(r => h('li', {class: 'rec pri-' + r.priority},
+        h('div', {class: 'rectext'}, h('span', {class: 'recpri'}, PRI[r.priority] || 'Soon'), h('b', {}, r.title), h('p', {}, r.why), r.who && r.who !== 'you' ? h('small', {}, 'For the ' + r.who) : null),
+        r.do && act(r) ? h('button', {type: 'button', class: 'btn small', onclick: act(r).run}, act(r).label) : null)))
+        : h('p', {class: 'note'}, 'Nothing to recommend. Everything checks out.'));
+  }
+  async function loadReportRecs(askAi) {
+    const r = state.report, slot = $('recs'); if (!r || !slot) return;
+    try {
+      const recs = await api('/api/recommendations', {file_hash: r.file_hash, ask_ai: askAi});
+      if (state.report?.file_hash !== r.file_hash || !$('recs')) return;
+      $('recs').replaceChildren(...[recsBlock(recs, {scope: 'this report', ask: () => loadReportRecs(true), act: reportAct})].filter(Boolean));
+    } catch (e) { if (askAi) throw e; }
+  }
+  function reportAct(rec) {
+    const r = state.report, newer = (r.fixes_applied || []).slice(-1)[0];
+    const scrollTo = id => () => $(id)?.scrollIntoView({behavior: 'smooth', block: 'start'});
+    return ({
+      fix_issues: {label: 'Fix them', run: () => openWalk(0)},
+      review_fixes: {label: 'Show the fixes', run: scrollTo('fixes-block')},
+      fix_shifts: {label: 'Show the rows', run: scrollTo('shiftfix')},
+      recheck_sharepoint: {label: 'Check SharePoint', run: () => rerun('sharepoint', 'Checking SharePoint…')},
+      send_for_review: {label: 'Send for review', run: () => { reviewForm('request'); scrollTo('reviewstate')(); }},
+      approve_send: {label: 'Send', run: openSend},
+      open_report: newer ? {label: 'Open corrected copy', run: () => select(newer.fixed_file_hash)} : null,
+    })[rec.do] || null;
+  }
+  function periodAct(rec, go) {
+    return ({open_week: {label: rec.target ? `Open ${rec.target}` : 'Open the days', run: () => go(rec.target)}})[rec.do] || null;
+  }
+
   // ---------------- review and sign-off: send a report to the boss, who approves it or sends it back with a comment
   function reviewState(r) {
     const rr = r.review_request || {};
@@ -819,7 +869,7 @@
     state.ovDays ||= 30;
     wrap.replaceChildren(h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Adding up every report…'));
     let o;
-    try { o = await api('/api/overview', {days: state.ovDays}); } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
+    try { o = state.ovRecs && state.ovRecs.days === state.ovDays ? state.ovRecs : await api('/api/overview', {days: state.ovDays}); state.ovRecs = null; } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
     if (location.hash !== '#overview') return;
     const t = o.totals, top = Math.max(1, ...o.categories.map(c => c.count));
     const ctx = what => ({id: `o:${o.days}:${o.end}:${what}`, noun: what === 'slides' ? 'slide show' : 'dashboard', title: `Quality overview, ${o.label}`,
@@ -840,6 +890,8 @@
         h('div', {}, h('b', {}, pct(t.on_time_pct)), h('span', {}, 'Sent on time')),
         h('div', {}, h('b', {}, t.turnaround == null ? '—' : `${t.turnaround} h`), h('span', {}, 'Upload to sent')),
         h('div', {}, h('b', {class: t.open ? 'bad' : ''}, fmt(t.open)), h('span', {}, 'Still on Hold'))),
+      recsBlock(o.recs, {scope: 'every job', ask: async () => { const n = await api('/api/overview', {days: o.days, ask_ai: true}); if (location.hash === '#overview') { state.ovRecs = n; showOverview(); } },
+        act: rec => periodAct(rec, job => { state.periodQuery = {kind: o.days > 7 ? 'month' : 'week', day: o.end, job: job || ''}; location.hash = 'periods'; })}),
       h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'What was caught'), h('p', {}, 'By kind of error, from the first upload of each daily report.')),
         o.categories.length ? h('div', {class: 'ovbars'}, o.categories.map(c => h('div', {class: 'ovbar'}, h('span', {}, c.reason), h('div', {}, (() => { const i = h('i'); i.style.width = `${c.count / top * 100}%`; return i; })()), h('em', {}, fmt(c.count)))))
           : h('p', {class: 'note'}, 'Nothing caught in this period.')),
@@ -1031,7 +1083,7 @@
     const q = state.periodQuery ||= store.get('rd-period', {kind: 'week', day: new Date().toISOString().slice(0, 10), job: ''});
     wrap.replaceChildren(h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Gathering the daily reports and SharePoint scans…'));
     let data;
-    try { data = await api('/api/periods', q); } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
+    try { data = state.periodAsk ? state.periodAsk : await api('/api/periods', q); state.periodAsk = null; } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
     if (location.hash !== '#periods') return;
     q.job = data.period.job; store.set('rd-period', q);
     const p = data.period, t = p.totals;
@@ -1064,6 +1116,8 @@
         h('div', {}, h('b', {}, num(t.rejected)), h('span', {}, 'Rejected')),
         h('div', {}, h('b', {}, t.rate == null ? '—' : t.rate.toFixed(1) + '%'), h('span', {}, 'Reject rate')),
         h('div', {}, h('b', {}, `${t.sent} of ${t.reports}`), h('span', {}, 'Daily reports sent'))),
+      recsBlock(data.recs, {scope: `${p.job}'s ${q.kind}`, ask: async () => { const n = await api('/api/periods', {...q, ask_ai: true}); if (location.hash === '#periods') { state.periodAsk = n; showPeriods(); } },
+        act: rec => periodAct(rec, () => document.querySelector('.pdays')?.scrollIntoView({behavior: 'smooth'}))}),
       h('div', {class: 'periodacts'},
         h('button', {type: 'button', class: 'btn primary', onclick: () => openArtifact(ctx('dashboard'))}, data.made.dashboard ? 'Open dashboard' : 'Create dashboard'),
         h('button', {type: 'button', class: 'btn primary', onclick: () => openArtifact(ctx('slides'))}, data.made.slides ? 'Open slide show' : 'Create slide show'),
