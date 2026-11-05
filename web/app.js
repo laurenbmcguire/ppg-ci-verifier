@@ -43,6 +43,7 @@
 
   // ---------------------------------------------------------------- connections
   api('/api/health').then(hh => {
+    state.aiOn = !!hh.ai_review_configured;
     const box = $('connections'); box.replaceChildren(
       h('span', {class: 'conn' + (hh.storage === 'vercel-postgres' ? ' on' : '')}, h('i'), 'Saved in the cloud'),
       h('span', {class: 'conn' + (hh.sharepoint_configured ? ' on' : '')}, h('i'), hh.sharepoint_configured ? 'SharePoint connected' : 'SharePoint off'),
@@ -157,8 +158,34 @@
       const data = await api('/api/spreadsheets/fixes', {file_hash: hash});
       if (state.selected !== hash) return;
       state.fixes = data.proposals || [];
-    } catch (e) { state.fixes = []; }
+      state.aiFix = data.ai || {status: 'not_run'};
+    } catch (e) { state.fixes = []; state.aiFix = {status: 'not_run'}; }
     drawFixes();
+    // first time a report with issues is opened, let Claude draft the fixes
+    const open = (state.report?.review?.issues || []).filter(i => i.severity !== 'info').length;
+    if (state.aiOn && open && state.aiFix.status === 'not_run' && !state.aiFixTried?.has(hash)) runAiFixes(true);
+  }
+  async function runAiFixes(auto) {
+    const hash = state.report.file_hash;
+    (state.aiFixTried ||= new Set()).add(hash);
+    if (state.aiFixing) return;
+    state.aiFixing = true; drawFixes();
+    if (!auto) toast('Claude is working out the fixes…');
+    try {
+      const out = (await api('/api/spreadsheets/ai-fixes', {file_hash: hash})).ai_fixes || {};
+      if (state.selected !== hash) return;
+      const data = await api('/api/spreadsheets/fixes', {file_hash: hash});
+      state.fixes = data.proposals || []; state.aiFix = data.ai || {};
+      // AI fixes start accepted; reject any you disagree with before downloading
+      const dec = store.get(decisionsKey(), {});
+      for (const f of state.fixes) if ((f.source === 'AI fix' || f.confidence === 'high') && !dec[f.id]) dec[f.id] = {state: 'accepted', after: f.after};
+      store.set(decisionsKey(), dec);
+      const n = (out.fixes || []).length, k = (out.skipped || []).length;
+      const ready = state.fixes.filter(f => dec[f.id]?.state === 'accepted').length;
+      toast(n || ready ? `Claude fixed ${n} cell${n === 1 ? '' : 's'}${k ? ` and left ${k} issue${k === 1 ? '' : 's'} for a person` : ''}. ${ready} fix${ready === 1 ? ' is' : 'es are'} accepted; review them, then download.`
+        : `Claude found nothing it could fix safely${k ? ` (${k} issue${k === 1 ? '' : 's'} need a person)` : ''}.`);
+    } catch (e) { if (!auto || state.selected === hash) toast(e.message, true); }
+    finally { state.aiFixing = false; if (state.selected === hash) drawFixes(); }
   }
   const decisionsKey = () => 'rd-fixes:' + state.report.file_hash;
   const editsKey = () => 'rd-edits:' + state.report.file_hash;
@@ -213,11 +240,18 @@
     block.replaceChildren();
     const save = d => { store.set(decisionsKey(), d); drawFixes(); };
     block.append(h('header', {}, h('h2', {}, 'Fixes'),
-      h('p', {}, fixes.length ? `${fixes.length} suggested. Accept the ones you want, or edit any cell yourself, then download a corrected copy.`
-        : 'No automatic fixes for this report. Use "Fix this" on an issue below, or edit any cell here, then download a corrected copy.'),
-      fixes.length ? h('div', {class: 'right'}, h('button', {type: 'button', class: 'btn small', onclick: () => {
-        const d = store.get(decisionsKey(), {}); fixes.filter(f => f.confidence === 'high').forEach(f => { d[f.id] = {state: 'accepted', after: d[f.id]?.after ?? f.after}; }); save(d);
-      }}, 'Accept all safe fixes')) : null));
+      h('p', {}, fixes.length ? `${fixes.length} suggested${fixes.some(f => f.source === 'AI fix') ? ', including Claude\'s' : ''}. Accept the ones you want, or edit any cell yourself, then download a corrected copy.`
+        : state.aiFixing ? 'Claude is reading the report and writing fixes for the issues below…' : 'No fixes yet. Let AI fix the issues, use "Fix this" on an issue below, or edit any cell here.'),
+      h('div', {class: 'right'},
+        state.aiOn ? h('button', {type: 'button', class: 'btn small' + (state.aiFix?.status === 'done' ? '' : ' primary'), disabled: state.aiFixing, onclick: () => runAiFixes(false)},
+          state.aiFixing ? [h('span', {class: 'spin'}), ' Claude is fixing…'] : state.aiFix?.status === 'done' ? 'Ask AI to fix again' : 'Let AI fix the issues') : null,
+        fixes.length ? h('button', {type: 'button', class: 'btn small', onclick: () => {
+          const d = store.get(decisionsKey(), {}); fixes.filter(f => f.confidence === 'high' || f.source === 'AI fix').forEach(f => { d[f.id] = {state: 'accepted', after: d[f.id]?.after ?? f.after}; }); save(d);
+        }}, 'Accept all') : null)));
+    const ai = state.aiFix || {};
+    if (ai.status === 'done' && (ai.skipped || []).length) block.append(h('details', {class: 'skipped'},
+      h('summary', {}, `Claude left ${ai.skipped.length} issue${ai.skipped.length === 1 ? '' : 's'} for a person to fix`),
+      h('ul', {}, ai.skipped.map(x => h('li', {}, h('b', {}, x.issue), ' ', x.reason)))));
     const panel = h('div', {class: 'panel'});
     for (const f of fixes) {
       const d = dec[f.id] || {};
@@ -267,7 +301,7 @@
       const changes = accepted.map(f => {
         const after = dec[f.id]?.after ?? f.after;
         return {id: f.id, sheet: f.sheet, cell: f.cell, before: f.before, after, reason: f.reason, source: f.source,
-          kind: after === f.after ? f.kind : (f.kind === 'number' && after.trim() !== '' && !isNaN(Number(after)) ? 'number' : 'text')};
+          kind: f.kind === 'auto' ? 'auto' : after === f.after ? f.kind : (f.kind === 'number' && after.trim() !== '' && !isNaN(Number(after)) ? 'number' : 'text')};
       });
       for (const e of Object.values(edits || {})) {
         const numeric = e.after.trim() !== '' && !isNaN(Number(e.after.replace(/,/g, ''))) && (e.before === '' || !isNaN(Number(e.before)));

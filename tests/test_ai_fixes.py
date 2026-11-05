@@ -1,0 +1,53 @@
+import io, json, os, sys, tempfile, unittest
+from unittest.mock import patch
+sys.path.insert(0, os.path.dirname(__file__))
+from eos_fixture import build, ROWS
+from hosting.spreadsheet_inbox import SpreadsheetInbox, make_ai_fixes
+from hosting.fixes import apply_fixes, _sources, _cell_value
+
+NAME = '2230-OWENS-BASCO - EOS - 10.07.26.xlsx'
+
+
+class FakeResponse(io.BytesIO):
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def opener_for(fixes, skipped=()):
+    body = {'model': 'test-model', 'content': [{'type': 'tool_use', 'name': 'propose_cell_fixes', 'input': {'fixes': fixes, 'skipped': list(skipped)}}]}
+    return lambda request, timeout=None: FakeResponse(json.dumps(body).encode())
+
+
+class AIFixTests(unittest.TestCase):
+    def setUp(self):
+        rows = [list(r) for r in ROWS]
+        rows[1][0] = '8O10808540'
+        self.raw = build([tuple(r) for r in rows])
+
+    @patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test'})
+    def test_valid_fixes_kept_bad_ones_dropped_and_applied(self):
+        with tempfile.TemporaryDirectory() as d:
+            inbox = SpreadsheetInbox(__import__('pathlib').Path(d))
+            item = inbox.ingest(NAME, self.raw)
+            fixes = [
+                dict(sheet='1st Shift', cell='E17', before='8O10808540', after='8010808540', reason='letter O', confidence='high'),
+                dict(sheet='1st Shift', cell='E18', before='WRONG', after='x', reason='before mismatch', confidence='medium'),
+                dict(sheet='No Sheet', cell='A1', before='', after='x', reason='bad sheet', confidence='medium'),
+                dict(sheet='1st Shift', cell='E17', before='8O10808540', after='dup', reason='same cell twice', confidence='medium'),
+            ]
+            record = inbox.ai_fixes(item['file_hash'], opener=opener_for(fixes, [dict(issue='Reject rate high', reason='needs a person')]))
+            self.assertEqual(record['status'], 'done')
+            self.assertEqual([f['cell'] for f in record['fixes']], ['E17'])
+            self.assertEqual(record['dropped'], 3)
+            self.assertEqual(record['skipped'][0]['issue'], 'Reject rate high')
+            props = inbox.fix_proposals(item['file_hash'])
+            self.assertEqual(props['ai']['count'], 1)
+            # the rule-based typo fix already covers E17, so the AI one is not listed twice
+            self.assertEqual(sum(1 for p in props['proposals'] if p['cell'] == 'E17'), 1)
+            fixed = apply_fixes(NAME, self.raw, [dict(record['fixes'][0], kind='auto')])
+            self.assertEqual(_cell_value(_sources(NAME, fixed)[0], '1st Shift', 'E17'), '8010808540')
+
+    def test_not_configured_reports_status(self):
+        with patch.dict(os.environ, {}, clear=True):
+            out = make_ai_fixes({'filename': NAME, 'findings': []}, self.raw, [dict(severity='high', text='x')])
+        self.assertEqual(out['status'], 'not_configured')

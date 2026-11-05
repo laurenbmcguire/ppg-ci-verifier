@@ -142,6 +142,25 @@ class SpreadsheetInbox:
             result.pop('check_hash', None); result.pop('checked_at', None)
             result['ai_review'] = ai_review
             return self.save_check(db, result)
+    def ai_fix_inputs(self, file_hash):
+        from hosting.review_summary import summarize
+        item = self.get(file_hash)
+        _, raw = self.original_bytes(file_hash)
+        return item, raw, [i for i in summarize(item)['issues'] if i['severity'] != 'info']
+    def record_ai_fixes(self, file_hash, record):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            original, _ = self._original(db, file_hash)
+            result = dict(self.latest(db, file_hash, original))
+            result.pop('check_hash', None); result.pop('checked_at', None)
+            result['ai_fixes'] = record
+            self.save_check(db, result)
+        return record
+    def ai_fixes(self, file_hash, opener=None):
+        """Ask Claude to write cell changes for the open issues; keep only changes that fit the file exactly."""
+        item, raw, issues = self.ai_fix_inputs(file_hash)
+        record = make_ai_fixes(item, raw, issues, opener)
+        return self.record_ai_fixes(file_hash, record) if record['status'] == 'done' else record
     def history_for(self, job, day, exclude_hash=None):
         """Day totals of earlier saved reports for the same job (latest version per file, one entry per day)."""
         from hosting.source_compare import identify
@@ -174,8 +193,17 @@ class SpreadsheetInbox:
         from hosting.fixes import proposals
         item = self.get(file_hash)
         _, raw = self.original_bytes(file_hash)
-        return dict(file_hash=file_hash, filename=item['filename'], proposals=proposals(item, item['filename'], raw),
-                    applied=item.get('fixes_applied') or [])
+        props = proposals(item, item['filename'], raw)
+        taken = {(p['sheet'], p['cell']) for p in props}
+        ai = item.get('ai_fixes') or {}
+        for f in ai.get('fixes') or []:
+            if (f['sheet'], f['cell']) in taken:
+                continue
+            props.append(dict(id=f['id'], sheet=f['sheet'], cell=f['cell'], before=f['before'], after=f['after'], kind='auto',
+                              reason=f['reason'], source='AI fix', confidence=f.get('confidence') or 'medium'))
+        return dict(file_hash=file_hash, filename=item['filename'], proposals=props, applied=item.get('fixes_applied') or [],
+                    ai=dict(status=ai.get('status') or 'not_run', made_at=ai.get('made_at'), count=len(ai.get('fixes') or []),
+                            skipped=ai.get('skipped') or [], dropped=ai.get('dropped') or 0, message=ai.get('message')))
     def row_cells(self, file_hash, sheet, row):
         from hosting.fixes import row_cells
         item = self.get(file_hash)
@@ -284,3 +312,35 @@ class SpreadsheetInbox:
             result.update({k:original[k] for k in ('file_hash','filename','version','original_path','received_at')})
             result['sheet_count']=len(result['sheets'])
             return self.save_check(db,result)
+
+
+def make_ai_fixes(item, raw, issues, opener=None):
+    """Network call + validation (no database). {status, fixes, skipped, dropped, ...}"""
+    from hosting import ai_review
+    from hosting.fixes import _sources, _cell_value, _show, _addr, _pid, FixError
+    if not issues:
+        return dict(status='done', made_at=datetime.now(timezone.utc).isoformat(), fixes=[], skipped=[], dropped=0, message='No issues to fix.')
+    try:
+        answer = ai_review.fix(item, raw, issues, opener=opener)
+    except ai_review.AIReviewNotConfigured as exc:
+        return dict(status='not_configured', message=str(exc))
+    except ai_review.AIReviewError as exc:
+        return dict(status='error', message=str(exc))
+    sources, _ = _sources(item['filename'], raw)
+    kept, seen, dropped = [], set(), 0
+    for f in answer['fixes']:
+        try:
+            _addr(f['cell'])
+            current = _cell_value(sources, f['sheet'], f['cell'])
+        except FixError:
+            dropped += 1
+            continue
+        shown = _show(current)
+        if (isinstance(current, str) and current.startswith('=')) or (f['sheet'], f['cell']) in seen or f['after'] == shown \
+                or f['before'].strip() != shown.strip():
+            dropped += 1
+            continue
+        seen.add((f['sheet'], f['cell']))
+        kept.append(dict(f, before=shown, id=_pid(f['sheet'], f['cell'], f['after'])))
+    return dict(status='done', model=answer['model'], made_at=datetime.now(timezone.utc).isoformat(),
+                fixes=kept, skipped=answer['skipped'], dropped=dropped)
