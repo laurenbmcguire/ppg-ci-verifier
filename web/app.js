@@ -289,14 +289,28 @@
       h('summary', {}, `Claude left ${ai.skipped.length} issue${ai.skipped.length === 1 ? '' : 's'} for a person to fix`),
       h('ul', {}, ai.skipped.map(x => h('li', {}, h('b', {}, x.issue), ' ', x.reason)))));
     const panel = h('div', {class: 'panel'});
+    state.fixSel ||= {};
+    const fsel = (state.fixSel[state.report.file_hash] ||= new Set());
+    for (const id of [...fsel]) if (!fixes.some(f => f.id === id)) fsel.delete(id);
+    if (fixes.length) {
+      const picked = fixes.filter(f => fsel.has(f.id));
+      const all = h('input', {type: 'checkbox', checked: picked.length === fixes.length, 'aria-label': 'Select all fixes', onchange: e => { fixes.forEach(f => e.target.checked ? fsel.add(f.id) : fsel.delete(f.id)); drawFixes(); }});
+      all.indeterminate = picked.length > 0 && picked.length < fixes.length;
+      const bulk = st => { const d = store.get(decisionsKey(), {}); for (const f of picked) d[f.id] = {state: st, after: d[f.id]?.after ?? f.after}; save(d); fsel.clear(); drawFixes(); toast(`${picked.length} fix${picked.length === 1 ? '' : 'es'} ${st}.`); };
+      panel.append(h('div', {class: 'selbar'}, h('label', {}, all, ' ', picked.length ? `${picked.length} of ${fixes.length} selected` : `Select all ${fixes.length}`),
+        h('button', {type: 'button', class: 'btn small primary', disabled: !picked.length, onclick: () => bulk('accepted')}, `Accept selected${picked.length ? ` (${picked.length})` : ''}`),
+        h('button', {type: 'button', class: 'btn small', disabled: !picked.length, onclick: () => bulk('rejected')}, `Reject selected${picked.length ? ` (${picked.length})` : ''}`),
+        picked.length ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { fsel.clear(); drawFixes(); }}, 'Clear selection') : null));
+    }
     for (const f of fixes) {
       const d = dec[f.id] || {};
       const input = h('input', {value: d.after ?? f.after, 'aria-label': `New value for ${f.sheet} ${f.cell}`, onchange: e => {
         const all = store.get(decisionsKey(), {}); all[f.id] = {state: all[f.id]?.state || 'accepted', after: e.target.value}; save(all); }});
       const set = st => { const all = store.get(decisionsKey(), {}); all[f.id] = {state: all[f.id]?.state === st ? undefined : st, after: input.value}; save(all); };
       const before = f.before === '' ? '(blank)' : f.source === 'Clean-up' ? f.before.replace(/ /g, '·').replace(/ /g, '⍽') : f.before;
-      panel.append(h('div', {class: 'fix' + (d.state ? ' ' + d.state : '')},
-        h('div', {class: 'where'}, `${f.source} · ${f.sheet}, cell ${f.cell}` + (f.confidence !== 'high' ? ' · check carefully' : '')),
+      const pick = h('input', {type: 'checkbox', checked: fsel.has(f.id), 'aria-label': `Select ${f.sheet} ${f.cell}`, onchange: e => { e.target.checked ? fsel.add(f.id) : fsel.delete(f.id); drawFixes(); }});
+      panel.append(h('div', {class: 'fix' + (d.state ? ' ' + d.state : '') + (fsel.has(f.id) ? ' picked' : '')},
+        h('label', {class: 'where'}, pick, ' ', `${f.source} · ${f.sheet}, cell ${f.cell}` + (f.confidence !== 'high' ? ' · check carefully' : '')),
         h('div', {class: 'choose'},
           h('button', {type: 'button', class: 'btn small' + (d.state === 'accepted' ? ' on-accept' : ''), 'aria-pressed': String(d.state === 'accepted'), onclick: () => set('accepted')}, d.state === 'accepted' ? '✓ Accepted' : 'Accept'),
           h('button', {type: 'button', class: 'btn small' + (d.state === 'rejected' ? ' on-reject' : ''), 'aria-pressed': String(d.state === 'rejected'), onclick: () => set('rejected')}, d.state === 'rejected' ? 'Rejected' : 'Reject')),
@@ -679,6 +693,7 @@
       const skip = Object.entries(dec).filter(([, d]) => d?.state === 'rejected').map(([id]) => id);
       try {
         state.fixerCache[hash] = await api('/api/spreadsheets/ai-summary', {file_hash: hash, extra, skip});
+        if (state.fixerSel) delete state.fixerSel[hash];
       } catch (e) {
         if (state.report?.file_hash === hash) dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('h2', {id: 'fixer-title'}, 'AI worksheet fixer'), h('p', {class: 'note'}, e.message),
           h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Close'), h('button', {type: 'button', class: 'btn primary', onclick: () => openFixer(true)}, 'Try again'))));
@@ -690,19 +705,27 @@
   }
   function drawFixer() {
     const dlg = $('fixer-dialog'); if (!dlg?.open || !state.report) return;
-    const sum = state.fixerCache?.[state.report.file_hash]; if (!sum) return;
+    const hash = state.report.file_hash, sum = state.fixerCache?.[hash]; if (!sum) return;
     const byId = Object.fromEntries((state.fixes || []).map(f => [f.id, f]));
     const edits = store.get(editsKey(), {});
     const changeOf = id => id.startsWith('edit:') ? (() => { const e = edits[id.slice(5)]; return e ? {...e, id, source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit'} : null; })() : byId[id];
     const stateOf = id => id.startsWith('edit:') ? (edits[id.slice(5)] ? 'accepted' : 'gone') : (store.get(decisionsKey(), {})[id]?.state || (edits[editId(byId[id]?.sheet, byId[id]?.cell)] ? 'replaced' : null));
     const applyIds = ids => { const d = store.get(decisionsKey(), {}); let n = 0; for (const id of ids) { const f = byId[id]; if (f && !d[id]?.state && !edits[editId(f.sheet, f.cell)]) { d[id] = {state: 'accepted', after: f.after}; n++; } } store.set(decisionsKey(), d); return n; };
     const unapply = ids => { const d = store.get(decisionsKey(), {}); for (const id of ids) if (d[id]?.state === 'accepted') delete d[id]; store.set(decisionsKey(), d); };
-    const refresh = () => { drawFixes(); drawFixer(); };
     const issuesNow = walkIssues();
     const allIds = sum.change_groups.flatMap(g => g.fix_ids).filter(id => changeOf(id));
     const waiting = allIds.filter(id => !stateOf(id));
+    // selection: starts with everything that is still waiting; kept per report while the pop-up is used
+    state.fixerSel ||= {};
+    if (!state.fixerSel[hash]) state.fixerSel[hash] = new Set(waiting);
+    const sel = state.fixerSel[hash];
+    for (const id of [...sel]) if (!waiting.includes(id)) sel.delete(id);
+    state.fixerOpen ||= new Set();
+    const chosen = waiting.filter(id => sel.has(id));
     const ready = readyChanges().total;
+    const redraw = () => { drawFixes(); drawFixer(); };
     const sev = {high: 'Must fix', medium: 'Should fix', low: 'Tidy-up'};
+    const box = (checked, mixed, onchange, label) => { const c = h('input', {type: 'checkbox', checked, 'aria-label': label, onchange}); c.indeterminate = !!mixed; return c; };
     dlg.replaceChildren(
       h('div', {class: 'fixer-top'}, h('div', {}, h('p', {class: 'eyebrow'}, 'AI WORKSHEET FIXER'), h('h2', {id: 'fixer-title'}, state.report.review.job || state.report.filename)),
         h('button', {type: 'button', class: 'btn ghost small', onclick: () => openFixer(true)}, 'Refresh summary'),
@@ -718,21 +741,35 @@
               g.examples?.length ? h('ul', {class: 'fx-ex'}, g.examples.map(e => h('li', {}, e))) : null,
               g.issue_keys?.length ? h('button', {type: 'button', class: 'btn small', onclick: () => { const i = issuesNow.findIndex(x => g.issue_keys.includes(x.key)); dlg.close(); openWalk(Math.max(0, i)); }}, 'Show in sheet') : null))
             : h('p', {class: 'note'}, 'No open errors.')),
-          h('section', {}, h('h3', {}, `Summary of suggested changes · ${allIds.length}`),
-            sum.change_groups.length ? sum.change_groups.map(g => {
+          h('section', {},
+            h('div', {class: 'fx-selhead'}, h('h3', {}, `Summary of suggested changes · ${allIds.length}`),
+              waiting.length ? h('span', {class: 'fx-selall'},
+                h('button', {type: 'button', class: 'linkish', onclick: () => { waiting.forEach(id => sel.add(id)); drawFixer(); }}, 'Select all'), ' · ',
+                h('button', {type: 'button', class: 'linkish', onclick: () => { sel.clear(); drawFixer(); }}, 'Select none')) : null),
+            sum.change_groups.length ? sum.change_groups.map((g, gi) => {
               const ids = g.fix_ids.filter(id => changeOf(id)), open = ids.filter(id => !stateOf(id)), done = ids.filter(id => stateOf(id) === 'accepted');
+              const picked = open.filter(id => sel.has(id)).length, expanded = state.fixerOpen.has(gi), shown = expanded ? ids : ids.slice(0, 6);
               return h('div', {class: 'fx-card chg-card' + (open.length ? '' : ' done')},
-                h('div', {class: 'fx-head'}, h('span', {class: 'risk ' + g.risk}, g.risk === 'safe' ? 'Safe' : 'Check first'), h('b', {}, g.title), h('span', {class: 'fx-count'}, String(ids.length))),
+                h('label', {class: 'fx-head'},
+                  open.length ? box(picked === open.length, picked > 0 && picked < open.length, e => { open.forEach(id => e.target.checked ? sel.add(id) : sel.delete(id)); drawFixer(); }, `Select all in ${g.title}`) : null,
+                  h('span', {class: 'risk ' + g.risk}, g.risk === 'safe' ? 'Safe' : 'Check first'), h('b', {}, g.title),
+                  h('span', {class: 'fx-count'}, open.length ? `${picked} of ${open.length}` : String(ids.length))),
                 h('p', {}, g.explanation),
-                h('ul', {class: 'fx-ex mono'}, ids.slice(0, 5).map(id => { const c = changeOf(id); return h('li', {}, h('button', {type: 'button', class: 'cellref', onclick: () => { dlg.close(); showCell(c.sheet, c.cell); }}, `${c.sheet} ${c.cell}`), ' ', h('s', {}, c.before || '(blank)'), ' → ', h('b', {}, c.after || '(blank)')); }),
-                  ids.length > 5 ? h('li', {class: 'more'}, `…and ${ids.length - 5} more`) : null),
-                h('div', {class: 'fx-act'}, open.length ? h('button', {type: 'button', class: 'btn primary small', onclick: () => { const n = applyIds(open); toast(`${n} change${n === 1 ? '' : 's'} added.`); refresh(); }}, open.length === 1 ? (ids.length === 1 ? 'Apply this change' : 'Apply the last one') : `Apply ${open.length === ids.length ? 'these' : 'the other'} ${open.length}`) : h('span', {class: 'tagok'}, `✓ ${done.length} applied`),
-                  done.length && !g.fix_ids.every(id => id.startsWith('edit:')) ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { unapply(done); refresh(); }}, 'Undo') : null));
+                h('ul', {class: 'fx-list'}, shown.map(id => { const c = changeOf(id), st = stateOf(id);
+                  return h('li', {class: st ? 'applied' : ''},
+                    st ? h('span', {class: 'okmark', title: st === 'accepted' ? 'Will be in the download' : 'Replaced by your own value'}, st === 'accepted' ? '✓' : '–')
+                      : box(sel.has(id), false, e => { e.target.checked ? sel.add(id) : sel.delete(id); drawFixer(); }, `${c.sheet} ${c.cell}`),
+                    h('button', {type: 'button', class: 'cellref', onclick: () => { dlg.close(); showCell(c.sheet, c.cell); }}, `${c.sheet} ${c.cell}`),
+                    h('span', {class: 'mono'}, h('s', {}, c.before || '(blank)'), ' → ', h('b', {}, c.after || '(blank)'))); }),
+                  ids.length > 6 ? h('li', {class: 'more'}, h('button', {type: 'button', class: 'linkish', onclick: () => { expanded ? state.fixerOpen.delete(gi) : state.fixerOpen.add(gi); drawFixer(); }},
+                    expanded ? 'Show fewer' : `Show all ${ids.length}`)) : null),
+                done.length && !g.fix_ids.every(id => id.startsWith('edit:')) ? h('div', {class: 'fx-act'}, h('span', {class: 'tagok'}, `✓ ${done.length} applied`),
+                  h('button', {type: 'button', class: 'btn ghost small', onclick: () => { unapply(done); done.forEach(id => sel.add(id)); redraw(); }}, 'Undo')) : null);
             }) : h('p', {class: 'note'}, 'No suggested changes. Use the chat or the sheet to make your own.')))),
-      h('div', {class: 'fixer-bar'}, h('span', {}, ready ? `${ready} change${ready === 1 ? '' : 's'} ready for the corrected copy` : 'No changes chosen yet'),
-        waiting.length ? h('button', {type: 'button', class: 'btn', onclick: () => { const n = applyIds(waiting); toast(`${n} change${n === 1 ? '' : 's'} added.`); refresh(); }}, `Apply all ${waiting.length}`) : null,
-        h('button', {type: 'button', class: 'btn primary', disabled: !ready && !waiting.length, onclick: () => { applyIds(waiting); dlg.close(); drawFixes(); downloadWithChanges(); }},
-          waiting.length ? 'Apply all and download' : 'Download corrected copy')));
+      h('div', {class: 'fixer-bar'}, h('span', {}, (chosen.length ? `${chosen.length} of ${waiting.length} selected` : waiting.length ? 'Nothing selected' : 'All suggested changes decided') + (ready ? ` · ${ready} ready for the corrected copy` : '')),
+        h('button', {type: 'button', class: 'btn', disabled: !chosen.length, onclick: () => { const n = applyIds(chosen); toast(`${n} change${n === 1 ? '' : 's'} applied.`); redraw(); }}, `Apply selected (${chosen.length})`),
+        h('button', {type: 'button', class: 'btn primary', disabled: !chosen.length && !ready, onclick: () => { applyIds(chosen); dlg.close(); drawFixes(); downloadWithChanges(); }},
+          chosen.length ? 'Apply selected and download' : 'Download corrected copy')));
   }
 
   // ---------------- guided review: one issue at a time, shown in the sheet
