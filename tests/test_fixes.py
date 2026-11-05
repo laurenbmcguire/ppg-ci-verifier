@@ -136,3 +136,26 @@ class FixRouteTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ManualEditTests(unittest.TestCase):
+    def test_row_cells_then_hand_edit_lands_in_fixed_copy(self):
+        from hosting.fixes import row_cells, _sources, _cell_value
+        raw = build(ROWS)
+        data = row_cells(NAME, raw, '1st Shift', 17)
+        self.assertEqual(data['row'], 17)
+        self.assertTrue(data['header_row'] and data['header_row'] < 17)
+        cells = {c['cell']: c for c in data['cells']}
+        self.assertIn('A17', cells)
+        self.assertTrue(any(c['header'] for c in data['cells']))
+        a17 = cells['A17']
+        fixed = apply_fixes(NAME, raw, [dict(sheet='1st Shift', cell='A17', before=a17['before'], after='9999999999', kind='text')])
+        sources, _ = _sources(NAME, fixed)
+        self.assertEqual(_cell_value(sources, '1st Shift', 'A17'), '9999999999')
+
+    def test_row_cells_rejects_bad_input(self):
+        from hosting.fixes import row_cells
+        with self.assertRaises(FixError):
+            row_cells(NAME, build(ROWS), '1st Shift', 'abc')
+        with self.assertRaises(FixError):
+            row_cells(NAME, build(ROWS), 'No such sheet', 3)

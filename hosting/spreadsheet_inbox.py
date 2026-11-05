@@ -176,6 +176,11 @@ class SpreadsheetInbox:
         _, raw = self.original_bytes(file_hash)
         return dict(file_hash=file_hash, filename=item['filename'], proposals=proposals(item, item['filename'], raw),
                     applied=item.get('fixes_applied') or [])
+    def row_cells(self, file_hash, sheet, row):
+        from hosting.fixes import row_cells
+        item = self.get(file_hash)
+        _, raw = self.original_bytes(file_hash)
+        return row_cells(item['filename'], raw, sheet, row)
     def apply_fixes(self, file_hash, approved):
         """Write a corrected copy with the approved changes as a new upload; the original is untouched."""
         from hosting.fixes import apply_fixes, fixed_filename

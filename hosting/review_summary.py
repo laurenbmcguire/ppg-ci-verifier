@@ -44,6 +44,10 @@ def severity(code):
     return 'high' if HIGH.search(code) else 'medium'
 
 
+def _cell(f):
+    return f.get('cell') or (f'{f["column"]}{f["row"]}' if isinstance(f.get('column'), str) and re.fullmatch(r'[A-Z]{1,3}', f['column']) and f.get('row') else None)
+
+
 def _where(f):
     cell = f.get('cell') or (f'{f["column"]}{f["row"]}' if isinstance(f.get('column'), str) and f.get('row') else None)
     parts = [f.get('sheet') if f.get('sheet') not in (None, 'SharePoint comparison', 'Compared with usual') else None,
@@ -66,12 +70,12 @@ def summarize(result, with_issues=True):
     issues = []
     for i, f in enumerate(result.get('findings') or []):
         issues.append(dict(key=f'check:{f.get("code")}:{f.get("sheet")}:{f.get("row")}:{f.get("column")}:{i}', source='Checks',
-                           severity=severity(f.get('code')), code=f.get('code'), where=_where(f), sheet=f.get('sheet'), row=f.get('row'),
+                           severity=severity(f.get('code')), code=f.get('code'), where=_where(f), sheet=f.get('sheet'), row=f.get('row'), cell=_cell(f),
                            text=_plain(f)))
     sp = result.get('sharepoint') or {}
     for i, f in enumerate(sp.get('findings') or []):
         issues.append(dict(key=f'sp:{f.get("code")}:{f.get("row")}:{f.get("field")}:{i}', source='SharePoint', severity='high',
-                           code=f.get('code'), where=_where(f), sheet=f.get('sheet'), row=f.get('row'), text=f.get('message')))
+                           code=f.get('code'), where=_where(f), sheet=f.get('sheet'), row=f.get('row'), cell=_cell(f), text=f.get('message')))
     bl = result.get('baseline') or {}
     for i, f in enumerate(bl.get('findings') or []):
         issues.append(dict(key=f'usual:{f.get("code")}:{i}', source='Usual day', severity=f.get('severity') or 'medium',
@@ -81,7 +85,7 @@ def summarize(result, with_issues=True):
         issues.append(dict(key=f'ai:{i}:{f.get("sheet")}:{f.get("cell") or f.get("row")}', source='AI review',
                            severity=f.get('severity') or 'medium', code=f.get('category'),
                            where=' · '.join(p for p in (f.get('sheet'), f.get('cell') or (f'row {f["row"]}' if f.get('row') else None)) if p),
-                           sheet=f.get('sheet'), row=f.get('row'), text=f.get('issue'), why=f.get('why'), check=f.get('check')))
+                           sheet=f.get('sheet'), row=f.get('row'), cell=f.get('cell'), text=f.get('issue'), why=f.get('why'), check=f.get('check')))
     if not result.get('record_count'):
         issues.append(dict(key='none:rows', source='Checks', severity='high', code='no_rows_found', where='Whole file',
                            text='No inspection rows were found in this file, so nothing could be checked. Check that this is the end-of-shift report.'))

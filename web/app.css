@@ -127,16 +127,36 @@ footer{font-size:12px;color:#657b72;padding:24px 0 6px}
 .sev.high{background:var(--high)}.sev.medium{background:var(--med)}.sev.low{background:var(--low)}
 .issue > div{flex:1;min-width:0}
 .issue p{margin:0;overflow-wrap:anywhere}
+.issue .editor p{margin:0 0 10px}
 .issue .src{font-size:12px;font-weight:600;color:var(--faint)}
 .issue .text{color:var(--ink)}
 .hint{font-size:12px;color:var(--faint)}
 .issue .hint{font-size:13px;color:var(--muted);margin-top:3px}
-.issue label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--faint);cursor:pointer;white-space:nowrap}
-.issue input{width:17px;height:17px;accent-color:var(--green)}
+.issue .side label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--faint);cursor:pointer;white-space:nowrap}
+.issue .side input{width:17px;height:17px;accent-color:var(--green)}
 .issue.done{opacity:.55}
 .issue.done .text{text-decoration:line-through}
 .more{width:100%;margin-top:6px}
 .note{font-size:12px;color:var(--faint);margin:12px 0 0}
+
+/* your own edits */
+.issue .side{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+.editor{margin-top:12px;padding:14px;border:1px solid var(--line);border-radius:8px;background:#f8fbf9}
+.editor .note{margin:0 0 10px}
+.cells{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.cellbox{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:var(--btn-ink)}
+.cellbox span{display:flex;justify-content:space-between;gap:6px;overflow:hidden}
+.cellbox small{font-weight:400;color:var(--faint);white-space:nowrap}
+.cellbox input{font:13px ui-monospace,Menlo,monospace;padding:7px 8px;border:1px solid var(--btn-line);border-radius:5px;background:#fff;color:var(--ink);width:100%}
+.cellbox.flag input{border-color:var(--high);box-shadow:0 0 0 2px var(--high-bg)}
+.cellbox.edited input{background:var(--ok-bg)}
+.cellbox.formula input{background:#eef1ef;color:var(--faint)}
+.editbar{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.anycell{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line-2);font-size:13px;font-weight:600;color:var(--btn-ink)}
+.anycell select,.anycell .rownum{font:inherit;font-weight:400;padding:7px 10px;border:1px solid var(--btn-line);border-radius:7px;background:#fff;color:var(--ink)}
+.anycell .rownum{width:90px}
+.fix.mine{border-left-color:var(--green)}
+.fix .blank{font-size:12px;color:var(--faint)}
 
 /* checked against */
 .sources{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:12px}

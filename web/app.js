@@ -161,27 +161,70 @@
     drawFixes();
   }
   const decisionsKey = () => 'rd-fixes:' + state.report.file_hash;
+  const editsKey = () => 'rd-edits:' + state.report.file_hash;
+  const editId = (sheet, cell) => `${sheet}!${cell}`;
+
+  // Row editor: shows one row's cells with their headers; changed cells become "Your edit" fixes.
+  async function rowEditor(sheet, row, note, flagCell) {
+    const box = h('div', {class: 'editor'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Loading the row…'));
+    try {
+      const data = await api('/api/spreadsheets/cells', {file_hash: state.report.file_hash, sheet, row});
+      const edits = store.get(editsKey(), {});
+      const inputs = [];
+      const grid = h('div', {class: 'cells'});
+      for (const c of data.cells) {
+        const saved = edits[editId(data.sheet, c.cell)];
+        const input = h('input', {value: saved ? saved.after : c.value, disabled: c.formula, 'aria-label': `${c.header || c.cell} (${c.cell})`});
+        if (!c.formula) inputs.push({c, input});
+        grid.append(h('label', {class: 'cellbox' + (c.formula ? ' formula' : '') + (saved ? ' edited' : '') + (flagCell && c.cell === String(flagCell).toUpperCase() ? ' flag' : '')},
+          h('span', {}, c.header || 'Column', h('small', {}, c.cell + (c.formula ? ' · formula' : ''))), input));
+      }
+      const save = () => {
+        const all = store.get(editsKey(), {});
+        let n = 0;
+        for (const {c, input} of inputs) {
+          const id = editId(data.sheet, c.cell);
+          if (input.value !== c.value) { all[id] = {sheet: data.sheet, cell: c.cell, before: c.before, after: input.value, header: c.header}; n++; }
+          else delete all[id];
+        }
+        store.set(editsKey(), all);
+        toast(n ? `${n} edit${n === 1 ? '' : 's'} added to Fixes. Download the fixed version when you're ready.` : 'No changes on this row.');
+        box.remove(); drawFixes();
+      };
+      box.replaceChildren(
+        h('p', {class: 'note'}, `${data.sheet}, row ${data.row}` + (data.header_row ? ` (headers on row ${data.header_row})` : '') + (note ? ` · ${note}` : '') + '. Change any value, then save.'),
+        grid,
+        h('div', {class: 'editbar'},
+          h('button', {type: 'button', class: 'btn primary small', onclick: save}, 'Save edits'),
+          h('button', {type: 'button', class: 'btn small', onclick: () => { inputs.forEach(({input}) => { input.value = ''; }); }}, 'Clear the whole row'),
+          h('button', {type: 'button', class: 'btn ghost small', onclick: () => box.remove()}, 'Cancel')));
+      (inputs.find(x => flagCell && x.c.cell === String(flagCell).toUpperCase()) || inputs[0])?.input.focus();
+    } catch (e) { box.replaceChildren(h('p', {class: 'note'}, e.message)); }
+    return box;
+  }
+
   function drawFixes() {
     const block = $('fixes-block'); if (!block || !state.fixes) return;
-    const fixes = state.fixes, dec = store.get(decisionsKey(), {});
+    const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
+    const editList = Object.entries(edits);
+    const fixes = state.fixes.filter(f => !edits[editId(f.sheet, f.cell)]);
     const accepted = fixes.filter(f => dec[f.id]?.state === 'accepted');
+    const total = accepted.length + editList.length;
     block.replaceChildren();
-    if (!fixes.length) {
-      block.append(h('header', {}, h('h2', {}, 'Fixes'), h('p', {}, 'Nothing the desk can correct automatically. Anything flagged below needs a person to fix it in the file.')));
-      return;
-    }
     const save = d => { store.set(decisionsKey(), d); drawFixes(); };
-    block.append(h('header', {}, h('h2', {}, 'Fixes'), h('p', {}, `${fixes.length} suggested. Accept the ones you want, then download a corrected copy.`),
-      h('div', {class: 'right'}, h('button', {type: 'button', class: 'btn small', onclick: () => {
+    block.append(h('header', {}, h('h2', {}, 'Fixes'),
+      h('p', {}, fixes.length ? `${fixes.length} suggested. Accept the ones you want, or edit any cell yourself, then download a corrected copy.`
+        : 'No automatic fixes for this report. Use "Fix this" on an issue below, or edit any cell here, then download a corrected copy.'),
+      fixes.length ? h('div', {class: 'right'}, h('button', {type: 'button', class: 'btn small', onclick: () => {
         const d = store.get(decisionsKey(), {}); fixes.filter(f => f.confidence === 'high').forEach(f => { d[f.id] = {state: 'accepted', after: d[f.id]?.after ?? f.after}; }); save(d);
-      }}, 'Accept all safe fixes'))));
+      }}, 'Accept all safe fixes')) : null));
     const panel = h('div', {class: 'panel'});
     for (const f of fixes) {
       const d = dec[f.id] || {};
       const input = h('input', {value: d.after ?? f.after, 'aria-label': `New value for ${f.sheet} ${f.cell}`, onchange: e => {
         const all = store.get(decisionsKey(), {}); all[f.id] = {state: all[f.id]?.state || 'accepted', after: e.target.value}; save(all); }});
       const set = st => { const all = store.get(decisionsKey(), {}); all[f.id] = {state: all[f.id]?.state === st ? undefined : st, after: input.value}; save(all); };
-      const before = f.before === '' ? '(blank)' : f.source === 'Clean-up' ? f.before.replace(/ /g, '·').replace(/ /g, '⍽') : f.before;
+      const before = f.before === '' ? '(blank)' : f.source === 'Clean-up' ? f.before.replace(/ /g, '·').replace(/ /g, '⍽') : f.before;
       panel.append(h('div', {class: 'fix' + (d.state ? ' ' + d.state : '')},
         h('div', {class: 'where'}, `${f.source} · ${f.sheet}, cell ${f.cell}` + (f.confidence !== 'high' ? ' · check carefully' : '')),
         h('div', {class: 'choose'},
@@ -190,14 +233,34 @@
         h('div', {class: 'change'}, h('span', {class: 'before'}, before), h('span', {'aria-hidden': 'true'}, '→'), input),
         h('p', {class: 'why'}, f.reason)));
     }
+    // your own edits
+    for (const [id, e] of editList) {
+      const input = h('input', {value: e.after, 'aria-label': `New value for ${e.sheet} ${e.cell}`, onchange: ev => {
+        const all = store.get(editsKey(), {}); if (all[id]) { all[id].after = ev.target.value; store.set(editsKey(), all); drawFixes(); } }});
+      panel.append(h('div', {class: 'fix accepted mine'},
+        h('div', {class: 'where'}, `Your edit · ${e.sheet}, cell ${e.cell}` + (e.header ? ` (${e.header})` : '')),
+        h('div', {class: 'choose'}, h('button', {type: 'button', class: 'btn small', onclick: () => {
+          const all = store.get(editsKey(), {}); delete all[id]; store.set(editsKey(), all); drawFixes(); }}, 'Remove')),
+        h('div', {class: 'change'}, h('span', {class: 'before'}, e.before === '' ? '(blank)' : e.before), h('span', {'aria-hidden': 'true'}, '→'),
+          e.after === '' ? h('span', {class: 'blank'}, '(blank)') : null, input)));
+    }
+    // edit any cell
+    const sheets = (state.report.sheets || []).map(x => x.name).filter(Boolean);
+    const sheetPick = h('select', {'aria-label': 'Sheet'}, sheets.map(n => h('option', {value: n}, n)));
+    const rowPick = h('input', {type: 'number', min: '1', placeholder: 'Row', 'aria-label': 'Row number', class: 'rownum'});
+    const slot = h('div', {});
+    const openRow = async () => { if (!rowPick.value) { rowPick.focus(); return; } slot.replaceChildren(await rowEditor(sheetPick.value, Number(rowPick.value))); };
+    rowPick.addEventListener('keydown', e => { if (e.key === 'Enter') openRow(); });
+    panel.append(h('div', {class: 'anycell'}, h('span', {}, 'Edit any cell:'), sheets.length > 1 ? sheetPick : null, rowPick,
+      h('button', {type: 'button', class: 'btn small', onclick: openRow}, 'Open row')), slot);
     panel.append(h('div', {class: 'fixbar'},
-      h('span', {}, accepted.length ? `${accepted.length} of ${fixes.length} accepted` : 'No fixes accepted yet'),
-      h('button', {type: 'button', class: 'btn ghost small', onclick: () => save({})}, 'Clear'),
-      h('button', {type: 'button', class: 'btn', disabled: !accepted.length || state.busy, onclick: () => applyFixes(accepted, dec)},
-        accepted.length ? `Download fixed version (${accepted.length})` : 'Download fixed version')));
+      h('span', {}, total ? `${total} change${total === 1 ? '' : 's'} ready` + (editList.length ? ` (${editList.length} yours)` : '') : 'No changes yet'),
+      total ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { store.set(decisionsKey(), {}); store.set(editsKey(), {}); drawFixes(); }}, 'Clear all') : null,
+      h('button', {type: 'button', class: 'btn', disabled: !total || state.busy, onclick: () => applyFixes(accepted, dec, edits)},
+        total ? `Download fixed version (${total})` : 'Download fixed version')));
     block.append(panel);
   }
-  async function applyFixes(accepted, dec) {
+  async function applyFixes(accepted, dec, edits) {
     if (state.busy) return; state.busy = true; drawFixes();
     toast('Building the fixed version…');
     try {
@@ -206,11 +269,15 @@
         return {id: f.id, sheet: f.sheet, cell: f.cell, before: f.before, after, reason: f.reason, source: f.source,
           kind: after === f.after ? f.kind : (f.kind === 'number' && after.trim() !== '' && !isNaN(Number(after)) ? 'number' : 'text')};
       });
+      for (const e of Object.values(edits || {})) {
+        const numeric = e.after.trim() !== '' && !isNaN(Number(e.after.replace(/,/g, ''))) && (e.before === '' || !isNaN(Number(e.before)));
+        changes.push({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: 'Edited by reviewer', source: 'Your edit', kind: numeric ? 'number' : 'text'});
+      }
       const answer = await api('/api/spreadsheets/apply-fixes', {file_hash: state.report.file_hash, changes});
-      store.set(decisionsKey(), {});
+      store.set(decisionsKey(), {}); store.set(editsKey(), {});
       const link = h('a', {href: '/api/spreadsheets/download?id=' + answer.item.file_hash, download: answer.item.filename});
       document.body.append(link); link.click(); link.remove();
-      toast(`Saved and downloaded "${answer.item.filename}" with ${changes.length} fix${changes.length === 1 ? '' : 'es'}. It has been checked again. The original is unchanged.`);
+      toast(`Saved and downloaded "${answer.item.filename}" with ${changes.length} change${changes.length === 1 ? '' : 's'}. It has been checked again. The original is unchanged.`);
       await loadList(); select(answer.item.file_hash);
     } catch (e) { toast(e.message, true); }
     finally { state.busy = false; if ($('fixes-block')) drawFixes(); }
@@ -238,11 +305,15 @@
       for (const i of shown.slice(0, limit)) {
         const box = h('input', {type: 'checkbox', checked: done.has(i.key), onchange: e => {
           e.target.checked ? done.add(i.key) : done.delete(i.key); store.set(reviewedKey, [...done]); draw(); }});
+        const rowNo = Number(i.row) || Number(String(i.cell || '').replace(/^[A-Z]+/i, '')) || null;
+        const body = h('div', {}, h('p', {class: 'src'}, [i.source, i.where].filter(Boolean).join(' · ')), h('p', {class: 'text'}, i.text),
+          i.why ? h('p', {class: 'hint'}, 'Why: ' + i.why) : null, i.check ? h('p', {class: 'hint'}, 'Check: ' + i.check) : null);
+        const fixBtn = rowNo ? h('button', {type: 'button', class: 'btn small', onclick: async () => {
+          const open = body.querySelector('.editor'); if (open) { open.remove(); return; }
+          body.append(await rowEditor(i.sheet || (state.report.sheets || [])[0]?.name, rowNo, i.cell ? `flagged cell ${i.cell} is outlined` : null, i.cell)); }}, 'Fix this') : null;
         panel.append(h('div', {class: 'issue' + (done.has(i.key) ? ' done' : '')},
-          h('span', {class: 'sev ' + i.severity, title: i.severity}),
-          h('div', {}, h('p', {class: 'src'}, [i.source, i.where].filter(Boolean).join(' · ')), h('p', {class: 'text'}, i.text),
-            i.why ? h('p', {class: 'hint'}, 'Why: ' + i.why) : null, i.check ? h('p', {class: 'hint'}, 'Check: ' + i.check) : null),
-          h('label', {}, box, 'Reviewed')));
+          h('span', {class: 'sev ' + i.severity, title: i.severity}), body,
+          h('div', {class: 'side'}, fixBtn, h('label', {}, box, 'Reviewed'))));
       }
       if (shown.length > limit) panel.append(h('button', {type: 'button', class: 'more', onclick: () => { state.showAll = true; draw(); }}, `Show all ${shown.length}`));
       block.append(panel);

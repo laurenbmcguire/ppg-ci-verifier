@@ -328,3 +328,40 @@ def fixed_filename(filename):
     stem, dot, ext = filename.rpartition('.')
     stem = re.sub(r'\s*\(fixed( \d+)?\)$', '', stem if dot else filename)
     return f'{stem} (fixed).{ext}' if dot else f'{filename} (fixed)'
+
+
+def row_cells(filename, raw, sheet, row):
+    """Current values of one row, with the column headers above it, so a person can edit cells by hand.
+    [{cell, header, value, formula}] — formula cells show their saved result and can't be edited here."""
+    try:
+        row = int(row)
+    except (TypeError, ValueError):
+        raise FixError('Pick a row number.') from None
+    if not 1 <= row <= 1048576:
+        raise FixError('Pick a row number.')
+    sources, cached = _sources(filename, raw)
+    names = [t for t, _ in sources]
+    if sheet not in names:
+        sheet = names[0] if len(names) == 1 else sheet
+    rows = dict(sources).get(sheet)
+    if rows is None:
+        raise FixError(f'Sheet "{sheet}" is not in this workbook.')
+    sheets, _, _ = scan(sources, cached)
+    header_row = None
+    for s in sheets:
+        if s['name'] == sheet:
+            for t in s['tables']:
+                if t['header_row'] < row and (header_row is None or t['header_row'] > header_row):
+                    header_row = t['header_row']
+    heads = list(rows[header_row - 1]) if header_row else []
+    values = list(rows[row - 1]) if row - 1 < len(rows) else []
+    saved = list(cached.get(sheet, [])[row - 1]) if row - 1 < len(cached.get(sheet, [])) else []
+    width = max([i + 1 for i, v in enumerate(values) if _show(v).strip()] + [i + 1 for i, v in enumerate(heads) if _show(v).strip()] + [0])
+    cells = []
+    for i in range(min(width, 200)):
+        v = values[i] if i < len(values) else None
+        formula = isinstance(v, str) and v.startswith('=')
+        shown = saved[i] if formula and i < len(saved) else v
+        cells.append(dict(cell=f'{col_letter(i)}{row}', header=_show(heads[i]).strip() if i < len(heads) else '',
+                          value=_show(shown), before=_show(v), formula=formula))
+    return dict(sheet=sheet, row=row, header_row=header_row, sheets=names, cells=cells)
