@@ -145,14 +145,14 @@ TOOL = {
 }
 
 
-def _post(body, opener=None):
+def _post(body, opener=None, timeout=None):
     key = os.environ.get('ANTHROPIC_API_KEY')
     if not key:
         raise AIReviewNotConfigured('AI review is not set up yet (ANTHROPIC_API_KEY missing in Vercel).')
     request = urllib.request.Request(API, data=json.dumps(body).encode(), method='POST', headers={
         'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json'})
     try:
-        with (opener or urllib.request.urlopen)(request, timeout=TIMEOUT) as response:
+        with (opener or urllib.request.urlopen)(request, timeout=timeout or TIMEOUT) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as exc:
         hint = {401: ' Check the API key.', 403: ' The API key is not allowed to use this model.', 429: ' Rate limit or credit limit reached; try again shortly.',
@@ -590,3 +590,42 @@ def summarize_fixes(item, issues, changes, numbers, opener=None):
         groups.append(dict(title=f'Other changes ({len(left)})', explanation='Changes not placed in a batch above.', risk='check', fix_ids=left))
     return dict(model=data.get('model') or model, headline=str(a.get('headline') or '')[:800], error_groups=errors, change_groups=groups,
                 next_steps=[str(s)[:300] for s in (a.get('next_steps') or [])[:3]])
+
+
+# ---------------------------------------------------------------- dashboard: change it on request
+DASH_SYSTEM = """You redesign {what} for PPG Quality (Preferred Precision Group), built from end-of-shift inspection data. The reviewer asks for a change in plain words; you return the whole updated page.
+
+Rules:
+- Return a complete, self-contained HTML document (<!doctype html> ... </html>). No external scripts, stylesheets, fonts, images or network calls of any kind: inline <style>, inline SVG, and optional small inline <script> only. It must open offline and print well.
+- Every number must come from <data> (or be simple arithmetic on it, such as a percentage). Never invent, estimate or round away numbers. If the reviewer asks for something the data does not have, keep the page as it is for that part and say so in reply.
+- The page may be sent to the client: never add inspector or auditor names, scan times, or internal check results / errors, even if asked to "show everything"; say so in reply instead.
+- Keep what the reviewer did not ask to change. Keep it readable on a phone, with good contrast. Keep PPG Quality's deep green look unless asked otherwise.
+- reply: one or two plain sentences saying what you changed (or why you could not)."""
+
+DASH_TOOL = {
+    'name': 'update_dashboard',
+    'description': 'Return the full updated dashboard page and a short note to the reviewer.',
+    'input_schema': {'type': 'object', 'required': ['reply', 'html'], 'properties': {
+        'reply': {'type': 'string', 'description': 'One or two sentences for the reviewer.'},
+        'html': {'type': 'string', 'description': 'The complete updated HTML document.'}}},
+}
+
+
+def edit_dashboard(page, data, history, request, opener=None, what='dashboard'):
+    """(new_html, reply). history: earlier [{'role': 'user'|'assistant', 'text'}] about this dashboard."""
+    model = os.environ.get('AI_DASHBOARD_MODEL') or os.environ.get('AI_REVIEW_MODEL') or DEFAULT_MODEL
+    earlier = '\n'.join(f'{m["role"]}: {m["text"]}' for m in history[-10:] if m.get('text'))
+    prompt = ('<data>\n' + json.dumps(data, default=str) + '\n</data>\n\n'
+              + (f'<earlier_requests>\n{earlier}\n</earlier_requests>\n\n' if earlier else '')
+              + '<current_page>\n' + page + '\n</current_page>\n\n'
+              + f'<request>\n{request}\n</request>\n\nMake the change and call update_dashboard with the whole page.')
+    kind = ('an HTML slide show (one <section class="slide"> per slide, 16:9; keep the arrow-key navigation script and the print layout '
+            'that prints one slide per page; add, remove or reorder slides when asked)') if what == 'slides' else 'a one-page HTML dashboard'
+    out = _post(dict(model=model, max_tokens=32000, system=DASH_SYSTEM.replace('{what}', kind), tools=[DASH_TOOL], tool_choice={'type': 'tool', 'name': 'update_dashboard'},
+                     messages=[{'role': 'user', 'content': prompt}]), opener, timeout=280)
+    answer = _tool_input(out, 'html')
+    new = str(answer.get('html') or '').strip()
+    low = new.lower()
+    if not (low.startswith('<!doctype html') or low.startswith('<html')) or '</html>' not in low or len(new) > 600_000:
+        raise AIReviewError('Claude did not return a complete page. Nothing was changed; try asking again.')
+    return new, ' '.join(str(answer.get('reply') or 'Done.').split())[:600]

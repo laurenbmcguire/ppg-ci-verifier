@@ -90,7 +90,8 @@
   function select(hash) { if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
   window.addEventListener('hashchange', route);
   async function route() {
-    document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === (['#api', '#checks'].includes(location.hash) ? location.hash : '#')));
+    document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === (['#api', '#checks', '#periods'].includes(location.hash) ? location.hash : '#')));
+    if (location.hash === '#periods') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showPeriods(); return; }
     if (location.hash === '#checks') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showChecks(); return; }
     if (location.hash === '#api') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showApi(); return; }
     const m = location.hash.match(/^#r=([0-9a-f]{64})$/);
@@ -133,6 +134,7 @@
       h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r)),
       h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download report'),
       h('button', {type: 'button', class: 'btn chat-btn', onclick: () => openFixer(false)}, 'AI worksheet fixer'),
+      h('button', {type: 'button', class: 'btn chat-btn', onclick: () => openDashboard(false)}, 'Create dashboard'),
       h('button', {type: 'button', class: 'btn chat-btn', onclick: openChat}, 'Chat with Claude'),
       h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download original'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('sharepoint', 'Checking SharePoint…')}, 'Check SharePoint again'),
@@ -751,6 +753,137 @@
         h('button', {type: 'button', class: 'btn', onclick: downloadFinal}, 'Download final report'),
         h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, 'Send it to the client for me'))));
     if (!dlg.open) dlg.showModal();
+  }
+
+  // ---------------- dashboards and slide shows: built from the data, shown in a sandbox, changed by talking to Claude, downloadable
+  function dailyDashboard() {
+    const r = state.report, hash = r.file_hash;
+    return {id: 'd:' + hash, noun: 'dashboard', title: `${r.review.job || r.filename}, ${shortDay(r.review.day)}`,
+      ideas: ['One clean page for printing', 'Add a donut chart of reject reasons', 'White background for a client presentation', 'Put the reject rate by shift at the top'],
+      create: rebuild => api('/api/spreadsheets/dashboard', {file_hash: hash, rebuild}),
+      chat: message => api('/api/spreadsheets/dashboard/chat', {file_hash: hash, message}),
+      undo: () => api('/api/spreadsheets/dashboard/undo', {file_hash: hash})};
+  }
+  const openDashboard = rebuild => openArtifact(dailyDashboard(), rebuild);
+  async function openArtifact(ctx, rebuild) {
+    let dlg = $('dash-dialog');
+    if (!dlg) { dlg = h('dialog', {id: 'dash-dialog', class: 'walk dashdlg', 'aria-labelledby': 'dash-title'}); document.body.append(dlg);
+      dlg.addEventListener('close', () => { state.dashFrame = null; }); }
+    if (!dlg.open) dlg.showModal();
+    if (!state.dash || state.dash.ctx.id !== ctx.id || rebuild) {
+      state.dashFrame = null;
+      dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('span', {class: 'spin'}), h('h2', {id: 'dash-title'}, rebuild ? 'Starting over from the data…' : `Building your ${ctx.noun}…`)));
+      try { state.dash = {ctx, ...(await ctx.create(!!rebuild))}; }
+      catch (e) { dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('h2', {id: 'dash-title'}, ctx.noun), h('p', {class: 'note'}, e.message),
+        h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Close')))); return; }
+    }
+    drawDash();
+  }
+  function drawDash() {
+    const dlg = $('dash-dialog'), d = state.dash; if (!dlg?.open || !d) return;
+    const ctx = d.ctx;
+    if (!state.dashFrame) state.dashFrame = h('iframe', {class: 'dashframe', title: ctx.noun + ' preview', sandbox: 'allow-scripts allow-popups allow-modals'});
+    if (state.dashFrame.getAttribute('src') !== d.view) state.dashFrame.setAttribute('src', d.view);
+    const box = h('textarea', {rows: 3, placeholder: ctx.noun === 'slide show' ? 'Say what to change, e.g. “Add a slide comparing the two shifts”' : 'Say what to change, e.g. “Show the reject rate by shift as a donut chart”',
+      'aria-label': 'Change to make', disabled: !d.ai_on || state.dashBusy});
+    const send = text => { text = (text || '').trim(); if (text) sendDash(text); };
+    box.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(box.value); } });
+    const talk = d.messages.concat(state.dashPending ? [{role: 'user', text: state.dashPending}] : []);
+    const log = h('div', {class: 'dashlog'},
+      h('p', {class: 'dashintro'}, `Built from the report data. Ask for any change in plain words; Claude uses only these numbers and leaves out inspector names and scan times.${ctx.noun === 'slide show' ? ' Use the arrow keys or click to move between slides.' : ''}`),
+      talk.length ? null : h('div', {class: 'dashideas'}, ctx.ideas.map(t => h('button', {type: 'button', class: 'chip', disabled: !d.ai_on, onclick: () => send(t)}, t))),
+      ...talk.map(m => h('div', {class: 'dmsg ' + m.role}, m.text)),
+      state.dashBusy ? h('div', {class: 'dmsg assistant wait'}, h('span', {class: 'spin'}), ` Redesigning the ${ctx.noun}. This can take a minute.`) : null);
+    dlg.replaceChildren(
+      h('div', {class: 'fixer-top'}, h('div', {}, h('p', {class: 'eyebrow'}, ctx.noun.toUpperCase()), h('h2', {id: 'dash-title'}, ctx.title)),
+        h('a', {class: 'btn', href: d.download, download: ''}, 'Download HTML'),
+        h('a', {class: 'btn', href: d.view, target: '_blank', rel: 'noopener'}, ctx.noun === 'slide show' ? 'Present in a new tab' : 'Open in a new tab'),
+        d.undo ? h('button', {type: 'button', class: 'btn', disabled: state.dashBusy, onclick: undoDash}, 'Undo last change') : null,
+        h('button', {type: 'button', class: 'btn', disabled: state.dashBusy, onclick: e => {
+          if (e.target.dataset.sure) { openArtifact(ctx, true); return; }
+          e.target.dataset.sure = '1'; e.target.textContent = 'Sure? Your changes go'; setTimeout(() => { if (e.target.isConnected) { delete e.target.dataset.sure; e.target.textContent = 'Start over'; } }, 4000); }}, 'Start over'),
+        h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Close')),
+      h('div', {class: 'dashbody'}, h('div', {class: 'dashview'}, state.dashFrame),
+        h('aside', {class: 'dashchat'}, log,
+          d.ai_on ? null : h('p', {class: 'ssource warn'}, `Changes by Claude need AI review turned on. You can still view and download this ${ctx.noun}.`),
+          h('div', {class: 'dashsend'}, box, h('button', {type: 'button', class: 'btn primary', disabled: !d.ai_on || state.dashBusy, onclick: () => send(box.value)}, 'Send')))));
+    log.scrollTop = log.scrollHeight;
+    if (!state.dashBusy && d.ai_on) box.focus();
+  }
+  async function sendDash(text) {
+    const ctx = state.dash.ctx;
+    state.dashBusy = true; state.dashPending = text; drawDash();
+    try { const out = await ctx.chat(text); if (state.dash?.ctx.id === ctx.id) state.dash = {ctx, ...out}; }
+    catch (e) { toast(e.message, true); }
+    finally { state.dashBusy = false; state.dashPending = null; drawDash(); if (ctx.after) ctx.after(); }
+  }
+  async function undoDash() {
+    const ctx = state.dash.ctx;
+    try { state.dash = {ctx, ...(await ctx.undo())}; drawDash(); } catch (e) { toast(e.message, true); }
+  }
+
+  // ---------------- weekly & monthly: the period's daily reports and SharePoint scans, its checks, dashboard and slide show
+  async function showPeriods() {
+    const wrap = h('div', {class: 'sheetwrap apiwrap'});
+    $('report').replaceChildren(wrap);
+    const q = state.periodQuery ||= store.get('rd-period', {kind: 'week', day: new Date().toISOString().slice(0, 10), job: ''});
+    wrap.replaceChildren(h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Gathering the daily reports and SharePoint scans…'));
+    let data;
+    try { data = await api('/api/periods', q); } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
+    if (location.hash !== '#periods') return;
+    q.job = data.period.job; store.set('rd-period', q);
+    const p = data.period, t = p.totals;
+    const move = n => { const d = new Date(p.start + 'T12:00:00'); if (q.kind === 'week') d.setDate(d.getDate() + 7 * n); else d.setMonth(d.getMonth() + n); q.day = d.toISOString().slice(0, 10); showPeriods(); };
+    const ctx = what => ({id: `p:${p.job}:${q.kind}:${p.start}:${what}`, noun: what === 'slides' ? 'slide show' : 'dashboard', title: `${p.job}, ${p.label}`,
+      ideas: what === 'slides' ? ['Add a slide with the three worst days', 'Make it 5 slides at most', 'Add a highlights slide at the start', 'Use a white theme'] :
+        ['Add a reject rate line to the daily chart', 'One clean page for printing', 'Show the weekdays side by side', 'White background for a client presentation'],
+      create: rebuild => api('/api/periods/artifact', {...q, what, rebuild}), chat: message => api('/api/periods/artifact/chat', {...q, what, message}),
+      undo: () => api('/api/periods/artifact/undo', {...q, what})});
+    const num = v => v == null ? '—' : fmt(v);
+    const pair = (a, b) => a == null && b != null ? h('td', {class: 'num'}, h('span', {class: 'sponly', title: 'From SharePoint (no daily report)'}, num(b)))
+      : h('td', {class: 'num'}, num(a), b != null && a != null && Math.abs(a - b) > 0.0001 ? h('span', {class: 'differs', title: 'SharePoint shows ' + num(b)}, ` / ${num(b)}`) : null);
+    const file = h('input', {type: 'file', accept: '.xlsx,.csv', hidden: true, onchange: async e => {
+      const f = e.target.files[0]; if (!f) return;
+      if (f.size > 4 * 1024 * 1024) { toast('Weekly and monthly files up to 4 MB can be checked here.', true); return; }
+      const content_base64 = await new Promise(res => { const rd = new FileReader(); rd.onload = () => res(String(rd.result).split(',')[1]); rd.readAsDataURL(f); });
+      toast(`Checking ${f.name}…`);
+      try { await api('/api/periods/check-file', {...q, filename: f.name, content_base64}); showPeriods(); } catch (err) { toast(err.message, true); } }});
+    const fc = data.file_check;
+    wrap.replaceChildren(...[
+      h('button', {type: 'button', class: 'back', onclick: () => { location.hash = ''; }}, '‹ All reports'),
+      h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Weekly & monthly'), h('div', {class: 'meta'}, 'A job’s week or month: every daily report and SharePoint scan, checked together, with a dashboard and slide show you can shape by talking to Claude.'))),
+      h('div', {class: 'periodbar'},
+        h('select', {'aria-label': 'Job', onchange: e => { q.job = e.target.value; showPeriods(); }}, data.jobs.map(j => h('option', {value: j, selected: j === p.job}, j))),
+        h('div', {class: 'pseg'}, ['week', 'month'].map(k => h('button', {type: 'button', class: q.kind === k ? 'on' : '', onclick: () => { q.kind = k; showPeriods(); }}, k === 'week' ? 'Week' : 'Month'))),
+        h('div', {class: 'pnav'}, h('button', {type: 'button', class: 'btn small', 'aria-label': 'Previous', onclick: () => move(-1)}, '‹'), h('b', {}, p.label), h('button', {type: 'button', class: 'btn small', 'aria-label': 'Next', onclick: () => move(1)}, '›'))),
+      h('div', {class: 'numbers five'},
+        h('div', {}, h('b', {}, num(t.days_worked)), h('span', {}, 'Days worked')),
+        h('div', {}, h('b', {}, num(t.inspected)), h('span', {}, 'Parts inspected')),
+        h('div', {}, h('b', {}, num(t.rejected)), h('span', {}, 'Rejected')),
+        h('div', {}, h('b', {}, t.rate == null ? '—' : t.rate.toFixed(1) + '%'), h('span', {}, 'Reject rate')),
+        h('div', {}, h('b', {}, `${t.sent} of ${t.reports}`), h('span', {}, 'Daily reports sent'))),
+      h('div', {class: 'periodacts'},
+        h('button', {type: 'button', class: 'btn primary', onclick: () => openArtifact(ctx('dashboard'))}, data.made.dashboard ? 'Open dashboard' : 'Create dashboard'),
+        h('button', {type: 'button', class: 'btn primary', onclick: () => openArtifact(ctx('slides'))}, data.made.slides ? 'Open slide show' : 'Create slide show'),
+        h('button', {type: 'button', class: 'btn', onclick: () => file.click()}, `Check a ${q.kind === 'week' ? 'weekly' : 'monthly'} report file`), file),
+      fc ? h('section', {class: 'block'}, h('header', {}, h('h2', {}, `${fc.filename}`),
+          h('p', {}, `${fc.status === 'clear' ? 'Matches the daily reports and SharePoint.' : `${fc.findings.length} thing${fc.findings.length === 1 ? '' : 's'} to look at.`} ${fmt(fc.rows)} rows, ${fmt(fc.inspected)} parts inspected, checked ${ago(fc.checked_at)}.`)),
+        fc.findings.length ? h('ul', {class: 'pfind'}, fc.findings.map(f => h('li', {class: f.severity}, f.day ? h('span', {class: 'pday'}, shortDay(f.day)) : null, f.text))) : null) : null,
+      h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Checks for the ' + q.kind),
+          h('p', {}, p.findings.length ? `${p.findings.length} thing${p.findings.length === 1 ? '' : 's'} to look at.` : 'Nothing to look at: every day has a clean, sent report that matches SharePoint.')),
+        p.findings.length ? h('ul', {class: 'pfind'}, p.findings.map(f => h('li', {class: f.severity}, f.day ? h('span', {class: 'pday'}, shortDay(f.day)) : null, f.text))) : null,
+        data.sharepoint_on ? h('p', {class: 'note'}, `SharePoint numbers from ${p.sharepoint_source}.`) : h('p', {class: 'note'}, 'SharePoint is not connected, so days are checked from the daily reports only.')),
+      h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Day by day'), h('p', {}, 'Report numbers first; a red number after a slash is what SharePoint shows when it differs.')),
+        h('div', {class: 'tablewrap'}, h('table', {class: 'keys pdays'},
+          h('thead', {}, h('tr', {}, ['Day', 'Daily report', 'Cars / rows', 'Inspected', 'Rejected', 'Sent'].map(x => h('th', {}, x)))),
+          h('tbody', {}, p.days.map(x => {
+            const rep = x.report, sp = x.sharepoint || {};
+            return h('tr', {class: rep || x.sharepoint ? '' : 'quiet'},
+              h('td', {}, shortDay(x.day)),
+              h('td', {}, rep ? h('a', {href: '#r=' + rep.file_hash}, h('span', {class: 'tag tag-' + rep.status}, STATUS[rep.status]), ' ', rep.filename) : (x.sharepoint ? h('span', {class: 'differs'}, 'Missing') : '—')),
+              pair(rep?.scans, sp.scans), pair(rep?.inspected, sp.inspected), pair(rep?.rejected, sp.rejected),
+              h('td', {}, rep ? (rep.sent_at ? 'Sent ' + when(rep.sent_at) : rep.approved ? 'Approved' : 'No') : ''));
+          })))))].filter(Boolean));
   }
 
   // ---------------- Checks & shifts page: what is checked, the reviewer's extra AI rules, and shift times

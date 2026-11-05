@@ -32,6 +32,7 @@ class SpreadsheetInbox:
             db.execute('CREATE TABLE IF NOT EXISTS spreadsheet_sources (source_hash TEXT PRIMARY KEY, source_json TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS client_contacts (job TEXT PRIMARY KEY, contacts_json TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS dashboards (file_hash TEXT PRIMARY KEY, versions_json TEXT NOT NULL, messages_json TEXT NOT NULL, updated_at TEXT NOT NULL)')
             db.execute('''CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
                 prefix TEXT NOT NULL, can_send INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_used TEXT, revoked_at TEXT)''')
     @contextmanager
@@ -196,6 +197,67 @@ class SpreadsheetInbox:
         with self.connect() as db:
             db.execute('INSERT INTO client_contacts (job, contacts_json) VALUES (?, ?) ON CONFLICT(job) DO UPDATE SET contacts_json=excluded.contacts_json',
                        (job, json.dumps(dict(to=to, cc=cc, saved_at=datetime.now(timezone.utc).isoformat()))))
+    # ---------------- dashboards (current page first, up to 10 earlier versions for undo, and the conversation)
+    def dashboard(self, file_hash):
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM dashboards WHERE file_hash=?', (file_hash,)).fetchone()
+        if not row:
+            return None
+        versions = json.loads(row['versions_json'])
+        return dict(html=versions[0], undo=len(versions) > 1, messages=json.loads(row['messages_json']), updated_at=row['updated_at'])
+    def save_dashboard(self, file_hash, page, messages=(), reset=False):
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM dashboards WHERE file_hash=?', (file_hash,)).fetchone()
+            versions = [] if reset or not row else json.loads(row['versions_json'])
+            talk = [] if reset or not row else json.loads(row['messages_json'])
+            versions = ([page] + versions)[:11]
+            talk = (talk + list(messages))[-40:]
+            db.execute('INSERT INTO dashboards (file_hash, versions_json, messages_json, updated_at) VALUES (?,?,?,?) '
+                       'ON CONFLICT(file_hash) DO UPDATE SET versions_json=excluded.versions_json, messages_json=excluded.messages_json, updated_at=excluded.updated_at',
+                       (file_hash, json.dumps(versions), json.dumps(talk), now))
+        return self.dashboard(file_hash)
+    def undo_dashboard(self, file_hash):
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM dashboards WHERE file_hash=?', (file_hash,)).fetchone()
+            if not row or len(json.loads(row['versions_json'])) < 2:
+                raise ValueError('There is no earlier version to go back to.')
+            versions = json.loads(row['versions_json'])[1:]
+            talk = json.loads(row['messages_json']) + [dict(role='assistant', text='Went back to the previous version.', at=datetime.now(timezone.utc).isoformat())]
+            db.execute('UPDATE dashboards SET versions_json=?, messages_json=?, updated_at=? WHERE file_hash=?',
+                       (json.dumps(versions), json.dumps(talk[-40:]), datetime.now(timezone.utc).isoformat(), file_hash))
+        return self.dashboard(file_hash)
+    def reports_for(self, job, start, end):
+        """{day: summary} for the job's daily reports between start and end (the upload that counts for each day)."""
+        from hosting.review_summary import summarize
+        from hosting.source_compare import identify
+        from hosting.periods import pick_daily
+        with self.connect() as db:
+            rows = db.execute('SELECT file_hash, result_json FROM spreadsheets').fetchall()
+            found = []
+            for r in rows:
+                base = json.loads(r['result_json'])
+                j, d = identify(base.get('filename'), base)
+                if (j or '').upper() == job.upper() and d and start.isoformat() <= d <= end.isoformat():
+                    found.append(self.latest(db, r['file_hash'], base))
+        by_day = {}
+        for result in found:
+            rv = summarize(result, with_issues=False)
+            by_day.setdefault(rv['day'], []).append(dict(file_hash=result['file_hash'], filename=result['filename'], version=result.get('version'),
+                                                         received_at=result.get('received_at'), review=rv))
+        out = {}
+        for d, cands in by_day.items():
+            c = pick_daily(cands)
+            rv = c['review']
+            out[d] = dict(file_hash=c['file_hash'], filename=c['filename'], version=c['version'], status=rv['status'], counts=rv['counts'],
+                          scans=float(rv['scans']) if rv.get('scans') is not None else None, inspected=rv.get('inspected'), rejected=rv.get('rejected'),
+                          approved=rv.get('approved'), sent_at=rv.get('sent_at'), uploads=len(cands))
+        return out
+    def jobs(self):
+        from hosting.source_compare import identify
+        with self.connect() as db:
+            rows = db.execute('SELECT result_json FROM spreadsheets').fetchall()
+        return sorted({j.upper() for j in (identify(json.loads(r['result_json']).get('filename'), json.loads(r['result_json']))[0] for r in rows) if j})
     # ---------------- settings (shift times, reviewer rules)
     def setting(self, key, default=None):
         with self.connect() as db:

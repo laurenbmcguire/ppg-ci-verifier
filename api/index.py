@@ -115,11 +115,14 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', 'private, no-store, max-age=0')
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('X-Frame-Options', 'DENY')
+        if 'Content-Security-Policy' not in (headers or {}):
+            self.send_header('X-Frame-Options', 'DENY')
         self.send_header('Referrer-Policy', 'no-referrer')
         self.send_header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
-        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
-        for key, value in (headers or {}).items():
+        headers = dict(headers or {})
+        if 'Content-Security-Policy' not in headers:
+            self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+        for key, value in headers.items():
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
@@ -297,6 +300,41 @@ class handler(BaseHTTPRequestHandler):
                     else:
                         body=encode_json(demo.get(file_hash));content_type='application/json; charset=utf-8';headers={}
                 return self.send(200,body,content_type,headers)
+            if route == '/api/artifacts/view':
+                from hosting import periods
+                q = parse_qs(urlsplit(self.path).query)
+                art = q.get('key', [''])[0]
+                parsed = periods.parse_key(art)
+                if not parsed:
+                    raise Conflict('Unknown dashboard or slide show.')
+                with self.store().session() as directory:
+                    dash = SpreadsheetInbox(directory).dashboard(art)
+                if not dash:
+                    return self.fail(404, 'Not created yet.')
+                headers = {'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; "
+                                                      "base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-popups allow-modals"}
+                if q.get('download') == ['1']:
+                    job, kind, start, what = parsed
+                    headers['Content-Disposition'] = f'attachment; filename="{re.sub(r"[^A-Za-z0-9 ._()-]", "_", job)} {"Weekly" if kind == "week" else "Monthly"} {"Slides" if what == "slides" else "Dashboard"} {start.isoformat()}.html"'
+                return self.send(200, dash['html'].encode('utf-8'), 'text/html; charset=utf-8', headers)
+            if route == '/api/spreadsheets/dashboard/view':
+                q = parse_qs(urlsplit(self.path).query)
+                file_hash = q.get('id', [''])[0]
+                if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    dash = inbox.dashboard(file_hash)
+                    item = inbox.get(file_hash) if dash else None
+                if not dash:
+                    return self.fail(404, 'No dashboard for this report yet.')
+                # the page runs in its own sandbox: no network, no access to the app, framed only by the app
+                headers = {'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; "
+                                                      "base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-popups allow-modals"}
+                if q.get('download') == ['1']:
+                    from hosting.dashboard import file_name
+                    headers['Content-Disposition'] = f'attachment; filename="{file_name(item)}"'
+                return self.send(200, dash['html'].encode('utf-8'), 'text/html; charset=utf-8', headers)
             if route == '/api/spreadsheets/download':
                 file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
                 if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
@@ -374,11 +412,11 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
-            limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
-            if not route.startswith('/api/workflow/') and route not in ('/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/ai-fixes','/api/spreadsheets/ai-verify','/api/spreadsheets/ai-summary','/api/spreadsheets/chat','/api/spreadsheets/baseline','/api/spreadsheets/fixes','/api/spreadsheets/cells','/api/spreadsheets/sheet','/api/spreadsheets/apply-fixes','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
+            limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload', '/api/periods/check-file') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
+            if not route.startswith('/api/workflow/') and route not in ('/api/periods/check-file', '/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/ai-fixes','/api/spreadsheets/ai-verify','/api/spreadsheets/ai-summary','/api/spreadsheets/chat','/api/spreadsheets/baseline','/api/spreadsheets/fixes','/api/spreadsheets/cells','/api/spreadsheets/sheet','/api/spreadsheets/apply-fixes','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= limit:
                 return self.fail(413, 'Request size is invalid.')
@@ -552,6 +590,123 @@ class handler(BaseHTTPRequestHandler):
                 for x in out['shifts']['default']:
                     x['label'] = shift_times.label(x)
                 return self.send(200, encode_json(dict(out, rechecked=rechecked, moved=moved)))
+            if route in ('/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo'):
+                payload = json.loads(raw)
+                file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                from hosting import dashboard as dash_mod
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    item = inbox.get(file_hash)
+                    _, data = inbox.original_bytes(file_hash)
+                    current = inbox.dashboard(file_hash)
+                def done(d):
+                    return self.send(200, encode_json(dict({k: d[k] for k in ('undo', 'messages', 'updated_at')}, ai_on=ai_review_configured(),
+                                                           view=f'/api/spreadsheets/dashboard/view?id={file_hash}&v={d["updated_at"]}',
+                                                           download=f'/api/spreadsheets/dashboard/view?id={file_hash}&download=1')))
+                if route.endswith('/undo'):
+                    with self.store().session() as directory:
+                        return done(SpreadsheetInbox(directory).undo_dashboard(file_hash))
+                facts = dash_mod.data_for(item, data)
+                if route.endswith('/dashboard'):
+                    if current and payload.get('rebuild') is not True:
+                        return done(current)
+                    with self.store().session() as directory:
+                        return done(SpreadsheetInbox(directory).save_dashboard(file_hash, dash_mod.build(facts), reset=True))
+                request = ' '.join(str(payload.get('message') or '').split())[:2000]
+                if not request:
+                    raise Conflict('Say what to change.')
+                if not current:
+                    raise Conflict('Create the dashboard first.')
+                from hosting import ai_review
+                try:
+                    page, reply = ai_review.edit_dashboard(current['html'], facts, current['messages'], request)  # network call outside any DB transaction
+                except (ai_review.AIReviewNotConfigured, ai_review.AIReviewError) as exc:
+                    raise Conflict(str(exc))
+                now = datetime.now(timezone.utc).isoformat()
+                with self.store().session() as directory:
+                    return done(SpreadsheetInbox(directory).save_dashboard(file_hash, page, [dict(role='user', text=request, at=now), dict(role='assistant', text=reply, at=now)]))
+            if route.startswith('/api/periods'):
+                from hosting import periods
+                from urllib.parse import quote
+                payload = json.loads(raw)
+                if not isinstance(payload, dict):
+                    raise Conflict('Send a JSON object.')
+                kind = payload.get('kind') if payload.get('kind') in periods.KINDS else 'week'
+                try:
+                    start, end, label = periods.bounds(kind, payload.get('day') or datetime.now(timezone.utc).date().isoformat())
+                except ValueError:
+                    raise Conflict('Pick a valid date.')
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    jobs = inbox.jobs()
+                    job = ' '.join(str(payload.get('job') or '').split()).upper() or (jobs[0] if jobs else '')
+                    if not job:
+                        raise Conflict('Upload a daily report first, so there is a job to look at.')
+                    reports = inbox.reports_for(job, start, end)
+                    schedule = inbox.shift_schedule(job)
+                    file_check = inbox.setting(f'filecheck|{job}|{kind}|{start.isoformat()}', None)
+                sp_days, sp_note = periods.sharepoint_days(job, start, end, schedule)  # network call outside any DB transaction
+                period = periods.assemble(job, kind, start, end, label, reports, sp_days, sp_note)
+                what = 'slides' if payload.get('what') == 'slides' else 'dashboard'
+                art_key = periods.key(job, kind, start, what)
+                def art_reply(d):
+                    return self.send(200, encode_json(dict({k: d[k] for k in ('undo', 'messages', 'updated_at')}, ai_on=ai_review_configured(), what=what,
+                                                           view=f'/api/artifacts/view?key={quote(art_key)}&v={quote(d["updated_at"])}',
+                                                           download=f'/api/artifacts/view?key={quote(art_key)}&download=1')))
+                if route == '/api/periods':
+                    with self.store().session() as directory:
+                        inbox = SpreadsheetInbox(directory)
+                        made = {w: bool(inbox.dashboard(periods.key(job, kind, start, w))) for w in ('dashboard', 'slides')}
+                    return self.send(200, encode_json(dict(jobs=jobs, period=period, file_check=file_check, made=made,
+                                                           ai_on=ai_review_configured(), sharepoint_on=sharepoint_configured())))
+                if route == '/api/periods/check-file':
+                    name, content = payload.get('filename'), payload.get('content_base64')
+                    if not isinstance(name, str) or not isinstance(content, str):
+                        raise Conflict('Choose a weekly or monthly report file.')
+                    try:
+                        file_raw = base64.b64decode(content, validate=True)
+                    except ValueError:
+                        raise Conflict('The file could not be read.')
+                    result = periods.check_file(name, file_raw, period)
+                    with self.store().session() as directory:
+                        SpreadsheetInbox(directory).set_setting(f'filecheck|{job}|{kind}|{start.isoformat()}', result)
+                    return self.send(200, encode_json(dict(file_check=result)))
+                with self.store().session() as directory:
+                    current = SpreadsheetInbox(directory).dashboard(art_key)
+                if route.endswith('/undo'):
+                    with self.store().session() as directory:
+                        return art_reply(SpreadsheetInbox(directory).undo_dashboard(art_key))
+                from hosting import dashboard as dash_mod
+                if route == '/api/periods/artifact' and current and payload.get('rebuild') is not True:
+                    return art_reply(current)
+                dailies = []
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    for x in period['days']:
+                        if x['report']:
+                            try:
+                                it = inbox.get(x['report']['file_hash'])
+                                dailies.append(dash_mod.data_for(it, inbox.original_bytes(x['report']['file_hash'])[1]))
+                            except Exception:
+                                debug_log()
+                facts = periods.data_for(period, dailies)
+                if route == '/api/periods/artifact':
+                    page = dash_mod.build_slides(facts) if what == 'slides' else dash_mod.build_period(facts)
+                    with self.store().session() as directory:
+                        return art_reply(SpreadsheetInbox(directory).save_dashboard(art_key, page, reset=True))
+                request = ' '.join(str(payload.get('message') or '').split())[:2000]
+                if not request or not current:
+                    raise Conflict('Say what to change.' if current else 'Create it first.')
+                from hosting import ai_review
+                try:
+                    page, reply = ai_review.edit_dashboard(current['html'], facts, current['messages'], request, what=what)
+                except (ai_review.AIReviewNotConfigured, ai_review.AIReviewError) as exc:
+                    raise Conflict(str(exc))
+                now = datetime.now(timezone.utc).isoformat()
+                with self.store().session() as directory:
+                    return art_reply(SpreadsheetInbox(directory).save_dashboard(art_key, page, [dict(role='user', text=request, at=now), dict(role='assistant', text=reply, at=now)]))
             if route == '/api/spreadsheets/shift-fix':
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
