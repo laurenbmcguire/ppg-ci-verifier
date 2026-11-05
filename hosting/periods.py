@@ -252,4 +252,6 @@ def day_scans(job, day, schedule=None):
         elif d == prev:
             out['yesterday'] += 1
     out['last'] = last.isoformat() if last else None
+    from hosting.builder import readiness
+    out['readiness'] = readiness(out['last'])
     return out

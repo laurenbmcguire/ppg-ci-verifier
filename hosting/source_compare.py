@@ -104,11 +104,11 @@ def compare(report_rows, source_rows, meta=None):
         pa, pb = _key(rep['labels'].get('part')), _key(src['labels'].get('part'))
         if pa and pb and pa != pb:
             diffs.append(('part', rep['labels'].get('part'), src['labels'].get('part')))
-        if rep.get('day') and src.get('day') and rep['day'] != src['day']:
-            diffs.append(('day', rep['day'].isoformat(), src['day'].isoformat()))
+        scan = scans.get(re.sub(r'[^A-Z0-9]', '', str(rep['labels'].get('identifier') or '').upper())) if scans else None
+        if rep.get('day') and src.get('day') and rep['day'] != src['day'] and not (scan and scan.get('day') == rep['day'].isoformat()):
+            diffs.append(('day', rep['day'].isoformat(), src['day'].isoformat()))   # the midnight rule's report day is not a difference
         sa, sb = rep_shift(rep), shift_number(src['labels'].get('shift'))
         ident = rep['labels'].get('identifier') or rep['labels'].get('part') or f'row {rep["row"]}'
-        scan = scans.get(re.sub(r'[^A-Z0-9]', '', str(rep['labels'].get('identifier') or '').upper())) if scans else None
         if sa and sb and sa != sb and scan:
             differences += 1
             picked = f' (the inspector picked shift {scan["picked"]})' if scan.get('picked') not in (None, '', sb) else ''

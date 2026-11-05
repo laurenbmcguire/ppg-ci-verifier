@@ -42,7 +42,7 @@
   const state = {list: [], filter: store.get('rd-filter', 'attention'), search: '', selected: null, report: null, fixes: null, issueSource: 'All', showAll: false, busy: false};
 
   // ---------------------------------------------------------------- connections
-  api('/api/health').then(hh => {
+  api('/api/health').then(hh => { state.health = hh;
     state.aiOn = !!hh.ai_review_configured;
     const box = $('connections'); box.replaceChildren(
       h('span', {class: 'conn' + (hh.storage === 'vercel-postgres' ? ' on' : '')}, h('i'), 'Saved in the cloud'),
@@ -161,12 +161,14 @@
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('sharepoint', 'Checking SharePoint…')}, 'Check SharePoint again'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('baseline', 'Comparing with earlier days…')}, 'Compare with usual day'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('ai-review', 'Claude is reading the report…')}, rv.ai.status === 'done' ? 'Run AI review again' : 'Run AI review')));
+    if (r.built) wrap.append(builtBanner(r));
     wrap.append(h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)));
     wrap.append(h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
     wrap.append(h('div', {id: 'shiftfix'}, ...[shiftCard(rv)].filter(Boolean)));
     wrap.append(h('div', {id: 'finish'}));
     wrap.append(h('div', {id: 'recs'}));
     wrap.append(numbers(r));
+    wrap.append(nexusBlock(r));
     wrap.append(h('section', {class: 'block', id: 'sheet-block'}, h('header', {}, h('h2', {}, 'Spreadsheet'), h('p', {}, 'Loading the file…'))));
     wrap.append(h('section', {class: 'block', id: 'fixes-block'}, h('header', {}, h('h2', {}, 'Fixes'), h('p', {}, 'Loading suggested fixes…'))));
     wrap.append(issuesBlock(rv));
@@ -904,6 +906,63 @@
     ].filter(Boolean));
   }
 
+  function builtBanner(r) {
+    const b = r.built, rv = r.review;
+    return h('div', {class: 'builtbar'},
+      h('div', {}, h('b', {}, 'Built from SharePoint'),
+        h('span', {}, `${fmt(b.scans)} scans from “${b.list}”, ${ago(b.built_at)}. Each scan is on the shift its scan time falls in` + (b.outside ? `; ${b.outside} scan${b.outside === 1 ? ' was' : 's were'} outside every shift and went on the nearest one.` : '.'))),
+      h('div', {class: 'btns'},
+        h('button', {type: 'button', class: 'btn small ghost', onclick: e => headerForm(rv, e.target.closest('.builtbar'))}, 'Report header'),
+        h('button', {type: 'button', class: 'btn small', onclick: e => buildReport(rv.job, rv.day, true, e.target)}, 'Rebuild with the latest scans')));
+  }
+  async function headerForm(rv, bar) {
+    let cur = {};
+    try { cur = (await api('/api/settings/report-header', {job: rv.job})).header; } catch (e) { toast(e.message, true); return; }
+    const fields = [['customer', 'Customer', 'e.g. SL Alabama, LLC'], ['worksite', 'Worksite', 'e.g. Hyundai Mobis Alabama, Montgomery'], ['program', 'Part / program', 'Optional'], ['prepared_by', 'Prepared by', 'PPG Quality']];
+    const inputs = Object.fromEntries(fields.map(([k, label, ph]) => [k, h('input', {type: 'text', value: cur[k] || '', placeholder: ph, 'aria-label': label})]));
+    const form = h('div', {class: 'hdrform'}, h('b', {}, `Report header for ${rv.job}`), h('span', {class: 'quiet'}, 'Printed on the Summary tab of every report built for this job.'),
+      ...fields.map(([k, label]) => h('label', {}, label, inputs[k])),
+      h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn ghost small', onclick: () => form.remove()}, 'Cancel'),
+        h('button', {type: 'button', class: 'btn primary small', onclick: async e => {
+          const header = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value]));
+          try { await api('/api/settings/report-header', {job: rv.job, header}); form.remove(); buildReport(rv.job, rv.day, true, e.target); } catch (err) { toast(err.message, true); } }}, 'Save and rebuild')));
+    bar.after(form); inputs.customer.focus();
+  }
+  function nexusTable(n) {
+    const copy = () => { const t = n.shifts.map(x => `${x.name}\t${x.inspected}\t${x.rejected}\t${x.certified}`).join('\n'); navigator.clipboard?.writeText('Shift\tInspected\tRejected\tCertified\n' + t).then(() => toast('Copied. Paste into Nexus or Excel.'), () => toast(t)); };
+    return h('div', {},
+      h('div', {class: 'tablewrap'}, h('table', {class: 'keys nexus'},
+        h('thead', {}, h('tr', {}, ['Nexus shift', 'Window', 'Scans', 'Inspected', 'Rejected', 'Certified'].map(x => h('th', {}, x)))),
+        h('tbody', {}, n.shifts.map(x => h('tr', {}, h('td', {}, h('b', {}, x.name)), h('td', {}, `${hm12(x.start)} – ${hm12(x.end)}`),
+          h('td', {class: 'num'}, fmt(x.scans)), h('td', {class: 'num'}, fmt(x.inspected)), h('td', {class: 'num'}, fmt(x.rejected)), h('td', {class: 'num'}, fmt(x.certified)))),
+          h('tr', {class: 'tot'}, h('td', {}, h('b', {}, 'Day')), h('td', {}), ...['scans', 'inspected', 'rejected', 'certified'].map(k => h('td', {class: 'num'}, h('b', {}, fmt(n.total[k])))))))),
+      n.unplaced ? h('p', {class: 'note'}, `${n.unplaced} scan(s) had no time or fell outside every Nexus window.`) : null,
+      h('button', {type: 'button', class: 'btn small', onclick: copy}, 'Copy for Nexus'));
+  }
+  const hm12 = t => { const [H, M] = t.split(':').map(Number); return `${(H % 12) || 12}:${String(M).padStart(2, '0')} ${H < 12 ? 'AM' : 'PM'}`; };
+  function nexusBlock(r) {
+    const body = h('div', {}, r.built?.nexus ? nexusTable(r.built.nexus)
+      : state.health?.sharepoint_configured === false ? h('p', {class: 'note'}, 'Connect SharePoint to split the day by scan time.')
+      : h('button', {type: 'button', class: 'btn small', onclick: async e => {
+          e.target.disabled = true; e.target.textContent = 'Reading the scan times…';
+          try { body.replaceChildren(nexusTable(await api('/api/nexus', {file_hash: r.file_hash}))); } catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Show Nexus numbers'; } }}, 'Show Nexus numbers'));
+    return h('section', {class: 'block', id: 'nexus-block'}, h('header', {}, h('h2', {}, 'Nexus numbers'),
+      h('p', {}, 'The day split into Nexus’s three shifts by scan time (plant time), ready to enter in Nexus. Internal only.')), body);
+  }
+
+  // ---------------- build a report from SharePoint
+  async function buildReport(job, day, force, btn, quiet) {
+    const was = btn?.textContent; if (btn) { btn.disabled = true; btn.textContent = 'Building…'; }
+    try {
+      const out = await api('/api/build', {job, day, force: !!force});
+      const r = out.report, b = out.built;
+      toast(`${job}: report built from ${fmt(b.scans)} scans. ${r.status === 'clear' ? 'Every check passed.' : r.status === 'hold' ? 'It has must-fix items.' : 'It has items to look at.'}`);
+      if (!quiet) select(r.id);
+      loadList();
+      return out;
+    } catch (e) { toast(`${job}: ${e.message}`, true); if (btn) { btn.disabled = false; btn.textContent = was; } return null; }
+  }
+
   // ---------------- Today: every job's day at a glance
   async function showToday() {
     const wrap = h('div', {class: 'sheetwrap apiwrap'});
@@ -928,15 +987,33 @@
         if (!y && s?.yesterday) counts.missing++;
       }
       const shift = d => { const x = new Date(day + 'T12:00:00'); x.setDate(x.getDate() + d); state.todayDay = x.toISOString().slice(0, 10); showToday(); };
-      const repCell = (rep, scans, when) => rep
-        ? h('td', {}, h('a', {href: '#r=' + rep.file_hash}, h('span', {class: 'tag tag-' + rep.status}, STATUS[rep.status])), ' ',
-            h('span', {class: rep.sent_at ? 'ok' : 'warn'}, rep.sent_at ? 'Sent' : rep.approved ? 'Approved, not sent' : 'Not sent'))
-        : h('td', {}, scans ? h('span', {class: 'differs'}, `Missing (${fmt(scans)} scans on SharePoint)`) : h('span', {class: 'quiet'}, when === 'today' ? 'Not uploaded yet' : '—'));
+      const prevDay = (() => { const x = new Date(day + 'T12:00:00'); x.setDate(x.getDate() - 1); return x.toISOString().slice(0, 10); })();
+      const clock = iso => new Date(iso).toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit'});
+      const buildBtn = (job, d, label, force, primary) => h('button', {type: 'button', class: 'btn small' + (primary ? ' primary' : ''), onclick: e => buildReport(job, d, force, e.target)}, label);
+      const repCell = (rep, scans, when, job) => {
+        if (rep) return h('td', {}, h('a', {href: '#r=' + rep.file_hash}, h('span', {class: 'tag tag-' + rep.status}, STATUS[rep.status])), ' ',
+          h('span', {class: rep.sent_at ? 'ok' : 'warn'}, rep.sent_at ? 'Sent' : rep.approved ? 'Approved, not sent' : 'Not sent'));
+        const s = sp[job];
+        if (when === 'today' && s?.today) {
+          const rd = s.readiness || {};
+          return h('td', {}, rd.state === 'running'
+            ? h('span', {class: 'buildcell'}, h('span', {class: 'quiet'}, `Shift running · ready about ${clock(rd.ready_at)}`), buildBtn(job, day, 'Build now anyway', true, false))
+            : h('span', {class: 'buildcell'}, h('span', {class: 'ok'}, 'Ready to build'), buildBtn(job, day, 'Build report', false, true)));
+        }
+        if (scans) return h('td', {}, h('span', {class: 'buildcell'}, h('span', {class: 'differs'}, `Missing (${fmt(scans)} scans on SharePoint)`), data.sharepoint_on ? buildBtn(job, prevDay, 'Build it', true, true) : null));
+        return h('td', {}, h('span', {class: 'quiet'}, when === 'today' ? 'No scans yet' : '—'));
+      };
+      const readyJobs = rows.filter(r => !r.today && sp[r.job]?.today && sp[r.job]?.readiness?.state === 'ready');
       const addBox = h('input', {type: 'text', placeholder: 'Add a job to watch, e.g. HANDS-HMMA-2219', 'aria-label': 'Job number'});
       wrap.replaceChildren(
         h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Today'), h('div', {class: 'meta'}, 'Every job’s day at a glance: scans on SharePoint so far, and where each daily report stands.'))),
         h('div', {class: 'periodbar'}, h('div', {class: 'pnav'}, h('button', {type: 'button', class: 'btn small', 'aria-label': 'Previous day', onclick: () => shift(-1)}, '‹'),
-          h('b', {}, label), h('button', {type: 'button', class: 'btn small', 'aria-label': 'Next day', onclick: () => shift(1)}, '›'))),
+          h('b', {}, label), h('button', {type: 'button', class: 'btn small', 'aria-label': 'Next day', onclick: () => shift(1)}, '›')),
+          readyJobs.length ? h('button', {type: 'button', class: 'btn primary', onclick: async e => {
+            e.target.disabled = true;
+            for (const [i, r] of readyJobs.entries()) { e.target.textContent = `Building ${i + 1} of ${readyJobs.length}…`; await buildReport(r.job, day, false, null, true); }
+            showToday(); }}, `Build ${readyJobs.length} ready report${readyJobs.length === 1 ? '' : 's'}`) : null),
+        h('p', {class: 'note'}, 'A job is ready to build 45 minutes after its last scan, so breaks and lunches are not taken as the end of the shift. Built reports are checked like uploads; nothing is sent until someone approves it.'),
         h('div', {class: 'numbers five'},
           h('div', {}, h('b', {}, fmt(rows.length)), h('span', {}, 'Jobs')),
           h('div', {}, h('b', {class: counts.missing ? 'bad' : ''}, fmt(counts.missing)), h('span', {}, 'Yesterday’s reports missing')),
@@ -955,9 +1032,9 @@
                 : h('span', {class: 'quiet'}, 'No scans yet');
               return h('tr', {},
                 h('td', {}, h('b', {}, r.job)),
-                repCell(r.yesterday, s?.yesterday, 'yesterday'),
+                repCell(r.yesterday, s?.yesterday, 'yesterday', r.job),
                 h('td', {}, today),
-                repCell(r.today, 0, 'today'),
+                repCell(r.today, 0, 'today', r.job),
                 h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => { state.periodQuery = {kind: 'week', day, job: r.job}; location.hash = 'periods'; }}, 'Week'),
                   r.watched ? h('button', {type: 'button', class: 'btn ghost small', onclick: async () => { if (await load({remove: r.job})) draw(); }}, 'Stop watching') : null));
             })))) : h('p', {class: 'note'}, 'No jobs yet. Upload a daily report, or add a job to watch below.'),

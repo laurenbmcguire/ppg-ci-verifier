@@ -29,6 +29,15 @@ TOOLS = [
          inputSchema=S(status={'type': 'string', 'enum': ['hold', 'check', 'clear']},
                        job={'type': 'string', 'description': 'Part of a job number or filename, e.g. HANDS or 2219.'}),
          annotations=dict(readOnlyHint=True)),
+    dict(name='build_report', title='Build a report from SharePoint',
+         description='Build the end-of-shift report for a job and day straight from its SharePoint scans (client-safe: no scan times or inspector names), save it in the verifier and run every check. Each scan goes on the shift its scan time falls in; after-midnight 3rd-shift scans count toward the day the shift started. Refuses while the shift may still be running (until 45 minutes after the last scan) unless force is true. Nothing is sent to the client.',
+         inputSchema=dict(S(job={'type': 'string', 'description': 'Job number, e.g. SLAL-HYMOBAL-2221.'},
+                            day={'type': 'string', 'description': 'YYYY-MM-DD; default today (plant time).'},
+                            force={'type': 'boolean', 'description': 'Build even if the last scan was under 45 minutes ago.'}), required=['job'])),
+    dict(name='nexus_numbers', title='Nexus shift numbers',
+         description='A job\'s day split into Nexus\'s three shifts by plant-time window (Shift 1 6:00a-2:30p, Shift 2 2:30p-10:30p, Shift 3 10:00p-6:30a): scans, inspected, rejected and certified per shift, for entering into Nexus.',
+         inputSchema=dict(S(job={'type': 'string'}, day={'type': 'string', 'description': 'YYYY-MM-DD; default today.'}), required=['job']),
+         annotations=dict(readOnlyHint=True)),
     dict(name='get_report', title='Get a report',
          description='One report: status, numbers (scans, inspected, rejected), every issue with sheet/cell, SharePoint and usual-day comparison, approval and send history, corrected copy.',
          inputSchema=dict(S(id=ID), required=['id']), annotations=dict(readOnlyHint=True)),
@@ -123,6 +132,10 @@ def _call(h, key, name, a):
         return _fetch(h, a.get('id'))
     if name == 'list_reports':
         return ops.op_list(h, a.get('status'), a.get('job'))
+    if name == 'build_report':
+        return ops.op_build(h, a.get('job'), a.get('day'), a.get('force') is True)
+    if name == 'nexus_numbers':
+        return ops.op_nexus(h, a.get('job'), a.get('day'))
     if name == 'get_report':
         return ops.op_get(h, a.get('id'))
     if name == 'find_vin':

@@ -22,6 +22,8 @@ ENDPOINTS = [
     ('GET', '/api/v1/reports', 'Latest 100 reports with status. Optional ?status=hold|check|clear&job=...'),
     ('POST', '/api/v1/reports', 'Upload a report: {"filename": "...xlsx", "content_base64": "..."} (up to 4 MB). Runs every check (SharePoint, usual day, AI when on) and returns the result.'),
     ('GET', '/api/v1/vins?q=...', 'Which reports a VIN or identifier is in (full or partial, at least 4 characters).'),
+    ('POST', '/api/v1/build', 'Build the end-of-shift report from SharePoint: {"job": "SLAL-HYMOBAL-2221", "day": "YYYY-MM-DD" (default today, plant time), "force": false}. Each scan goes on the shift its scan time falls in. Waits until 45 minutes after the last scan unless force is true. The report is saved and checked like an upload; nothing is sent.'),
+    ('GET', '/api/v1/nexus?job=...&day=...', 'The day split into Nexus shifts by plant-time window (Shift 1 6:00a-2:30p, Shift 2 2:30p-10:30p, Shift 3 10:00p-6:30a): scans, inspected, rejected, certified.'),
     ('GET', '/api/v1/reports/{id}', 'One report: status, numbers, every issue, approval and send history.'),
     ('GET', '/api/v1/reports/{id}/fixes', 'Suggested cell changes (checks and Claude).'),
     ('POST', '/api/v1/reports/{id}/fixes', 'Make a corrected copy: {"accept": "all"} or {"ids": [...]} and/or {"changes": [{"sheet","cell","after","reason"}]}. Returns the new report (it is checked again). The original is never changed.'),
@@ -229,6 +231,68 @@ def op_find_vin(h, q):
         return SpreadsheetInbox(directory).find_vin(q)
 
 
+def _job_day(job, day):
+    from zoneinfo import ZoneInfo
+    from datetime import datetime as _dt, date as _date
+    job = ' '.join(str(job or '').split()).upper()
+    if not job:
+        raise ApiError(400, 'Which job? Send "job", e.g. SLAL-HYMOBAL-2221.')
+    day = str(day or _dt.now(ZoneInfo('America/Chicago')).date().isoformat())
+    try:
+        _date.fromisoformat(day)
+    except ValueError:
+        raise ApiError(400, 'day must be YYYY-MM-DD.') from None
+    return job, day
+
+
+def op_build(h, job, day=None, force=False, header=None):
+    """Build the job's report for the day from SharePoint, save it, and run the checks. Returns the report and how it was built."""
+    from datetime import datetime as _dt, timezone as _tz
+    from hosting import builder
+    job, day = _job_day(job, day)
+    with h.store().session() as directory:
+        inbox = SpreadsheetInbox(directory)
+        schedule = inbox.shift_schedule(job)
+        saved = inbox.setting(f'report_header|{job}', {}) or {}
+        if isinstance(header, dict):
+            saved = inbox.set_setting(f'report_header|{job}', {k: ' '.join(str(header.get(k) or '').split())[:120] for k in ('customer', 'worksite', 'program', 'prepared_by')})
+        windows = inbox.setting('nexus_windows', None)
+    try:
+        rows, info = builder.day_rows(job, day, schedule)        # network call outside any DB transaction
+    except builder.BuildError as exc:
+        raise ApiError(409, str(exc)) from None
+    if not rows:
+        raise ApiError(409, f'SharePoint has no scans for {job} on {day}.')
+    ready = builder.readiness(info['last_scan'])
+    if ready['state'] == 'running' and not force:
+        last = _dt.fromisoformat(info['last_scan'])
+        raise ApiError(409, f'The last {job} scan was at {last.strftime("%I:%M %p").lstrip("0")}; the shift may still be going. '
+                            f'The report is ready at {_dt.fromisoformat(ready["ready_at"]).strftime("%I:%M %p").lstrip("0")} '
+                            f'(45 minutes after the last scan). Build anyway to make it now.')
+    raw = builder.build_xlsx(job, day, rows, schedule, saved)
+    built = dict(info, built_at=_dt.now(_tz.utc).isoformat(), ready=ready, nexus=builder.nexus_split(rows, windows),
+                 shifts={sh['name']: sum(1 for r in rows if r['shift_name'] == sh['name']) for sh in schedule})
+    with h.store().session() as directory:
+        inbox = SpreadsheetInbox(directory)
+        item = inbox.ingest(builder.file_name(job, day), raw)
+        inbox.set_setting(f'built|{item["file_hash"]}', built)
+    _after_change(h, item['file_hash'])
+    return dict(report=report(_get(h, item['file_hash'])), built={k: v for k, v in built.items() if k != 'columns'})
+
+
+def op_nexus(h, job, day=None):
+    from hosting import builder
+    job, day = _job_day(job, day)
+    with h.store().session() as directory:
+        inbox = SpreadsheetInbox(directory)
+        schedule, windows = inbox.shift_schedule(job), inbox.setting('nexus_windows', None)
+    try:
+        rows, info = builder.day_rows(job, day, schedule)
+    except builder.BuildError as exc:
+        raise ApiError(409, str(exc)) from None
+    return dict(job=job, day=day, last_scan=info['last_scan'], **builder.nexus_split(rows, windows))
+
+
 def shift_fix(h, file_hash):
     """Corrected copy with every wrong-shift row on its shift's tab (or taken out). Returns (item, moved, removed)."""
     from hosting.fixes import relocate_rows, FixError
@@ -276,6 +340,12 @@ def handle(h, method, route, send):
         if path == '/api/v1/vins' and method == 'GET':
             from urllib.parse import unquote_plus
             return send(200, op_find_vin(h, unquote_plus(query.get('q', ''))))
+        if path == '/api/v1/build' and method == 'POST':
+            data = _body(h, 10000)
+            return send(201, op_build(h, data.get('job'), data.get('day'), data.get('force') is True, data.get('header')))
+        if path == '/api/v1/nexus' and method == 'GET':
+            from urllib.parse import unquote_plus
+            return send(200, op_nexus(h, unquote_plus(query.get('job', '')), query.get('day')))
         if path == '/api/v1/reports':
             if method == 'GET':
                 return send(200, op_list(h, query.get('status'), query.get('job', '').replace('%20', ' ') or None))

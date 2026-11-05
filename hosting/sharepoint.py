@@ -289,7 +289,7 @@ def _by_time(names, rows, schedule):
     for it in rows:
         f = dict(it.get('fields') or {})
         local = local_time(_stamp(it))
-        shift = assign(local, schedule)[0] if local else None
+        shift, report_day = assign(local, schedule) if local else (None, None)
         f['ShiftPicked'] = f.get(shift_key)
         f['ScanTime'] = f'{local.month}/{local.day} at {(local.hour % 12) or 12}:{local.minute:02d} {"AM" if local.hour < 12 else "PM"}' if local else None
         if shift:
@@ -298,7 +298,7 @@ def _by_time(names, rows, schedule):
         if ident:
             scans[re.sub(r'[^A-Z0-9]', '', str(ident).upper())] = dict(time=f['ScanTime'], shift=number(shift['name']) if shift else None,
                                                                         label=label(shift) if shift else 'outside every shift',
-                                                                        picked=None if f['ShiftPicked'] is None else str(f['ShiftPicked']))
+                                                                        picked=None if f['ShiftPicked'] is None else str(f['ShiftPicked']), day=report_day)
         out.append(dict(it, fields=f))
     return names, out, scans
 
