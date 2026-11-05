@@ -90,6 +90,8 @@
   function select(hash) { if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
   window.addEventListener('hashchange', route);
   async function route() {
+    document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === (location.hash === '#api' ? '#api' : '#')));
+    if (location.hash === '#api') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showApi(); return; }
     const m = location.hash.match(/^#r=([0-9a-f]{64})$/);
     document.body.classList.toggle('viewing', !!m);
     if (!m) { state.selected = null; drawQueue(); showEmpty(); return; }
@@ -136,6 +138,7 @@
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('baseline', 'Comparing with earlier days…')}, 'Compare with usual day'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('ai-review', 'Claude is reading the report…')}, rv.ai.status === 'done' ? 'Run AI review again' : 'Run AI review')));
     wrap.append(h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
+    wrap.append(h('div', {id: 'finish'}));
     wrap.append(numbers(r));
     wrap.append(h('section', {class: 'block', id: 'sheet-block'}, h('header', {}, h('h2', {}, 'Spreadsheet'), h('p', {}, 'Loading the file…'))));
     wrap.append(h('section', {class: 'block', id: 'fixes-block'}, h('header', {}, h('h2', {}, 'Fixes'), h('p', {}, 'Loading suggested fixes…'))));
@@ -172,6 +175,15 @@
       if (state.selected !== hash) return;
       state.fixes = data.proposals || [];
       state.aiFix = data.ai || {status: 'not_run'};
+      const carry = store.get('rd-carry:' + hash, null);
+      if (carry) {  // what was ignored on the earlier version stays ignored on this corrected copy
+        const dec = store.get(decisionsKey(), {});
+        for (const f of state.fixes) if (carry.rejected.some(x => x.sheet === f.sheet && x.cell === f.cell && x.after === f.after)) dec[f.id] = {state: 'rejected'};
+        store.set(decisionsKey(), dec);
+        store.set('rd-reviewed:' + hash, [...new Set([...store.get('rd-reviewed:' + hash, []), ...carry.reviewed])]);
+        try { localStorage.removeItem('rd-carry:' + hash); } catch (e) { /* convenience only */ }
+        if (carry.reviewed.length) drawReport();
+      }
     } catch (e) { state.fixes = []; state.aiFix = {status: 'not_run'}; }
     drawFixes();
     // first time a report with issues is opened, Claude drafts the fixes, then offers them in the chat
@@ -351,6 +363,7 @@
     updateDownloads();
     if (!state.chatBusy) drawChat();
     drawFixer();
+    updateFinish();
   }
   function readyChanges() {
     if (!state.report) return {accepted: [], dec: {}, edits: {}, total: 0};
@@ -370,7 +383,7 @@
     const bar = $('dlbar');
     if (bar) { bar.hidden = !c.total; const t = bar.querySelector('span'); if (t) t.textContent = `${c.total} change${c.total === 1 ? '' : 's'} ready. The download is a corrected copy; your original stays as it is.`; }
   }
-  async function applyFixes(accepted, dec, edits) {
+  async function applyFixes(accepted, dec, edits, opts = {}) {
     if (state.busy) return; state.busy = true; drawFixes(); updateDownloads();
     toast('Building the fixed copy with your changes…');
     try {
@@ -384,10 +397,14 @@
         changes.push({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: e.reason || 'Edited by reviewer', source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit', kind: numeric ? 'number' : 'text'});
       }
       const answer = await api('/api/spreadsheets/apply-fixes', {file_hash: state.report.file_hash, changes});
+      const rejected = (state.fixes || []).filter(f => dec[f.id]?.state === 'rejected').map(f => ({sheet: f.sheet, cell: f.cell, after: f.after}));
+      store.set('rd-carry:' + answer.item.file_hash, {reviewed: store.get('rd-reviewed:' + state.report.file_hash, []), rejected});
       store.set(decisionsKey(), {}); store.set(editsKey(), {});
-      const link = h('a', {href: '/api/spreadsheets/download?id=' + answer.item.file_hash, download: answer.item.filename});
-      document.body.append(link); link.click(); link.remove();
-      toast(`Saved and downloaded "${answer.item.filename}" with ${changes.length} change${changes.length === 1 ? '' : 's'}. It has been checked again. The original is unchanged.`);
+      if (opts.download !== false) {
+        const link = h('a', {href: '/api/spreadsheets/download?id=' + answer.item.file_hash, download: answer.item.filename});
+        document.body.append(link); link.click(); link.remove();
+      }
+      toast(`${opts.download !== false ? 'Saved and downloaded' : 'Saved'} "${answer.item.filename}" with ${changes.length} change${changes.length === 1 ? '' : 's'}. It has been checked again. The original is unchanged.`);
       await loadList(); select(answer.item.file_hash);
     } catch (e) { toast(e.message, true); }
     finally { state.busy = false; if ($('fixes-block')) drawFixes(); }
@@ -679,6 +696,99 @@
     reveal(wrap, td, true);
   }
 
+  // ---------------- when every fix and issue is handled: offer the final download and the send
+  function progress() {
+    const r = state.report; if (!r || state.fixes == null || state.aiFixing || state.reviewing || state.verifying) return null;
+    const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
+    const undecided = state.fixes.filter(f => !dec[f.id]?.state && !edits[editId(f.sheet, f.cell)]).length;
+    const reviewed = new Set(store.get('rd-reviewed:' + r.file_hash, []));
+    const changed = new Set([...state.fixes.filter(f => dec[f.id]?.state === 'accepted').map(f => editId(f.sheet, f.cell)), ...Object.keys(edits)]);
+    const open = allIssues(r.review).filter(i => i.severity !== 'info' && !reviewed.has(i.key) && !(i.cell && changed.has(editId(i.sheet, String(i.cell).toUpperCase())))).length;
+    return {undecided, open, ready: readyChanges().total, done: !undecided && !open};
+  }
+  function downloadFinal() { $('finish-dialog')?.open && $('finish-dialog').close(); downloadWithChanges(); }
+  function sendFinal() {
+    $('finish-dialog')?.open && $('finish-dialog').close();
+    const c = readyChanges();
+    if (!c.total) { openSend(); return; }
+    state.openSendFor = 'next';                      // the corrected copy opens with the send window
+    applyFixes(c.accepted, c.dec, c.edits, {download: false});
+  }
+  function updateFinish() {
+    const slot = $('finish'), r = state.report; if (!slot || !r) return;
+    const p = progress(), sent = (r.sent || []).some(x => x.sent);
+    state.finishSeen ||= {};
+    if (!p || sent) { slot.replaceChildren(); return; }
+    const was = state.finishSeen[r.file_hash];
+    state.finishSeen[r.file_hash] = p.done;
+    if (!p.done) {
+      const parts = [p.undecided ? `${p.undecided} fix${p.undecided === 1 ? '' : 'es'} to accept or reject` : null, p.open ? `${p.open} issue${p.open === 1 ? '' : 's'} to fix or mark reviewed` : null].filter(Boolean);
+      slot.replaceChildren(h('p', {class: 'finish-left'}, `Before the final report: ${parts.join(' and ')}.`));
+      return;
+    }
+    slot.replaceChildren(h('div', {class: 'finish'},
+      h('div', {}, h('b', {}, r.approval ? 'Approved and ready to send' : 'Every fix and issue is handled'),
+        h('span', {}, p.ready ? `${p.ready} change${p.ready === 1 ? '' : 's'} will go into the final copy. Your original stays as it is.` : 'No changes are needed. This file is the final report.')),
+      h('button', {type: 'button', class: 'btn', onclick: downloadFinal}, 'Download final report'),
+      h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, r.approval ? 'Send to client' : 'Send it to the client for me')));
+    if (was === false && !store.get('rd-finish-offered:' + r.file_hash, false)) { store.set('rd-finish-offered:' + r.file_hash, true); offerFinish(p); }
+  }
+  function offerFinish(p) {
+    if (document.querySelector('dialog[open]:not(#finish-dialog)')) { setTimeout(() => offerFinish(p), 1500); return; }
+    let dlg = $('finish-dialog');
+    if (!dlg) { dlg = h('dialog', {id: 'finish-dialog', class: 'fixer finishdlg', 'aria-labelledby': 'finish-title'}); document.body.append(dlg);
+      dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); }); }
+    const r = state.report;
+    dlg.replaceChildren(h('div', {class: 'fixer-wait'},
+      h('div', {class: 'finish-mark'}, '✓'),
+      h('h2', {id: 'finish-title'}, 'All fixes are handled'),
+      h('p', {}, `${r.review.job || r.filename}: ` + (p.ready ? `${p.ready} change${p.ready === 1 ? '' : 's'} will go into the final report.` : 'nothing needs changing.')
+        + ' Download it, or approve it and send it to the client from data@ppgquality.com.'),
+      h('div', {class: 'row'},
+        h('button', {type: 'button', class: 'btn ghost', onclick: () => dlg.close()}, 'Not now'),
+        h('button', {type: 'button', class: 'btn', onclick: downloadFinal}, 'Download final report'),
+        h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, 'Send it to the client for me'))));
+    if (!dlg.open) dlg.showModal();
+  }
+
+  // ---------------- API page: keys and how to call it
+  async function showApi() {
+    const report = $('report');
+    const wrap = h('div', {class: 'sheetwrap apiwrap'});
+    report.replaceChildren(wrap);
+    const base = location.origin + '/api/v1';
+    let index = {endpoints: []}, keys = [], fresh = null;
+    try { [index, keys] = await Promise.all([api('/api/v1'), api('/api/keys', {}).then(d => d.keys)]); } catch (e) { toast(e.message, true); }
+    const draw = () => {
+      const name = h('input', {type: 'text', placeholder: 'What will use it, e.g. Power Automate', 'aria-label': 'Key name', maxlength: '60'});
+      const canSend = h('input', {type: 'checkbox'});
+      wrap.replaceChildren(
+        h('button', {type: 'button', class: 'back', onclick: () => { location.hash = ''; }}, '‹ All reports'),
+        h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'API'), h('div', {class: 'meta'}, 'Let other programs upload reports, read the results, apply fixes, approve and send, with the same rules as this screen.'))),
+        h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'API keys'), h('p', {}, 'A program sends its key with every call. You see a key once, when you make it; revoke it any time.')),
+          fresh ? h('div', {class: 'keynew'}, h('p', {}, h('b', {}, `New key for ${fresh.name}. Copy it now; it will not be shown again.`)),
+            h('div', {class: 'keyline'}, h('code', {}, fresh.key), h('button', {type: 'button', class: 'btn small', onclick: e => { navigator.clipboard?.writeText(fresh.key).then(() => { e.target.textContent = 'Copied'; }, () => toast('Select the key and copy it.', true)); }}, 'Copy'))) : null,
+          h('div', {class: 'keyform'}, name, h('label', {class: 'tick'}, canSend, 'Can send to clients'),
+            h('button', {type: 'button', class: 'btn primary', onclick: async () => {
+              try { const d = await api('/api/keys/create', {name: name.value, can_send: canSend.checked}); fresh = d.key; keys = d.keys; draw(); }
+              catch (e) { toast(e.message, true); } }}, 'Make a key')),
+          keys.length ? h('div', {class: 'tablewrap'}, h('table', {class: 'keys'}, h('thead', {}, h('tr', {}, ['Name', 'Key', 'Can send', 'Made', 'Last used', ''].map(t => h('th', {}, t)))),
+            h('tbody', {}, keys.map(k => h('tr', {class: k.revoked_at ? 'revoked' : ''}, h('td', {}, k.name), h('td', {}, h('code', {}, k.prefix + '…')),
+              h('td', {}, k.can_send ? 'Yes' : 'No'), h('td', {}, when(k.created_at)), h('td', {}, k.last_used ? ago(k.last_used) : 'Never'),
+              h('td', {}, k.revoked_at ? 'Revoked' : h('button', {type: 'button', class: 'btn small', onclick: async () => {
+                try { keys = (await api('/api/keys/revoke', {id: k.id})).keys; fresh = null; draw(); toast(`Revoked ${k.name}.`); } catch (e) { toast(e.message, true); } }}, 'Revoke')))))))
+            : h('p', {class: 'note'}, 'No keys yet.')),
+        h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'How to call it')),
+          h('p', {}, 'Base address: ', h('code', {}, base)),
+          h('p', {}, 'While the app is behind Vercel sign-in, a program outside it also needs Vercel’s automation header, ', h('code', {}, 'x-vercel-protection-bypass'),
+            '. Turn on “Protection Bypass for Automation” in the Vercel project’s Deployment Protection settings and give the program that value with its API key.'),
+          h('pre', {class: 'code'}, `curl ${base}/reports \\\n  -H "Authorization: Bearer ppgv_YOUR_KEY" \\\n  -H "x-vercel-protection-bypass: YOUR_VERCEL_VALUE"\n\ncurl -X POST ${base}/reports \\\n  -H "Authorization: Bearer ppgv_YOUR_KEY" -H "Content-Type: application/json" \\\n  -d '{"filename": "2219-HANDS-HMMA 11.05.26.xlsx", "content_base64": "<file as base64>"}'`),
+          h('div', {class: 'tablewrap'}, h('table', {class: 'keys endpoints'}, h('thead', {}, h('tr', {}, ['', 'Address', 'What it does'].map(t => h('th', {}, t)))),
+            h('tbody', {}, index.endpoints.map(e => h('tr', {}, h('td', {}, h('span', {class: 'verb ' + e.method.toLowerCase()}, e.method)), h('td', {}, h('code', {}, e.path)), h('td', {}, e.description))))))));
+    };
+    draw();
+  }
+
   // ---------------- approve, then send the final report to the client (from data@ppgquality.com)
   const when = iso => iso ? new Date(iso).toLocaleString('en-US', {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}) : '';
   const kb = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
@@ -807,6 +917,7 @@
   function refreshHead() {
     const slot = $('sendstate'); if (slot) slot.replaceChildren(...[sendState(state.report)].filter(Boolean));
     const b = $('send-btn'); if (b) b.textContent = sendLabel(state.report);
+    updateFinish();
   }
   const sendLabel = r => (r.sent || []).some(x => x.sent) ? 'Sent to client' : r.approval ? 'Send to client' : 'Approve and send';
 
@@ -934,7 +1045,7 @@
     const dlg = $('walk-dialog'); if (!dlg) return;
     const issues = walkIssues(), w = state.walk, issue = issues[w.index];
     const reviewedKey = 'rd-reviewed:' + state.report.file_hash, done = new Set(store.get(reviewedKey, []));
-    const markDone = () => { done.add(issue.key); store.set(reviewedKey, [...done]); };
+    const markDone = () => { done.add(issue.key); store.set(reviewedKey, [...done]); updateFinish(); };
     const next = () => { markDone(); if (w.index < issues.length - 1) { w.index++; w.target = null; drawWalk(); } else finish(); };
     const finish = () => {
       const ready = (state.fixes || []).filter(f => store.get(decisionsKey(), {})[f.id]?.state === 'accepted').length + Object.keys(store.get(editsKey(), {})).length;
@@ -1070,7 +1181,7 @@
       const limit = state.showAll ? shown.length : 25;
       for (const i of shown.slice(0, limit)) {
         const box = h('input', {type: 'checkbox', checked: done.has(i.key), onchange: e => {
-          e.target.checked ? done.add(i.key) : done.delete(i.key); store.set(reviewedKey, [...done]); draw(); }});
+          e.target.checked ? done.add(i.key) : done.delete(i.key); store.set(reviewedKey, [...done]); draw(); updateFinish(); }});
         const rowNo = Number(i.row) || Number(String(i.cell || '').replace(/^[A-Z]+/i, '')) || null;
         const badge = i.restored ? h('span', {class: 'vb unsure'}, 'Put back by you') : i.verdict === 'valid' ? h('span', {class: 'vb ok'}, '✓ Claude confirmed') : i.verdict === 'unsure' ? h('span', {class: 'vb unsure'}, 'Claude unsure') : null;
         const body = h('div', {}, h('p', {class: 'src'}, [i.source, i.where].filter(Boolean).join(' · '), badge ? ' ' : null, badge), h('p', {class: 'text'}, i.text),

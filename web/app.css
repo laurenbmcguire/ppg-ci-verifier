@@ -456,3 +456,35 @@ dialog.send{width:min(820px,calc(100vw - 24px))}
 .shist h3{font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#60726a;margin:4px 0 6px}
 .shist p{font-size:13px;margin:4px 0}
 @media (max-width:640px){.sgrid{grid-template-columns:1fr}.sform label{grid-template-columns:1fr}}
+
+/* every fix and issue handled: final download and send */
+.finish{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--ok-bg);border:1px solid #c6e0d3;border-left:4px solid var(--ok);border-radius:8px;padding:12px 14px;margin:0 0 16px}
+.finish > div{flex:1;min-width:240px;display:grid;gap:2px}
+.finish b{font-size:15px;color:var(--ok-ink)}
+.finish span{font-size:13px;color:var(--muted)}
+.finish-left{font-size:13px;color:var(--muted);margin:0 0 14px}
+dialog.finishdlg{width:min(640px,calc(100vw - 24px))}
+.finish-mark{width:52px;height:52px;margin:0 auto;border-radius:50%;background:var(--ok);color:#fff;font:700 26px/52px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.finishdlg .row{flex-wrap:wrap}
+
+/* API page */
+.keynew{background:var(--med-bg);border-radius:8px;padding:12px 14px;margin:0 0 14px}
+.keynew p{margin:0 0 8px;color:var(--ink)}
+.keyline{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.keyline code{flex:1;min-width:0;overflow-wrap:anywhere;background:#fff;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:13px}
+.keyform{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 14px}
+.keyform input[type=text]{flex:1;min-width:220px;font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:9px 11px;border:1px solid var(--btn-line);border-radius:7px;color:var(--ink)}
+table.keys{width:100%;border-collapse:collapse;font-size:13px;background:#fff;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+table.keys th{text-align:left;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#60726a;background:#f6f9f7;padding:8px 10px}
+table.keys td{padding:8px 10px;border-top:1px solid var(--line-2);vertical-align:top}
+table.keys tr.revoked td{color:var(--faint);text-decoration:line-through}
+table.keys tr.revoked td:last-child{text-decoration:none}
+table.endpoints{margin-top:14px}
+table.endpoints td:nth-child(2){min-width:280px}
+table.endpoints code{white-space:nowrap}
+.tablewrap{overflow-x:auto;margin-top:14px}
+.tablewrap table.endpoints{margin-top:0}
+table.keys td:nth-child(2){min-width:180px}
+.verb{display:inline-block;min-width:44px;text-align:center;border-radius:4px;padding:1px 6px;font:700 11px/1.6 ui-monospace,Menlo,monospace;background:#e6eef7;color:#2d4f75}
+.verb.post{background:var(--ok-bg);color:var(--ok-ink)}
+pre.code{background:#143c3b;color:#e7f2ee;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.55}

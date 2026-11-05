@@ -31,6 +31,8 @@ class SpreadsheetInbox:
                 check_hash TEXT NOT NULL UNIQUE, result_json TEXT NOT NULL)''')
             db.execute('CREATE TABLE IF NOT EXISTS spreadsheet_sources (source_hash TEXT PRIMARY KEY, source_json TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS client_contacts (job TEXT PRIMARY KEY, contacts_json TEXT NOT NULL)')
+            db.execute('''CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
+                prefix TEXT NOT NULL, can_send INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_used TEXT, revoked_at TEXT)''')
     @contextmanager
     def connect(self):
         db = sqlite3.connect(str(self.database), timeout=10)
@@ -193,6 +195,47 @@ class SpreadsheetInbox:
         with self.connect() as db:
             db.execute('INSERT INTO client_contacts (job, contacts_json) VALUES (?, ?) ON CONFLICT(job) DO UPDATE SET contacts_json=excluded.contacts_json',
                        (job, json.dumps(dict(to=to, cc=cc, saved_at=datetime.now(timezone.utc).isoformat()))))
+    # ---------------- API keys (only a SHA-256 fingerprint is stored; the key is shown once)
+    def create_key(self, name, can_send=False):
+        import secrets
+        name = ' '.join(str(name or '').split())[:60]
+        if not name:
+            raise ValueError('Name the key (for example: Power Automate, Nexus sync).')
+        token = 'ppgv_' + secrets.token_urlsafe(32)
+        key_id = 'key_' + secrets.token_hex(6)
+        with self.connect() as db:
+            if db.execute('SELECT COUNT(*) FROM api_keys WHERE revoked_at IS NULL').fetchone()[0] >= 25:
+                raise ValueError('There are already 25 active keys. Revoke one first.')
+            db.execute('INSERT INTO api_keys (id, name, key_hash, prefix, can_send, created_at) VALUES (?,?,?,?,?,?)',
+                       (key_id, name, hashlib.sha256(token.encode()).hexdigest(), token[:12], 1 if can_send else 0, datetime.now(timezone.utc).isoformat()))
+        return dict(self._key_row(key_id), key=token)
+    def _key_row(self, key_id):
+        with self.connect() as db:
+            r = db.execute('SELECT * FROM api_keys WHERE id=?', (key_id,)).fetchone()
+        return dict(id=r['id'], name=r['name'], prefix=r['prefix'], can_send=bool(r['can_send']), created_at=r['created_at'],
+                    last_used=r['last_used'], revoked_at=r['revoked_at']) if r else None
+    def list_keys(self):
+        with self.connect() as db:
+            ids = [r['id'] for r in db.execute('SELECT id FROM api_keys ORDER BY created_at DESC').fetchall()]
+        return [self._key_row(i) for i in ids]
+    def revoke_key(self, key_id):
+        with self.connect() as db:
+            if not db.execute("UPDATE api_keys SET revoked_at=? WHERE id=? AND revoked_at IS NULL", (datetime.now(timezone.utc).isoformat(), str(key_id))).rowcount:
+                raise ValueError('That key was not found or is already revoked.')
+        return self._key_row(key_id)
+    def check_key(self, token):
+        """The key's record when the token is valid and not revoked, else None. last_used is refreshed at most hourly."""
+        if not isinstance(token, str) or not token.startswith('ppgv_') or len(token) > 100:
+            return None
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        with self.connect() as db:
+            r = db.execute('SELECT id, last_used FROM api_keys WHERE key_hash=? AND revoked_at IS NULL', (digest,)).fetchone()
+            if not r:
+                return None
+            now = datetime.now(timezone.utc)
+            if not r['last_used'] or (now - datetime.fromisoformat(r['last_used'])).total_seconds() > 3600:
+                db.execute('UPDATE api_keys SET last_used=? WHERE id=?', (now.isoformat(), r['id']))
+        return self._key_row(r['id'])
     def record_ai_verify(self, file_hash, record):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
