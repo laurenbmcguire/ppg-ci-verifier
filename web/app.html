@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PPG Report Desk</title>
+<link rel="icon" href="/assets/ppg-client-intelligence.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="#" aria-label="PPG Report Desk home"><img src="/assets/ppg-client-intelligence.png" alt=""><span>Report Desk</span></a>
+  <div class="connections" id="connections" aria-label="Connections"></div>
+  <label class="upload-button" for="file-input">Upload report<input id="file-input" type="file" accept=".xlsx,.csv" multiple></label>
+</header>
+
+<main class="desk" id="desk">
+  <aside class="queue" id="queue" aria-label="Reports">
+    <div class="queue-tools">
+      <input id="search" type="search" placeholder="Search job, file or date" aria-label="Search reports">
+      <div class="segmented" role="group" aria-label="Show">
+        <button type="button" data-filter="attention" class="on">Needs attention</button>
+        <button type="button" data-filter="all">All</button>
+      </div>
+    </div>
+    <div id="uploads" aria-live="polite"></div>
+    <div id="queue-list" class="queue-list"></div>
+  </aside>
+
+  <section class="report" id="report" aria-live="polite">
+    <div class="empty" id="empty">
+      <div class="tag tag-big tag-idle"><span>Ready</span></div>
+      <h1>Drop an end-of-shift report here</h1>
+      <p>Excel or CSV, any layout. Each upload is checked for duplicates, typos and math, compared with SharePoint and with the job's usual day, and read by AI. You can accept fixes and download a corrected copy. The original is never changed.</p>
+      <label class="upload-button big" for="file-input">Choose a report</label>
+    </div>
+  </section>
+</main>
+
+<div class="drop" id="drop" hidden><div><strong>Drop to check</strong><span>Excel (.xlsx) or CSV</span></div></div>
+<div class="toast" id="toast" role="status" hidden></div>
+<dialog id="result-dialog" class="sheet" aria-labelledby="result-title"></dialog>
+<script src="/app.js"></script>
+</body>
+</html>

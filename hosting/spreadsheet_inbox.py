@@ -215,7 +215,15 @@ class SpreadsheetInbox:
                 result['internal_check_status']='outdated_checks_require_recheck'
         # List endpoint is bounded; detailed results remain available by hash.
         fields = ('file_hash','filename','version','received_at','format','status','internal_check_status','verification_scope','release_status','finding_count','findings_truncated','sheet_count','row_count')
-        return {'spreadsheets': [{key: result[key] for key in fields if key in result} for result in results],
+        from hosting.review_summary import summarize
+        def row(result):
+            item = {key: result[key] for key in fields if key in result}
+            try:
+                item['review'] = summarize(result, with_issues=False)
+            except Exception:
+                item['review'] = None
+            return item
+        return {'spreadsheets': [row(result) for result in results],
                 'count': count, 'limit':100, 'has_more': count > 100,
                 'notice':'Mapped checks and optional separately supplied source comparisons. No source authentication, business approval or release.'}
     def get(self, file_hash):

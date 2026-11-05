@@ -22,9 +22,13 @@ from hosting.storage import StorageUnavailable
 from hosting.sqlite_storage import local_environment, SQLiteWorkspace
 
 FILES = {'/development-examples.js': 'development-examples.js', '/': 'index.html', '/ui.js': 'ui.js', '/report-ui.js': 'report-ui.js',
-         '/style.css': 'style.css', '/spreadsheet-ui.js': 'spreadsheet-ui.js', '/workflow-ui.js':'workflow-ui.js', '/assets/ppg-client-intelligence.png': 'assets/ppg-client-intelligence.png'}
+         '/style.css': 'style.css', '/spreadsheet-ui.js': 'spreadsheet-ui.js', '/workflow-ui.js':'workflow-ui.js', '/assets/ppg-client-intelligence.png': 'assets/ppg-client-intelligence.png',
+         '/app.js': 'app.js', '/app.css': 'app.css', '/assets/fonts/barlow-400.woff2': 'assets/fonts/barlow-400.woff2',
+         '/assets/fonts/barlow-500.woff2': 'assets/fonts/barlow-500.woff2', '/assets/fonts/barlow-600.woff2': 'assets/fonts/barlow-600.woff2',
+         '/assets/fonts/barlow-condensed-600.woff2': 'assets/fonts/barlow-condensed-600.woff2',
+         '/assets/fonts/barlow-condensed-700.woff2': 'assets/fonts/barlow-condensed-700.woff2'}
 TYPES = {'html': 'text/html; charset=utf-8', 'js': 'text/javascript; charset=utf-8',
-         'css': 'text/css; charset=utf-8', 'png': 'image/png'}
+         'css': 'text/css; charset=utf-8', 'png': 'image/png', 'woff2': 'font/woff2'}
 MAX_RESPONSE_BYTES = 3 * 1024 * 1024
 
 def encode_json(data):
@@ -251,6 +255,10 @@ class handler(BaseHTTPRequestHandler):
                 safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', filename)[:180] or 'report'
                 kind = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if safe.lower().endswith('.xlsx') else 'text/csv; charset=utf-8'
                 return self.send(200, raw, kind, {'Content-Disposition': f'attachment; filename="{safe}"'})
+            if route == '/' and hosted_preview() or route == '/app':
+                return self.send(200, (ROOT / 'web' / 'app.html').read_bytes(), TYPES['html'])
+            if route == '/classic':
+                route = '/'
             if route in FILES:
                 name = FILES[route]
                 return self.send(200, (ROOT / 'web' / name).read_bytes(), TYPES[name.rsplit('.', 1)[1]])
@@ -285,6 +293,8 @@ class handler(BaseHTTPRequestHandler):
                     if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                         raise Conflict('Valid spreadsheet version ID required.')
                     data = SpreadsheetInbox(directory).get(file_hash)
+                    from hosting.review_summary import summarize
+                    data = dict(data, review=summarize(data))
                 else:
                     data = {'status': 'ready', 'storage': getattr(self.store(), 'storage_label', 'unconfigured'), 'live_connectors_enabled': False, 'sharepoint_configured': sharepoint_configured(), 'ai_review_configured': ai_review_configured(), 'spreadsheet_scope': 'internal_checks_only', 'send_enabled': False, 'reviewer_identity_available': False, 'prototype': True, 'local_only': not hosted_preview(), 'development_demo': self.demo_enabled()}
                 body = encode_json(data)
