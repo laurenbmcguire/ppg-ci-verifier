@@ -224,6 +224,15 @@ body.chatting .shell{margin-right:420px}
 .btn.chat-btn{border-color:var(--green);color:var(--green)}
 @media (max-width:1200px){body.chatting .shell{margin-right:0}.chat{width:min(420px,100vw)}}
 
+.vb{display:inline-block;font-size:11px;font-weight:700;padding:1px 8px;border-radius:999px;margin-left:6px;vertical-align:1px}
+.vb.ok{background:var(--ok-bg);color:var(--ok-ink)}.vb.unsure{background:#eef1ef;color:var(--info-ink)}
+details.dismissed{margin-top:14px;padding:10px 14px;border:1px dashed var(--line);border-radius:8px;background:#f8faf9;font-size:13px}
+details.dismissed summary{cursor:pointer;font-weight:600;color:var(--muted)}
+details.dismissed ul{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:8px}
+details.dismissed li{display:flex;gap:10px;align-items:center;justify-content:space-between;background:#fff;border:1px solid var(--line-2);border-radius:6px;padding:8px 10px}
+details.dismissed li b{display:block;font-weight:500;color:var(--ink)}
+details.dismissed li small{color:var(--faint)}
+
 /* download bar */
 .dlbar{position:sticky;bottom:12px;z-index:5;display:flex;align-items:center;gap:14px;margin-top:16px;padding:14px 18px;background:#143c3b;color:#f0f7f4;border-radius:10px;box-shadow:0 10px 30px rgba(20,60,59,.3)}
 .dlbar span{flex:1;font-size:14px}

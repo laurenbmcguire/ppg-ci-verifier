@@ -22,7 +22,7 @@ MAX_RECORDS_RETURNED = 500
 _FILLER = {'total', 'totals', 'qty', 'quantity', 'quantities', 'pcs', 'pc', 'pieces', 'piece', 'parts', 'part',
            'count', 'counts', 'no', 'number', 'of', 'num', 'units', 'unit', 'amount', 'daily', 'sum', 'ea'}
 FIELDS = {
-    'inspected': {'inspected', 'sorted', 'checked', 'inspect', 'audited', 'reviewed', 'sort'},
+    'inspected': {'inspected', 'sorted', 'checked', 'inspect', 'audited', 'reviewed', 'sort', 'actual', 'counted', 'actual count'},
     'rejected': {'rejected', 'rejects', 'reject', 'ng', 'nok', 'no good', 'defects', 'defective', 'nonconforming',
                  'non conforming', 'scrap', 'scrapped', 'failed', 'fail', 'bad', 'suspect'},
     'certified': {'certified', 'accepted', 'accept', 'good', 'passed', 'pass', 'ok', 'conforming', 'released',
@@ -34,16 +34,19 @@ TOTAL_WORDS = ('total', 'grand total', 'totals', 'subtotal', 'sub total', 'shift
 LABELS = {
     'identifier': {'identifier', 'identifier lot', 'id', 'lot', 'lot number', 'lot no', 'serial', 'serial number', 'serial no',
                    'tag', 'label', 'container', 'container id', 'box', 'skid', 'batch', 'barcode', 'scan', 'scan id',
-                   'vin', 'vin number', 'vin no', 'vin inspected', 'vehicle vin', 'vin scanned'},
+                   'vin', 'vin number', 'vin no', 'vin inspected', 'vehicle vin', 'vin scanned',
+                   'delivery note', 'delivery note number', 'delivery note no', 'packing slip', 'packing slip number', 'asn', 'shipper'},
     'part': {'part number', 'part', 'part no', 'part num', 'p n', 'pn', 'part name', 'item', 'item number', 'sku', 'part id',
              'vehicle', 'model', 'vehicle model'},
     'date': {'date', 'inspection date', 'scan date', 'report date'},
     'shift': {'shift', 'shift no', 'shift number'},
-    'defect': {'defect', 'defect type', 'reject reason', 'reason', 'defect reason', 'nok reason', 'failure mode', 'issue', 'suspect reason',
+    'defect': {'defect', 'defects', 'defect type', 'reject reason', 'reason', 'defect reason', 'nok reason', 'failure mode', 'issue', 'suspect reason',
                'reason for reject', 'reject reason s'},
-    'condition': {'condition', 'status', 'result', 'ok nok', 'ok nok status', 'disposition'},
-    'auditor': {'auditor', 'inspector', 'inspected by', 'operator', 'sorter', 'technician'},
+    'condition': {'condition', 'status', 'result', 'ok nok', 'ok nok status', 'disposition', 'audit result', 'audit status',
+                  'pass fail', 'inspection result', 'audit outcome'},
+    'auditor': {'auditor', 'auditor lookup id', 'inspector', 'inspected by', 'operator', 'sorter', 'technician'},
     'area': {'area', 'line', 'location', 'station', 'cell'},
+    'expected': {'order', 'ordered', 'order qty', 'order quantity', 'expected', 'expected qty', 'expected quantity', 'planned'},
     'comment': {'comment', 'comments', 'note', 'notes', 'remark', 'remarks', 'observation', 'observations'},
 }
 CONFUSABLE = str.maketrans({'O': '0', 'o': '0', 'I': '1', 'l': '1', 'i': '1', 'S': '5', 's': '5', 'B': '8', 'Z': '2', 'z': '2'})
@@ -53,11 +56,21 @@ def norm(value):
     return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9]+', ' ', str(value).lower())).strip()
 
 
+def header_text(value):
+    """Readable form of a header: SharePoint internal names like 'OrderQty_x002e_' or 'PartNumber' -> 'Order Qty.' / 'Part Number'."""
+    if not isinstance(value, str):
+        return value
+    text = re.sub(r'_x([0-9a-fA-F]{4})_', lambda m: chr(int(m.group(1), 16)), value)
+    text = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', ' ', text)          # camelCase -> camel Case
+    text = re.sub(r'(?<=[A-Z])(?=[A-Z][a-z])', ' ', text)         # IDNumber -> ID Number
+    return text.replace('_', ' ')
+
+
 def field_for_header(value):
     """Map one header cell to a quantity field, or None. 'Inspected for' and a bare 'Qty' stay unmapped."""
     if not isinstance(value, str):
         return None
-    words = norm(value).split()
+    words = norm(header_text(value)).split()
     if not words or len(words) > 12:
         return None
     has_quantity_word = any(w in ('qty', 'quantity', 'quantities', 'count', 'pcs', 'total') for w in words)
@@ -66,6 +79,8 @@ def field_for_header(value):
     while words and words[-1] in _FILLER:
         words.pop()
     core = ' '.join(words)
+    if core in ('defects', 'defect') and not has_quantity_word:
+        return None  # 'Defects' is usually the defect description
     for field, names in FIELDS.items():
         if core in names and len(words) <= 6:
             return field
@@ -81,7 +96,7 @@ def field_for_header(value):
 def label_for_header(value):
     if not isinstance(value, str):
         return None
-    key = norm(value)
+    key = norm(header_text(value))
     for label, names in LABELS.items():
         if key in names:
             return label
@@ -155,6 +170,8 @@ def label_text(raw, cached=None):
         raw = int(raw)
     text = raw.isoformat() if isinstance(raw, (datetime, date)) else str(raw)
     text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        text = text[1:-1].strip()  # exported text like "2026-11-04T06:00:00Z"
     return text or None
 
 
@@ -165,7 +182,9 @@ def as_day(raw, cached=None):
     if isinstance(value, date):
         return value
     if isinstance(value, str):
-        text = value.strip()
+        text = value.strip().strip('"').strip()
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})?', text):
+            text = text[:10]  # ISO timestamp from a SharePoint export
         for fmt in ('%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y', '%m-%d-%Y', '%m.%d.%y', '%m.%d.%Y', '%B %d, %Y', '%b %d, %Y'):
             try:
                 return datetime.strptime(text, fmt).date()
@@ -550,11 +569,14 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
                         finding(f'{kind}_format_differs', r['sheet'], r['row'],
                                 message=f'{"Identifier" if kind == "identifier" else "Part number"} {c} has a different format from the other {n} (expected like {common.replace("9", "#")}).')
     parts = Counter((r['labels'].get('part') or '').strip().upper() for r in detail if r['labels'].get('part'))
+    # With a big parts catalog, part numbers one digit apart are usually different real parts (ST1946-115 vs ST1946-015).
+    # Then only look-alike characters (O for 0, I/l for 1 ...) count as a likely typo.
+    big_catalog = len(parts) > 25
     for rare, n in parts.items():
         if n > 2:
             continue
         for common, m in parts.items():
-            if m >= 3 * n and m >= 3 and near_miss(rare, common):
+            if m >= 3 * n and m >= 3 and (rare.translate(CONFUSABLE) == common.translate(CONFUSABLE) if big_catalog else near_miss(rare, common)):
                 for r in detail:
                     if (r['labels'].get('part') or '').strip().upper() == rare:
                         finding('possible_part_number_typo', r['sheet'], r['row'], message=f'Part {rare} appears {n}× but {common} appears {m}×; likely a typo.')
@@ -660,6 +682,16 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
     info = {'no_quantity_columns_detected', 'no_data_rows', 'quantity_formulas_not_evaluated', 'formula_results_used', 'known_template_layout_differs', 'labeled_total_unit_differs'}
     issues = {c for c in finding.counts if c not in info}
     totals = {f: dict(total=str(grand[f][0]) if grand[f][1] else None, known_sum=str(grand[f][0])) for f in ('inspected', 'certified', 'rejected')} if sheet_sums else {}
+    # Pass/Fail reports (packing audits) have no reject quantity column: count the failed rows instead.
+    has_qty = any(f in t['columns'] for s in sheets for t in s['tables'] if t['kind'] == 'detail' for f in ('rejected', 'certified'))
+    results = [norm(r['labels'].get('condition') or '') for r in detail if r['labels'].get('condition')]
+    if detail and not has_qty and len(results) >= 0.8 * len(detail):
+        fails = sum(1 for v in results if v in ('fail', 'failed', 'nok', 'ng', 'reject', 'rejected', 'no good', 'not ok'))
+        passes = sum(1 for v in results if v in ('pass', 'passed', 'ok', 'good', 'accept', 'accepted'))
+        if fails + passes >= 0.8 * len(results):
+            totals = dict(totals or {})
+            totals['rejected'] = dict(total=str(fails), known_sum=str(fails), unit='rows')
+            totals['certified'] = dict(total=str(passes), known_sum=str(passes), unit='rows')
     result.update(
         sheets=sheets, record_count=len(detail), numeric_cells_checked=numeric,
         formula_count=stats['formula'] + stats['formula_result'], formula_results_used=stats['formula_result'],

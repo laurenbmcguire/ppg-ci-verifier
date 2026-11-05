@@ -20,7 +20,7 @@ MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 MAX_FINDINGS = 200
-CHECKER_VERSION = '2026-11-04-common-issues-v6'
+CHECKER_VERSION = '2026-11-05-sharepoint-exports-v7'
 
 
 class SpreadsheetError(ValueError):

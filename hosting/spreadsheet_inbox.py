@@ -142,11 +142,20 @@ class SpreadsheetInbox:
             result.pop('check_hash', None); result.pop('checked_at', None)
             result['ai_review'] = ai_review
             return self.save_check(db, result)
-    def ai_fix_inputs(self, file_hash):
+    def ai_fix_inputs(self, file_hash, include_dismissed=False):
         from hosting.review_summary import summarize
         item = self.get(file_hash)
         _, raw = self.original_bytes(file_hash)
-        return item, raw, [i for i in summarize(item)['issues'] if i['severity'] != 'info']
+        out = summarize(item, use_verdicts=not include_dismissed)
+        return item, raw, [i for i in out['issues'] if i['severity'] != 'info']
+    def record_ai_verify(self, file_hash, record):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            original, _ = self._original(db, file_hash)
+            result = dict(self.latest(db, file_hash, original))
+            result.pop('check_hash', None); result.pop('checked_at', None)
+            result['ai_verify'] = record
+            return self.save_check(db, result)
     def record_ai_fixes(self, file_hash, record):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -388,3 +397,17 @@ def chat_turn(item, raw, issues, messages, queued, opener=None, suggested=()):
     kept, dropped = validate_changes(item, raw, answer['changes'])
     return dict(status='done', reply=answer['reply'], changes=kept, undo=answer['undo'],
                 dropped=[dict(sheet=d['sheet'], cell=d['cell'], why=d.get('why')) for d in dropped])
+
+
+def make_ai_verify(item, raw, issues, opener=None):
+    from hosting import ai_review
+    if not issues:
+        return dict(status='done', made_at=datetime.now(timezone.utc).isoformat(), verdicts={}, checker_version=item.get('checker_version'))
+    try:
+        out = ai_review.verify(item, raw, issues, opener=opener)
+    except ai_review.AIReviewNotConfigured as exc:
+        return dict(status='not_configured', message=str(exc))
+    except ai_review.AIReviewError as exc:
+        return dict(status='error', message=str(exc))
+    return dict(status='done', model=out['model'], made_at=datetime.now(timezone.utc).isoformat(), verdicts=out['verdicts'],
+                checker_version=item.get('checker_version'))

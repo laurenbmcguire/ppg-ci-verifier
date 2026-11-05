@@ -170,6 +170,21 @@ def proposals(result, filename, raw, sharepoint_rows=None):
             if v != common and n > spellings[v]:
                 add(r['sheet'], text_cell(r, kind), common, f'Uses the spelling "{common}" found on {n} other row(s).', 'Spelling')
 
+    # 4b. Part numbers that differ only in upper/lower case → the most common form (uppercase on a tie).
+    groups = defaultdict(Counter)
+    for r in detail:
+        v = (r['labels'].get('part') or '').strip()
+        if v:
+            groups[v.upper()][v] += 1
+    for r in detail:
+        v = (r['labels'].get('part') or '').strip()
+        spellings = groups.get(v.upper()) if v else None
+        if not spellings or len(spellings) < 2:
+            continue
+        best = max(spellings.items(), key=lambda kv: (kv[1], kv[0] == kv[0].upper()))[0]
+        if v != best:
+            add(r['sheet'], text_cell(r, 'part'), best, f'Part number written as "{best}" on {spellings[best]} other row(s); same part, different capitals.', 'Spelling')
+
     # 5. Numbers typed as text in quantity columns.
     for r in detail:
         for field in ('inspected', 'certified', 'rejected'):

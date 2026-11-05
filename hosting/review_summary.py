@@ -65,7 +65,7 @@ def _num(total):
         return None
 
 
-def summarize(result, with_issues=True):
+def summarize(result, with_issues=True, use_verdicts=True):
     from hosting.source_compare import identify
     issues = []
     for i, f in enumerate(result.get('findings') or []):
@@ -89,6 +89,17 @@ def summarize(result, with_issues=True):
     if not result.get('record_count'):
         issues.append(dict(key='none:rows', source='Checks', severity='high', code='no_rows_found', where='Whole file',
                            text='No inspection rows were found in this file, so nothing could be checked. Check that this is the end-of-shift report.'))
+    # Claude's double-check: drop false alarms (kept in 'dismissed' with the reason), mark confirmed ones
+    verify = result.get('ai_verify') or {}
+    dismissed = []
+    if use_verdicts and verify.get('status') == 'done' and verify.get('checker_version') in (None, result.get('checker_version')):
+        verdicts, kept = verify.get('verdicts') or {}, []
+        for x in issues:
+            v = verdicts.get(x['key'])
+            if v:
+                x['verdict'], x['verdict_reason'], x['fixable'] = v.get('verdict'), v.get('reason'), v.get('fixable')
+            (dismissed if v and v.get('verdict') == 'not_an_issue' else kept).append(x)
+        issues = kept
     issues.sort(key=lambda x: RANK.get(x['severity'], 1))
     counts = {k: sum(1 for x in issues if x['severity'] == k) for k in RANK}
     status = 'hold' if counts['high'] else 'check' if counts['medium'] or counts['low'] else 'clear'
@@ -96,12 +107,14 @@ def summarize(result, with_issues=True):
     job, day = identify(result.get('filename'), result)
     out = dict(status=status, counts=counts, job=job, day=day,
                scans=result.get('record_count'), inspected=_num(totals.get('inspected')), rejected=_num(totals.get('rejected')),
-               certified=_num(totals.get('certified')),
+               certified=_num(totals.get('certified')), rejected_unit=(totals.get('rejected') or {}).get('unit'),
                sharepoint=dict(status=sp.get('status') or 'not_checked', message=sp.get('message'), matched=sp.get('matched_rows'),
                                rows=sp.get('sharepoint_rows'), web_url=sp.get('web_url'), source=sp.get('path')),
                usual=dict(status=bl.get('status') or 'not_checked', message=bl.get('message')),
                ai=dict(status=ai.get('status') or 'not_run', summary=ai.get('summary'), message=ai.get('message')),
-               fixed_from=(result.get('fixed_from') or {}).get('filename'), fixes_applied=len(result.get('fixes_applied') or []))
+               fixed_from=(result.get('fixed_from') or {}).get('filename'), fixes_applied=len(result.get('fixes_applied') or []),
+               verify=dict(status=verify.get('status') or 'not_run', dismissed=len(dismissed), message=verify.get('message')))
     if with_issues:
         out['issues'] = issues
+        out['dismissed'] = dismissed
     return out

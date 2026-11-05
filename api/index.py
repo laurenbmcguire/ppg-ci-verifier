@@ -334,11 +334,11 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/chat', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-verify', '/api/spreadsheets/chat', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
-            if not route.startswith('/api/workflow/') and route not in ('/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/ai-fixes','/api/spreadsheets/chat','/api/spreadsheets/baseline','/api/spreadsheets/fixes','/api/spreadsheets/cells','/api/spreadsheets/sheet','/api/spreadsheets/apply-fixes','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
+            if not route.startswith('/api/workflow/') and route not in ('/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/ai-fixes','/api/spreadsheets/ai-verify','/api/spreadsheets/chat','/api/spreadsheets/baseline','/api/spreadsheets/fixes','/api/spreadsheets/cells','/api/spreadsheets/sheet','/api/spreadsheets/apply-fixes','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= limit:
                 return self.fail(413, 'Request size is invalid.')
@@ -373,6 +373,21 @@ class handler(BaseHTTPRequestHandler):
                         except Exception:
                             debug_log()
                 return self.send(200, encode_json({'item': fixed}))
+            if route == '/api/spreadsheets/ai-verify':
+                payload = json.loads(raw)
+                file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                from hosting.spreadsheet_inbox import make_ai_verify
+                with self.store().session() as directory:
+                    item, data, issues = SpreadsheetInbox(directory).ai_fix_inputs(file_hash, include_dismissed=True)
+                record = make_ai_verify(item, data, issues)  # network call outside any DB transaction
+                if record.get('status') != 'done':
+                    raise Conflict(record.get('message') or 'The double-check failed.')
+                with self.store().session() as directory:
+                    SpreadsheetInbox(directory).record_ai_verify(file_hash, record)
+                return self.send(200, encode_json({'verified': len(record.get('verdicts') or {}),
+                                                   'dismissed': sum(1 for v in (record.get('verdicts') or {}).values() if v.get('verdict') == 'not_an_issue')}))
             if route == '/api/spreadsheets/chat':
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None

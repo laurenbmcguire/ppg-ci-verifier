@@ -150,14 +150,15 @@
 
   function numbers(r) {
     const rv = r.review, bl = r.baseline || {}, usual = bl.usual || {}, flagged = new Set((bl.findings || []).map(f => f.field));
-    const rate = rv.inspected ? (rv.rejected || 0) / rv.inspected * 100 : null;
+    const perRow = rv.rejected_unit === 'rows', base = perRow ? rv.scans : rv.inspected;
+    const rate = base ? (rv.rejected || 0) / base * 100 : null;
     const cell = (value, label, u, key) => h('div', {}, h('b', {}, value), h('span', {}, label),
       u ? h('em', {class: flagged.has(key) ? 'off' : ''}, `Usual ${u.median}`) : null);
     return h('div', {class: 'numbers'},
       cell(fmt(rv.scans), 'Scans / rows', usual.scans, 'scans'),
       cell(fmt(rv.inspected), 'Inspected', usual.inspected, 'inspected'),
-      cell(fmt(rv.rejected), 'Rejected', usual.rejected, 'rejected'),
-      cell(rate == null ? '—' : rate.toFixed(1) + '%', 'Reject rate', usual.reject_rate, 'reject_rate'));
+      cell(fmt(rv.rejected), perRow ? 'Failed audits' : 'Rejected', usual.rejected, 'rejected'),
+      cell(rate == null ? '—' : rate.toFixed(1) + '%', perRow ? 'Fail rate' : 'Reject rate', usual.reject_rate, 'reject_rate'));
   }
 
   // ---------------- fixes
@@ -170,9 +171,28 @@
     } catch (e) { state.fixes = []; state.aiFix = {status: 'not_run'}; }
     drawFixes();
     // first time a report with issues is opened, Claude drafts the fixes, then offers them in the chat
-    const open = (state.report?.review?.issues || []).filter(i => i.severity !== 'info').length;
+    const rv = state.report?.review || {}, open = (rv.issues || []).filter(i => i.severity !== 'info').length + (rv.dismissed || []).length;
+    if (state.aiOn && (rv.ai?.status === 'not_run' || !rv.ai) && !state.reviewTried?.has(hash)) { maybeBrief(hash, true); runReview(hash); return; }
+    if (state.aiOn && open && rv.verify?.status !== 'done' && !state.verifyTried?.has(hash)) { maybeBrief(hash, true); runVerify(hash); return; }
     if (state.aiOn && open && state.aiFix.status === 'not_run' && !state.aiFixTried?.has(hash)) { maybeBrief(hash, true); runAiFixes(true); }
     else maybeBrief(hash, false);
+  }
+  async function runReview(hash) {
+    (state.reviewTried ||= new Set()).add(hash);
+    state.reviewing = hash; drawChat();
+    try { await api('/api/spreadsheets/ai-review', {file_hash: hash}); } catch (e) { /* the double-check and fixes still run */ }
+    finally { state.reviewing = null; }
+    if (state.selected === hash) { await openReport(hash, true); loadList(); }
+  }
+  async function runVerify(hash) {
+    (state.verifyTried ||= new Set()).add(hash);
+    state.verifying = hash; drawChat();
+    try {
+      const out = await api('/api/spreadsheets/ai-verify', {file_hash: hash});
+      state.verifyResult = {hash, ...out};
+    } catch (e) { state.verifyResult = {hash, error: e.message}; }
+    finally { state.verifying = null; }
+    if (state.selected === hash) { await openReport(hash, true); loadList(); }
   }
   async function runAiFixes(auto) {
     const hash = state.report.file_hash;
@@ -196,6 +216,11 @@
         : `Claude found nothing it could fix safely${k ? ` (${k} issue${k === 1 ? '' : 's'} need a person)` : ''}.`);
     } catch (e) { if (!auto) toast(e.message, true); else if (state.selected === hash) maybeBrief(hash, false); }
     finally { state.aiFixing = false; if (state.selected === hash) { drawFixes(); maybeBrief(hash, false); } }
+  }
+  const restoredKey = () => 'rd-restored:' + state.report.file_hash;
+  function allIssues(rv) {
+    const back = new Set(store.get(restoredKey(), []));
+    return [...(rv.issues || []), ...(rv.dismissed || []).filter(i => back.has(i.key)).map(i => ({...i, restored: true}))];
   }
   const decisionsKey = () => 'rd-fixes:' + state.report.file_hash;
   const editsKey = () => 'rd-edits:' + state.report.file_hash;
@@ -357,7 +382,7 @@
     const rv = state.report.review, dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
     const cells = {}, rows = {}, perSheet = {};
     const add = (sheet, key, kind, item) => { (cells[`${sheet}!${key}`] ||= []).push({kind, item}); perSheet[sheet] = (perSheet[sheet] || 0) + 1; };
-    for (const i of (rv.issues || []).filter(x => x.severity !== 'info' && x.sheet)) {
+    for (const i of allIssues(rv).filter(x => x.severity !== 'info' && x.sheet)) {
       if (i.cell && splitCell(i.cell)) add(i.sheet, i.cell.toUpperCase(), 'issue', i);
       else if (i.row) { (rows[`${i.sheet}!${i.row}`] ||= []).push(i); perSheet[i.sheet] = (perSheet[i.sheet] || 0) + 1; }
     }
@@ -511,8 +536,9 @@
     const people = issues.filter(i => !(i.cell && fixedCells.has(`${i.sheet}!${String(i.cell).toUpperCase()}`)) && !fixes.some(f => f.sheet === i.sheet && i.row && splitCell(f.cell)?.[1] === Number(i.row)));
     const lines = [];
     if (rv.ai?.summary) lines.push(rv.ai.summary);
+    if (rv.verify?.status === 'done' && rv.verify.dismissed) lines.push(`I double-checked everything that was flagged against the actual cells and dismissed ${rv.verify.dismissed} false alarm${rv.verify.dismissed === 1 ? '' : 's'} (listed under Issues if you want to look).`);
     lines.push(`I found ${issues.length} issue${issues.length === 1 ? '' : 's'}` + (high ? `: ${high} must be fixed` : '') + (high && rest ? `, ${rest} to check` : !high ? '' : '') + '.');
-    lines.push(fixes.length ? `I can fix ${fixes.length} of them for you (listed below).` : 'None of them can be fixed safely from the file alone.');
+    lines.push(fixes.length ? `I have ${fixes.length} fix${fixes.length === 1 ? '' : 'es'} ready (listed below).` : 'None of them can be fixed safely from the file alone.');
     if (people.length) lines.push(`${people.length} need a person to decide` + (ai.skipped?.length ? ', for example: ' + ai.skipped.slice(0, 2).map(x => x.issue).join('; ') : '') + '.');
     lines.push(fixes.length ? 'Want me to do all the fixes? Or we can go through them one at a time, or you can tell me what to change.' : 'We can go through them one at a time in the sheet, or tell me what to change.');
     log.push({role: 'assistant', kind: 'brief', content: lines.join('\n\n'), offer: fixes.map(f => f.id)});
@@ -586,7 +612,8 @@
           (m.dropped || []).length ? h('p', {class: 'skipnote'}, `Skipped ${m.dropped.length}: ` + m.dropped.slice(0, 4).map(d => `${d.cell} (${d.why})`).join(', ')) : null) : null));
     }
     if (state.chatBusy) list.append(h('div', {class: 'msg ai'}, h('span', {class: 'spin'}), ' Claude is reading the report…'));
-    else if (state.briefWaiting === state.report.file_hash && !log.some(m => m.kind === 'brief')) list.append(h('div', {class: 'msg ai'}, h('span', {class: 'spin'}), ' Claude is going through the report and working out fixes…'));
+    else if (state.briefWaiting === state.report.file_hash && !log.some(m => m.kind === 'brief')) list.append(h('div', {class: 'msg ai'}, h('span', {class: 'spin'}),
+      state.reviewing === state.report.file_hash ? ' Claude is reading the whole report…' : state.verifying === state.report.file_hash ? ' Claude is double-checking each flagged item against the actual cells…' : ' Claude is working out fixes for the real issues…'));
     const box = h('textarea', {rows: 2, placeholder: 'e.g. Change the auditor on every row to Robert Swanke', 'aria-label': 'Message to Claude'});
     box.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(box.value); } });
     const c = readyChanges();
@@ -641,7 +668,7 @@
     if (state.grid && state.grid.sheet === name) return (gridCache[key] = state.grid);
     return (gridCache[key] = await api('/api/spreadsheets/sheet', {file_hash: hash, sheet: name}));
   }
-  const walkIssues = () => (state.report.review.issues || []).filter(i => i.severity !== 'info');
+  const walkIssues = () => allIssues(state.report.review).filter(i => i.severity !== 'info');
   function fixesFor(issue) {
     const dec = store.get(decisionsKey(), {});
     const rowNo = Number(issue.row) || splitCell(issue.cell)?.[1];
@@ -778,17 +805,18 @@
   function issuesBlock(rv) {
     const reviewedKey = 'rd-reviewed:' + state.report.file_hash;
     const done = new Set(store.get(reviewedKey, []));
-    const issues = (rv.issues || []).filter(i => i.severity !== 'info');
+    const issues = allIssues(rv).filter(i => i.severity !== 'info');
     const info = (rv.issues || []).filter(i => i.severity === 'info');
+    const dismissed = (rv.dismissed || []).filter(i => !new Set(store.get(restoredKey(), [])).has(i.key));
     const sources = ['All', ...new Set(issues.map(i => i.source))];
     const block = h('section', {class: 'block', id: 'issues'});
     const draw = () => {
       const shown = issues.filter(i => state.issueSource === 'All' || i.source === state.issueSource);
       const left = issues.filter(i => !done.has(i.key)).length;
       block.replaceChildren(h('header', {}, h('h2', {}, 'Issues'),
-        h('p', {}, issues.length ? `${left} of ${issues.length} not yet reviewed` : 'Nothing flagged by the checks, SharePoint, the usual-day comparison or AI.'),
+        h('p', {}, issues.length ? `${left} of ${issues.length} not yet reviewed` + (rv.verify?.status === 'done' ? ' · double-checked by Claude' : state.verifying ? ' · Claude is double-checking…' : '') : dismissed.length ? 'Nothing left: Claude checked every flagged item and none are real problems.' : 'Nothing flagged by the checks, SharePoint, the usual-day comparison or AI.'),
         issues.length ? h('div', {class: 'right'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => openWalk(Math.max(0, issues.findIndex(i => !done.has(i.key))))}, left < issues.length && left ? 'Continue reviewing' : 'Go through them one by one')) : null));
-      if (!issues.length) { if (info.length) block.append(infoNote(info)); return; }
+      if (!issues.length) { if (dismissed.length) block.append(dismissedList(dismissed)); if (info.length) block.append(infoNote(info)); return; }
       if (sources.length > 2) block.append(h('div', {class: 'filters', role: 'group', 'aria-label': 'Filter issues'}, sources.map(s =>
         h('button', {type: 'button', class: 'chip' + (state.issueSource === s ? ' on' : ''), onclick: () => { state.issueSource = s; state.showAll = false; draw(); }},
           s === 'All' ? `All ${issues.length}` : `${s} ${issues.filter(i => i.source === s).length}`))));
@@ -798,7 +826,9 @@
         const box = h('input', {type: 'checkbox', checked: done.has(i.key), onchange: e => {
           e.target.checked ? done.add(i.key) : done.delete(i.key); store.set(reviewedKey, [...done]); draw(); }});
         const rowNo = Number(i.row) || Number(String(i.cell || '').replace(/^[A-Z]+/i, '')) || null;
-        const body = h('div', {}, h('p', {class: 'src'}, [i.source, i.where].filter(Boolean).join(' · ')), h('p', {class: 'text'}, i.text),
+        const badge = i.restored ? h('span', {class: 'vb unsure'}, 'Put back by you') : i.verdict === 'valid' ? h('span', {class: 'vb ok'}, '✓ Claude confirmed') : i.verdict === 'unsure' ? h('span', {class: 'vb unsure'}, 'Claude unsure') : null;
+        const body = h('div', {}, h('p', {class: 'src'}, [i.source, i.where].filter(Boolean).join(' · '), badge ? ' ' : null, badge), h('p', {class: 'text'}, i.text),
+          i.verdict_reason && !i.restored ? h('p', {class: 'hint'}, 'Claude: ' + i.verdict_reason) : null,
           i.why ? h('p', {class: 'hint'}, 'Why: ' + i.why) : null, i.check ? h('p', {class: 'hint'}, 'Check: ' + i.check) : null);
         const fixBtn = rowNo ? h('button', {type: 'button', class: 'btn small', onclick: async () => {
           const open = body.querySelector('.editor'); if (open) { open.remove(); return; }
@@ -809,10 +839,16 @@
       }
       if (shown.length > limit) panel.append(h('button', {type: 'button', class: 'more', onclick: () => { state.showAll = true; draw(); }}, `Show all ${shown.length}`));
       block.append(panel);
+      if (dismissed.length) block.append(dismissedList(dismissed));
       if (info.length) block.append(infoNote(info));
     };
     draw();
     return block;
+  }
+  function dismissedList(list) {
+    return h('details', {class: 'dismissed'}, h('summary', {}, `Claude checked and dismissed ${list.length} false alarm${list.length === 1 ? '' : 's'}`),
+      h('ul', {}, list.map(i => h('li', {}, h('div', {}, h('b', {}, i.text), h('small', {}, [i.source, i.where].filter(Boolean).join(' · ') + (i.verdict_reason ? ' · Claude: ' + i.verdict_reason : ''))),
+        h('button', {type: 'button', class: 'btn small', onclick: () => { const b = new Set(store.get(restoredKey(), [])); b.add(i.key); store.set(restoredKey(), [...b]); drawReport(); if (state.fixes) drawFixes(); toast('Put back in the issue list.'); }}, 'Put back')))));
   }
   const infoNote = info => { const texts = [...new Set(info.map(i => i.text))]; return h('p', {class: 'note'}, 'For information: ' + texts.slice(0, 3).join(' ') + (texts.length > 3 ? ` (and ${texts.length - 3} more)` : '')); };
 
