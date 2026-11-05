@@ -30,6 +30,7 @@ class SpreadsheetInbox:
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, file_hash TEXT NOT NULL,
                 check_hash TEXT NOT NULL UNIQUE, result_json TEXT NOT NULL)''')
             db.execute('CREATE TABLE IF NOT EXISTS spreadsheet_sources (source_hash TEXT PRIMARY KEY, source_json TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS client_contacts (job TEXT PRIMARY KEY, contacts_json TEXT NOT NULL)')
     @contextmanager
     def connect(self):
         db = sqlite3.connect(str(self.database), timeout=10)
@@ -148,6 +149,50 @@ class SpreadsheetInbox:
         _, raw = self.original_bytes(file_hash)
         out = summarize(item, use_verdicts=not include_dismissed)
         return item, raw, [i for i in out['issues'] if i['severity'] != 'info']
+    def _update(self, file_hash, change):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            original, _ = self._original(db, file_hash)
+            result = dict(self.latest(db, file_hash, original))
+            result.pop('check_hash', None); result.pop('checked_at', None)
+            change(result)
+            return self.save_check(db, result)
+    def approve(self, file_hash, approver, note='', override=False, withdraw=False):
+        """Record that a reviewer approved this exact file version as final (or withdraw it). Sending requires it."""
+        from hosting.review_summary import summarize
+        item = self.get(file_hash)
+        if withdraw:
+            if any(x.get('sent') for x in item.get('sent') or []):
+                raise ValueError('This report was already sent to the client, so its approval stays on record.')
+            return self._update(file_hash, lambda r: r.pop('approval', None))
+        approver = ' '.join(str(approver or '').split())[:80]
+        if not approver:
+            raise ValueError('Type your name to approve the report.')
+        rv = summarize(item, with_issues=False)
+        must = (rv.get('counts') or {}).get('high', 0)
+        if must and not override:
+            raise ValueError(f'{must} must-fix issue{"s are" if must != 1 else " is"} still open. Fix them first, or tick "Approve anyway".')
+        newer = (item.get('fixes_applied') or [])
+        if newer and not override:
+            raise ValueError(f'A corrected copy of this report exists ("{newer[-1]["fixed_filename"]}"). Approve that version instead, or tick "Approve anyway".')
+        record = dict(by=approver, note=' '.join(str(note or '').split())[:500], at=datetime.now(timezone.utc).isoformat(),
+                      status=rv['status'], open_must_fix=must, open_to_check=(rv['counts'].get('medium', 0) + rv['counts'].get('low', 0)),
+                      overridden=bool(must and override), filename=item['filename'], version=item.get('version'))
+        return self._update(file_hash, lambda r: r.__setitem__('approval', record))
+    def record_send(self, file_hash, record):
+        return self._update(file_hash, lambda r: r.__setitem__('sent', (r.get('sent') or []) + [record]))
+    def contacts_for(self, job):
+        if not job:
+            return {}
+        with self.connect() as db:
+            row = db.execute('SELECT contacts_json FROM client_contacts WHERE job=?', (job,)).fetchone()
+        return json.loads(row['contacts_json']) if row else {}
+    def save_contacts(self, job, to, cc):
+        if not job:
+            return
+        with self.connect() as db:
+            db.execute('INSERT INTO client_contacts (job, contacts_json) VALUES (?, ?) ON CONFLICT(job) DO UPDATE SET contacts_json=excluded.contacts_json',
+                       (job, json.dumps(dict(to=to, cc=cc, saved_at=datetime.now(timezone.utc).isoformat()))))
     def record_ai_verify(self, file_hash, record):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -283,7 +328,10 @@ class SpreadsheetInbox:
             raw=files_for(self.root).get('uploads/'+file_hash+suffix)
             if hashlib.sha256(raw).hexdigest()!=file_hash:raise ValueError('Stored original integrity mismatch.')
             previous=result.get('sharepoint') or {}
+            keep={k:result[k] for k in ('approval','sent','fixes_applied','fixed_from') if result.get(k)}
             fresh=self.ingest(result['filename'],raw)
+            if keep:
+                fresh=self._update(file_hash,lambda r:r.update(keep))
             if previous.get('status') in ('match','differences') and previous.get('source_sha256'):
                 # Re-run the last SharePoint comparison with the stored export so it reflects the new checks.
                 name=previous.get('source_filename') or 'export.csv'

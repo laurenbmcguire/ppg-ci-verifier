@@ -1,5 +1,6 @@
 """Verifier review app. Local SQLite copy is loopback-only; Vercel runs only in protected preview mode (Postgres, Vercel Authentication required)."""
 import base64
+from datetime import datetime, timezone
 import json
 import re
 import os
@@ -77,6 +78,11 @@ def ai_review_configured():
 def sharepoint_configured():
     from hosting.sharepoint import configured
     return configured()
+
+
+def mail_configured():
+    from hosting import mailer
+    return mailer.configured()
 
 
 def allowed_host(host):
@@ -311,7 +317,7 @@ class handler(BaseHTTPRequestHandler):
                     from hosting.review_summary import summarize
                     data = dict(data, review=summarize(data))
                 else:
-                    data = {'status': 'ready', 'storage': getattr(self.store(), 'storage_label', 'unconfigured'), 'live_connectors_enabled': False, 'sharepoint_configured': sharepoint_configured(), 'ai_review_configured': ai_review_configured(), 'spreadsheet_scope': 'internal_checks_only', 'send_enabled': False, 'reviewer_identity_available': False, 'prototype': True, 'local_only': not hosted_preview(), 'development_demo': self.demo_enabled()}
+                    data = {'status': 'ready', 'storage': getattr(self.store(), 'storage_label', 'unconfigured'), 'live_connectors_enabled': False, 'sharepoint_configured': sharepoint_configured(), 'ai_review_configured': ai_review_configured(), 'spreadsheet_scope': 'internal_checks_only', 'send_enabled': mail_configured(), 'reviewer_identity_available': False, 'prototype': True, 'local_only': not hosted_preview(), 'development_demo': self.demo_enabled()}
                 body = encode_json(data)
             return self.send(200, body)
         except (Conflict, IntakeError, ValueError) as exc:
@@ -334,7 +340,7 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
@@ -443,6 +449,67 @@ class handler(BaseHTTPRequestHandler):
                 if record.get('status') in ('error', 'not_configured'):
                     raise Conflict(record.get('message') or 'AI fixes failed.')
                 return self.send(200, encode_json({'ai_fixes': record}))
+            if route in ('/api/spreadsheets/approve', '/api/spreadsheets/send-info', '/api/spreadsheets/send'):
+                payload = json.loads(raw)
+                file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                from hosting import mailer
+                from hosting.review_summary import summarize
+                if route.endswith('/approve'):
+                    with self.store().session() as directory:
+                        item = SpreadsheetInbox(directory).approve(file_hash, payload.get('approver'), payload.get('note'),
+                                                                   payload.get('override') is True, payload.get('withdraw') is True)
+                    return self.send(200, encode_json({'item': item}))
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    item = inbox.get(file_hash)
+                    _, data = inbox.original_bytes(file_hash)
+                    rv = summarize(item, with_issues=False)
+                    saved = inbox.contacts_for(rv.get('job'))
+                base = re.sub(r'\s*\(fixed( \d+)?\)(?=\.[^.]+$)', '', item['filename'])
+                if route.endswith('/send-info'):
+                    previous, lookup = None, None
+                    if mailer.configured():
+                        try:
+                            previous = mailer.last_sent(rv.get('job'))  # network call outside any DB transaction
+                        except mailer.MailError as exc:
+                            lookup = str(exc)
+                    shift = mailer.shift_of(item)
+                    subject, body = mailer.compose(rv.get('job'), rv.get('day'), shift, previous)
+                    to = previous['to'] if previous else (saved.get('to') or [])
+                    cc = previous['cc'] if previous else (saved.get('cc') or [])
+                    cc = cc + [a for a in mailer.always_cc() if a.lower() not in {x.lower() for x in to + cc}]
+                    return self.send(200, encode_json(dict(
+                        enabled=mailer.configured(), sender=mailer.sender(), job=rv.get('job'), day=rv.get('day'), shift=shift,
+                        previous=previous and {k: previous[k] for k in ('id', 'subject', 'sent_at', 'web_link', 'to', 'cc')}, lookup_error=lookup,
+                        recipients_from='previous' if previous else ('saved' if saved.get('to') else 'none'),
+                        to=to, cc=cc, subject=subject, body=body, attachment=dict(name=base, size=len(data), too_big=len(data) > mailer.MAX_ATTACHMENT),
+                        approval=item.get('approval'), sent=item.get('sent') or [])))
+                approval = item.get('approval')
+                if not approval:
+                    raise Conflict('Approve the report before sending it to the client.')
+                done = [x for x in item.get('sent') or [] if x.get('sent')]
+                if done and payload.get('again') is not True and payload.get('mode') == 'send':
+                    raise Conflict(f'This report was already sent to the client on {done[-1].get("at", "")[:10]}. Tick "Send again" to send it anyway.')
+                mode = 'draft' if payload.get('mode') == 'draft' else 'send'
+                try:
+                    out = mailer.deliver(payload.get('to') or [], payload.get('cc') or [], payload.get('subject'), payload.get('body'),
+                                         payload.get('attachment_name') or base, data,
+                                         reply_to=payload.get('reply_to') if isinstance(payload.get('reply_to'), str) else None,
+                                         send_now=mode == 'send')  # network call outside any DB transaction
+                except mailer.MailError as exc:
+                    raise Conflict(str(exc))
+                record = dict(at=datetime.now(timezone.utc).isoformat(), sent=out['sent'], sender=out['sender'], web_link=None if out['sent'] else out.get('web_link'),
+                              to=mailer.clean_addresses(payload.get('to') or [], 'To'), cc=mailer.clean_addresses(payload.get('cc') or [], 'Cc'),
+                              subject=' '.join(str(payload.get('subject') or '').split()), attachment=payload.get('attachment_name') or base,
+                              reply_all=bool(payload.get('reply_to')), by=' '.join(str(payload.get('by') or approval.get('by') or '').split())[:80],
+                              version=item.get('version'))
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    item = inbox.record_send(file_hash, record)
+                    inbox.save_contacts(rv.get('job'), record['to'], record['cc'])
+                return self.send(200, encode_json({'item': item, 'record': record}))
             if route in ('/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/baseline'):
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None

@@ -113,7 +113,9 @@ def summarize(result, with_issues=True, use_verdicts=True):
                usual=dict(status=bl.get('status') or 'not_checked', message=bl.get('message')),
                ai=dict(status=ai.get('status') or 'not_run', summary=ai.get('summary'), message=ai.get('message')),
                fixed_from=(result.get('fixed_from') or {}).get('filename'), fixes_applied=len(result.get('fixes_applied') or []),
-               verify=dict(status=verify.get('status') or 'not_run', dismissed=len(dismissed), message=verify.get('message')))
+               verify=dict(status=verify.get('status') or 'not_run', dismissed=len(dismissed), message=verify.get('message')),
+               approved=(result.get('approval') or {}).get('by'),
+               sent_at=next((x.get('at') for x in reversed(result.get('sent') or []) if x.get('sent')), None))
     if with_issues:
         out['issues'] = issues
         out['dismissed'] = dismissed

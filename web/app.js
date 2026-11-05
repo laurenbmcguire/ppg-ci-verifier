@@ -79,7 +79,7 @@
         'aria-label': `${rv.job || r.filename}, ${STATUS[rv.status] || 'Check'}, ${count}`},
         h('span', {class: 'tag tag-' + rv.status}, STATUS[rv.status] || 'Check'),
         h('span', {class: 'job'}, (rv.job || 'Unknown job') + (rv.fixed_from ? ' (fixed)' : '')),
-        h('span', {class: 'count'}, count),
+        h('span', {class: 'count'}, rv.sent_at ? 'Sent' : rv.approved ? 'Approved' : count),
         h('span', {class: 'file'}, `${r.filename} · v${r.version} · ${ago(r.received_at)}`)));
     }
   }
@@ -111,6 +111,7 @@
       drawReport();
       if (keepScroll) report.scrollTop = top;
       loadFixes(hash);
+      if (state.openSendFor && (state.openSendFor === hash || state.openSendFor === 'next' && data.fixed_from)) { state.openSendFor = null; openSend(); }
     } catch (e) {
       report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note'}, e.message)));
     }
@@ -126,13 +127,15 @@
       h('div', {}, h('h1', {}, rv.job || r.filename),
         h('div', {class: 'meta'}, `${dayLabel(rv.day)}. ${r.filename}, version ${r.version}, uploaded ${ago(r.received_at)}.`))));
     wrap.append(h('div', {class: 'actions'},
-      h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, 'Download report'),
+      h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r)),
+      h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download report'),
       h('button', {type: 'button', class: 'btn chat-btn', onclick: () => openFixer(false)}, 'AI worksheet fixer'),
       h('button', {type: 'button', class: 'btn chat-btn', onclick: openChat}, 'Chat with Claude'),
       h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download original'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('sharepoint', 'Checking SharePoint…')}, 'Check SharePoint again'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('baseline', 'Comparing with earlier days…')}, 'Compare with usual day'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('ai-review', 'Claude is reading the report…')}, rv.ai.status === 'done' ? 'Run AI review again' : 'Run AI review')));
+    wrap.append(h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
     wrap.append(numbers(r));
     wrap.append(h('section', {class: 'block', id: 'sheet-block'}, h('header', {}, h('h2', {}, 'Spreadsheet'), h('p', {}, 'Loading the file…'))));
     wrap.append(h('section', {class: 'block', id: 'fixes-block'}, h('header', {}, h('h2', {}, 'Fixes'), h('p', {}, 'Loading suggested fixes…'))));
@@ -675,6 +678,137 @@
     if (!quiet) $('sheet-block').scrollIntoView({behavior: 'smooth', block: 'start'});
     reveal(wrap, td, true);
   }
+
+  // ---------------- approve, then send the final report to the client (from data@ppgquality.com)
+  const when = iso => iso ? new Date(iso).toLocaleString('en-US', {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}) : '';
+  const kb = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+  const addrList = v => v.split(/[;,\s]+/).map(x => x.trim()).filter(Boolean);
+  function sendState(r) {
+    const a = r.approval, sent = (r.sent || []).filter(x => x.sent), last = sent[sent.length - 1];
+    if (!a) return null;
+    return h('div', {class: 'sendstate' + (last ? ' sent' : '')},
+      h('b', {}, last ? `Sent to the client ${when(last.at)}` : 'Approved as final'),
+      h('span', {}, last ? `To ${last.to.join(', ')}${last.cc.length ? `, Cc ${last.cc.length}` : ''}. Approved by ${a.by}.`
+        : `By ${a.by}, ${when(a.at)}${a.overridden ? `, with ${a.open_must_fix} must-fix issue${a.open_must_fix === 1 ? '' : 's'} open` : ''}. Not sent yet.`),
+      h('button', {type: 'button', class: 'btn small', onclick: () => openSend()}, last ? 'Details' : 'Send to client'));
+  }
+  async function openSend() {
+    let dlg = $('send-dialog');
+    if (!dlg) { dlg = h('dialog', {id: 'send-dialog', class: 'fixer send', 'aria-labelledby': 'send-title'}); document.body.append(dlg);
+      dlg.addEventListener('click', e => { if (e.target === dlg && !state.sending) dlg.close(); }); }
+    if (!dlg.open) dlg.showModal();
+    const hash = state.report.file_hash;
+    state.sendForm = null; state.sendConfirm = false;
+    dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('span', {class: 'spin'}), h('h2', {id: 'send-title'}, 'Approve and send'),
+      h('p', {}, 'Finding the last report sent for this job in data@ppgquality.com…')));
+    try {
+      const info = await api('/api/spreadsheets/send-info', {file_hash: hash});
+      if (state.report?.file_hash !== hash) return;
+      state.sendInfo = info; drawSend();
+    } catch (e) {
+      dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('h2', {id: 'send-title'}, 'Approve and send'), h('p', {class: 'note'}, e.message),
+        h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Close'), h('button', {type: 'button', class: 'btn primary', onclick: openSend}, 'Try again'))));
+    }
+  }
+  function drawSend() {
+    const dlg = $('send-dialog'), info = state.sendInfo, r = state.report; if (!dlg?.open || !info || !r) return;
+    const rv = r.review, approval = r.approval, must = rv.counts?.high || 0, pending = readyChanges().total;
+    const newer = (r.fixes_applied || []).slice(-1)[0];
+    const sentBefore = (r.sent || []).filter(x => x.sent);
+    // form values survive redraws while the dialog is open
+    const f = state.sendForm ||= {to: info.to.join(', '), cc: info.cc.join(', '), subject: info.subject, body: info.body, name: info.attachment.name,
+      reply: info.previous ? 'reply' : 'new', again: false, override: false, approver: store.get('rd-approver', ''), note: ''};
+    const bind = (key, attrs, tag = 'input') => { const el = h(tag, {...attrs, oninput: e => { f[key] = e.target.value; }}); el.value = f[key]; return el; };
+    const check = (key, label) => h('label', {class: 'tick'}, h('input', {type: 'checkbox', checked: f[key], onchange: e => { f[key] = e.target.checked; drawSend(); }}), label);
+    // step 1: approve
+    let step1;
+    if (approval) {
+      step1 = h('div', {class: 'sstep done'}, h('div', {class: 'shead'}, h('span', {class: 'snum'}, '✓'), h('h3', {}, 'Approved as final')),
+        h('p', {}, `${approval.by} approved version ${approval.version} on ${when(approval.at)}.` + (approval.note ? ` Note: ${approval.note}` : '')
+          + (approval.overridden ? ` It was approved with ${approval.open_must_fix} must-fix issue${approval.open_must_fix === 1 ? '' : 's'} open.` : '')),
+        sentBefore.length ? null : h('button', {type: 'button', class: 'btn ghost small', onclick: () => approve(true)}, 'Withdraw approval'));
+    } else {
+      const warns = [];
+      if (pending) warns.push(h('div', {class: 'swarn'}, h('p', {}, `${pending} change${pending === 1 ? ' is' : 's are'} ready but not in a corrected copy yet. Approve the corrected copy, not this one.`),
+        h('button', {type: 'button', class: 'btn small', disabled: state.busy, onclick: () => { state.openSendFor = 'next'; dlg.close(); downloadWithChanges(); }}, `Apply ${pending} change${pending === 1 ? '' : 's'} and continue`)));
+      if (newer) warns.push(h('div', {class: 'swarn'}, h('p', {}, `A corrected copy of this report exists: "${newer.fixed_filename}".`),
+        h('button', {type: 'button', class: 'btn small', onclick: () => { state.openSendFor = newer.fixed_file_hash; dlg.close(); select(newer.fixed_file_hash); }}, 'Open the corrected copy')));
+      if (must) warns.push(h('div', {class: 'swarn high'}, h('p', {}, `${must} must-fix issue${must === 1 ? ' is' : 's are'} still open on this report.`), check('override', 'Approve anyway')));
+      step1 = h('div', {class: 'sstep'}, h('div', {class: 'shead'}, h('span', {class: 'snum'}, '1'), h('h3', {}, 'Approve the final report')),
+        h('p', {}, `${rv.status === 'clear' ? 'Nothing is flagged.' : statusNote(rv) + '.'} The report goes to the client exactly as this version (${r.filename}, version ${r.version}).`),
+        ...warns,
+        h('div', {class: 'sgrid'}, h('label', {}, 'Approved by', bind('approver', {type: 'text', placeholder: 'Your name', autocomplete: 'name'})),
+          h('label', {}, 'Note (optional)', bind('note', {type: 'text', placeholder: 'For example: checked against the app, 144 = 144'}))),
+        h('button', {type: 'button', class: 'btn primary', disabled: !!state.sending || (must > 0 && !f.override) || (!!newer && !f.override) || pending > 0, onclick: () => approve(false)}, 'Approve as final'));
+    }
+    // step 2: send
+    const prev = info.previous;
+    const source = prev ? h('p', {class: 'ssource'}, f.reply === 'reply' ? `Reply All on "${prev.subject}", sent ${when(prev.sent_at)}. Recipients come from that email.` : 'New email (not a reply).',
+        h('button', {type: 'button', class: 'linkish', onclick: () => { f.reply = f.reply === 'reply' ? 'new' : 'reply'; drawSend(); }}, f.reply === 'reply' ? 'Send as a new email instead' : 'Reply on the earlier email'))
+      : h('p', {class: 'ssource warn'}, info.lookup_error ? `Could not read Sent Items: ${info.lookup_error}` :
+        info.recipients_from === 'saved' ? 'No earlier report email was found for this job in Sent Items. The recipients below are the ones used the last time this app sent it. Check them.'
+          : `No earlier report email was found for ${info.job || 'this job'} in Sent Items. Type the client's addresses carefully.`);
+    const canSend = !!approval && info.enabled && !info.attachment.too_big && !state.sending;
+    const n = addrList(f.to).length + addrList(f.cc).length;
+    const step2 = h('div', {class: 'sstep' + (approval ? '' : ' locked')}, h('div', {class: 'shead'}, h('span', {class: 'snum'}, '2'), h('h3', {}, 'Send to the client')),
+      !info.enabled ? h('p', {class: 'ssource warn'}, 'Sending is not set up yet. The app needs permission to use the data@ppgquality.com mailbox.') : null,
+      approval ? null : h('p', {}, 'Approve the report first.'),
+      source,
+      h('div', {class: 'sform'},
+        h('label', {}, 'From', h('input', {type: 'text', value: info.sender, disabled: true})),
+        h('label', {}, 'To', bind('to', {type: 'text', placeholder: 'client@company.com'})),
+        h('label', {}, 'Cc', bind('cc', {type: 'text'})),
+        h('label', {}, 'Subject', bind('subject', {type: 'text'})),
+        h('label', {}, 'Message', bind('body', {rows: 6}, 'textarea')),
+        h('label', {}, 'Attachment', h('span', {class: 'att'}, bind('name', {type: 'text'}), h('em', {}, kb(info.attachment.size))))),
+      info.attachment.too_big ? h('p', {class: 'ssource warn'}, 'The file is over 3 MB, too large to send from here. Download it and send it from Outlook.') : null,
+      r.fixed_from ? h('p', {class: 'ssource'}, `This is a corrected copy with ${r.fixed_from.changes.length} changed value${r.fixed_from.changes.length === 1 ? '' : 's'}. Make the same changes in the SharePoint list, so it matches what the client receives.`) : null,
+      sentBefore.length ? h('div', {class: 'swarn'}, h('p', {}, `Already sent ${when(sentBefore[sentBefore.length - 1].at)}. Only send it again if a corrected report needs to go out.`), check('again', 'Send again')) : null,
+      h('div', {class: 'sbtns'},
+        h('button', {type: 'button', class: 'btn', disabled: !canSend, onclick: () => deliver('draft')}, 'Save as draft in Outlook'),
+        h('button', {type: 'button', class: 'btn primary' + (state.sendConfirm ? ' confirm' : ''), disabled: !canSend || (sentBefore.length > 0 && !f.again),
+          onclick: () => { if (!state.sendConfirm) { state.sendConfirm = true; drawSend(); return; } deliver('send'); }},
+          state.sending === 'send' ? 'Sending…' : state.sendConfirm ? `Confirm: send to ${n} ${n === 1 ? 'person' : 'people'}` : 'Send to client')),
+      h('p', {class: 'note'}, 'Save as draft puts it in Drafts in data@ppgquality.com, so someone can review it in Outlook and send it from there.'));
+    const history = (r.sent || []).length ? h('div', {class: 'shist'}, h('h3', {}, 'History'),
+      ...[...r.sent].reverse().map(x => h('p', {}, `${x.sent ? 'Sent' : 'Draft saved'} ${when(x.at)}${x.by ? ` by ${x.by}` : ''}: "${x.subject}" to ${x.to.join(', ')}.`,
+        x.web_link ? h('a', {href: x.web_link, target: '_blank', rel: 'noopener'}, x.sent ? ' Open in Outlook' : ' Open the draft') : null))) : null;
+    dlg.replaceChildren(
+      h('div', {class: 'fixer-top'}, h('div', {}, h('p', {class: 'eyebrow'}, 'APPROVE AND SEND'), h('h2', {id: 'send-title'}, `${rv.job || r.filename}, ${shortDay(rv.day)}`)),
+        h('button', {type: 'button', class: 'btn', disabled: !!state.sending, onclick: () => dlg.close()}, 'Close')),
+      h('div', {class: 'fixer-body'}, step1, step2, history));
+  }
+  async function approve(withdraw) {
+    const f = state.sendForm, hash = state.report.file_hash;
+    if (!withdraw && !f.approver.trim()) { toast('Type your name to approve the report.', true); return; }
+    state.sending = 'approve'; drawSend();
+    try {
+      if (!withdraw) store.set('rd-approver', f.approver.trim());
+      const out = await api('/api/spreadsheets/approve', {file_hash: hash, approver: f.approver, note: f.note, override: !!f.override, withdraw});
+      state.report = {...state.report, ...out.item, review: state.report.review};
+      toast(withdraw ? 'Approval withdrawn.' : 'Approved as final. You can send it to the client now.');
+      refreshHead(); loadList();
+    } catch (e) { toast(e.message, true); }
+    finally { state.sending = false; drawSend(); }
+  }
+  async function deliver(mode) {
+    const f = state.sendForm, info = state.sendInfo, hash = state.report.file_hash;
+    state.sending = mode; drawSend();
+    try {
+      const out = await api('/api/spreadsheets/send', {file_hash: hash, mode, again: !!f.again, to: addrList(f.to), cc: addrList(f.cc),
+        subject: f.subject, body: f.body, attachment_name: f.name, reply_to: f.reply === 'reply' && info.previous ? info.previous.id : null,
+        by: store.get('rd-approver', '')});
+      state.report = {...state.report, ...out.item, review: state.report.review};
+      toast(mode === 'send' ? `Sent to ${out.record.to.join(', ')} from ${out.record.sender}.` : 'Saved as a draft in data@ppgquality.com. Review and send it from Outlook.');
+      refreshHead(); loadList();
+    } catch (e) { toast(e.message, true); }
+    finally { state.sending = false; state.sendConfirm = false; drawSend(); }
+  }
+  function refreshHead() {
+    const slot = $('sendstate'); if (slot) slot.replaceChildren(...[sendState(state.report)].filter(Boolean));
+    const b = $('send-btn'); if (b) b.textContent = sendLabel(state.report);
+  }
+  const sendLabel = r => (r.sent || []).some(x => x.sent) ? 'Sent to client' : r.approval ? 'Send to client' : 'Approve and send';
 
   // ---------------- AI worksheet fixer: Claude's summary of the errors and of the suggested changes
   async function openFixer(refresh) {
