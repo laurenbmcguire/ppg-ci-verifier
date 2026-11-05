@@ -90,7 +90,8 @@
   function select(hash) { if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
   window.addEventListener('hashchange', route);
   async function route() {
-    document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === (location.hash === '#api' ? '#api' : '#')));
+    document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === (['#api', '#checks'].includes(location.hash) ? location.hash : '#')));
+    if (location.hash === '#checks') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showChecks(); return; }
     if (location.hash === '#api') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showApi(); return; }
     const m = location.hash.match(/^#r=([0-9a-f]{64})$/);
     document.body.classList.toggle('viewing', !!m);
@@ -138,6 +139,7 @@
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('baseline', 'Comparing with earlier days…')}, 'Compare with usual day'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('ai-review', 'Claude is reading the report…')}, rv.ai.status === 'done' ? 'Run AI review again' : 'Run AI review')));
     wrap.append(h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
+    wrap.append(h('div', {id: 'shiftfix'}, ...[shiftCard(rv)].filter(Boolean)));
     wrap.append(h('div', {id: 'finish'}));
     wrap.append(numbers(r));
     wrap.append(h('section', {class: 'block', id: 'sheet-block'}, h('header', {}, h('h2', {}, 'Spreadsheet'), h('p', {}, 'Loading the file…'))));
@@ -749,6 +751,86 @@
         h('button', {type: 'button', class: 'btn', onclick: downloadFinal}, 'Download final report'),
         h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, 'Send it to the client for me'))));
     if (!dlg.open) dlg.showModal();
+  }
+
+  // ---------------- Checks & shifts page: what is checked, the reviewer's extra AI rules, and shift times
+  async function showChecks() {
+    const wrap = h('div', {class: 'sheetwrap apiwrap'});
+    $('report').replaceChildren(wrap);
+    let data;
+    try { data = await api('/api/settings', {}); } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
+    const save = async (path, body, done) => {
+      try { data = await api(path, body); draw(); if (done) toast(done(data)); } catch (e) { toast(e.message, true); }
+    };
+    const shiftEditor = (list, onSave, extra) => {
+      let rows = list.map(x => ({...x}));
+      const box = h('div', {class: 'shiftedit'});
+      const paint = () => {
+        box.replaceChildren(
+          h('div', {class: 'shiftrows'}, rows.map((r, i) => h('div', {class: 'shiftrow'},
+            h('input', {type: 'text', value: r.name, 'aria-label': 'Shift name', maxlength: '20', oninput: e => { r.name = e.target.value; }}),
+            h('label', {}, 'Starts', h('input', {type: 'time', value: r.start, oninput: e => { r.start = e.target.value; }})),
+            h('label', {}, 'Ends', h('input', {type: 'time', value: r.end, oninput: e => { r.end = e.target.value; }})),
+            rows.length > 1 ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { rows.splice(i, 1); paint(); }}, 'Remove') : null))),
+          h('div', {class: 'shiftbtns'},
+            rows.length < 4 ? h('button', {type: 'button', class: 'btn small', onclick: () => { const last = rows[rows.length - 1]; rows.push({name: ['1st', '2nd', '3rd', '4th'][rows.length], start: last.end, end: last.start}); paint(); }}, 'Add a shift') : null,
+            extra || null,
+            h('button', {type: 'button', class: 'btn primary small', onclick: () => onSave(rows)}, 'Save shift times')));
+      };
+      paint();
+      return box;
+    };
+    const moved = d => `Saved. ${d.rechecked ? `${d.rechecked} report${d.rechecked === 1 ? '' : 's'} checked again with the new times` : 'New uploads use the new times'}${d.moved ? `; ${d.moved} row${d.moved === 1 ? ' is' : 's are'} on a different shift than in the report. Open the report to move them.` : '.'}`;
+    const draw = () => {
+      const ruleText = h('input', {type: 'text', placeholder: 'e.g. Flag any VIN that does not start with HZA', 'aria-label': 'What Claude should look for', maxlength: '400'});
+      const ruleJob = h('select', {'aria-label': 'Which jobs'}, h('option', {value: ''}, 'All jobs'), data.jobs.map(j => h('option', {value: j}, j)));
+      const jobsWithOwn = Object.keys(data.shifts.jobs || {});
+      const newJob = h('input', {type: 'text', list: 'job-list', placeholder: 'Job number, e.g. HANDS-HMMA-2219', 'aria-label': 'Job number'});
+      wrap.replaceChildren(
+        h('button', {type: 'button', class: 'back', onclick: () => { location.hash = ''; }}, '‹ All reports'),
+        h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Checks & shifts'), h('div', {class: 'meta'}, 'What the verifier looks at, what else you want Claude to look for, and when each shift starts and ends.'))),
+        h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'What it checks')),
+          h('div', {class: 'checkgroups'}, data.checks.map(g => h('div', {class: 'checkgroup'}, h('h3', {}, g.title), h('p', {class: 'note'}, g.when),
+            h('ul', {}, g.items.map(t => h('li', {}, t))))))),
+        h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Also look for'),
+            h('p', {}, 'Tell Claude anything else to check. It reads this list every time it reviews a report, and its double-check will not dismiss what you asked for.')),
+          data.ai_on ? null : h('p', {class: 'ssource warn'}, 'AI review is off, so these rules are saved but not used until it is turned on.'),
+          h('div', {class: 'keyform'}, ruleText, ruleJob,
+            h('button', {type: 'button', class: 'btn primary', onclick: () => save('/api/settings/rules', {text: ruleText.value, job: ruleJob.value || null}, () => 'Added. New AI reviews will look for it.')}, 'Add')),
+          data.rules.length ? h('ul', {class: 'rules'}, data.rules.map(r => h('li', {}, h('span', {class: 'rjob'}, r.job || 'All jobs'), h('span', {class: 'rtext'}, r.text),
+            h('button', {type: 'button', class: 'btn ghost small', onclick: () => save('/api/settings/rules', {remove: r.id})}, 'Remove'))))
+            : h('p', {class: 'note'}, 'Nothing added yet.'),
+          h('p', {class: 'note'}, 'To use a new rule on a report that was already checked, open it and click Run AI review again.')),
+        h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Shift times'),
+            h('p', {}, 'Plant time (Central). Each scan goes on the shift its scan time falls in, not the shift the inspector picked. A shift that runs past midnight counts toward the day it started. Saving checks recent reports again, so every scan lands in the right shift.')),
+          h('h3', {class: 'subh'}, 'All jobs'),
+          shiftEditor(data.shifts.default, rows => save('/api/settings/shifts', {shifts: rows}, moved)),
+          ...jobsWithOwn.map(job => h('div', {class: 'jobshifts'}, h('h3', {class: 'subh'}, job),
+            shiftEditor(data.shifts.jobs[job], rows => save('/api/settings/shifts', {job, shifts: rows}, moved),
+              h('button', {type: 'button', class: 'btn ghost small', onclick: () => save('/api/settings/shifts', {job, remove: true}, moved)}, 'Use the all-jobs times')))),
+          h('div', {class: 'keyform addjob'}, newJob, h('datalist', {id: 'job-list'}, data.jobs.filter(j => !jobsWithOwn.includes(j)).map(j => h('option', {value: j}))),
+            h('button', {type: 'button', class: 'btn', onclick: () => { const j = newJob.value.trim().toUpperCase(); if (!j) { newJob.focus(); return; }
+              data.shifts.jobs = {...data.shifts.jobs, [j]: data.shifts.default.map(x => ({...x}))}; draw(); toast(`Set ${j}'s times below, then save.`); }}, 'Set different times for a job'))));
+    };
+    draw();
+  }
+
+  // a report with rows on the wrong shift: one click puts them on the right tab
+  function shiftCard(rv) {
+    const wrong = allIssues(rv).filter(i => i.code === 'wrong_shift');
+    if (!wrong.length) return null;
+    return h('div', {class: 'shiftcard'},
+      h('div', {}, h('b', {}, `${wrong.length} row${wrong.length === 1 ? ' is' : 's are'} on the wrong shift by scan time`),
+        h('span', {}, wrong.slice(0, 2).map(i => i.text).join(' ') + (wrong.length > 2 ? ` And ${wrong.length - 2} more.` : '')),
+        h('span', {class: 'note'}, 'Rows move to the right shift tab. A row whose shift has no tab in this workbook is taken out (it belongs in that shift\'s report). You get a corrected copy; the original stays as it is.')),
+      h('button', {type: 'button', class: 'btn primary', onclick: async e => {
+        e.target.disabled = true; e.target.textContent = 'Moving…';
+        try {
+          const out = await api('/api/spreadsheets/shift-fix', {file_hash: state.report.file_hash});
+          toast(`Moved ${out.moved} row${out.moved === 1 ? '' : 's'}${out.removed ? ` and took out ${out.removed}` : ''}. This is the corrected copy; it has been checked again.`);
+          await loadList(); select(out.item.file_hash);
+        } catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Put them on the right shift'; }
+      }}, 'Put them on the right shift'));
   }
 
   // ---------------- API page: keys and how to call it

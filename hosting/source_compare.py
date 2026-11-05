@@ -80,6 +80,17 @@ def compare(report_rows, source_rows, meta=None):
         if len(rows) > 1:
             finding('sharepoint_duplicate_identifier', f'Identifier {ident} appears {len(rows)} times in the SharePoint export (rows {", ".join(str(r["row"]) for r in rows)}).')
 
+    from hosting.shifts import sheet_shift
+    scans = (meta or {}).get('scan_shifts') or {}
+    rep_shift = lambda rep: shift_number(rep['labels'].get('shift')) or shift_number(rep['sheet']) or sheet_shift(rep['sheet'])
+    if scans:
+        # A one-shift report is compared with that shift's scans only (by scan time). Scans from other shifts
+        # stay in when their identifier is in the report, so a car on the wrong shift is named, not "missing".
+        shifts_in_report = {rep_shift(r) for r in report_rows}
+        if shifts_in_report and None not in shifts_in_report:
+            in_report = {_key(r['labels'].get('identifier')) for r in report_rows if r['labels'].get('identifier')}
+            source_rows = [s for s in source_rows if shift_number(s['labels'].get('shift')) in shifts_in_report
+                           or not s['labels'].get('shift') or _key(s['labels'].get('identifier')) in in_report]
     unmatched_source = {id(s): s for s in source_rows}
     matched = differences = 0
 
@@ -95,10 +106,17 @@ def compare(report_rows, source_rows, meta=None):
             diffs.append(('part', rep['labels'].get('part'), src['labels'].get('part')))
         if rep.get('day') and src.get('day') and rep['day'] != src['day']:
             diffs.append(('day', rep['day'].isoformat(), src['day'].isoformat()))
-        sa, sb = shift_number(rep['labels'].get('shift')) or shift_number(rep['sheet']), shift_number(src['labels'].get('shift'))
-        if sa and sb and sa != sb:
-            diffs.append(('shift', sa, sb))
+        sa, sb = rep_shift(rep), shift_number(src['labels'].get('shift'))
         ident = rep['labels'].get('identifier') or rep['labels'].get('part') or f'row {rep["row"]}'
+        scan = scans.get(re.sub(r'[^A-Z0-9]', '', str(rep['labels'].get('identifier') or '').upper())) if scans else None
+        if sa and sb and sa != sb and scan:
+            differences += 1
+            picked = f' (the inspector picked shift {scan["picked"]})' if scan.get('picked') not in (None, '', sb) else ''
+            finding('wrong_shift', f'{ident} was scanned {scan["time"]}, which is {scan["label"]} by the shift times{picked}, '
+                    f'but it is in the {sa}{ {"1": "st", "2": "nd", "3": "rd"}.get(sa, "th")} shift part of the report.', rep['sheet'], rep['row'], field='shift',
+                    report_value=sa, sharepoint_value=sb, target_shift=sb, scan_time=scan['time'])
+        elif sa and sb and sa != sb:
+            diffs.append(('shift', sa, sb))
         for f, a, b in diffs:
             differences += 1
             finding('differs_from_sharepoint', f'{ident}: {NAMES[f]} is {_fmt(a)} in the report but {_fmt(b)} on SharePoint.',
@@ -161,6 +179,8 @@ def compare(report_rows, source_rows, meta=None):
             finding('total_differs_from_sharepoint', f'Total {NAMES[f]}: report {_fmt(a)}, SharePoint {_fmt(b)}.', field=f, report_value=_fmt(a), sharepoint_value=_fmt(b))
 
     status = 'match' if not counts else 'differences'
+    meta.pop('scan_shifts', None)  # per-scan times stay out of the saved result (they can be thousands)
+    meta['wrong_shift'] = counts.get('wrong_shift', 0)
     return dict(meta, status=status, compared_at=datetime.now(timezone.utc).isoformat(),
                 report_rows=len(report_rows), sharepoint_rows=len(source_rows), matched_rows=matched,
                 value_differences=differences, missing_from_report=counts['missing_from_report'],

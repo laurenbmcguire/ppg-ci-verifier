@@ -25,6 +25,7 @@ ENDPOINTS = [
     ('GET', '/api/v1/reports/{id}/fixes', 'Suggested cell changes (checks and Claude).'),
     ('POST', '/api/v1/reports/{id}/fixes', 'Make a corrected copy: {"accept": "all"} or {"ids": [...]} and/or {"changes": [{"sheet","cell","after","reason"}]}. Returns the new report (it is checked again). The original is never changed.'),
     ('POST', '/api/v1/reports/{id}/ai-fixes', 'Ask Claude to draft fixes for the open issues, then list them with GET .../fixes.'),
+    ('POST', '/api/v1/reports/{id}/shift-fix', 'Put every row that is on the wrong shift (by scan time and the shift times) on its shift\'s tab. Returns the corrected copy.'),
     ('POST', '/api/v1/reports/{id}/recheck', 'Run checks again: {"checks": ["sharepoint", "baseline", "ai"]} (default: sharepoint and baseline).'),
     ('GET', '/api/v1/reports/{id}/download', 'The spreadsheet file itself.'),
     ('POST', '/api/v1/reports/{id}/approve', 'Approve as final: {"approver": "Name", "note": "", "override": false}. {"withdraw": true} removes an approval that was not sent.'),
@@ -174,6 +175,8 @@ def op_apply(h, file_hash, accept=None, ids=None, changes=None):
     extra = [dict(c) for c in changes or [] if isinstance(c, dict)]
     for c in extra:
         c.setdefault('reason', 'Changed through the API'); c.setdefault('source', 'API'); c.setdefault('kind', 'auto')
+        if c.get('kind') not in ('number', 'text', 'auto'):
+            c['kind'] = 'auto'  # formulas are only written by the shift move
     taken = {(c.get('sheet'), str(c.get('cell') or '').upper()) for c in extra}
     todo = [p for p in chosen if (p['sheet'], p['cell']) not in taken] + extra
     if not todo:
@@ -218,6 +221,32 @@ def op_send_preview(h, file_hash):
     from hosting import delivery
     file_hash = _id(file_hash); _get(h, file_hash)
     return delivery.info(h.store(), file_hash)
+
+
+def shift_fix(h, file_hash):
+    """Corrected copy with every wrong-shift row on its shift's tab (or taken out). Returns (item, moved, removed)."""
+    from hosting.fixes import relocate_rows, FixError
+    with h.store().session() as directory:
+        inbox = SpreadsheetInbox(directory)
+        moves = inbox.shift_moves(file_hash)
+        item = inbox.get(file_hash)
+        _, data = inbox.original_bytes(file_hash)
+    if not moves:
+        raise ApiError(409, 'No rows are on the wrong shift by their scan times.')
+    try:
+        changes = relocate_rows(item['filename'], data, moves)
+        with h.store().session() as directory:
+            fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, changes)
+    except FixError as exc:
+        raise ApiError(409, str(exc)) from None
+    _after_change(h, fixed['file_hash'])
+    return _get(h, fixed['file_hash']), sum(1 for m in moves if m[2]), sum(1 for m in moves if not m[2])
+
+
+def op_shift_fix(h, file_hash):
+    file_hash = _id(file_hash); _get(h, file_hash)
+    fixed, moved, removed = shift_fix(h, file_hash)
+    return dict(report(fixed), moved=moved, removed=removed)
 
 
 def op_send(h, key, file_hash, data):
@@ -265,6 +294,8 @@ def handle(h, method, route, send):
             return send(201, op_apply(h, file_hash, data.get('accept'), data.get('ids'), data.get('changes')))
         if action == 'ai-fixes' and method == 'POST':
             return send(200, op_ai_fixes(h, file_hash))
+        if action == 'shift-fix' and method == 'POST':
+            return send(201, op_shift_fix(h, file_hash))
         if action == 'recheck' and method == 'POST':
             data = _body(h, 10000) if int(h.headers.get('Content-Length') or 0) else {}
             return send(200, op_recheck(h, file_hash, data.get('checks')))
@@ -275,7 +306,7 @@ def handle(h, method, route, send):
             return send(200, op_send_preview(h, file_hash))
         if action == 'send' and method == 'POST':
             return send(200, op_send(h, key, file_hash, _body(h, 100000)))
-        raise ApiError(405 if action in (None, 'download', 'fixes', 'ai-fixes', 'recheck', 'approve', 'send') else 404,
+        raise ApiError(405 if action in (None, 'download', 'fixes', 'ai-fixes', 'shift-fix', 'recheck', 'approve', 'send') else 404,
                        'That method is not available here. GET /api/v1 lists the endpoints.')
     except ApiError as exc:
         return send(exc.status, {'error': str(exc)})

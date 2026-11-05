@@ -494,3 +494,32 @@ pre.code{background:#143c3b;color:#e7f2ee;border-radius:8px;padding:14px 16px;ov
 .howto ol{margin:0;padding-left:20px;font-size:13px;color:var(--muted)}
 .howto li{margin:3px 0}
 @media (max-width:760px){.howto{grid-template-columns:1fr}}
+
+/* Checks & shifts */
+.checkgroups{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.checkgroup{background:#f6f9f7;border:1px solid var(--line);border-radius:8px;padding:12px 16px}
+.checkgroup h3{font-size:15px}
+.checkgroup .note{margin:2px 0 8px}
+.checkgroup ul{margin:0;padding-left:18px;font-size:13px;color:var(--ink)}
+.checkgroup li{margin:4px 0}
+.keyform select{font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:9px 10px;border:1px solid var(--btn-line);border-radius:7px;color:var(--ink);background:#fff}
+ul.rules{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:8px;background:#fff}
+ul.rules li{display:flex;align-items:center;gap:12px;padding:9px 12px;border-top:1px solid var(--line-2);font-size:14px}
+ul.rules li:first-child{border-top:0}
+.rjob{flex:none;font-size:11px;font-weight:700;color:var(--ok-ink);background:var(--ok-bg);border-radius:999px;padding:2px 9px}
+.rtext{flex:1;min-width:0}
+h3.subh{font-size:14px;margin:14px 0 6px;color:var(--ink)}
+.shiftedit{background:#f6f9f7;border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.shiftrows{display:grid;gap:8px}
+.shiftrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.shiftrow input[type=text]{width:90px;font:600 14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:7px 9px;border:1px solid var(--btn-line);border-radius:7px;color:var(--ink)}
+.shiftrow label{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:650;color:#60726a}
+.shiftrow input[type=time]{font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:6px 8px;border:1px solid var(--btn-line);border-radius:7px;color:var(--ink);background:#fff}
+.shiftbtns{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:10px}
+.jobshifts{margin-top:6px}
+.addjob{margin-top:14px}
+.shiftcard{display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:#eef4f9;border:1px solid #cddbe8;border-left:4px solid var(--low);border-radius:8px;padding:12px 14px;margin:0 0 16px}
+.shiftcard > div{flex:1;min-width:260px;display:grid;gap:3px}
+.shiftcard b{font-size:15px;color:var(--ink)}
+.shiftcard span{font-size:13px;color:var(--muted)}
+.shiftcard .note{margin:0}

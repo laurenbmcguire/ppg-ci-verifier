@@ -161,10 +161,12 @@ class handler(BaseHTTPRequestHandler):
         from hosting.sharepoint import fetch_export, SharePointNotConfigured, SharePointNotFound, SharePointError
         from hosting.source_compare import identify, SourceError
         with self.store().session() as directory:
-            item = SpreadsheetInbox(directory).get(file_hash)
-        job, day = identify(item.get('filename'), item)
+            inbox = SpreadsheetInbox(directory)
+            item = inbox.get(file_hash)
+            job, day = identify(item.get('filename'), item)
+            schedule = inbox.shift_schedule(job)
         try:
-            filename, content, meta = fetch_export(job, day)
+            filename, content, meta = fetch_export(job, day, schedule=schedule)
         except SharePointNotConfigured as exc:
             status, message = 'not_configured', str(exc)
         except SharePointNotFound as exc:
@@ -191,6 +193,7 @@ class handler(BaseHTTPRequestHandler):
             item = inbox.get(file_hash)
             job, day = identify(item.get('filename'), item)
             saved = inbox.history_for(job, day, exclude_hash=file_hash)
+            schedule = inbox.shift_schedule(job)
         history, sp_note = [], None
         if job and day and sharepoint_configured():
             from hosting.sharepoint import list_history, recent_exports, _list_items, SharePointError
@@ -208,7 +211,7 @@ class handler(BaseHTTPRequestHandler):
                 found = _list_items(job)
                 if found:
                     sp_note = found[1].get('displayName')
-                    add(list_history(job, day, limit=MAX_DAYS), f'SharePoint list ({sp_note})')
+                    add(list_history(job, day, limit=MAX_DAYS, schedule=schedule), f'SharePoint list ({sp_note})')
                 if len(history) < MAX_DAYS:
                     add(recent_exports(job, day, limit=MAX_DAYS), 'SharePoint export')
             except SharePointError:
@@ -231,8 +234,10 @@ class handler(BaseHTTPRequestHandler):
             inbox = SpreadsheetInbox(directory)
             item = inbox.get(file_hash)
             _, raw = inbox.original_bytes(file_hash)
+            from hosting.source_compare import identify
+            rules = inbox.rules_for(identify(item.get('filename'), item)[0])
         try:
-            outcome = review(item, raw)  # network call outside any DB transaction
+            outcome = review(item, raw, rules=rules)  # network call outside any DB transaction
         except AIReviewNotConfigured as exc:
             outcome = dict(status='not_configured', message=str(exc))
         except AIReviewError as exc:
@@ -369,7 +374,7 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
@@ -397,8 +402,11 @@ class handler(BaseHTTPRequestHandler):
                     if route.endswith('/cells'):
                         with self.store().session() as directory:
                             return self.send(200, encode_json(SpreadsheetInbox(directory).row_cells(file_hash, payload.get('sheet'), payload.get('row'))))
+                    changes = payload.get('changes')
+                    if isinstance(changes, list):
+                        changes = [dict(c, kind='auto') if isinstance(c, dict) and c.get('kind') not in ('number', 'text', 'auto') else c for c in changes]
                     with self.store().session() as directory:
-                        fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, payload.get('changes'))
+                        fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, changes)
                 except FixError as exc:
                     raise Conflict(str(exc))
                 for step in (self.sharepoint_check if sharepoint_configured() else None, self.baseline_check):
@@ -438,9 +446,12 @@ class handler(BaseHTTPRequestHandler):
                 if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                     raise Conflict('Valid spreadsheet version ID required.')
                 from hosting.spreadsheet_inbox import make_ai_verify
+                from hosting.source_compare import identify
                 with self.store().session() as directory:
-                    item, data, issues = SpreadsheetInbox(directory).ai_fix_inputs(file_hash, include_dismissed=True)
-                record = make_ai_verify(item, data, issues)  # network call outside any DB transaction
+                    inbox = SpreadsheetInbox(directory)
+                    item, data, issues = inbox.ai_fix_inputs(file_hash, include_dismissed=True)
+                    rules = inbox.rules_for(identify(item.get('filename'), item)[0])
+                record = make_ai_verify(item, data, issues, rules=rules)  # network call outside any DB transaction
                 if record.get('status') != 'done':
                     raise Conflict(record.get('message') or 'The double-check failed.')
                 with self.store().session() as directory:
@@ -478,6 +489,80 @@ class handler(BaseHTTPRequestHandler):
                 if record.get('status') in ('error', 'not_configured'):
                     raise Conflict(record.get('message') or 'AI fixes failed.')
                 return self.send(200, encode_json({'ai_fixes': record}))
+            if route in ('/api/settings', '/api/settings/shifts', '/api/settings/rules'):
+                from hosting import shifts as shift_times
+                from hosting.check_catalog import catalog
+                payload = json.loads(raw)
+                if not isinstance(payload, dict):
+                    raise Conflict('Send a JSON object.')
+                rechecked = moved = 0
+                if route.endswith('/shifts'):
+                    job = ' '.join(str(payload.get('job') or '').split()).upper()[:60] or None
+                    with self.store().session() as directory:
+                        inbox = SpreadsheetInbox(directory)
+                        current = inbox.setting('shifts', None) or {'default': shift_times.DEFAULT, 'jobs': {}}
+                        if payload.get('remove') is True and job:
+                            current.setdefault('jobs', {}).pop(job, None)
+                        else:
+                            cleaned = shift_times.clean(payload.get('shifts'))
+                            if job:
+                                current.setdefault('jobs', {})[job] = cleaned
+                            else:
+                                current['default'] = cleaned
+                        inbox.set_setting('shifts', current)
+                        rows = inbox.list()['spreadsheets']
+                    # put everything in the right shift with the new times: compare the affected reports again
+                    if sharepoint_configured():
+                        jobs_with_own = {k.upper() for k in current.get('jobs') or {}}
+                        for r in rows[:15]:
+                            rjob = ((r.get('review') or {}).get('job') or '').upper()
+                            if (job and rjob != job) or (not job and rjob in jobs_with_own):
+                                continue
+                            try:
+                                updated = self.sharepoint_check(r['file_hash'])
+                                rechecked += 1
+                                moved += (updated.get('sharepoint') or {}).get('wrong_shift') or 0
+                            except Exception:
+                                debug_log()
+                elif route.endswith('/rules'):
+                    with self.store().session() as directory:
+                        inbox = SpreadsheetInbox(directory)
+                        rules = inbox.setting('ai_rules', []) or []
+                        if payload.get('remove'):
+                            rules = [r for r in rules if r.get('id') != payload['remove']]
+                        else:
+                            text = ' '.join(str(payload.get('text') or '').split())[:400]
+                            if not text:
+                                raise Conflict('Type what Claude should look for.')
+                            if len(rules) >= 30:
+                                raise Conflict('There are already 30 rules. Remove one first.')
+                            import secrets
+                            rules.append(dict(id='rule_' + secrets.token_hex(4), text=text,
+                                              job=' '.join(str(payload.get('job') or '').split()).upper()[:60] or None))
+                        inbox.set_setting('ai_rules', rules)
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    out = dict(shifts=inbox.setting('shifts', None) or {'default': shift_times.DEFAULT, 'jobs': {}},
+                               rules=inbox.setting('ai_rules', []) or [], checks=catalog(),
+                               jobs=sorted({(r.get('review') or {}).get('job') for r in inbox.list()['spreadsheets'] if (r.get('review') or {}).get('job')}),
+                               ai_on=ai_review_configured(), sharepoint_on=sharepoint_configured())
+                for group in out['shifts'].get('jobs', {}).values():
+                    for x in group:
+                        x['label'] = shift_times.label(x)
+                for x in out['shifts']['default']:
+                    x['label'] = shift_times.label(x)
+                return self.send(200, encode_json(dict(out, rechecked=rechecked, moved=moved)))
+            if route == '/api/spreadsheets/shift-fix':
+                payload = json.loads(raw)
+                file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                from hosting.public_api import shift_fix, ApiError
+                try:
+                    fixed, moved, removed = shift_fix(self, file_hash)
+                except ApiError as exc:
+                    raise Conflict(str(exc))
+                return self.send(200, encode_json({'item': fixed, 'moved': moved, 'removed': removed}))
             if route in ('/api/keys', '/api/keys/create', '/api/keys/revoke'):
                 payload = json.loads(raw)
                 if not isinstance(payload, dict):

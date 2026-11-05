@@ -31,6 +31,7 @@ class SpreadsheetInbox:
                 check_hash TEXT NOT NULL UNIQUE, result_json TEXT NOT NULL)''')
             db.execute('CREATE TABLE IF NOT EXISTS spreadsheet_sources (source_hash TEXT PRIMARY KEY, source_json TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS client_contacts (job TEXT PRIMARY KEY, contacts_json TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL)')
             db.execute('''CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
                 prefix TEXT NOT NULL, can_send INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_used TEXT, revoked_at TEXT)''')
     @contextmanager
@@ -195,6 +196,35 @@ class SpreadsheetInbox:
         with self.connect() as db:
             db.execute('INSERT INTO client_contacts (job, contacts_json) VALUES (?, ?) ON CONFLICT(job) DO UPDATE SET contacts_json=excluded.contacts_json',
                        (job, json.dumps(dict(to=to, cc=cc, saved_at=datetime.now(timezone.utc).isoformat()))))
+    # ---------------- settings (shift times, reviewer rules)
+    def setting(self, key, default=None):
+        with self.connect() as db:
+            row = db.execute('SELECT value_json FROM settings WHERE key=?', (key,)).fetchone()
+        return json.loads(row['value_json']) if row else default
+    def set_setting(self, key, value):
+        with self.connect() as db:
+            db.execute('INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json',
+                       (key, json.dumps(value)))
+        return value
+    def rules_for(self, job):
+        """The reviewer's "also look for" rules that apply to this job (all-jobs rules plus the job's own)."""
+        stored = self.setting('ai_rules', []) or []
+        return [r['text'] for r in stored if not r.get('job') or (job and r['job'].upper() == job.upper())]
+    def shift_schedule(self, job):
+        from hosting.shifts import for_job
+        return for_job(self.setting('shifts', None), job)
+    def shift_moves(self, file_hash):
+        """[(sheet, row, target sheet or None)] for rows the SharePoint comparison found on the wrong shift."""
+        from hosting.shifts import sheet_shift
+        item = self.get(file_hash)
+        tabs = [s.get('name') for s in item.get('sheets') or [] if s.get('name')]
+        moves = []
+        for f in (item.get('sharepoint') or {}).get('findings') or []:
+            if f.get('code') != 'wrong_shift' or not f.get('row'):
+                continue
+            target = next((t for t in tabs if t != f.get('sheet') and sheet_shift(t) == str(f.get('target_shift'))), None)
+            moves.append((f['sheet'], f['row'], target))
+        return moves
     # ---------------- API keys (only a SHA-256 fingerprint is stored; the key is shown once)
     def create_key(self, name, can_send=False):
         import secrets
@@ -490,12 +520,12 @@ def chat_turn(item, raw, issues, messages, queued, opener=None, suggested=()):
                 dropped=[dict(sheet=d['sheet'], cell=d['cell'], why=d.get('why')) for d in dropped])
 
 
-def make_ai_verify(item, raw, issues, opener=None):
+def make_ai_verify(item, raw, issues, opener=None, rules=None):
     from hosting import ai_review
     if not issues:
         return dict(status='done', made_at=datetime.now(timezone.utc).isoformat(), verdicts={}, checker_version=item.get('checker_version'))
     try:
-        out = ai_review.verify(item, raw, issues, opener=opener)
+        out = ai_review.verify(item, raw, issues, opener=opener, rules=rules)
     except ai_review.AIReviewNotConfigured as exc:
         return dict(status='not_configured', message=str(exc))
     except ai_review.AIReviewError as exc:

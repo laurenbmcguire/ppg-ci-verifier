@@ -45,6 +45,9 @@ TOOLS = [
                                     'after': {'type': 'string'}, 'before': {'type': 'string', 'description': 'Current value, to be safe.'},
                                     'reason': {'type': 'string'}}}}), required=['id']),
          annotations=dict(destructiveHint=False, idempotentHint=False)),
+    dict(name='fix_shifts', title='Put rows on the right shift',
+         description='Moves every row that is on the wrong shift by its scan time (using the shift times set in the app) to its shift\'s tab, or takes it out when the workbook has no tab for that shift. Returns the NEW corrected report; the original is never changed.',
+         inputSchema=dict(S(id=ID), required=['id']), annotations=dict(destructiveHint=False, idempotentHint=False)),
     dict(name='draft_ai_fixes', title='Ask Claude in the app for fixes',
          description='Has the verifier\'s AI draft fixes for the open issues. Then call get_fixes to see them.',
          inputSchema=dict(S(id=ID), required=['id']), annotations=dict(destructiveHint=False)),
@@ -123,6 +126,8 @@ def _call(h, key, name, a):
         return ops.op_fixes(h, a.get('id'))
     if name == 'apply_fixes':
         return ops.op_apply(h, a.get('id'), 'all' if a.get('accept_all') else None, a.get('ids'), a.get('changes'))
+    if name == 'fix_shifts':
+        return ops.op_shift_fix(h, a.get('id'))
     if name == 'draft_ai_fixes':
         return ops.op_ai_fixes(h, a.get('id'))
     if name == 'recheck_report':

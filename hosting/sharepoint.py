@@ -95,7 +95,7 @@ def _sites(opener=None):
         yield site.get('name') or site['id'], site['id']
 
 
-def fetch_export(job, day, opener=None):
+def fetch_export(job, day, opener=None, schedule=None):
     """Return (filename, bytes, meta) for the job's daily export, or raise SharePointNotFound."""
     if not configured():
         raise SharePointNotConfigured('SharePoint lookup is not set up yet (Microsoft app registration missing).')
@@ -116,7 +116,7 @@ def fetch_export(job, day, opener=None):
                 continue
             return filename, content, dict(site=name, path=path, web_url=item.get('webUrl'),
                                            modified=item.get('lastModifiedDateTime'), job=job, day=day)
-    found = list_day(job, day, opener)
+    found = list_day(job, day, opener, schedule)
     if found:
         return found
     data = _list_items(job, opener)
@@ -235,9 +235,21 @@ def _list_items(job, opener=None):
     return value
 
 
-def _item_day(item):
+def _stamp(item):
+    fields = item.get('fields') or {}
+    return fields.get('Date0') or fields.get('Date') or item.get('createdDateTime')
+
+
+def _item_day(item, schedule=None):
+    """The report day a scan belongs to. With shift times, a scan after midnight in a shift that started the
+    evening before belongs to that earlier day."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
+    if schedule:
+        from hosting.shifts import local_time, assign
+        local = local_time(_stamp(item))
+        if local is not None:
+            return assign(local, schedule)[1]
     fields = item.get('fields') or {}
     stamp = fields.get('Date0') or fields.get('Date') or item.get('createdDateTime')
     if not stamp:
@@ -266,24 +278,54 @@ def _items_csv(names, items):
     return out.getvalue().encode('utf-8')
 
 
-def list_day(job, day, opener=None):
-    """(filename, csv bytes, meta) built from the job's data list for one day, or None."""
+def _by_time(names, rows, schedule):
+    """Rows with Shift set from the scan time (the inspector's pick kept as "Picked shift") and a Scan time column."""
+    from hosting.shifts import local_time, assign, number, label
+    shift_key = next((k for k, v in names.items() if re.sub(r'[^a-z]', '', str(v).lower()) == 'shift'), None) or 'Shift'
+    names = dict(names)
+    names[shift_key] = names.get(shift_key, 'Shift')
+    names['ShiftPicked'], names['ScanTime'] = 'Picked shift', 'Scan time'
+    out, scans = [], {}
+    for it in rows:
+        f = dict(it.get('fields') or {})
+        local = local_time(_stamp(it))
+        shift = assign(local, schedule)[0] if local else None
+        f['ShiftPicked'] = f.get(shift_key)
+        f['ScanTime'] = f'{local.month}/{local.day} at {(local.hour % 12) or 12}:{local.minute:02d} {"AM" if local.hour < 12 else "PM"}' if local else None
+        if shift:
+            f[shift_key] = number(shift['name'])
+        ident = f.get('Identifier') or f.get('VIN') or f.get('Title')
+        if ident:
+            scans[re.sub(r'[^A-Z0-9]', '', str(ident).upper())] = dict(time=f['ScanTime'], shift=number(shift['name']) if shift else None,
+                                                                        label=label(shift) if shift else 'outside every shift',
+                                                                        picked=None if f['ShiftPicked'] is None else str(f['ShiftPicked']))
+        out.append(dict(it, fields=f))
+    return names, out, scans
+
+
+def list_day(job, day, opener=None, schedule=None):
+    """(filename, csv bytes, meta) built from the job's data list for one day, or None.
+    With shift times, the day runs from the first shift's start to the last shift's end, and each scan's
+    shift comes from its time."""
     if not configured() or not job or not day:
         return None
     data = _list_items(job, opener)
     if not data:
         return None
     site, lst, names, items = data
-    rows = [it for it in items if _item_day(it) == day]
+    rows = [it for it in items if _item_day(it, schedule) == day]
     if not rows:
         return None
     modified = max((it.get('lastModifiedDateTime') or '') for it in rows) or None
-    return (f'{job} {day} (SharePoint list).csv', _items_csv(names, rows),
-            dict(site=site, path=f'list: {lst.get("displayName")}', web_url=lst.get('webUrl'), modified=modified,
-                 job=job, day=day, source_kind='list', rows=len(rows)))
+    meta = dict(site=site, path=f'list: {lst.get("displayName")}', web_url=lst.get('webUrl'), modified=modified,
+                job=job, day=day, source_kind='list', rows=len(rows))
+    if schedule:
+        names, rows, scans = _by_time(names, rows, schedule)
+        meta.update(scan_shifts=scans, shift_times=schedule)
+    return (f'{job} {day} (SharePoint list).csv', _items_csv(names, rows), meta)
 
 
-def list_history(job, before_day, limit=10, opener=None):
+def list_history(job, before_day, limit=10, opener=None, schedule=None):
     """[(day, filename, csv bytes)] from the job's data list for earlier days, newest first."""
     data = _list_items(job, opener) if configured() and job and before_day else None
     if not data:
@@ -291,7 +333,7 @@ def list_history(job, before_day, limit=10, opener=None):
     _, _, names, items = data
     by_day = {}
     for it in items:
-        d = _item_day(it)
+        d = _item_day(it, schedule)
         if d and d < before_day:
             by_day.setdefault(d, []).append(it)
     return [(d, f'{job} {d} (SharePoint list).csv', _items_csv(names, by_day[d])) for d in sorted(by_day, reverse=True)[:limit]]

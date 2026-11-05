@@ -167,13 +167,21 @@ def _post(body, opener=None):
         raise AIReviewError('Could not reach Claude for the AI review. Try again.') from None
 
 
-def review(item, raw, opener=None):
+def _rules_text(rules):
+    rules = [' '.join(str(r).split())[:400] for r in (rules or []) if str(r).strip()][:30]
+    return ('<reviewer_rules>\nThe PPG reviewer also wants you to look for these, on top of everything else:\n'
+            + '\n'.join(f'- {r}' for r in rules) + '\nCheck every one of them. Report each problem you find as an issue, '
+            'and start its "why" with "Your rule: <the rule>".\n</reviewer_rules>\n\n') if rules else ''
+
+
+def review(item, raw, opener=None, rules=None):
     """Ask Claude for possible issues. Returns a dict saved with the report as result['ai_review']."""
     meta, checks, sharepoint, text = _context(item, raw)
     model = os.environ.get('AI_REVIEW_MODEL') or DEFAULT_MODEL
     prompt = ('<report_metadata>\n' + json.dumps(meta, default=str) + '\n</report_metadata>\n\n'
               '<automatic_check_findings>\n' + json.dumps(checks, default=str) + '\n</automatic_check_findings>\n\n'
               '<sharepoint_comparison>\n' + (json.dumps(sharepoint, default=str) if sharepoint else 'not compared') + '\n</sharepoint_comparison>\n\n'
+              + _rules_text(rules) +
               '<report_cells>\n' + text + '\n</report_cells>\n\nReview this report and call report_possible_issues.')
     data = _post(dict(model=model, max_tokens=8000, system=SYSTEM, tools=[TOOL],
                       tool_choice={'type': 'auto'},
@@ -473,7 +481,7 @@ def verify_excerpt(item, raw, issues, limit_chars=80_000):
     return '\n\n'.join(parts)
 
 
-def verify(item, raw, issues, opener=None):
+def verify(item, raw, issues, opener=None, rules=None):
     """Claude's verdict on each issue. Returns {verdicts: {issue_key: {verdict, reason, fixable}}}."""
     issues = issues[:MAX_VERIFY]
     ids = {f'i{n}': i['key'] for n, i in enumerate(issues, 1)}
@@ -483,6 +491,9 @@ def verify(item, raw, issues, opener=None):
     prompt = ('<report_metadata>\n' + json.dumps(meta, default=str) + '\n</report_metadata>\n\n'
               '<sharepoint_comparison>\n' + (json.dumps(sharepoint, default=str) if sharepoint else 'not compared') + '\n</sharepoint_comparison>\n\n'
               '<issues>\n' + json.dumps(listed, default=str) + '\n</issues>\n\n'
+              + (('<reviewer_rules>\nThe reviewer asked for these to be checked. An issue raised because of one of these rules is a real '
+                  'concern if the cells show it; do not dismiss it just because the automatic checks do not cover it:\n'
+                  + '\n'.join(f'- {r}' for r in rules) + '\n</reviewer_rules>\n\n') if rules else '') +
               '<cells>\n' + verify_excerpt(item, raw, issues) + '\n</cells>\n\nJudge every issue and call judge_issues.')
     model = os.environ.get('AI_VERIFY_MODEL') or os.environ.get('AI_REVIEW_MODEL') or DEFAULT_MODEL
     data = _post(dict(model=model, max_tokens=12000, system=VERIFY_SYSTEM, tools=[VERIFY_TOOL], tool_choice={'type': 'auto'},

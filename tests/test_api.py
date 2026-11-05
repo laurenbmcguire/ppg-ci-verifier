@@ -64,10 +64,11 @@ class ApiTests(unittest.TestCase):
         key = made['key']['key']; self.assertTrue(key.startswith('ppgv_')); self.assertFalse(made['key']['can_send'])
         self.assertNotIn('key', made['keys'][0])                                   # the key is shown once only
         # upload
-        status, rep = self.call('POST', '/api/v1/reports', {'filename': NAME, 'content_base64': base64.b64encode(seeded()).decode()}, key)
+        upload = {'filename': NAME, 'content_base64': base64.b64encode(seeded()).decode()}   # built once: the file carries a timestamp
+        status, rep = self.call('POST', '/api/v1/reports', upload, key)
         self.assertEqual(status, 201, rep); rid = rep['id']
         self.assertEqual(rep['job'], '2230-OWENS-BASCO'); self.assertIn(rep['status'], ('hold', 'check', 'clear'))
-        status, again = self.call('POST', '/api/v1/reports', {'filename': NAME, 'content_base64': base64.b64encode(seeded()).decode()}, key)
+        status, again = self.call('POST', '/api/v1/reports', upload, key)
         self.assertEqual(status, 200); self.assertTrue(again['already_uploaded'])
         status, lst = self.call('GET', '/api/v1/reports?job=2230-OWENS-BASCO', key=key)
         self.assertEqual(lst['reports'][0]['id'], rid)

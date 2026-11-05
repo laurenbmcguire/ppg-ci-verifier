@@ -223,6 +223,10 @@ def _xml_text(value):
 def _new_cell(attrs, address, value, kind):
     style = re.search(r'\bs="(\d+)"', attrs)
     s = f' s="{style.group(1)}"' if style else ''
+    if kind == 'blank' or value == '':
+        return f'<c r="{address}"{s}/>'
+    if kind == 'formula':
+        return f'<c r="{address}"{s}><f>{_xml_text(value.lstrip("="))}</f></c>'
     if kind == 'number':
         return f'<c r="{address}"{s}><v>{value}</v></c>'
     return f'<c r="{address}"{s} t="inlineStr"><is><t xml:space="preserve">{_xml_text(value)}</t></is></c>'
@@ -270,7 +274,7 @@ def apply_fixes(filename, raw, approved):
         if 'before' in change and _show(current) != str(change['before']):
             raise FixError(f'{sheet}!{cell} now holds "{_show(current)}", not "{change["before"]}". Re-open the report and review again.')
         after = str(change.get('after', ''))
-        kind = change.get('kind') if change.get('kind') in ('number', 'text') else ('number' if _num(after) is not None and isinstance(current, (int, float)) and not isinstance(current, bool) else 'text')
+        kind = 'blank' if after == '' else change.get('kind') if change.get('kind') in ('number', 'text', 'formula') else ('number' if _num(after) is not None and isinstance(current, (int, float)) and not isinstance(current, bool) else 'text')
         if kind == 'number':
             n = _num(after)
             if n is None:
@@ -336,7 +340,8 @@ def _apply_xlsx(raw, edits):
             dst.writestr(info, data)
     if len(done) != len(edits):
         raise FixError('Not every approved change could be applied; nothing was changed.')
-    return out.getvalue()
+    from hosting.recalc import recalc
+    return recalc(out.getvalue())  # saved formula results match the new values, as if Excel had saved it
 
 
 def fixed_filename(filename):
@@ -441,3 +446,119 @@ def sheet_grid(filename, raw, sheet=None):
     return dict(sheet=sheet, sheets=names, rows=values, width=width, height=height, formulas=formulas, merges=merges,
                 widths={str(k): v for k, v in widths.items() if k < width}, hidden_rows=sorted(r for r in hidden_rows if r <= height),
                 truncated=truncated)
+
+
+def relocate_rows(filename, raw, moves):
+    """Cell changes that put report rows on the right shift tab.
+    moves: [(sheet, row, target_sheet or None)]. A row moves to the end of the target tab's table, or is taken
+    out when target_sheet is None (it belongs in another shift's report). Rows below a removed row move up so the
+    table has no gaps; formula cells (Date / Shift / Area columns, totals) are never touched."""
+    from hosting.spreadsheets import report_records
+    sources, _ = _sources(filename, raw)
+    grid = dict(sources)
+    recs = [r for r in report_records(filename, raw) if r.get('table_kind') == 'detail']
+    if not recs:
+        raise FixError('No inspection rows were found to move.')
+    by_sheet = defaultdict(list)
+    for r in recs:
+        by_sheet[r['sheet']].append(r)
+    span = {}
+    for sheet, rows in by_sheet.items():
+        cols = set()
+        for r in rows:
+            cols.update(c - 1 for c in r['columns'].values())
+            cols.update(col_index(l) for l in (r.get('label_columns') or {}).values())
+        span[sheet] = range(min(cols), max(cols) + 1)
+    shift_col = {sheet: col_index(rows[0]['label_columns']['shift']) for sheet, rows in by_sheet.items()
+                 if (rows[0].get('label_columns') or {}).get('shift')}
+    value = lambda sheet, row, c: (grid[sheet][row - 1][c] if row - 1 < len(grid[sheet]) and c < len(grid[sheet][row - 1]) else '')
+    is_formula = lambda v: isinstance(v, str) and v.startswith('=')
+    def payload(sheet, row):
+        out = {c: value(sheet, row, c) for c in span[sheet] if not is_formula(value(sheet, row, c))}
+        out['_formulas'] = {c: (value(sheet, row, c), row) for c in span[sheet] if is_formula(value(sheet, row, c))}
+        return out
+    order = {sheet: [r['row'] for r in sorted(rows, key=lambda r: r['row'])] for sheet, rows in by_sheet.items()}
+    content = {sheet: [(row, payload(sheet, row)) for row in rows] for sheet, rows in order.items()}
+    moving = {}
+    for sheet, row, target in moves:
+        if sheet not in order or row not in order[sheet]:
+            raise FixError(f'{sheet} row {row} is not an inspection row any more. Re-open the report and try again.')
+        if target is not None and target not in order and target not in grid:
+            raise FixError(f'There is no "{target}" tab in this workbook.')
+        moving[(sheet, row)] = target
+    for (sheet, row), target in sorted(moving.items(), key=lambda m: (m[0][0], m[0][1])):
+        data = dict(content[sheet])[row]
+        content[sheet] = [(r, d) for r, d in content[sheet] if r != row]
+        if target:
+            moved = {c: data.get(c, '') for c in span.get(target, span[sheet])}
+            moved['_formulas'] = data.get('_formulas') or {}
+            col = shift_col.get(sheet)
+            if col is not None and col in moved and moved[col] not in ('', None):
+                moved[col] = _shift_value(moved[col], target, grid, order, col, value)
+            content.setdefault(target, []).append((None, moved))
+    content = {sheet: [d for _, d in rows] for sheet, rows in content.items()}
+    changes = []
+    for sheet in set(order) | {t for t in moving.values() if t}:
+        rows = list(order.get(sheet, []))
+        cols = span.get(sheet) or next(iter(span.values()))
+        need = len(content.get(sheet, []))
+        nxt = rows[-1] + 1 if rows else _start_row(grid, order, sheet, cols, value)
+        while len(rows) < need:  # extend into the blank rows below the table
+            if any(value(sheet, nxt, c) not in ('', None) and not is_formula(value(sheet, nxt, c)) for c in cols):
+                raise FixError(f'The "{sheet}" tab has no empty row below its table for {need - len(rows)} more car(s). Add rows in Excel first.')
+            rows.append(nxt); nxt += 1
+        for i, row in enumerate(rows):
+            new = content[sheet][i] if i < need else {}
+            for c, (formula, src_row) in (new.get('_formulas') or {}).items():
+                if value(sheet, row, c) in ('', None):  # the row's own formula (e.g. Certified = Inspected - Rejected) comes with it
+                    from hosting.recalc import _shift
+                    changes.append(dict(sheet=sheet, cell=f'{col_letter(c)}{row}', before='', after='=' + _shift(formula.lstrip('='), row - src_row, 0),
+                                        kind='formula', reason='Put the row on the right shift (by scan time)', source='Shift times'))
+            for c in cols:
+                old = value(sheet, row, c)
+                if is_formula(old) or (c in (new.get('_formulas') or {}) and old in ('', None)):
+                    continue
+                after = new.get(c, '')
+                after = '' if after is None else after
+                if _show(old) != _show(after):
+                    changes.append(dict(sheet=sheet, cell=f'{col_letter(c)}{row}', before=_show(old), after=_show(after),
+                                        kind='blank' if after == '' else ('number' if isinstance(after, (int, float)) and not isinstance(after, bool) else 'text'),
+                                        reason='Put the row on the right shift (by scan time)', source='Shift times'))
+    if len(changes) > 500:
+        raise FixError(f'Moving these rows changes {len(changes)} cells, more than can be done at once. Move them in Excel.')
+    return changes
+
+
+def _start_row(grid, order, sheet, cols, value):
+    """First data row on a shift tab that has no rows yet: below the header that matches another tab's header,
+    with the same gap between header and data as that tab."""
+    norm = lambda v: re.sub(r'\s+', ' ', str(v or '')).strip().lower()
+    for src, rows in order.items():
+        if not rows or src == sheet:
+            continue
+        for hs in range(rows[0] - 1, 0, -1):
+            head = [norm(value(src, hs, c)) for c in cols]
+            if sum(1 for x in head if x and not x.startswith('=')) < 3:
+                continue
+            for ht in range(1, len(grid[sheet]) + 1):
+                if [norm(value(sheet, ht, c)) for c in cols] == head:
+                    return ht + (rows[0] - hs)
+            break
+    raise FixError(f'Could not find the table header on the "{sheet}" tab, so rows were not moved there.')
+
+
+def _shift_value(old, target, grid, order, col, value):
+    """The Shift cell for a row moved to another tab, written the way that tab (or the old value) writes it."""
+    from hosting.shifts import sheet_shift
+    rows = order.get(target) or []
+    if rows and value(target, rows[0], col) not in ('', None):
+        return value(target, rows[0], col)
+    n = sheet_shift(target)
+    if not n:
+        return old
+    text = str(old).strip()
+    if re.fullmatch(r'\d', text) or isinstance(old, (int, float)):
+        return int(n) if isinstance(old, (int, float)) else n
+    if re.fullmatch(r'\d(st|nd|rd|th)', text, re.I):
+        return n + {'1': 'st', '2': 'nd', '3': 'rd'}.get(n, 'th')
+    return re.sub(r'\b\d(st|nd|rd|th)?\b', lambda m: n + ({'1': 'st', '2': 'nd', '3': 'rd'}.get(n, 'th') if m.group(1) else ''), text, count=1)
