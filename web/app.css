@@ -488,3 +488,9 @@ table.keys td:nth-child(2){min-width:180px}
 .verb{display:inline-block;min-width:44px;text-align:center;border-radius:4px;padding:1px 6px;font:700 11px/1.6 ui-monospace,Menlo,monospace;background:#e6eef7;color:#2d4f75}
 .verb.post{background:var(--ok-bg);color:var(--ok-ink)}
 pre.code{background:#143c3b;color:#e7f2ee;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.55}
+.howto{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:4px 0 6px}
+.howto > div{background:#f6f9f7;border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.howto h3{font-size:14px;margin:0 0 6px}
+.howto ol{margin:0;padding-left:20px;font-size:13px;color:var(--muted)}
+.howto li{margin:3px 0}
+@media (max-width:760px){.howto{grid-template-columns:1fr}}

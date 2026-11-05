@@ -248,14 +248,20 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', '0')
         self.end_headers()
 
-    def public_api(self, method, route):
-        from hosting import public_api
+    def do_DELETE(self):
+        route = self.checked_route()
+        if route is not None and route.startswith('/mcp/'):
+            return self.public_api('DELETE', route, mcp=True)
+        return self.fail(405, 'Method not allowed.')
+
+    def public_api(self, method, route, mcp=False):
+        from hosting import public_api, mcp_server
         def reply(status, data, content_type=None, headers=None):
             if not isinstance(data, (bytes, bytearray)):
                 data, content_type = encode_json(data), content_type or 'application/json; charset=utf-8'
             return self.send(status, data, content_type, headers)
         try:
-            return public_api.handle(self, method, route, reply)
+            return (mcp_server if mcp else public_api).handle(self, method, route, reply)
         except StorageUnavailable:
             debug_log()
             return reply(503, {'error': 'The report store is not available right now. Try again in a minute.'})
@@ -269,6 +275,8 @@ class handler(BaseHTTPRequestHandler):
         route = self.checked_route()
         if route is not None and route.startswith('/api/v1'):
             return self.public_api('GET', route)
+        if route is not None and route.startswith('/mcp/'):
+            return self.public_api('GET', route, mcp=True)
         if route is None:
             return self.fail(403, f'This address is not one of the verifier’s approved addresses. Open https://{APP_HOST} instead.' if hosted_preview() else 'LOCAL SQLITE COPY is available only on this computer’s loopback address.')
         try:
@@ -352,6 +360,8 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'LOCAL SQLITE COPY requires loopback access.')
         if route.startswith('/api/v1'):
             return self.public_api('POST', route)
+        if route.startswith('/mcp/'):
+            return self.public_api('POST', route, mcp=True)
         expected_origin = ('https://' if os.environ.get('VERCEL') == '1' else 'http://') + self.headers.get('Host', '')
         if (self.headers.get('Origin') != expected_origin
             or self.headers.get('Sec-Fetch-Site', 'same-origin') != 'same-origin'
@@ -476,10 +486,15 @@ class handler(BaseHTTPRequestHandler):
                     inbox = SpreadsheetInbox(directory)
                     if route.endswith('/create'):
                         made = inbox.create_key(payload.get('name'), payload.get('can_send') is True)
+                        if payload.get('connector') is True:
+                            bypass = os.environ.get('VERCEL_AUTOMATION_BYPASS_SECRET', '')
+                            made['connector_url'] = ('https://' if os.environ.get('VERCEL') == '1' else 'http://') + self.headers.get('Host', '') + '/mcp/' + made['key'] \
+                                + ('?x-vercel-protection-bypass=' + bypass if bypass else '')
+                            made['bypass_ready'] = bool(bypass) or not hosted_preview()
                         return self.send(200, encode_json({'key': made, 'keys': inbox.list_keys()}))
                     if route.endswith('/revoke'):
                         inbox.revoke_key(payload.get('id'))
-                    return self.send(200, encode_json({'keys': inbox.list_keys()}))
+                    return self.send(200, encode_json({'keys': inbox.list_keys(), 'bypass_ready': bool(os.environ.get('VERCEL_AUTOMATION_BYPASS_SECRET')) or not hosted_preview()}))
             if route in ('/api/spreadsheets/approve', '/api/spreadsheets/send-info', '/api/spreadsheets/send'):
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None

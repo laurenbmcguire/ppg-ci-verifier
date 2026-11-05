@@ -121,6 +121,115 @@ def _after_change(h, file_hash, checks=('sharepoint', 'baseline')):
     return ran
 
 
+def _id(file_hash):
+    if not isinstance(file_hash, str) or not re.fullmatch(ID, file_hash.strip().lower()):
+        raise ApiError(400, 'A report id is the 64-character id from list_reports.')
+    return file_hash.strip().lower()
+
+
+# ---------------- operations shared by the HTTP API and the Claude connector (MCP)
+def op_list(h, status=None, job=None):
+    with h.store().session() as directory:
+        rows = [report_row(r) for r in SpreadsheetInbox(directory).list()['spreadsheets']]
+    if status:
+        rows = [r for r in rows if r['status'] == status]
+    if job:
+        rows = [r for r in rows if job.lower() in (r['job'] or '').lower() or job.lower() in r['filename'].lower()]
+    return dict(reports=rows, count=len(rows))
+
+
+def op_upload(h, name, content):
+    if not isinstance(name, str) or not isinstance(content, str):
+        raise ApiError(400, 'Send "filename" and "content_base64".')
+    try:
+        raw = base64.b64decode(content, validate=True)
+    except ValueError:
+        raise ApiError(400, '"content_base64" is not valid base64.') from None
+    if len(raw) > MAX_UPLOAD:
+        raise ApiError(413, 'Reports up to 4 MB can be uploaded here.')
+    with h.store().session() as directory:
+        item = SpreadsheetInbox(directory).ingest(name, raw)
+    if not item.get('idempotent'):
+        _after_change(h, item['file_hash'], ('sharepoint', 'baseline', 'ai'))
+    return bool(item.get('idempotent')), dict(report(_get(h, item['file_hash'])), already_uploaded=bool(item.get('idempotent')))
+
+
+def op_get(h, file_hash):
+    return report(_get(h, _id(file_hash)))
+
+
+def op_fixes(h, file_hash):
+    file_hash = _id(file_hash); _get(h, file_hash)
+    with h.store().session() as directory:
+        out = SpreadsheetInbox(directory).fix_proposals(file_hash)
+    return dict(id=file_hash, fixes=out['proposals'], applied=out['applied'], ai=out['ai'])
+
+
+def op_apply(h, file_hash, accept=None, ids=None, changes=None):
+    from hosting.fixes import FixError
+    file_hash = _id(file_hash); _get(h, file_hash)
+    with h.store().session() as directory:
+        props = SpreadsheetInbox(directory).fix_proposals(file_hash)['proposals']
+    chosen = props if accept == 'all' or accept is True else [p for p in props if p['id'] in set(ids or [])]
+    extra = [dict(c) for c in changes or [] if isinstance(c, dict)]
+    for c in extra:
+        c.setdefault('reason', 'Changed through the API'); c.setdefault('source', 'API'); c.setdefault('kind', 'auto')
+    taken = {(c.get('sheet'), str(c.get('cell') or '').upper()) for c in extra}
+    todo = [p for p in chosen if (p['sheet'], p['cell']) not in taken] + extra
+    if not todo:
+        raise ApiError(400, 'Nothing to apply. Accept all, list fix ids, or send changes.')
+    try:
+        with h.store().session() as directory:
+            fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, todo)
+    except FixError as exc:
+        raise ApiError(409, str(exc)) from None
+    _after_change(h, fixed['file_hash'])
+    return dict(report(_get(h, fixed['file_hash'])), applied=len(todo))
+
+
+def op_ai_fixes(h, file_hash):
+    from hosting.spreadsheet_inbox import make_ai_fixes
+    file_hash = _id(file_hash); _get(h, file_hash)
+    with h.store().session() as directory:
+        item, raw, issues = SpreadsheetInbox(directory).ai_fix_inputs(file_hash)
+    record = make_ai_fixes(item, raw, issues)
+    if record.get('status') in ('error', 'not_configured'):
+        raise ApiError(409, record.get('message') or 'AI fixes failed.')
+    if record.get('status') == 'done':
+        with h.store().session() as directory:
+            SpreadsheetInbox(directory).record_ai_fixes(file_hash, record)
+    return dict(status=record.get('status'), drafted=len(record.get('fixes') or []), left_for_a_person=record.get('skipped') or [])
+
+
+def op_recheck(h, file_hash, checks=None):
+    file_hash = _id(file_hash); _get(h, file_hash)
+    checks = [c for c in checks or ['sharepoint', 'baseline'] if c in ('sharepoint', 'baseline', 'ai')]
+    ran = _after_change(h, file_hash, checks)
+    return dict(report(_get(h, file_hash)), ran=ran)
+
+
+def op_approve(h, file_hash, approver=None, note=None, override=False, withdraw=False):
+    from hosting import delivery
+    file_hash = _id(file_hash); _get(h, file_hash)
+    return report(delivery.approve(h.store(), file_hash, approver, note, override, withdraw))
+
+
+def op_send_preview(h, file_hash):
+    from hosting import delivery
+    file_hash = _id(file_hash); _get(h, file_hash)
+    return delivery.info(h.store(), file_hash)
+
+
+def op_send(h, key, file_hash, data):
+    from hosting import delivery
+    if not key['can_send']:
+        raise ApiError(403, 'This key cannot send email to clients. Make a key (or connector link) with "Can send to clients" ticked.')
+    file_hash = _id(file_hash); _get(h, file_hash)
+    data = dict(data, via=('connector:' if key.get('via') == 'mcp' else 'api:') + key['name'])
+    updated, record = delivery.send(h.store(), file_hash, data, defaults=delivery.info(h.store(), file_hash))
+    return dict(record=record, report=report(updated))
+
+
 def handle(h, method, route, send):
     """Serve one /api/v1 request. send(status, payload_or_bytes, content_type=None, headers=None)."""
     try:
@@ -131,94 +240,41 @@ def handle(h, method, route, send):
         query = dict(p.split('=', 1) for p in (h.path.split('?', 1)[1].split('&') if '?' in h.path else []) if '=' in p)
         if path == '/api/v1/reports':
             if method == 'GET':
-                with h.store().session() as directory:
-                    rows = [report_row(r) for r in SpreadsheetInbox(directory).list()['spreadsheets']]
-                if query.get('status'):
-                    rows = [r for r in rows if r['status'] == query['status']]
-                if query.get('job'):
-                    rows = [r for r in rows if (r['job'] or '').lower() == query['job'].replace('%20', ' ').lower()]
-                return send(200, dict(reports=rows, count=len(rows)))
+                return send(200, op_list(h, query.get('status'), query.get('job', '').replace('%20', ' ') or None))
             if method == 'POST':
                 data = _body(h, MAX_UPLOAD)
-                name, content = data.get('filename'), data.get('content_base64')
-                if not isinstance(name, str) or not isinstance(content, str):
-                    raise ApiError(400, 'Send "filename" and "content_base64".')
-                try:
-                    raw = base64.b64decode(content, validate=True)
-                except ValueError:
-                    raise ApiError(400, '"content_base64" is not valid base64.') from None
-                with h.store().session() as directory:
-                    item = SpreadsheetInbox(directory).ingest(name, raw)
-                if not item.get('idempotent'):
-                    _after_change(h, item['file_hash'], ('sharepoint', 'baseline', 'ai'))
-                return send(200 if item.get('idempotent') else 201, dict(report(_get(h, item['file_hash'])), already_uploaded=bool(item.get('idempotent'))))
+                again, out = op_upload(h, data.get('filename'), data.get('content_base64'))
+                return send(200 if again else 201, out)
         m = re.fullmatch(r'/api/v1/reports/' + ID + r'(?:/([a-z-]+))?', path)
         if not m:
             raise ApiError(404, 'Unknown endpoint. GET /api/v1 lists them.')
         file_hash, action = m.group(1), m.group(2)
-        item = _get(h, file_hash)
-        from hosting import delivery
         if action is None and method == 'GET':
-            return send(200, report(item))
+            return send(200, op_get(h, file_hash))
         if action == 'download' and method == 'GET':
+            _get(h, file_hash)
             with h.store().session() as directory:
                 filename, raw = SpreadsheetInbox(directory).download(file_hash)
             safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', filename)[:180] or 'report'
             kind = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if safe.lower().endswith('.xlsx') else 'text/csv; charset=utf-8'
             return send(200, raw, kind, {'Content-Disposition': f'attachment; filename="{safe}"'})
         if action == 'fixes' and method == 'GET':
-            with h.store().session() as directory:
-                out = SpreadsheetInbox(directory).fix_proposals(file_hash)
-            return send(200, dict(id=file_hash, fixes=out['proposals'], applied=out['applied'], ai=out['ai']))
+            return send(200, op_fixes(h, file_hash))
         if action == 'fixes' and method == 'POST':
-            from hosting.fixes import FixError
             data = _body(h, 200000)
-            with h.store().session() as directory:
-                props = SpreadsheetInbox(directory).fix_proposals(file_hash)['proposals']
-            chosen = props if data.get('accept') == 'all' else [p for p in props if p['id'] in set(data.get('ids') or [])]
-            extra = [c for c in data.get('changes') or [] if isinstance(c, dict)]
-            for c in extra:
-                c.setdefault('reason', 'Changed through the API'); c.setdefault('source', 'API'); c.setdefault('kind', 'auto')
-            taken = {(c.get('sheet'), str(c.get('cell') or '').upper()) for c in extra}
-            changes = [p for p in chosen if (p['sheet'], p['cell']) not in taken] + extra
-            if not changes:
-                raise ApiError(400, 'Nothing to apply. Send {"accept": "all"}, {"ids": [...]} or {"changes": [...]}.')
-            try:
-                with h.store().session() as directory:
-                    fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, changes)
-            except FixError as exc:
-                raise ApiError(409, str(exc)) from None
-            _after_change(h, fixed['file_hash'])
-            return send(201, dict(report(_get(h, fixed['file_hash'])), applied=len(changes)))
+            return send(201, op_apply(h, file_hash, data.get('accept'), data.get('ids'), data.get('changes')))
         if action == 'ai-fixes' and method == 'POST':
-            from hosting.spreadsheet_inbox import make_ai_fixes
-            with h.store().session() as directory:
-                item, raw, issues = SpreadsheetInbox(directory).ai_fix_inputs(file_hash)
-            record = make_ai_fixes(item, raw, issues)
-            if record.get('status') in ('error', 'not_configured'):
-                raise ApiError(409, record.get('message') or 'AI fixes failed.')
-            if record.get('status') == 'done':
-                with h.store().session() as directory:
-                    SpreadsheetInbox(directory).record_ai_fixes(file_hash, record)
-            return send(200, dict(status=record.get('status'), drafted=len(record.get('fixes') or []), left_for_a_person=record.get('skipped') or []))
+            return send(200, op_ai_fixes(h, file_hash))
         if action == 'recheck' and method == 'POST':
             data = _body(h, 10000) if int(h.headers.get('Content-Length') or 0) else {}
-            checks = [c for c in data.get('checks') or ['sharepoint', 'baseline'] if c in ('sharepoint', 'baseline', 'ai')]
-            ran = _after_change(h, file_hash, checks)
-            return send(200, dict(report(_get(h, file_hash)), ran=ran))
+            return send(200, op_recheck(h, file_hash, data.get('checks')))
         if action == 'approve' and method == 'POST':
             data = _body(h, 10000)
-            approved = delivery.approve(h.store(), file_hash, data.get('approver'), data.get('note'), data.get('override'), data.get('withdraw'))
-            return send(200, report(approved))
+            return send(200, op_approve(h, file_hash, data.get('approver'), data.get('note'), data.get('override'), data.get('withdraw')))
         if action == 'send' and method == 'GET':
-            return send(200, delivery.info(h.store(), file_hash))
+            return send(200, op_send_preview(h, file_hash))
         if action == 'send' and method == 'POST':
-            if not key['can_send']:
-                raise ApiError(403, 'This API key cannot send email. Make a key with "Can send to clients" ticked.')
-            data = _body(h, 100000)
-            data['via'] = 'api:' + key['name']
-            updated, record = delivery.send(h.store(), file_hash, data, defaults=delivery.info(h.store(), file_hash))
-            return send(200, dict(record=record, report=report(updated)))
+            return send(200, op_send(h, key, file_hash, _body(h, 100000)))
         raise ApiError(405 if action in (None, 'download', 'fixes', 'ai-fixes', 'recheck', 'approve', 'send') else 404,
                        'That method is not available here. GET /api/v1 lists the endpoints.')
     except ApiError as exc:
