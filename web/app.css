@@ -191,6 +191,13 @@ table.grid{border-collapse:collapse;font:12px/1.35 -apple-system,BlinkMacSystemF
 .cp-edit label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:var(--btn-ink);flex:1;min-width:200px}
 .cp-edit input{font:13px ui-monospace,Menlo,monospace;padding:8px;border:1px solid var(--btn-line);border-radius:6px}
 
+/* download bar */
+.dlbar{position:sticky;bottom:12px;z-index:5;display:flex;align-items:center;gap:14px;margin-top:16px;padding:14px 18px;background:#143c3b;color:#f0f7f4;border-radius:10px;box-shadow:0 10px 30px rgba(20,60,59,.3)}
+.dlbar span{flex:1;font-size:14px}
+.dlbar .btn.primary{background:#fff;color:var(--green);border-color:#fff;font-size:14px;padding:11px 18px}
+.dlbar .btn.primary:hover{background:#e4f1ec}
+@media (max-width:900px){.dlbar{flex-direction:column;align-items:stretch;text-align:center}}
+
 /* guided review pop-up */
 dialog.walk{border:0;border-radius:12px;padding:0;width:min(1280px,calc(100vw - 24px));height:min(860px,calc(100vh - 24px));max-height:none;color:var(--ink);box-shadow:0 24px 70px rgba(10,40,38,.4);overflow:hidden}
 dialog.walk[open]{display:flex;flex-direction:column}

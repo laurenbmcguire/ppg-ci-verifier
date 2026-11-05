@@ -126,7 +126,8 @@
       h('div', {}, h('h1', {}, rv.job || r.filename),
         h('div', {class: 'meta'}, `${dayLabel(rv.day)}. ${r.filename}, version ${r.version}, uploaded ${ago(r.received_at)}.`))));
     wrap.append(h('div', {class: 'actions'},
-      h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download this version'),
+      h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, 'Download report'),
+      h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download original'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('sharepoint', 'Checking SharePoint…')}, 'Check SharePoint again'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('baseline', 'Comparing with earlier days…')}, 'Compare with usual day'),
       h('button', {type: 'button', class: 'btn', onclick: () => rerun('ai-review', 'Claude is reading the report…')}, rv.ai.status === 'done' ? 'Run AI review again' : 'Run AI review')));
@@ -137,7 +138,9 @@
     wrap.append(sourcesBlock(r));
     wrap.append(readBlock(r));
     if (rv.fixed_from || rv.fixes_applied) wrap.append(historyBlock(r));
+    wrap.append(h('div', {class: 'dlbar', id: 'dlbar', hidden: true}, h('span', {}), h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, 'Download report')));
     $('report').replaceChildren(wrap);
+    updateDownloads();
     if (state.fixes) drawFixes();
     state.grid = null; state.gridSheet = null; state.gridCell = null;
     loadGrid();
@@ -297,10 +300,29 @@
         total ? `Download fixed version (${total})` : 'Download fixed version')));
     block.append(panel);
     drawGrid();
+    updateDownloads();
+  }
+  function readyChanges() {
+    if (!state.report) return {accepted: [], dec: {}, edits: {}, total: 0};
+    const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
+    const accepted = (state.fixes || []).filter(f => !edits[editId(f.sheet, f.cell)] && dec[f.id]?.state === 'accepted');
+    return {accepted, dec, edits, total: accepted.length + Object.keys(edits).length};
+  }
+  function downloadWithChanges() {
+    const c = readyChanges();
+    if (!c.total) { const a = h('a', {href: '/api/spreadsheets/download?id=' + state.report.file_hash, download: state.report.filename}); document.body.append(a); a.click(); a.remove(); return; }
+    $('walk-dialog')?.open && $('walk-dialog').close();
+    applyFixes(c.accepted, c.dec, c.edits);
+  }
+  function updateDownloads() {
+    const c = readyChanges(), label = c.total ? `Download with ${c.total} change${c.total === 1 ? '' : 's'}` : 'Download report';
+    for (const b of document.querySelectorAll('.dl-changes')) { b.textContent = state.busy ? 'Building the fixed copy…' : label; b.disabled = !!state.busy; }
+    const bar = $('dlbar');
+    if (bar) { bar.hidden = !c.total; const t = bar.querySelector('span'); if (t) t.textContent = `${c.total} change${c.total === 1 ? '' : 's'} ready. The download is a corrected copy; your original stays as it is.`; }
   }
   async function applyFixes(accepted, dec, edits) {
-    if (state.busy) return; state.busy = true; drawFixes();
-    toast('Building the fixed version…');
+    if (state.busy) return; state.busy = true; drawFixes(); updateDownloads();
+    toast('Building the fixed copy with your changes…');
     try {
       const changes = accepted.map(f => {
         const after = dec[f.id]?.after ?? f.after;
@@ -474,13 +496,16 @@
         h('p', {}, ready ? `${ready} change${ready === 1 ? '' : 's'} ready. Download the fixed version to get a corrected copy; it is checked again automatically.` : 'No changes were chosen.'),
         h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => { w.index = 0; drawWalk(); }}, 'Start over'),
           h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Close'),
-          ready ? h('button', {type: 'button', class: 'btn primary', onclick: () => { dlg.close(); const b = document.querySelector('.fixbar .btn:last-child'); b?.scrollIntoView({behavior: 'smooth', block: 'center'}); b?.click(); }}, `Download fixed version (${ready})`) : null)));
+          ready ? h('button', {type: 'button', class: 'btn primary', onclick: downloadWithChanges}, `Download with ${ready} change${ready === 1 ? '' : 's'}`) : null)));
     };
     const sheetName = issue.sheet || state.grid?.sheet || (state.report.sheets || [])[0]?.name;
     const head = h('div', {class: 'walk-top'},
       h('b', {id: 'walk-title'}, `Issue ${w.index + 1} of ${issues.length}`),
-      h('div', {class: 'walk-bar'}, h('i', {})), h('button', {type: 'button', class: 'btn ghost small', onclick: () => dlg.close()}, 'Close'));
+      h('div', {class: 'walk-bar'}, h('i', {})),
+      h('button', {type: 'button', class: 'btn primary small dl-changes', onclick: downloadWithChanges}, 'Download report'),
+      h('button', {type: 'button', class: 'btn ghost small', onclick: () => dlg.close()}, 'Close'));
     head.querySelector('.walk-bar i').style.width = Math.round((w.index + 1) / issues.length * 100) + '%';
+    requestAnimationFrame(updateDownloads);
     const gridBox = h('div', {class: 'walk-grid gridwrap'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Opening the sheet…'));
     const side = h('div', {class: 'walk-side'});
     dlg.replaceChildren(head, h('div', {class: 'walk-body'}, h('div', {class: 'walk-left'}, h('div', {class: 'walk-where'}, `${sheetName || 'Sheet'}${issue.cell ? ' · cell ' + issue.cell : issue.row ? ' · row ' + issue.row : ' · whole report'}`), gridBox), side));
