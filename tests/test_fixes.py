@@ -159,3 +159,39 @@ class ManualEditTests(unittest.TestCase):
             row_cells(NAME, build(ROWS), '1st Shift', 'abc')
         with self.assertRaises(FixError):
             row_cells(NAME, build(ROWS), 'No such sheet', 3)
+
+
+class SheetGridTests(unittest.TestCase):
+    def test_grid_has_values_formulas_and_sheet_names(self):
+        from hosting.fixes import sheet_grid
+        g = sheet_grid(NAME, build(ROWS), '1st Shift')
+        self.assertIn('Summary', g['sheets'])
+        self.assertEqual(g['sheet'], '1st Shift')
+        self.assertEqual(g['rows'][14][0], 'Date')
+        self.assertTrue(g['formulas'])
+        self.assertEqual(len(g['rows']), g['height'])
+
+    def test_unknown_sheet_falls_back_to_first(self):
+        from hosting.fixes import sheet_grid
+        g = sheet_grid(NAME, build(ROWS), 'nope')
+        self.assertEqual(g['sheet'], g['sheets'][0])
+
+    def test_layout_reads_merges_and_widths(self):
+        from hosting.fixes import _layout
+        import io as _io, zipfile as _zip
+        raw = build(ROWS)
+        out = _io.BytesIO()
+        with _zip.ZipFile(_io.BytesIO(raw)) as src, _zip.ZipFile(out, 'w') as dst:
+            from hosting.spreadsheet_demo import sheet_paths
+            path = sheet_paths(raw)['1st Shift']
+            for info in src.infolist():
+                data = src.read(info.filename)
+                if info.filename == path:
+                    x = data.decode()
+                    x = x.replace('<sheetData>', '<cols><col min="1" max="2" width="20" customWidth="1"/></cols><sheetData>', 1)
+                    x = x.replace('</sheetData>', '</sheetData><mergeCells count="1"><mergeCell ref="A1:D1"/></mergeCells>', 1)
+                    data = x.encode()
+                dst.writestr(info, data)
+        merges, widths, hidden = _layout(out.getvalue(), '1st Shift')
+        self.assertEqual(merges, ['A1:D1'])
+        self.assertEqual(widths[0], 20.0)

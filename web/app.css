@@ -139,6 +139,58 @@ footer{font-size:12px;color:#657b72;padding:24px 0 6px}
 .more{width:100%;margin-top:6px}
 .note{font-size:12px;color:var(--faint);margin:12px 0 0}
 
+/* spreadsheet view */
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin:12px 0 10px;font-size:12px;color:var(--muted)}
+.legend .k{display:inline-flex;align-items:center;gap:6px}
+.legend .k::before{content:"";width:14px;height:14px;border-radius:3px;border:1px solid #cbd8d0;background:#fff}
+.legend .k.iss::before{background:var(--high-bg);border-color:var(--high)}
+.legend .k.fixme::before{background:#ece9fb;border-color:#6b5bd2}
+.legend .k.ready::before{background:var(--ok-bg);border-color:var(--ok)}
+.legend .k.fx::before{background:#f4f6f5;border-style:dashed}
+label.only{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer}
+label.only input{accent-color:var(--green)}
+.tabs{display:flex;gap:2px;overflow-x:auto;border-bottom:1px solid var(--line)}
+.tabs button{border:1px solid var(--line);border-bottom:0;border-radius:6px 6px 0 0;background:#f4f7f5;padding:7px 12px;font-size:12px;color:var(--muted);white-space:nowrap}
+.tabs button.on{background:#fff;color:var(--green);box-shadow:inset 0 -2px 0 var(--green)}
+.tabs i{font-style:normal;margin-left:6px;background:var(--high-bg);color:var(--high-ink);border-radius:999px;padding:0 6px;font-size:11px}
+.gridwrap{overflow:auto;max-height:520px;border:1px solid var(--line);border-top:0;background:#fff}
+table.grid{border-collapse:collapse;font:12px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1f2d2b;table-layout:fixed}
+.grid col.rn{width:44px}
+.grid th{position:sticky;top:0;z-index:2;background:#eef2f0;color:#5f716b;font-weight:600;font-size:11px;border:1px solid #dbe3df;padding:3px 4px;text-align:center}
+.grid tbody th{position:sticky;left:0;z-index:1;top:auto}
+.grid th.corner{left:0;z-index:3}
+.grid td{border:1px solid #e3e9e6;padding:3px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;height:22px;cursor:pointer;vertical-align:middle}
+.grid td.num{text-align:right}
+.grid td:hover{outline:2px solid #9cc3b4;outline-offset:-2px}
+.grid td.fx{background:#f8faf9;color:#4d5f5a}
+.grid tr.rowflag th{background:var(--med-bg);color:var(--med-ink)}
+.grid tr.rowflag.high th{background:var(--high-bg);color:var(--high-ink)}
+.grid tr.rowflag td{background:#fffaf0}
+.grid tr.hiddenrow th{text-decoration:line-through}
+.grid td.iss{background:var(--high-bg);box-shadow:inset 0 0 0 2px var(--high)}
+.grid td.iss.medium{background:var(--med-bg);box-shadow:inset 0 0 0 2px var(--med)}
+.grid td.iss.low{background:#e6eef7;box-shadow:inset 0 0 0 2px var(--low)}
+.grid td.fixme,.grid td.ready{white-space:normal;overflow-wrap:anywhere;text-overflow:clip}
+.grid td.fixme{background:#ece9fb;box-shadow:inset 0 0 0 2px #6b5bd2}
+.grid td.ready{background:var(--ok-bg);box-shadow:inset 0 0 0 2px var(--ok)}
+.grid td s{color:#a0463a;margin-right:2px}
+.grid td b{font-weight:700}
+.grid td.sel{outline:3px solid var(--green);outline-offset:-3px}
+.cellpanel{margin-top:12px;padding:14px 16px;border:1px solid var(--line);border-left:4px solid var(--green);border-radius:8px;background:#f8fbf9;display:grid;gap:8px}
+.cp-head{display:flex;align-items:center;gap:10px}
+.cp-head b{font-size:14px}
+.cp-head .btn{margin-left:auto}
+.tagf{font-size:11px;padding:1px 8px;border-radius:999px;background:#eef1ef;color:var(--info-ink)}
+.cp-issue{margin:0;padding:8px 10px;border-radius:6px;background:var(--med-bg);color:var(--ink);font-size:13px}
+.cp-issue.high{background:var(--high-bg)}
+.cp-issue small{display:block;color:var(--muted);margin-top:3px}
+.cp-fix{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px}
+.cp-fix > span{flex:1;min-width:200px}
+.cp-fix s{color:#a0463a}.cp-fix small{display:block;color:var(--muted)}
+.cp-edit{display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px}
+.cp-edit label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:var(--btn-ink);flex:1;min-width:200px}
+.cp-edit input{font:13px ui-monospace,Menlo,monospace;padding:8px;border:1px solid var(--btn-line);border-radius:6px}
+
 /* your own edits */
 .issue .side{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
 .editor{margin-top:12px;padding:14px;border:1px solid var(--line);border-radius:8px;background:#f8fbf9}

@@ -365,3 +365,64 @@ def row_cells(filename, raw, sheet, row):
         cells.append(dict(cell=f'{col_letter(i)}{row}', header=_show(heads[i]).strip() if i < len(heads) else '',
                           value=_show(shown), before=_show(v), formula=formula))
     return dict(sheet=sheet, row=row, header_row=header_row, sheets=names, cells=cells)
+
+
+MAX_GRID_ROWS = 1500
+MAX_GRID_COLS = 80
+
+
+def _layout(raw, sheet):
+    """Merged ranges and column widths of one worksheet (xlsx only)."""
+    from hosting.spreadsheet_demo import sheet_paths
+    try:
+        path = sheet_paths(raw).get(sheet)
+        if not path:
+            return [], {}, set()
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            xml = z.read(path).decode('utf-8', 'replace')
+    except Exception:
+        return [], {}, set()
+    merges = re.findall(r'<mergeCell\b[^>]*\bref="([A-Z]+[0-9]+:[A-Z]+[0-9]+)"', xml)
+    widths = {}
+    for m in re.finditer(r'<col\b([^>]*)/?>', xml):
+        attrs = dict(re.findall(r'(\w+)="([^"]*)"', m.group(1)))
+        try:
+            lo, hi, w = int(attrs['min']), int(attrs['max']), float(attrs.get('width', 0))
+        except (KeyError, ValueError):
+            continue
+        hidden = attrs.get('hidden') in ('1', 'true')
+        for c in range(lo, min(hi, MAX_GRID_COLS) + 1):
+            widths[c - 1] = 0 if hidden else w
+    hidden_rows = {int(r) for r in re.findall(r'<row\b[^>]*\br="(\d+)"[^>]*\bhidden="(?:1|true)"', xml)}
+    return merges, widths, hidden_rows
+
+
+def sheet_grid(filename, raw, sheet=None):
+    """The sheet as shown in Excel: values (formulas as their saved results), merged cells, column widths."""
+    sources, cached = _sources(filename, raw)
+    names = [t for t, _ in sources]
+    if sheet not in names:
+        sheet = names[0] if names else None
+    if sheet is None:
+        raise FixError('This file has no sheets.')
+    rows = dict(sources)[sheet]
+    saved = cached.get(sheet, [])
+    height = max([i + 1 for i, r in enumerate(rows) if any(_show(v).strip() for v in r)] + [0])
+    width = max([i + 1 for r in rows[:height] for i, v in enumerate(r) if _show(v).strip()] + [0])
+    height, truncated = min(height, MAX_GRID_ROWS), height > MAX_GRID_ROWS or width > MAX_GRID_COLS
+    width = min(width, MAX_GRID_COLS)
+    values, formulas = [], []
+    for r in range(height):
+        row, srow = rows[r] if r < len(rows) else [], saved[r] if r < len(saved) else []
+        line = []
+        for c in range(width):
+            v = row[c] if c < len(row) else None
+            if isinstance(v, str) and v.startswith('='):
+                formulas.append(f'{col_letter(c)}{r + 1}')
+                v = srow[c] if c < len(srow) else ''
+            line.append(_show(v))
+        values.append(line)
+    merges, widths, hidden_rows = _layout(raw, sheet) if filename.lower().endswith('.xlsx') else ([], {}, set())
+    return dict(sheet=sheet, sheets=names, rows=values, width=width, height=height, formulas=formulas, merges=merges,
+                widths={str(k): v for k, v in widths.items() if k < width}, hidden_rows=sorted(r for r in hidden_rows if r <= height),
+                truncated=truncated)

@@ -204,6 +204,11 @@ class SpreadsheetInbox:
         return dict(file_hash=file_hash, filename=item['filename'], proposals=props, applied=item.get('fixes_applied') or [],
                     ai=dict(status=ai.get('status') or 'not_run', made_at=ai.get('made_at'), count=len(ai.get('fixes') or []),
                             skipped=ai.get('skipped') or [], dropped=ai.get('dropped') or 0, message=ai.get('message')))
+    def sheet_grid(self, file_hash, sheet=None):
+        from hosting.fixes import sheet_grid
+        item = self.get(file_hash)
+        _, raw = self.original_bytes(file_hash)
+        return sheet_grid(item['filename'], raw, sheet)
     def row_cells(self, file_hash, sheet, row):
         from hosting.fixes import row_cells
         item = self.get(file_hash)
