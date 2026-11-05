@@ -101,3 +101,32 @@ class SharePointHistoryTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SharePointHistoryFirstTests(unittest.TestCase):
+    def test_earlier_days_come_from_the_sharepoint_list(self):
+        import tempfile
+        from pathlib import Path
+        import api.index as app
+        from hosting.sqlite_storage import SQLiteWorkspace
+        from eos_fixture import build, ROWS
+        store = SQLiteWorkspace(tempfile.mkdtemp())
+        h = app.handler.__new__(app.handler)
+        h.store = lambda: store
+        with store.session() as d:
+            item = app.SpreadsheetInbox(d).ingest('2230-OWENS-BASCO - EOS - 10.07.26.xlsx', build(ROWS))
+        def csv_for(n):
+            lines = ['Identifier,Part Number,Quantity Inspected,Quantity Rejected']
+            lines += [f'80100{i:05d},80139189,34,2' for i in range(n)]
+            return '\n'.join(lines).encode()
+        days = [(f'2026-10-0{d}', f'x {d}.csv', csv_for(500)) for d in (6, 5, 4, 3, 2)]
+        with patch.object(app, 'sharepoint_configured', return_value=True), \
+             patch('hosting.sharepoint._list_items', return_value=('site', {'displayName': 'Data #2230-OWENS-BASCO'}, {}, [])), \
+             patch('hosting.sharepoint.list_history', return_value=days), \
+             patch('hosting.sharepoint.recent_exports', return_value=[]):
+            result = h.baseline_check(item['file_hash'])
+        bl = result['baseline']
+        self.assertEqual(bl['sharepoint_days'], 5)
+        self.assertIn('SharePoint list "Data #2230-OWENS-BASCO"', bl['history_source'])
+        self.assertIn('from the SharePoint list', bl['message'])
+        self.assertEqual(bl['status'], 'unusual')  # 13 rows today vs 500 usual

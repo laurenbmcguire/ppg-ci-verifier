@@ -176,28 +176,46 @@ class handler(BaseHTTPRequestHandler):
             return SpreadsheetInbox(directory).record_lookup(file_hash, status, message, job, day)
 
     def baseline_check(self, file_hash):
-        """Compare the report with the job's usual day (saved reports first, then earlier SharePoint exports)."""
-        from hosting.baseline import compare_to_usual, stats_from_result, stats_from_rows, MIN_DAYS
+        """Compare the report with the job's usual day. Earlier days come from SharePoint (the job's "Data #" list,
+        then the daily exports); saved reports only fill days SharePoint doesn't have."""
+        from hosting.baseline import compare_to_usual, stats_from_result, stats_from_rows, MAX_DAYS
         from hosting.source_compare import identify, parse_export, SourceError
         with self.store().session() as directory:
             inbox = SpreadsheetInbox(directory)
             item = inbox.get(file_hash)
             job, day = identify(item.get('filename'), item)
-            history = inbox.history_for(job, day, exclude_hash=file_hash)
-        if len(history) < 5 and job and day and sharepoint_configured():
-            from hosting.sharepoint import recent_exports, SharePointError
-            have = {h['day'] for h in history}
-            try:
-                for d, name, raw in recent_exports(job, day, limit=10):
+            saved = inbox.history_for(job, day, exclude_hash=file_hash)
+        history, sp_note = [], None
+        if job and day and sharepoint_configured():
+            from hosting.sharepoint import list_history, recent_exports, _list_items, SharePointError
+            def add(entries, label):
+                have = {h['day'] for h in history}
+                for d, name, raw in entries:
                     if d in have:
                         continue
                     try:
-                        history.append(dict(stats_from_rows(parse_export(name, raw)), day=d, source='SharePoint export'))
+                        history.append(dict(stats_from_rows(parse_export(name, raw)), day=d, source=label))
+                        have.add(d)
                     except SourceError:
                         continue
+            try:
+                found = _list_items(job)
+                if found:
+                    sp_note = found[1].get('displayName')
+                    add(list_history(job, day, limit=MAX_DAYS), f'SharePoint list ({sp_note})')
+                if len(history) < MAX_DAYS:
+                    add(recent_exports(job, day, limit=MAX_DAYS), 'SharePoint export')
             except SharePointError:
                 debug_log()
-        baseline = compare_to_usual(stats_from_result(item), history, job, day)
+        have = {h['day'] for h in history}
+        history += [h for h in saved if h['day'] not in have]
+        recent = sorted((h for h in history if h.get('day') and h['day'] != day), key=lambda h: h['day'], reverse=True)[:MAX_DAYS]
+        sp_used = sum(1 for h in recent if str(h.get('source', '')).startswith('SharePoint'))
+        label = (f'the SharePoint list "{sp_note}"' if sp_note else 'SharePoint') if sp_used == len(recent) and recent else None
+        baseline = compare_to_usual(stats_from_result(item), history, job, day, source_label=label)
+        sp_days = sum(1 for h in (baseline.get('history') or []) if str(h.get('source', '')).startswith('SharePoint'))
+        baseline['history_source'] = (f'SharePoint list "{sp_note}"' if sp_note else 'SharePoint') if sp_days else 'saved reports'
+        baseline['sharepoint_days'] = sp_days
         with self.store().session() as directory:
             return SpreadsheetInbox(directory).record_baseline(file_hash, baseline)
 

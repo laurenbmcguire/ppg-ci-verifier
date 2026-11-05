@@ -55,11 +55,11 @@ def _pct(r):
     return f'{(r * 100):.0f}%'
 
 
-def compare_to_usual(today, history, job=None, day=None):
+def compare_to_usual(today, history, job=None, day=None, source_label=None):
     """today: stats dict; history: [{'day', 'source', scans, inspected, rejected}] for other days of the same job."""
     history = sorted((h for h in history if h.get('day') and h.get('day') != day), key=lambda h: h['day'], reverse=True)
     seen, unique = set(), []
-    for h in history:  # one entry per day, preferring saved reports over exports
+    for h in history:  # one entry per day; the caller lists its preferred source first
         if h['day'] not in seen:
             seen.add(h['day']); unique.append(h)
     history = unique[:MAX_DAYS]
@@ -70,7 +70,7 @@ def compare_to_usual(today, history, job=None, day=None):
         base.update(status='not_enough_history',
                     message=f'Only {len(history)} earlier day(s) found for {job or "this job"}; at least {MIN_DAYS} are needed to judge what is usual.')
         return base
-    span = f'{len(history)} earlier days, {history[-1]["day"]} to {history[0]["day"]}'
+    span = f'{len(history)} earlier days' + (f' from {source_label}' if source_label else '') + f', {history[-1]["day"]} to {history[0]["day"]}'
     labels = {'scans': ('scans / rows', 'scans'), 'inspected': ('parts inspected', 'inspected'), 'rejected': ('rejects', 'rejected')}
     for field in ('scans', 'inspected', 'rejected'):
         values = [h[field] for h in history if h.get(field) is not None]
