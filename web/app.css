@@ -191,6 +191,49 @@ table.grid{border-collapse:collapse;font:12px/1.35 -apple-system,BlinkMacSystemF
 .cp-edit label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:var(--btn-ink);flex:1;min-width:200px}
 .cp-edit input{font:13px ui-monospace,Menlo,monospace;padding:8px;border:1px solid var(--btn-line);border-radius:6px}
 
+/* guided review pop-up */
+dialog.walk{border:0;border-radius:12px;padding:0;width:min(1280px,calc(100vw - 24px));height:min(860px,calc(100vh - 24px));max-height:none;color:var(--ink);box-shadow:0 24px 70px rgba(10,40,38,.4);overflow:hidden}
+dialog.walk[open]{display:flex;flex-direction:column}
+dialog.walk::backdrop{background:rgba(12,36,34,.6)}
+.walk-top{display:flex;align-items:center;gap:16px;padding:14px 20px;border-bottom:1px solid var(--line);background:#fff}
+.walk-top b{font-size:15px;white-space:nowrap}
+.walk-bar{flex:1;height:6px;background:#e3ebe7;border-radius:3px;overflow:hidden}
+.walk-bar i{display:block;height:100%;background:var(--green);transition:width .3s}
+.walk-body{flex:1;display:grid;grid-template-columns:minmax(0,1fr) 380px;min-height:0}
+.walk-left{display:flex;flex-direction:column;min-width:0;min-height:0;padding:14px 0 14px 20px}
+.walk-where{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:8px;letter-spacing:.3px}
+.walk-grid{flex:1;max-height:none;border-top:1px solid var(--line);border-radius:6px}
+.walk-side{overflow:auto;padding:18px 20px;display:flex;flex-direction:column;gap:14px;border-left:1px solid var(--line);background:#f8fbf9}
+.walk-side h3{font-size:13px;margin:0 0 6px}
+.walk-issue{background:#fff;border:1px solid var(--line);border-left:5px solid var(--med);border-radius:8px;padding:14px}
+.walk-issue.high{border-left-color:var(--high)}.walk-issue.low{border-left-color:var(--low)}
+.walk-issue .text{color:var(--ink);font-size:15px;margin:8px 0 4px}
+.walk-issue .hint{font-size:13px;color:var(--muted);margin:4px 0 0}
+.walk-issue .hint.done{color:var(--ok-ink);font-weight:600}
+.walk-issue .src{font-size:12px;color:var(--faint);font-weight:600;margin-left:8px}
+.chip-sev{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;background:var(--med-bg);color:var(--med-ink)}
+.walk-issue.high .chip-sev{background:var(--high-bg);color:var(--high-ink)}.walk-issue.low .chip-sev{background:#e6eef7;color:var(--low-ink, #2d4f75)}
+.walk-fix .wf{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--line);border-left:4px solid #6b5bd2;border-radius:8px;padding:10px 12px;margin-bottom:8px}
+.walk-fix .wf.on{border-left-color:var(--ok);background:#f1f8f4}
+.walk-fix .wf > div{flex:1;min-width:0}
+.walk-fix small{display:block;color:var(--faint);font-size:12px}
+.walk-fix .change{font-family:ui-monospace,Menlo,monospace;font-size:13px;margin:3px 0;overflow-wrap:anywhere}
+.walk-fix s{color:#a0463a}
+.tagok{font-size:12px;font-weight:700;color:var(--ok-ink);white-space:nowrap}
+.walk-none{margin:0}
+.walk-own .hint{font-size:12px;color:var(--faint);margin:0 0 6px}
+.own-row{display:flex;gap:8px}
+.own-row input{flex:1;min-width:0;font:13px ui-monospace,Menlo,monospace;padding:8px;border:1px solid var(--btn-line);border-radius:6px}
+.walk-nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;padding-top:12px;border-top:1px solid var(--line-2)}
+.walk-nav .btn:nth-child(2){margin-left:auto;background:var(--green);border-color:var(--green);color:#fff}
+.walk-end{padding:40px;max-width:560px;margin:auto;text-align:center}
+.walk-end h2{font-family:Georgia,serif;font-weight:400;font-size:30px}
+.walk-end .row{display:flex;gap:10px;justify-content:center;margin-top:20px;flex-wrap:wrap}
+.grid td.focus{outline:3px solid var(--green);outline-offset:-3px;animation:pulse 1.4s ease-in-out 2}
+.grid tr.focusrow td,.grid tr.focusrow th{background:#fff1c9}
+@keyframes pulse{50%{outline-color:#f0b429}}
+@media (max-width:900px){.walk-body{grid-template-columns:1fr;grid-template-rows:45% 55%}.walk-left{padding:10px}.walk-side{border-left:0;border-top:1px solid var(--line)}}
+
 /* your own edits */
 .issue .side{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
 .editor{margin-top:12px;padding:14px;border:1px solid var(--line);border-radius:8px;background:#f8fbf9}

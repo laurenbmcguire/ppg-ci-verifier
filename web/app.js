@@ -353,11 +353,9 @@
       state.grid = g; state.gridSheet = g.sheet; drawGrid(true);
     } catch (e) { block.replaceChildren(h('header', {}, h('h2', {}, 'Spreadsheet')), h('p', {class: 'note'}, e.message)); }
   }
-  function drawGrid(scroll) {
-    const block = $('sheet-block'), g = state.grid; if (!block || !g) return;
-    const m = marks(), sheet = g.sheet, formulas = new Set(g.formulas || []);
-    const onlyChanged = !!state.gridOnlyMarked;
-    // merged cells: top-left gets the span, the rest are skipped
+  // One sheet as an HTML table. opts: onlyRows (Set of row numbers), selected (cell), focus {cell, row}
+  function buildGrid(g, m, opts = {}) {
+    const sheet = g.sheet, formulas = new Set(g.formulas || []), onlyRows = opts.onlyRows;
     const span = {}, covered = new Set();
     for (const ref of g.merges || []) {
       const [a, b] = ref.split(':').map(splitCell); if (!a || !b) continue;
@@ -365,63 +363,183 @@
       for (let r = a[1]; r <= b[1]; r++) for (let c = a[0]; c <= b[0]; c++) if (r !== a[1] || c !== a[0]) covered.add(`${c},${r}`);
     }
     const hiddenRows = new Set(g.hidden_rows || []);
-    const markedRows = new Set();
-    for (const k of Object.keys(m.cells)) if (k.startsWith(sheet + '!')) markedRows.add(splitCell(k.slice(sheet.length + 1))[1]);
-    for (const k of Object.keys(m.rows)) if (k.startsWith(sheet + '!')) markedRows.add(Number(k.slice(sheet.length + 1)));
     let total = 44;
     const colgroup = h('colgroup', {}, h('col', {class: 'rn'}), Array.from({length: g.width}, (_, c) => {
       const w = g.widths?.[c], px = w === 0 ? 0 : w ? Math.max(24, Math.round(w * 7 + 10)) : 104;
       const col = h('col', {}); col.style.width = px + 'px'; total += px; return col; }));
     const thead = h('thead', {}, h('tr', {}, h('th', {class: 'corner'}), Array.from({length: g.width}, (_, c) => h('th', {}, colName(c)))));
     const tbody = h('tbody', {});
-    let first = null;
+    let first = null, focusEl = null;
+    const focusCell = opts.focus?.cell ? String(opts.focus.cell).toUpperCase() : null, focusRow = opts.focus?.row || (focusCell ? splitCell(focusCell)?.[1] : null);
     for (let r = 1; r <= g.height; r++) {
-      if (onlyChanged && !markedRows.has(r)) continue;
+      if (onlyRows && !onlyRows.has(r)) continue;
       const rowIssues = m.rows[`${sheet}!${r}`];
-      const tr = h('tr', {class: (rowIssues ? 'rowflag ' + rowIssues[0].severity : '') + (hiddenRows.has(r) ? ' hiddenrow' : '')},
+      const isFocusRow = !focusCell && focusRow === r;
+      const tr = h('tr', {class: [rowIssues ? 'rowflag ' + rowIssues[0].severity : '', hiddenRows.has(r) ? 'hiddenrow' : '', isFocusRow ? 'focusrow' : ''].filter(Boolean).join(' ') || null},
         h('th', {title: rowIssues ? rowIssues.map(i => i.text).join('\n') : null}, String(r)));
+      if (isFocusRow) focusEl = tr;
       for (let c = 0; c < g.width; c++) {
-        if (!onlyChanged && covered.has(`${c},${r}`)) continue;
+        if (!onlyRows && covered.has(`${c},${r}`)) continue;
         const addr = colName(c) + r, list = m.cells[`${sheet}!${addr}`] || [];
         const value = g.rows[r - 1]?.[c] ?? '';
         const ready = list.find(x => x.kind === 'ready'), fix = list.find(x => x.kind === 'fix'), issue = list.find(x => x.kind === 'issue');
-        const cls = [formulas.has(addr) ? 'fx' : '', issue ? 'iss ' + issue.item.severity : '', fix ? 'fixme' : '', ready ? 'ready' : '', state.gridCell === addr ? 'sel' : '',
-          /^-?[\d,.]+%?$/.test(value) ? 'num' : ''].filter(Boolean).join(' ');
+        const cls = [formulas.has(addr) ? 'fx' : '', issue ? 'iss ' + issue.item.severity : '', fix ? 'fixme' : '', ready ? 'ready' : '',
+          opts.selected === addr ? 'sel' : '', focusCell === addr ? 'focus' : '', /^-?[\d,.]+%?$/.test(value) ? 'num' : ''].filter(Boolean).join(' ');
         const change = ready || fix;
         const td = h('td', {class: cls || null, 'data-cell': addr, title: [addr, ...list.map(x => x.kind === 'issue' ? x.item.text : `${x.item.source}: ${x.item.before || '(blank)'} → ${x.item.after || '(blank)'}`)].join('\n')},
           change ? [h('s', {}, change.item.before || ''), ' ', h('b', {}, change.item.after === '' ? '(blank)' : change.item.after)] : value);
-        const sp = !onlyChanged && span[`${c},${r}`]; if (sp) { if (sp[0] > 1) td.colSpan = sp[0]; if (sp[1] > 1) td.rowSpan = sp[1]; }
+        const sp = !onlyRows && span[`${c},${r}`]; if (sp) { if (sp[0] > 1) td.colSpan = sp[0]; if (sp[1] > 1) td.rowSpan = sp[1]; }
         if (list.length && !first) first = td;
+        if (focusCell === addr) focusEl = td;
         tr.append(td);
       }
       tbody.append(tr);
     }
+    const table = h('table', {class: 'grid'}, colgroup, thead, tbody);
+    table.style.width = total + 'px';
+    return {table, first, focusEl};
+  }
+  // Scroll a grid's box so an element is in view (centered when it has to move).
+  function reveal(scroller, el, center) {
+    scroller.scrollTop = 0; scroller.scrollLeft = 0;
+    if (!el) return;
+    const box = scroller.getBoundingClientRect(), r = el.getBoundingClientRect();
+    if (center || r.bottom > box.bottom - 10) scroller.scrollTop = Math.max(0, r.top - box.top - (center ? box.height / 2 - r.height / 2 : 80));
+    if (r.right > box.right - 10 || (center && r.left - box.left > box.width / 2)) scroller.scrollLeft = Math.max(0, r.left - box.left - (center ? box.width / 2 - Math.min(r.width, box.width / 2) / 2 : 120));
+  }
+  function drawGrid(scroll) {
+    const block = $('sheet-block'), g = state.grid; if (!block || !g) return;
+    const m = marks(), sheet = g.sheet;
+    const onlyChanged = !!state.gridOnlyMarked;
+    const markedRows = new Set();
+    for (const k of Object.keys(m.cells)) if (k.startsWith(sheet + '!')) markedRows.add(splitCell(k.slice(sheet.length + 1))[1]);
+    for (const k of Object.keys(m.rows)) if (k.startsWith(sheet + '!')) markedRows.add(Number(k.slice(sheet.length + 1)));
+    const {table, first} = buildGrid(g, m, {onlyRows: onlyChanged ? markedRows : null, selected: state.gridCell});
     const counts = {flag: 0, fix: 0, ready: 0};
     for (const [k, list] of Object.entries(m.cells)) if (k.startsWith(sheet + '!')) for (const x of list) counts[x.kind === 'issue' ? 'flag' : x.kind]++;
     const tabs = h('div', {class: 'tabs', role: 'tablist'}, (g.sheets || []).map(n => h('button', {type: 'button', role: 'tab', class: n === sheet ? 'on' : '', 'aria-selected': String(n === sheet),
       onclick: () => { state.gridCell = null; loadGrid(n); }}, n, m.perSheet[n] ? h('i', {}, String(m.perSheet[n])) : null)));
-    const table = h('table', {class: 'grid'}, colgroup, thead, tbody);
-    table.style.width = total + 'px';
     table.addEventListener('click', e => { const td = e.target.closest('td[data-cell]'); if (td) { state.gridCell = td.dataset.cell; drawGrid(); } });
     const scroller = h('div', {class: 'gridwrap'}, table);
+    const issueCount = (state.report.review.issues || []).filter(i => i.severity !== 'info').length;
     block.replaceChildren(
       h('header', {}, h('h2', {}, 'Spreadsheet'),
         h('p', {}, 'The file as it is now. Click any cell to see what is wrong with it or to change it.'),
-        h('div', {class: 'right'}, h('label', {class: 'only'}, h('input', {type: 'checkbox', checked: onlyChanged, onchange: e => { state.gridOnlyMarked = e.target.checked; drawGrid(true); }}), 'Only rows with something to fix'))),
+        h('div', {class: 'right'},
+          issueCount ? h('button', {type: 'button', class: 'btn primary small', onclick: () => openWalk(0)}, `Go through the ${issueCount} issue${issueCount === 1 ? '' : 's'}`) : null,
+          h('label', {class: 'only'}, h('input', {type: 'checkbox', checked: onlyChanged, onchange: e => { state.gridOnlyMarked = e.target.checked; drawGrid(true); }}), 'Only rows with something to fix'))),
       h('div', {class: 'legend'},
         h('span', {class: 'k iss high'}, `Flagged (${counts.flag + Object.keys(m.rows).filter(k => k.startsWith(sheet + '!')).length})`),
         h('span', {class: 'k fixme'}, `Suggested fix (${counts.fix})`),
         h('span', {class: 'k ready'}, `Will change in the download (${counts.ready})`),
         h('span', {class: 'k fx'}, 'Formula')),
       ...[tabs, scroller, cellPanel(m), g.truncated ? h('p', {class: 'note'}, 'Large sheet: only the first rows and columns are shown.') : null].filter(Boolean));
-    if (scroll) requestAnimationFrame(() => {
-      scroller.scrollTop = 0; scroller.scrollLeft = 0;
-      if (!first) return;
-      const box = scroller.getBoundingClientRect(), cell = first.getBoundingClientRect();
-      if (cell.bottom > box.bottom - 10) scroller.scrollTop = cell.top - box.top - 80;
-      if (cell.right > box.right - 10) scroller.scrollLeft = cell.left - box.left - 120;
-    });
+    if (scroll) requestAnimationFrame(() => reveal(scroller, first, false));
   }
+
+  // ---------------- guided review: one issue at a time, shown in the sheet
+  const gridCache = {};
+  async function sheetFor(name) {
+    const hash = state.report.file_hash, key = hash + '|' + (name || '');
+    if (gridCache[key]) return gridCache[key];
+    if (state.grid && state.grid.sheet === name) return (gridCache[key] = state.grid);
+    return (gridCache[key] = await api('/api/spreadsheets/sheet', {file_hash: hash, sheet: name}));
+  }
+  const walkIssues = () => (state.report.review.issues || []).filter(i => i.severity !== 'info');
+  function fixesFor(issue) {
+    const dec = store.get(decisionsKey(), {});
+    const rowNo = Number(issue.row) || splitCell(issue.cell)?.[1];
+    return (state.fixes || []).filter(f => f.sheet === (issue.sheet || f.sheet) && (issue.cell ? f.cell === String(issue.cell).toUpperCase() : rowNo && splitCell(f.cell)?.[1] === rowNo))
+      .map(f => ({...f, after: dec[f.id]?.after ?? f.after, state: dec[f.id]?.state}));
+  }
+  async function openWalk(index) {
+    const issues = walkIssues(); if (!issues.length) return;
+    let dlg = $('walk-dialog');
+    if (!dlg) { dlg = h('dialog', {id: 'walk-dialog', class: 'walk', 'aria-labelledby': 'walk-title'}); document.body.append(dlg);
+      dlg.addEventListener('close', () => { drawFixes(); const old = $('issues'); if (old && state.report) old.replaceWith(issuesBlock(state.report.review)); }); }
+    state.walk = {index: Math.max(0, Math.min(index, issues.length - 1)), target: null};
+    if (!dlg.open) dlg.showModal();
+    await drawWalk();
+  }
+  async function drawWalk() {
+    const dlg = $('walk-dialog'); if (!dlg) return;
+    const issues = walkIssues(), w = state.walk, issue = issues[w.index];
+    const reviewedKey = 'rd-reviewed:' + state.report.file_hash, done = new Set(store.get(reviewedKey, []));
+    const markDone = () => { done.add(issue.key); store.set(reviewedKey, [...done]); };
+    const next = () => { markDone(); if (w.index < issues.length - 1) { w.index++; w.target = null; drawWalk(); } else finish(); };
+    const finish = () => {
+      const ready = (state.fixes || []).filter(f => store.get(decisionsKey(), {})[f.id]?.state === 'accepted').length + Object.keys(store.get(editsKey(), {})).length;
+      dlg.replaceChildren(h('div', {class: 'walk-end'},
+        h('h2', {id: 'walk-title'}, 'All issues gone through'),
+        h('p', {}, ready ? `${ready} change${ready === 1 ? '' : 's'} ready. Download the fixed version to get a corrected copy; it is checked again automatically.` : 'No changes were chosen.'),
+        h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => { w.index = 0; drawWalk(); }}, 'Start over'),
+          h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Close'),
+          ready ? h('button', {type: 'button', class: 'btn primary', onclick: () => { dlg.close(); const b = document.querySelector('.fixbar .btn:last-child'); b?.scrollIntoView({behavior: 'smooth', block: 'center'}); b?.click(); }}, `Download fixed version (${ready})`) : null)));
+    };
+    const sheetName = issue.sheet || state.grid?.sheet || (state.report.sheets || [])[0]?.name;
+    const head = h('div', {class: 'walk-top'},
+      h('b', {id: 'walk-title'}, `Issue ${w.index + 1} of ${issues.length}`),
+      h('div', {class: 'walk-bar'}, h('i', {})), h('button', {type: 'button', class: 'btn ghost small', onclick: () => dlg.close()}, 'Close'));
+    head.querySelector('.walk-bar i').style.width = Math.round((w.index + 1) / issues.length * 100) + '%';
+    const gridBox = h('div', {class: 'walk-grid gridwrap'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Opening the sheet…'));
+    const side = h('div', {class: 'walk-side'});
+    dlg.replaceChildren(head, h('div', {class: 'walk-body'}, h('div', {class: 'walk-left'}, h('div', {class: 'walk-where'}, `${sheetName || 'Sheet'}${issue.cell ? ' · cell ' + issue.cell : issue.row ? ' · row ' + issue.row : ' · whole report'}`), gridBox), side));
+    // issue card
+    const fixes = fixesFor(issue);
+    const target = w.target || (issue.cell ? String(issue.cell).toUpperCase() : fixes[0]?.cell || null);
+    side.append(h('div', {class: 'walk-issue ' + issue.severity},
+      h('span', {class: 'chip-sev'}, {high: 'Must fix', medium: 'Check', low: 'Minor'}[issue.severity] || 'Check'), h('span', {class: 'src'}, issue.source),
+      h('p', {class: 'text'}, issue.text), issue.why ? h('p', {class: 'hint'}, 'Why: ' + issue.why) : null, issue.check ? h('p', {class: 'hint'}, 'Check: ' + issue.check) : null,
+      done.has(issue.key) ? h('p', {class: 'hint done'}, '✓ Reviewed') : null));
+    // suggested fixes
+    const applyFix = f => { const d = store.get(decisionsKey(), {}); d[f.id] = {state: 'accepted', after: f.after}; store.set(decisionsKey(), d); toast(`${f.sheet} ${f.cell} will change to "${f.after || '(blank)'}".`); next(); };
+    if (fixes.length) side.append(h('div', {class: 'walk-fix'}, h('h3', {}, fixes.length > 1 ? 'Suggested fixes' : 'Suggested fix'),
+      fixes.map(f => h('div', {class: 'wf' + (f.state === 'accepted' ? ' on' : '')},
+        h('div', {}, h('small', {}, `${f.source} · ${f.cell}`), h('div', {class: 'change'}, h('s', {}, f.before || '(blank)'), ' → ', h('b', {}, f.after || '(blank)')), f.reason ? h('small', {}, f.reason) : null),
+        f.state === 'accepted' ? h('span', {class: 'tagok'}, '✓ Will apply') : h('button', {type: 'button', class: 'btn primary small', onclick: () => applyFix(f)}, 'Apply this fix')))));
+    else side.append(h('p', {class: 'note walk-none'}, state.aiFixing ? 'Claude is still working out fixes…' : issue.source === 'Usual day' ? 'This compares the whole day with usual days, so there is no single cell to change. Check the scans, then mark it reviewed.' : 'No automatic fix for this one. Enter the right value yourself below, or mark it reviewed if nothing needs to change.'));
+    // own value
+    const own = h('div', {class: 'walk-own'});
+    side.append(own);
+    // nav
+    side.append(h('div', {class: 'walk-nav'},
+      h('button', {type: 'button', class: 'btn small', disabled: w.index === 0, onclick: () => { w.index--; w.target = null; drawWalk(); }}, '‹ Back'),
+      h('button', {type: 'button', class: 'btn small', onclick: next}, done.has(issue.key) ? 'Next ›' : 'No change needed ›'),
+      h('button', {type: 'button', class: 'btn ghost small', onclick: () => { if (w.index < issues.length - 1) { w.index++; w.target = null; drawWalk(); } else finish(); }}, 'Skip for now')));
+    // sheet
+    let g;
+    try { g = await sheetFor(sheetName); } catch (e) { gridBox.replaceChildren(h('p', {class: 'note'}, e.message)); }
+    if (state.walk !== w || !g) return;
+    const m = marks();
+    const focus = target ? {cell: target} : issue.row ? {row: Number(issue.row)} : null;
+    const {table, focusEl} = buildGrid(g, m, {focus, selected: w.target});
+    table.addEventListener('click', e => { const td = e.target.closest('td[data-cell]'); if (td) { w.target = td.dataset.cell; drawWalk(); } });
+    gridBox.replaceChildren(table);
+    requestAnimationFrame(() => reveal(gridBox, focusEl, true));
+    // own value box for the target cell
+    if (target) {
+      const [c, r] = splitCell(target), shown = g.rows[r - 1]?.[c] ?? '', formula = (g.formulas || []).includes(target);
+      const edits = store.get(editsKey(), {}), mine = edits[editId(g.sheet, target)];
+      if (formula) own.append(h('h3', {}, `Your own fix · ${target}`), h('p', {class: 'note'}, `${target} is a formula (shows ${shown || 'blank'}). Click one of the cells it uses in the sheet to change that instead.`));
+      else {
+        const input = h('input', {value: mine ? mine.after : shown, 'aria-label': `Your value for ${target}`});
+        const apply = async () => {
+          let before = shown;
+          try { const d = await api('/api/spreadsheets/cells', {file_hash: state.report.file_hash, sheet: g.sheet, row: r}); before = (d.cells.find(x => x.cell === target) || {}).before ?? shown; } catch (e) { /* use shown */ }
+          if (input.value === before) { toast('That is the value already in the file.'); return; }
+          const all = store.get(editsKey(), {}); all[editId(g.sheet, target)] = {sheet: g.sheet, cell: target, before, after: input.value, header: ''}; store.set(editsKey(), all);
+          // your value replaces any suggested fix for the same cell
+          toast(`${target} will change to "${input.value || '(blank)'}".`); next();
+        };
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') apply(); });
+        own.append(h('h3', {}, fixes.length ? 'Or apply it yourself' : 'Apply it yourself'),
+          h('p', {class: 'hint'}, `Cell ${target}` + (w.target ? '' : ' · click another cell in the sheet to change that one instead')),
+          h('div', {class: 'own-row'}, input, h('button', {type: 'button', class: 'btn small', onclick: apply}, mine ? 'Update my value' : 'Apply my value')));
+        if (!fixes.length) input.focus();
+      }
+    } else own.append(h('h3', {}, 'Apply it yourself'), h('p', {class: 'hint'}, 'Click the cell you want to change in the sheet.'));
+  }
+
   function cellPanel(m) {
     const g = state.grid, addr = state.gridCell; if (!addr) return null;
     const [c, r] = splitCell(addr), sheet = g.sheet;
@@ -469,7 +587,8 @@
       const shown = issues.filter(i => state.issueSource === 'All' || i.source === state.issueSource);
       const left = issues.filter(i => !done.has(i.key)).length;
       block.replaceChildren(h('header', {}, h('h2', {}, 'Issues'),
-        h('p', {}, issues.length ? `${left} of ${issues.length} not yet reviewed` : 'Nothing flagged by the checks, SharePoint, the usual-day comparison or AI.')));
+        h('p', {}, issues.length ? `${left} of ${issues.length} not yet reviewed` : 'Nothing flagged by the checks, SharePoint, the usual-day comparison or AI.'),
+        issues.length ? h('div', {class: 'right'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => openWalk(Math.max(0, issues.findIndex(i => !done.has(i.key))))}, left < issues.length && left ? 'Continue reviewing' : 'Go through them one by one')) : null));
       if (!issues.length) { if (info.length) block.append(infoNote(info)); return; }
       if (sources.length > 2) block.append(h('div', {class: 'filters', role: 'group', 'aria-label': 'Filter issues'}, sources.map(s =>
         h('button', {type: 'button', class: 'chip' + (state.issueSource === s ? ' on' : ''), onclick: () => { state.issueSource = s; state.showAll = false; draw(); }},
@@ -487,7 +606,7 @@
           body.append(await rowEditor(i.sheet || (state.report.sheets || [])[0]?.name, rowNo, i.cell ? `flagged cell ${i.cell} is outlined` : null, i.cell)); }}, 'Fix this') : null;
         panel.append(h('div', {class: 'issue' + (done.has(i.key) ? ' done' : '')},
           h('span', {class: 'sev ' + i.severity, title: i.severity}), body,
-          h('div', {class: 'side'}, fixBtn, h('label', {}, box, 'Reviewed'))));
+          h('div', {class: 'side'}, h('button', {type: 'button', class: 'btn small', onclick: () => openWalk(issues.indexOf(i))}, 'Show in sheet'), fixBtn, h('label', {}, box, 'Reviewed'))));
       }
       if (shown.length > limit) panel.append(h('button', {type: 'button', class: 'more', onclick: () => { state.showAll = true; draw(); }}, `Show all ${shown.length}`));
       block.append(panel);
@@ -610,8 +729,11 @@
       h('p', {class: 'note'}, `${rv.job || data.filename}, ${shortDay(rv.day)}. ${fmt(rv.scans)} rows, ${fmt(rv.inspected)} inspected, ${fmt(rv.rejected)} rejected.`),
       top.length ? h('ul', {}, top.map(i => h('li', {}, h('span', {class: 'sev ' + i.severity}), h('span', {}, i.text)))) : null),
       h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dialog.close()}, 'Close'),
-        h('button', {type: 'button', class: 'btn primary', onclick: () => { dialog.close(); $('fixes-block')?.scrollIntoView({behavior: 'smooth'}); }},
-          rv.status === 'clear' ? 'Open report' : 'Review and fix')));
+        h('button', {type: 'button', class: 'btn primary', onclick: async () => { dialog.close();
+          if (rv.status === 'clear') return;
+          for (let i = 0; i < 40 && !(state.report?.file_hash === hash && state.fixes); i++) await new Promise(r => setTimeout(r, 250));
+          if (state.report?.file_hash === hash) openWalk(0); }},
+          rv.status === 'clear' ? 'Open report' : 'Go through the issues')));
     dialog.showModal();
   }
   $('result-dialog').addEventListener('click', e => { if (e.target === $('result-dialog')) $('result-dialog').close(); });
