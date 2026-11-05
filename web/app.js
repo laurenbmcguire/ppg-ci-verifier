@@ -169,9 +169,10 @@
       state.aiFix = data.ai || {status: 'not_run'};
     } catch (e) { state.fixes = []; state.aiFix = {status: 'not_run'}; }
     drawFixes();
-    // first time a report with issues is opened, let Claude draft the fixes
+    // first time a report with issues is opened, Claude drafts the fixes, then offers them in the chat
     const open = (state.report?.review?.issues || []).filter(i => i.severity !== 'info').length;
-    if (state.aiOn && open && state.aiFix.status === 'not_run' && !state.aiFixTried?.has(hash)) runAiFixes(true);
+    if (state.aiOn && open && state.aiFix.status === 'not_run' && !state.aiFixTried?.has(hash)) { maybeBrief(hash, true); runAiFixes(true); }
+    else maybeBrief(hash, false);
   }
   async function runAiFixes(auto) {
     const hash = state.report.file_hash;
@@ -184,16 +185,17 @@
       if (state.selected !== hash) return;
       const data = await api('/api/spreadsheets/fixes', {file_hash: hash});
       state.fixes = data.proposals || []; state.aiFix = data.ai || {};
-      // AI fixes start accepted; reject any you disagree with before downloading
       const dec = store.get(decisionsKey(), {});
+      if (auto) { maybeBrief(hash, false); return; }  // the chat offers them
+      // asked for by button: accept them; reject any you disagree with before downloading
       for (const f of state.fixes) if ((f.source === 'AI fix' || f.confidence === 'high') && !dec[f.id]) dec[f.id] = {state: 'accepted', after: f.after};
       store.set(decisionsKey(), dec);
       const n = (out.fixes || []).length, k = (out.skipped || []).length;
       const ready = state.fixes.filter(f => dec[f.id]?.state === 'accepted').length;
       toast(n || ready ? `Claude fixed ${n} cell${n === 1 ? '' : 's'}${k ? ` and left ${k} issue${k === 1 ? '' : 's'} for a person` : ''}. ${ready} fix${ready === 1 ? ' is' : 'es are'} accepted; review them, then download.`
         : `Claude found nothing it could fix safely${k ? ` (${k} issue${k === 1 ? '' : 's'} need a person)` : ''}.`);
-    } catch (e) { if (!auto || state.selected === hash) toast(e.message, true); }
-    finally { state.aiFixing = false; if (state.selected === hash) drawFixes(); }
+    } catch (e) { if (!auto) toast(e.message, true); else if (state.selected === hash) maybeBrief(hash, false); }
+    finally { state.aiFixing = false; if (state.selected === hash) { drawFixes(); maybeBrief(hash, false); } }
   }
   const decisionsKey = () => 'rd-fixes:' + state.report.file_hash;
   const editsKey = () => 'rd-edits:' + state.report.file_hash;
@@ -493,6 +495,50 @@
     msg.applied = false;
     store.set(editsKey(), edits); store.set(decisionsKey(), dec);
   }
+  // Claude's opening message: what it found, what it can fix, and an offer to do all the fixes
+  const pendingFixes = () => { const c = readyChanges(); return (state.fixes || []).filter(f => !c.edits[editId(f.sheet, f.cell)] && !c.dec[f.id]?.state); };
+  function maybeBrief(hash, working) {
+    if (!state.report || state.report.file_hash !== hash) return;
+    const issues = (state.report.review.issues || []).filter(i => i.severity !== 'info');
+    if (!issues.length) return;
+    const log = store.get(chatKey(), []);
+    if (log.some(m => m.kind === 'brief')) { if (!working) drawChat(); return; }
+    if (working || state.aiFixing) { state.briefWaiting = hash; autoOpenChat(); return; }
+    state.briefWaiting = null;
+    const rv = state.report.review, ai = state.aiFix || {}, fixes = pendingFixes();
+    const high = issues.filter(i => i.severity === 'high').length, rest = issues.length - high;
+    const fixedCells = new Set(fixes.map(f => `${f.sheet}!${f.cell}`));
+    const people = issues.filter(i => !(i.cell && fixedCells.has(`${i.sheet}!${String(i.cell).toUpperCase()}`)) && !fixes.some(f => f.sheet === i.sheet && i.row && splitCell(f.cell)?.[1] === Number(i.row)));
+    const lines = [];
+    if (rv.ai?.summary) lines.push(rv.ai.summary);
+    lines.push(`I found ${issues.length} issue${issues.length === 1 ? '' : 's'}` + (high ? `: ${high} must be fixed` : '') + (high && rest ? `, ${rest} to check` : !high ? '' : '') + '.');
+    lines.push(fixes.length ? `I can fix ${fixes.length} of them for you (listed below).` : 'None of them can be fixed safely from the file alone.');
+    if (people.length) lines.push(`${people.length} need a person to decide` + (ai.skipped?.length ? ', for example: ' + ai.skipped.slice(0, 2).map(x => x.issue).join('; ') : '') + '.');
+    lines.push(fixes.length ? 'Want me to do all the fixes? Or we can go through them one at a time, or you can tell me what to change.' : 'We can go through them one at a time in the sheet, or tell me what to change.');
+    log.push({role: 'assistant', kind: 'brief', content: lines.join('\n\n'), offer: fixes.map(f => f.id)});
+    store.set(chatKey(), log);
+    autoOpenChat(); drawChat();
+  }
+  function autoOpenChat() {
+    const hash = state.report.file_hash, key = 'rd-chat-opened:' + hash;
+    if (store.get(key, false) || $('chat')?.hidden === false) return;
+    const go = () => { if (state.report?.file_hash === hash) { store.set(key, true); openChat(); } };
+    const dlg = $('result-dialog');
+    if (dlg?.open) dlg.addEventListener('close', go, {once: true}); else go();
+  }
+  function doFixes(msg, ids) {
+    const dec = store.get(decisionsKey(), {}), byId = Object.fromEntries((state.fixes || []).map(f => [f.id, f]));
+    msg.done = [];
+    for (const id of ids) if (byId[id] && !dec[id]?.state) { dec[id] = {state: 'accepted', after: byId[id].after}; msg.done.push(id); }
+    store.set(decisionsKey(), dec);
+    return msg.done.length;
+  }
+  function undoFixes(msg) {
+    const dec = store.get(decisionsKey(), {});
+    for (const id of msg.done || []) if (dec[id]?.state === 'accepted') delete dec[id];
+    msg.done = []; store.set(decisionsKey(), dec);
+  }
+
   function openChat() {
     let panel = $('chat');
     if (!panel) {
@@ -508,12 +554,28 @@
     const log = store.get(chatKey(), []);
     const save = () => store.set(chatKey(), log);
     const list = h('div', {class: 'chat-log', 'aria-live': 'polite'});
-    if (!log.length) list.append(h('div', {class: 'chat-hello'},
+    if (!log.length && state.briefWaiting !== state.report.file_hash) list.append(h('div', {class: 'chat-hello'},
       h('p', {}, 'Tell me what to change in this report, or ask about anything in it. I make the changes in a corrected copy; nothing is final until you download it.'),
       h('div', {class: 'chat-ideas'}, ['Why is this report on hold?', 'Fix everything you safely can', 'Make the defect reason spellings match', 'Clear any duplicate rows']
         .map(t => h('button', {type: 'button', class: 'chip', onclick: () => send(t)}, t)))));
     for (const m of log) {
       if (m.role === 'user') { list.append(h('div', {class: 'msg me'}, m.content)); continue; }
+      if (m.kind === 'brief') {
+        const byId = Object.fromEntries((state.fixes || []).map(f => [f.id, f])), offer = (m.offer || []).map(id => byId[id]).filter(Boolean);
+        const done = (m.done || []).length;
+        list.append(h('div', {class: 'msg ai brief'}, h('div', {class: 'txt'}, m.content),
+          offer.length ? h('div', {class: 'chg'}, h('ul', {}, offer.slice(0, 40).map(f => h('li', {},
+            h('button', {type: 'button', class: 'cellref', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`), ' ', h('s', {}, f.before || '(blank)'), ' → ', h('b', {}, f.after || '(blank)'),
+            h('small', {}, f.reason || f.source))))) : null,
+          h('div', {class: 'offer'},
+            offer.length ? (done ? [h('span', {class: 'tagok'}, `✓ Did ${done} fix${done === 1 ? '' : 'es'}`), h('button', {type: 'button', class: 'btn small', onclick: () => { undoFixes(m); save(); drawFixes(); drawChat(); }}, 'Undo')]
+              : h('button', {type: 'button', class: 'btn primary small', onclick: () => {
+                  const n = doFixes(m, m.offer || []); log.push({role: 'assistant', content: n ? `Done. I queued ${n} fix${n === 1 ? '' : 'es'}; they're green in the sheet. Download when you're ready, or tell me anything else to change.` : 'Those fixes were already decided.'});
+                  save(); drawFixes(); drawChat(); if (offer[0]) showCell(offer[0].sheet, offer[0].cell, true); }}, `Do all ${offer.length} fix${offer.length === 1 ? '' : 'es'}`)) : null,
+            h('button', {type: 'button', class: 'btn small', onclick: () => openWalk(0)}, 'Go through them with me'),
+            offer.length && !done ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { closeChat(); $('fixes-block')?.scrollIntoView({behavior: 'smooth'}); }}, "I'll pick") : null)));
+        continue;
+      }
       const n = (m.changes || []).length, u = (m.undo || []).length;
       list.append(h('div', {class: 'msg ai' + (m.error ? ' err' : '')}, h('div', {class: 'txt'}, m.content),
         n || u ? h('div', {class: 'chg'},
@@ -524,6 +586,7 @@
           (m.dropped || []).length ? h('p', {class: 'skipnote'}, `Skipped ${m.dropped.length}: ` + m.dropped.slice(0, 4).map(d => `${d.cell} (${d.why})`).join(', ')) : null) : null));
     }
     if (state.chatBusy) list.append(h('div', {class: 'msg ai'}, h('span', {class: 'spin'}), ' Claude is reading the report…'));
+    else if (state.briefWaiting === state.report.file_hash && !log.some(m => m.kind === 'brief')) list.append(h('div', {class: 'msg ai'}, h('span', {class: 'spin'}), ' Claude is going through the report and working out fixes…'));
     const box = h('textarea', {rows: 2, placeholder: 'e.g. Change the auditor on every row to Robert Swanke', 'aria-label': 'Message to Claude'});
     box.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(box.value); } });
     const c = readyChanges();
@@ -534,7 +597,7 @@
       list,
       h('form', {class: 'chat-send', onsubmit: e => { e.preventDefault(); send(box.value); }}, box,
         h('button', {type: 'submit', class: 'btn primary', disabled: !!state.chatBusy}, 'Send')),
-      c.total ? h('div', {class: 'chat-dl'}, h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, `Download with ${c.total} change${c.total === 1 ? '' : 's'}`)) : null);
+      ...(c.total ? [h('div', {class: 'chat-dl'}, h('button', {type: 'button', class: 'btn primary dl-changes', onclick: downloadWithChanges}, `Download with ${c.total} change${c.total === 1 ? '' : 's'}`))] : []));
     requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
     async function send(text) {
       text = (text || '').trim(); if (!text || state.chatBusy) return;
@@ -542,7 +605,14 @@
       log.push({role: 'user', content: text}); save();
       state.chatBusy = true; drawChat();
       try {
-        const out = await api('/api/spreadsheets/chat', {file_hash: hash, messages: log.filter(m => !m.error).map(m => ({role: m.role, content: m.content})), queued: queuedList()});
+        const brief = [...log].reverse().find(m => m.kind === 'brief');
+        if (brief && !(brief.done || []).length && /^(yes|yep|yeah|sure|ok(ay)?|please|do (it|them|all|all (the|of the) fixes)|apply (them|all)|fix (them|all|everything))[.! ]*$/i.test(text)) {
+          const n = doFixes(brief, brief.offer || []);
+          log.push({role: 'assistant', content: n ? `Done. I queued ${n} fix${n === 1 ? '' : 'es'}; they're green in the sheet. Download when you're ready, or tell me anything else to change.` : 'There were no waiting fixes left to do.'});
+          save(); drawFixes(); return;
+        }
+        const suggested = pendingFixes().map(f => ({sheet: f.sheet, cell: f.cell, before: f.before, after: f.after, reason: f.reason, source: f.source}));
+        const out = await api('/api/spreadsheets/chat', {file_hash: hash, messages: log.filter(m => !m.error).map(m => ({role: m.role, content: m.content})), queued: queuedList(), suggested});
         if (state.report?.file_hash !== hash) return;
         const msg = {role: 'assistant', content: out.reply || 'Done.', changes: out.changes || [], undo: out.undo || [], dropped: out.dropped || []};
         if (msg.changes.length || msg.undo.length) applyChat(msg);

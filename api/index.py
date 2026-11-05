@@ -384,7 +384,8 @@ class handler(BaseHTTPRequestHandler):
                 from hosting.spreadsheet_inbox import chat_turn
                 with self.store().session() as directory:
                     item, data, issues = SpreadsheetInbox(directory).ai_fix_inputs(file_hash)
-                out = chat_turn(item, data, issues, [m for m in messages if isinstance(m, dict)], [q for q in queued if isinstance(q, dict)])
+                suggested = [x for x in (payload.get('suggested') or []) if isinstance(x, dict)] if isinstance(payload.get('suggested'), list) else []
+                out = chat_turn(item, data, issues, [m for m in messages if isinstance(m, dict)], [q for q in queued if isinstance(q, dict)], suggested=suggested)
                 if out.get('status') != 'done':
                     raise Conflict(out.get('message') or 'Claude could not answer.')
                 return self.send(200, encode_json(out))

@@ -298,9 +298,9 @@ def fix(item, raw, issues, sharepoint_csv=None, opener=None):
 # ---------------------------------------------------------------- chat
 CHAT_SYSTEM = """You are Claude, helping a PPG Quality (Preferred Precision Group) reviewer correct an end-of-shift inspection report before it goes to the customer. The customer is billed from this report, so be careful and precise.
 
-You can see the report's cells (address=value, by sheet and row; formulas are shown as "=formula → saved result"), the issues found so far, and the changes the reviewer already has queued for the corrected copy.
+You can see the report's cells (address=value, by sheet and row; formulas are shown as "=formula → saved result"), the issues found so far, the suggested fixes that are waiting for the reviewer's decision, and the changes the reviewer already has queued for the corrected copy.
 
-When the reviewer asks you to change something, work out the exact cells and put them in "changes". When they ask to undo or drop a queued change, list those cells in "undo". When they only ask a question, answer it and leave both lists empty.
+When the reviewer asks you to change something, work out the exact cells and put them in "changes". When they agree to some or all of the waiting suggested fixes ("yes", "do them all", "all except the comment one"), put exactly those fixes in "changes" with their before/after values. When they ask to undo or drop a queued change, list those cells in "undo". When they only ask a question, answer it and leave both lists empty.
 
 Rules:
 - Never change a formula cell; change the cells it uses, and say so.
@@ -335,7 +335,7 @@ CHAT_TOOL = {
 }
 
 
-def chat(item, raw, issues, messages, queued, opener=None):
+def chat(item, raw, issues, messages, queued, opener=None, suggested=()):
     """One chat turn. messages: [{role: user|assistant, content}], newest last. Returns {reply, changes, undo} (changes not yet validated)."""
     meta, _, sharepoint, text = _context(item, raw)
     model = os.environ.get('AI_CHAT_MODEL') or os.environ.get('AI_REVIEW_MODEL') or DEFAULT_MODEL
@@ -343,6 +343,7 @@ def chat(item, raw, issues, messages, queued, opener=None):
     context = ('<report_metadata>\n' + json.dumps(meta, default=str) + '\n</report_metadata>\n\n'
                '<issues>\n' + json.dumps(listed, default=str) + '\n</issues>\n\n'
                '<sharepoint_comparison>\n' + (json.dumps(sharepoint, default=str) if sharepoint else 'not compared') + '\n</sharepoint_comparison>\n\n'
+               '<suggested_fixes_waiting>\n' + json.dumps(list(suggested)[:200], default=str) + '\n</suggested_fixes_waiting>\n\n'
                '<queued_changes>\n' + json.dumps(queued[:200], default=str) + '\n</queued_changes>\n\n'
                '<report_cells>\n' + text + '\n</report_cells>')
     turns = []

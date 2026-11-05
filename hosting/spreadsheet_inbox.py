@@ -377,10 +377,10 @@ def validate_changes(item, raw, changes):
     return kept, dropped
 
 
-def chat_turn(item, raw, issues, messages, queued, opener=None):
+def chat_turn(item, raw, issues, messages, queued, opener=None, suggested=()):
     from hosting import ai_review
     try:
-        answer = ai_review.chat(item, raw, issues, messages, queued, opener=opener)
+        answer = ai_review.chat(item, raw, issues, messages, queued, opener=opener, suggested=suggested)
     except ai_review.AIReviewNotConfigured as exc:
         return dict(status='not_configured', message=str(exc))
     except ai_review.AIReviewError as exc:
