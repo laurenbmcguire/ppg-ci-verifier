@@ -81,3 +81,15 @@ class ListFallbackTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ListNameMatchTests(unittest.TestCase):
+    def test_job_number_first_or_last_matches(self):
+        from hosting.sharepoint import _list_match
+        self.assertEqual(_list_match('HANDS-HMMA-2219', 'Data #2219-HANDS-HMMA'), 2)
+        self.assertEqual(_list_match('HANDS-HMMA-2219', 'Data #HANDS-HMMA-2219'), 2)
+        self.assertEqual(_list_match('2230-OWENS-BASCO', 'Data #2230-OWENS-BASCO'), 2)
+        self.assertEqual(_list_match('HANDS-HMMA-2219', 'Data #2219 HMMA'), 1)
+        self.assertEqual(_list_match('HANDS-HMMA-2219', 'Data #2230-OWENS-BASCO'), 0)
+        self.assertEqual(_list_match('HANDS-HMMA-2219', 'Documents'), 0)
+        self.assertEqual(_list_match('HANDS-HMMA-2219', '2219 Site Pages'), 0)

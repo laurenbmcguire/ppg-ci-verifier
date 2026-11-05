@@ -9,6 +9,7 @@ Configuration (Vercel environment variables; the secret is stored as Sensitive a
 Path probed in each site's default document library:
   <folder>/<job>/<YYYY-MM-DD>/<job> <YYYY-MM-DD>.csv   (then .xlsx)
 """
+import re
 import json
 import os
 import time
@@ -118,8 +119,14 @@ def fetch_export(job, day, opener=None):
     found = list_day(job, day, opener)
     if found:
         return found
+    data = _list_items(job, opener)
+    if data:
+        days = sorted({d for d in (_item_day(it) for it in data[3]) if d}, reverse=True)
+        raise SharePointNotFound(f'Found the SharePoint list "{data[1].get("displayName")}" ({len(data[3])} rows), but none are dated {day}.'
+                                 + (f' Most recent days in the list: {", ".join(days[:5])}.' if days else ' Its rows have no dates.'))
     raise SharePointNotFound(f'No SharePoint data found for {job} on {day}: no daily export file, and no "Data #{job}" list with rows for that day.'
-                             + (f' Looked in {len(tried) // 2} site(s).' if tried else ' No client sites are configured.'))
+                             + (f' Looked in {len(tried) // 2} site(s).' if tried else ' No client sites are configured.')
+                             + (f' Data lists seen: {", ".join(sorted(set(_seen_lists))[:12])}.' if _seen_lists else ''))
 
 
 def recent_exports(job, before_day, limit=10, opener=None):
@@ -159,17 +166,42 @@ _SKIP_FIELDS = {'id', 'ContentType', 'Modified', 'Created', 'AuthorLookupId', 'E
                 'Edit', 'LinkTitleNoMenu', 'LinkTitle', 'ItemChildCount', 'FolderChildCount', '_ComplianceFlags', '_ComplianceTag',
                 '_ComplianceTagWrittenTime', '_ComplianceTagUserId', 'AppAuthorLookupId', 'AppEditorLookupId', '@odata.etag', 'DocIcon'}
 _list_cache = {}
+_seen_lists = []
 LIST_TTL = 120
 
 
+def _tokens(text):
+    return frozenset(t for t in re.split(r'[^a-z0-9]+', (text or '').lower()) if t and t != 'data')
+
+
+def _list_match(job, display):
+    """2 = same job written in any order ("Data #2219-HANDS-HMMA" for HANDS-HMMA-2219), 1 = same job number, 0 = no."""
+    name = (display or '').strip().lower()
+    if not name.startswith('data') and name != (job or '').lower():
+        return 0
+    want, have = _tokens(job), _tokens(display)
+    if want and want == have:
+        return 2
+    numbers = {t for t in want if t.isdigit() and len(t) >= 3}
+    return 1 if numbers and numbers & have else 0
+
+
 def _find_list(job, opener=None):
-    want = {f'data #{job}'.lower(), f'data#{job}'.lower(), f'data {job}'.lower(), job.lower()}
+    """The job's "Data #<job>" list. Field lists put the job number first (Data #2219-HANDS-HMMA) while reports
+    often put it last (HANDS-HMMA-2219), so match on the job's parts in any order, then on the job number alone."""
+    best = None
+    _seen_lists.clear()
     for name, site_id in _sites(opener):
         lists = _get(f'/sites/{site_id}/lists?$select=id,displayName,webUrl&$top=500', opener) or {}
         for lst in lists.get('value', []):
-            if (lst.get('displayName') or '').strip().lower() in want:
+            if (lst.get('displayName') or '').lower().startswith('data #'):
+                _seen_lists.append(lst['displayName'])
+            score = _list_match(job, lst.get('displayName'))
+            if score == 2:
                 return name, site_id, lst
-    return None
+            if score == 1 and best is None:
+                best = (name, site_id, lst)
+    return best
 
 
 def _list_items(job, opener=None):
