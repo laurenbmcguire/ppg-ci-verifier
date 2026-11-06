@@ -578,9 +578,58 @@
           const c = readyChanges(), msg = gw ? `Done! ${gw.label === 'Not sure' ? 'Every item you had to check' : `All the ${gw.label.toLowerCase()}`} handled.` : 'Done! That was the last open issue.';
           if (c.total) { toast(`${msg} Saving your ${c.total} change${c.total === 1 ? "" : "s"} into a new version and checking it again…`); applyFixes(c.accepted, c.dec, c.edits, {download: false}); }
           else toast(msg); } };
+      // every open item with exactly the same issue: handled together unless the person asks to go one by one
+      state.oneByOne ||= new Set(); state.bulkOff ||= new Set();
+      const openNow = list.filter(x => !done.has(x.key)), kinds = [...new Set(openNow.map(sameKey))];
+      const same = done.has(issue.key) || state.oneByOne.has(sameKey(issue)) ? [] : openNow.filter(x => sameKey(x) === sameKey(issue));
+      const advance = async (handled, verb, fine) => {   // after a batch: say what was done and go to the next kind
+        if (fine) await markFine(handled);
+        const dn = reviewedSet(); handled.forEach(x => dn.add(x.key)); store.set('rd-reviewed:' + state.report.file_hash, [...dn]);
+        updateFinish(); drawSteps(); drawCleanOffer(); drawSideTabs();
+        const rest = list.filter(x => !dn.has(x.key)), nx = rest[0];
+        if (nx) { const kindsLeft = new Set(rest.map(sameKey)).size, sameAgain = handled.length && sameKey(nx) === sameKey(handled[0]);
+          state.walkNote = `✓ ${handled.length === 1 ? '1 item' : `${handled.length} items`} ${verb}. ` + (sameAgain
+            ? `Now the rest of this same issue: ${rest.filter(x => sameKey(x) === sameKey(nx)).length} left that need a different answer.`
+            : `Now the next kind of issue (${kindsLeft} kind${kindsLeft === 1 ? '' : 's'} left, ${rest.length} item${rest.length === 1 ? '' : 's'} in all): ${issueType(nx)}.`);
+          state.groupWalk = null; focusIssue(list.indexOf(nx)); return; }
+        state.walkNote = null; state.issueNav = null; state.groupWalk = null; drawSide();
+        const c = readyChanges();
+        if (c.total) { toast(`Done! That was the last kind of issue. Saving your ${c.total} change${c.total === 1 ? '' : 's'} into a new version and checking it again…`); applyFixes(c.accepted, c.dec, c.edits, {download: false}); }
+        else toast('Done! That was the last kind of issue.');
+      };
+      let bulk = null;
+      if (same.length > 1) {
+        const ticked = same.filter(x => !state.bulkOff.has(x.key)), n = ticked.length;
+        const withFix = ticked.filter(x => fixesFor(x).some(f => f.state !== 'rejected')), dups = ticked.filter(x => isDupRow(x) && x.row && !fixesFor(x).length);
+        const acceptAll = () => {
+          const d = store.get(decisionsKey(), {});
+          for (const x of withFix) for (const f of fixesFor(x).filter(f => f.state !== 'rejected')) d[f.id] = {state: 'accepted', after: d[f.id]?.after ?? f.after};
+          store.set(decisionsKey(), d); drawFixes();
+          const handled = [...withFix, ...dups];
+          if (dups.length) removeRows(dups.map(x => [x.sheet, Number(x.row)]));
+          toast(`${handled.length} fixed at once. ${ticked.length - handled.length ? `${ticked.length - handled.length} had no suggested change, so they stay open.` : ''}`);
+          advance(handled, 'fixed');
+        };
+        const where = x => x.sheet ? `${x.sheet}${x.cell ? ' ' + x.cell : x.row ? ' row ' + x.row : ''}` : 'Whole report';
+        const fixText = x => { const f = fixesFor(x).find(f => f.state !== 'rejected'); return f ? ` → ${showWs(f.after)}` : ''; };
+        bulk = h('div', {class: 'bulkbox'},
+          h('p', {class: 'bulk-head'}, h('b', {}, `This exact issue is on ${same.length} rows.`), ` Kind ${kinds.indexOf(sameKey(issue)) + 1} of ${kinds.length}. Handle them all at once, or untick any that are different:`),
+          h('details', {}, h('summary', {}, `${n} of ${same.length} ticked: see them`),
+            h('ul', {class: 'bulk-list'}, same.map(x => h('li', {},
+              h('label', {}, h('input', {type: 'checkbox', checked: !state.bulkOff.has(x.key), onchange: e => { e.target.checked ? state.bulkOff.delete(x.key) : state.bulkOff.add(x.key); drawCellSlot(); }}),
+                ' ', h('span', {}, where(x), h('code', {}, fixText(x)))),
+              h('button', {type: 'button', class: 'linkish small', onclick: () => { state.walkNote = null; focusIssue(list.indexOf(x)); }}, 'show'))))),
+          h('div', {class: 'bulk-btns'},
+            withFix.length + dups.length ? h('button', {type: 'button', class: 'btn primary small', onclick: acceptAll},
+              withFix.length + dups.length === n ? `Make the suggested change on ${n === same.length ? 'all ' : ''}${n}` : `Fix the ${withFix.length + dups.length} that have a suggested change`) : null,
+            state.aiOn ? h('button', {type: 'button', class: 'btn small', onclick: e => { const k = ticked.map(x => x.key); aiFix(k, e.target); }}, `Let Claude fix ${n === same.length ? 'all ' : ''}${n}`) : null,
+            h('button', {type: 'button', class: 'btn small', onclick: () => { advance(ticked, 'marked fine as is', true); }}, `${n === same.length ? 'All' : 'The'} ${n} are fine as is`),
+            h('button', {type: 'button', class: 'linkish small', onclick: () => { state.oneByOne.add(sameKey(issue)); drawCellSlot(); }}, 'Go through them one by one')));
+      }
       kids.push(h('div', {class: 'issuenav sev-' + issue.severity},
         state.walkNote ? h('p', {class: 'walk-note', role: 'status'}, state.walkNote) : null,
-        h('div', {class: 'in-top'}, h('span', {class: 'sev ' + issue.severity}), h('b', {}, gw ? `${pos + 1} of ${nav.length} in ${gw.label}` : `Now fixing item ${pos + 1} of ${nav.length}`), gw ? null : h('span', {class: 'in-type'}, issueType(issue)),
+        bulk,
+        h('div', {class: 'in-top'}, h('span', {class: 'sev ' + issue.severity}), h('b', {}, bulk ? `For example, ${issue.where ? issue.where.replace(/^.*·\s*/, '') : 'this one'}:` : gw ? `${pos + 1} of ${nav.length} in ${gw.label}` : `Now fixing item ${pos + 1} of ${nav.length}`), gw ? null : h('span', {class: 'in-type'}, issueType(issue)),
           h('button', {type: 'button', class: 'btn ghost small', onclick: () => { state.issueNav = null; state.groupWalk = null; state.walkNote = null; state.gridCell = null; drawGrid(); drawSide(); drawCleanOffer(); }}, 'Close')),
         issue.where ? h('p', {class: 'in-where'}, `Where: ${issue.where}`) : null,
         h('p', {class: 'in-text'}, issue.text),
@@ -788,10 +837,11 @@
     const walkOpen = open.filter(i => !dupIssues.includes(i) || skipped.includes('sure'));
     if (walkOpen.length) {
       const first = walkOpen[0], list = walkIssues(), cur = walking ? list[state.issueNav] : null;
-      const start = () => { state.groupWalk = null; state.walkNote = `Starting with item 1 of ${walkOpen.length}.`; focusIssue(list.indexOf(cur && walkOpen.includes(cur) ? cur : first)); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); };
-      steps.push({id: 'walk', title: `Go through ${plural(walkOpen.length, 'thing')} that need${walkOpen.length === 1 ? 's' : ''} you, one at a time`,
+      const start = () => { state.groupWalk = null; state.walkNote = new Set(walkOpen.map(sameKey)).size < walkOpen.length ? `Starting with kind 1 of ${new Set(walkOpen.map(sameKey)).size}.` : `Starting with item 1 of ${walkOpen.length}.`; focusIssue(list.indexOf(cur && walkOpen.includes(cur) ? cur : first)); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); };
+      const nKinds = new Set(walkOpen.map(sameKey)).size;
+      steps.push({id: 'walk', title: nKinds < walkOpen.length ? `Go through ${plural(walkOpen.length, 'item')}: only ${plural(nKinds, 'kind')} of issue` : `Go through ${plural(walkOpen.length, 'thing')} that need${walkOpen.length === 1 ? 's' : ''} you, one at a time`,
         say: walking ? `You're on item ${walkOpen.indexOf(cur) + 1 || 1} of ${walkOpen.length}. It's open on the right, next to the spreadsheet. Pick one of the choices there and I'll move you to the next one.`
-          : `I'll show each one in the spreadsheet, say what's wrong and give you the choices: make the suggested change, type the right value, or say it's fine as is. ${(m => m ? `${plural(m, 'must-fix item')} ${m === 1 ? 'comes' : 'come'} first.` : '')(walkOpen.filter(i => i.severity === 'high').length)}`,
+          : (nKinds < walkOpen.length ? `Items with exactly the same issue are grouped, so you handle each kind with one click (and can untick any that are different). ` : '') + `I'll show each one in the spreadsheet, say what's wrong and give you the choices: make the suggested change, type the right value, or say it's fine as is. ${(m => m ? `${plural(m, 'must-fix item')} ${m === 1 ? 'comes' : 'come'} first.` : '')(walkOpen.filter(i => i.severity === 'high').length)}`,
         go: [walking ? 'Show me the current one' : `Start with item 1`, start],
         alt: state.aiOn && !walking ? ['Let Claude try them all first', e => aiFix(walkOpen.map(i => i.key), e.target)] : null});
     }
@@ -2156,18 +2206,28 @@
   }
   const sendLabel = r => (r.sent || []).some(x => x.sent) ? 'Sent to client' : r.approval ? 'Send to client' : 'Approve and send';
 
+  const sameKey = i => (i.code || '') + '|' + (i.column || (String(i.cell || '').match(/^[A-Z]+/i) || [''])[0].toUpperCase()) + '|' + String(i.text || '').replace(/"[^"]*"|“[^”]*”|'[^']*'/g, '"…"').replace(/\b[A-Za-z0-9-]*\d[A-Za-z0-9-]*\b/g, '#').replace(/\s+/g, ' ').trim();
   const walkIssues = () => {
     const list = allIssues(state.report.review).filter(i => i.severity !== 'info');
     const rank = {high: 0, medium: 1, low: 2}, size = {};
     for (const i of list) { const k = i.severity + '|' + issueType(i); size[k] = (size[k] || 0) + 1; }
     return list.map((i, n) => ({i, n})).sort((a, b) => (rank[a.i.severity] ?? 3) - (rank[b.i.severity] ?? 3)
       || size[b.i.severity + '|' + issueType(b.i)] - size[a.i.severity + '|' + issueType(a.i)]
-      || issueType(a.i).localeCompare(issueType(b.i)) || a.n - b.n).map(x => x.i);
+      || issueType(a.i).localeCompare(issueType(b.i)) || sameKey(a.i).localeCompare(sameKey(b.i)) || a.n - b.n).map(x => x.i);
   };
+  // a person said these are fine: saved on the report (not only in this browser), so later versions keep them settled
+  async function markFine(items) {
+    if (!items.length || !state.report) return;
+    try { await api('/api/spreadsheets/mark-fine', {file_hash: state.report.file_hash, by: myName() || null,
+      issues: items.map(i => ({code: i.code || null, sheet: i.sheet || null, row: i.row ?? null, text: i.text || ''}))}); }
+    catch (e) { /* still marked reviewed in this browser */ }
+  }
   function fixesFor(issue) {
     const dec = store.get(decisionsKey(), {});
     const rowNo = Number(issue.row) || splitCell(issue.cell)?.[1];
-    return (state.fixes || []).filter(f => f.sheet === (issue.sheet || f.sheet) && (issue.cell ? f.cell === String(issue.cell).toUpperCase() : rowNo && splitCell(f.cell)?.[1] === rowNo))
+    // an issue about a whole row only gets a fix that is about it: one that changes the value it names, or fills a blank it reports
+    const aboutIt = f => issue.cell || fixCovers(f, issue) || (String(f.before ?? '').trim() === '' && /blank|missing|empty/i.test(`${issue.code || ''} ${issue.text || ''}`));
+    return (state.fixes || []).filter(f => f.sheet === (issue.sheet || f.sheet) && (issue.cell ? f.cell === String(issue.cell).toUpperCase() : rowNo && splitCell(f.cell)?.[1] === rowNo) && aboutIt(f))
       .map(f => ({...f, after: dec[f.id]?.after ?? f.after, state: dec[f.id]?.state}));
   }
   // Every error ends in a click: accept the change, take out the extra row, let Claude write a fix, or say it is fine.
@@ -2196,7 +2256,7 @@
       state.aiOn ? h('button', {type: 'button', class: 'btn small', onclick: e => aiFix([issue.key], e.target)}, 'Fix with AI') : null));
     return h('div', {class: 'choices'}, h('b', {class: 'choices-h'}, 'How to fix it'), ...kids,
       h('div', {class: 'choice'}, h('span', {}, kids.length ? 'Or, if the value is actually right:' : 'If the value is actually right:'),
-        h('button', {type: 'button', class: 'btn small', onclick: next}, 'It\'s fine as is')));
+        h('button', {type: 'button', class: 'btn small', onclick: async () => { await markFine([issue]); next(); }}, 'It\'s fine as is')));
   }
   function cellPanel(m, underIssue) {
     const g = state.grid, addr = state.gridCell; if (!addr) return null;

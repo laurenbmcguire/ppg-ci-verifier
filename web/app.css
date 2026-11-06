@@ -1123,3 +1123,10 @@ body[data-page=reports] .mnav .mup,body[data-page=reports] label.nav[for=file-in
 .guide .sugglist li{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
 .guide .sugglist input{margin:0 4px 0 0;transform:translateY(2px)}
 .guide .sugglist .arrow{color:var(--muted)}
+.bulkbox{background:#f3f7fb;border:1px solid #d6e2ee;border-radius:10px;padding:10px 12px;margin:0 0 12px;display:grid;gap:8px}
+.bulkbox .bulk-head{margin:0;font-size:13.5px;line-height:1.45}
+.bulkbox details summary{cursor:pointer;font-size:13px;color:var(--green)}
+.bulk-list{list-style:none;margin:6px 0 0;padding:0;max-height:220px;overflow:auto;font-size:13px;display:grid;gap:3px}
+.bulk-list li{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.bulk-list code{margin-left:6px;font-size:12px}
+.bulk-btns{display:flex;flex-wrap:wrap;gap:6px;align-items:center}

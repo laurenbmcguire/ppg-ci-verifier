@@ -82,6 +82,16 @@ class AIFix(test_autopilot.Autopilot):
         st, again = self.call('/api/spreadsheets/auto-clean', {'file_hash': out['item']['file_hash']})
         self.assertEqual(st, 200, again); self.assertFalse(again['changed'])   # nothing left to clean
 
+    def test_fine_as_is_holds_on_later_versions(self):
+        issue = next(i for i in self.issues(self.h) if i.get('code') != 'duplicate_row')
+        st, out = self.call('/api/spreadsheets/mark-fine', {'file_hash': self.h, 'by': 'Lauren', 'issues': [{k: issue.get(k) for k in ('code', 'sheet', 'row', 'text')}]})
+        self.assertEqual(st, 200, out)
+        self.assertNotIn(issue['text'], [i['text'] for i in self.issues(self.h)])
+        os.environ.pop('PPG_AUTOFORMAT', None)
+        st, out = self.call('/api/spreadsheets/auto-clean', {'file_hash': self.h})   # a new version
+        self.assertEqual(st, 200, out); h2 = out['item']['file_hash']; self.assertNotEqual(h2, self.h)
+        self.assertNotIn(issue['text'], [i['text'] for i in self.issues(h2)])
+
     def test_nothing_picked_and_ai_off(self):
         st, out = self.call('/api/spreadsheets/ai-fix', {'file_hash': self.h, 'keys': []})
         self.assertEqual(st, 409); self.assertIn('Pick', out['error'])
