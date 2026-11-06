@@ -60,6 +60,11 @@ class Rules(unittest.TestCase):
         other = recommend.report_rules(self.facts(vins_on_other_days_count=2, vins_on_other_days=[dict(vin='X1', day='2026-10-06')]))
         self.assertTrue(any('another day' in r['title'] for r in other))
 
+    def test_empty_week_is_not_called_clean(self):
+        p = dict(kind='week', totals=dict(reports=0, sent=0), findings=[])
+        self.assertTrue(recommend.period_rules(p)[0]['title'].startswith('Nothing to review'))
+        self.assertIn('is clean', recommend.period_rules(dict(p, totals=dict(reports=3, sent=3)))[0]['title'])
+
     def test_ai_and_fallback(self):
         fake = {'content': [{'type': 'tool_use', 'name': 'give_recommendations', 'input': {'recommendations': [
             {'title': 'Fix the 2 must-fix issues', 'why': 'Two totals are off.', 'priority': 'high', 'do': 'fix_issues', 'who': 'you'},

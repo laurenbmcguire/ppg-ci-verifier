@@ -2,6 +2,11 @@
 (() => {
   // ---------------------------------------------------------------- helpers
   const $ = id => document.getElementById(id);
+  // an optional part that is empty (null/false) is left out, never printed as the word "null"
+  for (const name of ['replaceChildren', 'append']) {
+    const real = Element.prototype[name];
+    Element.prototype[name] = function (...nodes) { return real.apply(this, nodes.flat().filter(n => n != null && n !== false)); };
+  }
   const h = (tag, attrs, ...kids) => {
     const el = document.createElement(tag);
     for (const [k, v] of Object.entries(attrs || {})) {
@@ -124,7 +129,7 @@
     }
     if (!rows.length) {
       list.append(h('p', {class: 'queue-empty'}, state.list.length
-        ? (state.client && !q && !state.list.some(r => inClient(r.review?.job)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'Nothing is waiting for review.' : state.filter === 'attention' && !q ? 'Every report is clear. Switch to All to see them.' : 'No reports match that search.')
+        ? (state.client && !q && !state.list.some(r => inClient(r.review?.job)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'Nothing is waiting for review.' : state.filter === 'attention' && !q ? h('span', {}, 'Nothing needs your attention. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
         : 'No reports yet. Upload an end-of-shift report to start.'));
       return;
     }
@@ -145,6 +150,22 @@
         h('span', {class: 'file'}, `${r.filename} · v${r.version} · ${ago(r.received_at)}`)));
     }
   }
+  // keyboard: J/K or ↓/↑ next and previous report, / search, U upload, Esc back to the list, ? help
+  document.addEventListener('keydown', e => {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, textarea, select, [contenteditable], dialog')) return;
+    const onReports = document.body.dataset.page === 'reports';
+    const move = step => {
+      const items = [...document.querySelectorAll('#queue-list .item')]; if (!items.length) return;
+      const at = items.findIndex(b => b.classList.contains('sel'));
+      items[Math.max(0, Math.min(items.length - 1, at < 0 ? 0 : at + step))].click();
+    };
+    if (onReports && (e.key === 'j' || e.key === 'ArrowDown' && !state.selected)) { e.preventDefault(); move(1); }
+    else if (onReports && e.key === 'k') { e.preventDefault(); move(-1); }
+    else if (e.key === '/') { e.preventDefault(); if (!onReports || state.selected) location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; setTimeout(() => $('search')?.focus(), 50); }
+    else if (e.key === 'u') { e.preventDefault(); $('file-input')?.click(); }
+    else if (e.key === 'Escape' && state.selected) { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }
+    else if (e.key === '?') toast('Shortcuts: J or K next or previous report · / search · U upload · Esc back to the list');
+  });
   let vinTimer;
   $('search').addEventListener('input', e => {
     state.search = e.target.value; drawQueue();
@@ -182,7 +203,7 @@
   function drawMe() {
     const me = state.me?.user, box = $('me'); if (!box || !me) return;
     const admin = me.role === 'admin';
-    document.querySelectorAll('.rail [data-admin]').forEach(a => { a.hidden = !admin; });
+    document.querySelectorAll('.rail [data-admin], .mnav [data-admin]').forEach(a => { a.hidden = !admin; });
     box.replaceChildren(me.virtual
       ? h('div', {}, h('b', {}, 'Signed in through Vercel'), h('button', {type: 'button', class: 'linkish', onclick: () => showSignIn()}, 'Sign in with your own account'))
       : h('div', {}, h('b', {}, me.name || me.email), h('span', {}, `${me.email} · ${admin ? 'Admin' : 'Member'}`),
@@ -261,7 +282,7 @@
     if (cm) { state.client = decodeURIComponent(cm[1]); store.set('rd-client', state.client); drawClientTabs(); }
     else if (location.hash === '' || location.hash === '#') { if (state.client) { state.client = ''; store.set('rd-client', ''); drawClientTabs(); } }
     const navOn = ['#api', '#checks', '#periods', '#today', '#overview', '#users'].includes(location.hash) ? location.hash : state.client ? '#c=' + encodeURIComponent(state.client) : '#';
-    document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === navOn));
+    document.querySelectorAll('.rail .nav[href], .mnav a[href]').forEach(a => { const on = a.getAttribute('href') === navOn; a.classList.toggle('active', on); if (a.closest('.mnav')) a.setAttribute('aria-current', on ? 'page' : 'false'); });
     if (location.hash === '#overview') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showOverview(); return; }
     if (location.hash === '#today') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showToday(); return; }
     if (location.hash === '#periods') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showPeriods(); return; }
@@ -317,10 +338,12 @@
       h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
       h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)),
       h('div', {id: 'cleanoffer'}));
+    const steps = h('ol', {class: 'steps-bar', id: 'steps', 'aria-label': 'Where this report stands'});
     const ws = h('div', {class: 'workspace'},
       h('section', {class: 'sheetpane', id: 'sheet-block', 'aria-label': 'Spreadsheet'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Loading the spreadsheet…')),
       h('aside', {class: 'sidepane', id: 'side', 'aria-label': 'Facts and fixes'}));
-    $('report').replaceChildren(h('div', {class: 'rws'}, head, status, ws));
+    $('report').replaceChildren(h('div', {class: 'rws'}, head, steps, status, ws));
+    drawSteps();
     state.grid = null; state.gridSheet = null; state.gridCell = null; state.issueNav = null;
     drawSide();
     updateDownloads();
@@ -539,9 +562,30 @@
         h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); $('side')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, 'Let me choose'),
         h('button', {type: 'button', class: 'btn ghost', onclick: () => { store.set('rd-clean-no', [...dismissed, hash].slice(-200)); slot.replaceChildren(); }}, 'Not now'))));
   }
+  // ---------------- Check → Clean → Approve → Send: where the report stands and the one next thing to do
+  function drawSteps() {
+    const bar = $('steps'), r = state.report; if (!bar || !r) return;
+    const rv = r.review || {}, sent = (r.sent || []).some(x => x.sent), approved = !!r.approval;
+    const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
+    const pending = state.fixes ? state.fixes.filter(f => !edits[editId(f.sheet, f.cell)] && !dec[f.id]).length : null;
+    const mustFix = (rv.counts || {}).high || 0;
+    const cleanDone = sent || approved || (pending === 0 && !mustFix);
+    const list = [
+      ['Check', true, rv.status === 'clear' ? 'Nothing flagged' : `${STATUS[rv.status] || 'Check'}: ${statusNote(rv)}`],
+      ['Clean', cleanDone, cleanDone ? 'Done' : pending ? `${pending} fix${pending === 1 ? '' : 'es'} ready` : mustFix ? `${mustFix} must-fix left` : 'Loading fixes…'],
+      ['Approve', approved || sent, approved || sent ? 'Approved' : 'Not yet'],
+      ['Send', sent, sent ? 'Sent to client' : 'Not sent'],
+    ];
+    const current = list.findIndex(x => !x[1]);
+    const next = current === 1 ? (pending ? 'Next: clean the data (see the box below), or pick fixes one by one on the right.' : 'Next: fix the must-fix issues on the right.')
+      : current === 2 ? 'Next: approve the final copy with Approve and send.' : current === 3 ? 'Next: send it to the client.' : 'All done. This report has been sent.';
+    bar.replaceChildren(...list.map(([name, done, note], i) => h('li', {class: done ? 'done' : i === current ? 'now' : '', 'aria-current': i === current ? 'step' : null},
+      h('span', {class: 'dot', 'aria-hidden': 'true'}, done ? '✓' : String(i + 1)), h('b', {}, name), h('small', {}, note))),
+      h('li', {class: 'next'}, next));
+  }
   function drawFixes() {
     const block = $('fixes-block'); if (!state.fixes) return;
-    drawCleanOffer();
+    drawCleanOffer(); drawSteps();
     if (!block) { drawGrid(); updateDownloads(); if (!state.chatBusy) drawChat(); updateFinish(); drawSideTabs(); return; }
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
     const editList = Object.entries(edits);
@@ -1352,7 +1396,8 @@
   async function showPeriods() {
     const wrap = h('div', {class: 'sheetwrap apiwrap'});
     $('report').replaceChildren(wrap);
-    const q = state.periodQuery ||= store.get('rd-period', {kind: 'week', day: new Date().toISOString().slice(0, 10), job: ''});
+    const latest = state.list.map(r => r.review?.day).filter(Boolean).sort().pop();   // open on the newest week that has reports, not an empty one
+    const q = state.periodQuery ||= store.get('rd-period', {kind: 'week', day: latest || new Date().toISOString().slice(0, 10), job: ''});
     wrap.replaceChildren(h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Gathering the daily reports and SharePoint scans…'));
     let data;
     try { data = state.periodAsk ? state.periodAsk : await api('/api/periods', q); state.periodAsk = null; } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }

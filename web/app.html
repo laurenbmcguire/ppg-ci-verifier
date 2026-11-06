@@ -7,7 +7,7 @@
 <link rel="icon" href="/assets/ppg-client-intelligence.png">
 <link rel="stylesheet" href="/app.css">
 </head>
-<body>
+<body data-page="reports">
 <aside class="rail" aria-label="Navigation">
   <div class="brand"><img src="/assets/ppg-client-intelligence.png" alt="PPG Quality Client Intelligence"></div>
   <a class="nav" href="#today">Today</a>
@@ -26,6 +26,11 @@
 
 <main class="shell">
   <img class="mobile-brand" src="/assets/ppg-client-intelligence.png" alt="PPG Quality Client Intelligence">
+  <nav class="mnav" aria-label="Pages">
+    <a href="#today">Today</a><a href="#overview">Overview</a><a href="#" class="active">Reports</a><a href="#periods">Weekly &amp; monthly</a>
+    <a href="#checks" data-admin>Checks</a><a href="#users" data-admin>Users</a><a href="#api" data-admin>API</a>
+    <label for="file-input" class="mup">Upload</label>
+  </nav>
   <header class="top">
     <div>
       <p class="eyebrow">REVIEW DESK / PPG VERIFIER</p>
@@ -39,7 +44,7 @@
   <div class="desk" id="desk">
     <section class="queue card" id="queue" aria-label="Reports">
       <div class="queue-tools">
-        <input id="search" type="search" placeholder="Search job, file, date or VIN" aria-label="Search reports">
+        <input id="search" type="search" placeholder="Search job, file, date or VIN  ( / )" aria-label="Search reports">
         <div class="segmented" role="group" aria-label="Show">
           <button type="button" data-filter="attention" class="on">Needs attention</button>
           <button type="button" data-filter="all">All</button>
@@ -58,7 +63,7 @@
       </div>
     </section>
   </div>
-  <footer>PPG Verifier • Cloud database • Behind Vercel sign-in • Reviewer identity is not yet tracked • No automatic business sign-off</footer>
+  <footer>PPG Verifier · Nothing is sent to a client until someone approves it · Original files are never changed</footer>
 </main>
 
 <div class="drop" id="drop" hidden><div><strong>Drop to check</strong><span>Excel (.xlsx) or CSV</span></div></div>

@@ -102,7 +102,9 @@ def period_rules(p):
     unsent = t['reports'] - t['sent']
     if unsent > 0:
         out.append(_rec(f'{_n(unsent, "daily report")} not sent from the verifier', 'Approve and send them, or confirm they went out another way.', 'medium', 'send', 'you'))
-    if not out:
+    if not out and not t['reports']:
+        out.append(_rec(f'Nothing to review this {p["kind"]}', f'No daily reports were uploaded for this {p["kind"]}. Pick another {p["kind"]} with the arrows, or upload the reports.', 'low', 'fix', 'you'))
+    elif not out:
         out.append(_rec(f'The {p["kind"]} is clean', 'Every day has a clean, sent report that matches SharePoint. Create the slide show for the client.', 'low', 'send', 'you'))
     return out[:8]
 
