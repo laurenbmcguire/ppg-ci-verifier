@@ -579,6 +579,19 @@
   const editId = (sheet, cell) => `${sheet}!${cell}`;
 
   // ---------------- "Want me to clean this data?": every change listed in plain words before anything happens
+  // a change that only alters how a value is written (capitals, spaces, hidden characters, number stored as text)
+  function fmtKind(f) {
+    const a = String(f.before ?? ''), b = String(f.after ?? '');
+    if (a === b) return null;
+    if (a.toUpperCase() === b.toUpperCase()) return 'capital letters';
+    const vis = x => x.replace(/[\x00-\x1f\x7f-\x9f\xa0\u200b-\u200f\ufeff]/g, '');
+    if (vis(a) !== a && vis(a) === vis(b)) return 'hidden characters';
+    if (a.trim() === b.trim() || a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim()) return 'extra spaces';
+    if (vis(a).replace(/\s+/g, ' ').trim().toUpperCase() === vis(b).replace(/\s+/g, ' ').trim().toUpperCase()) return 'spaces and capitals';
+    if (f.source === 'Number as text' || (/^\s*'?-?[\d,]+(\.\d+)?\s*$/.test(a) && Number(a.replace(/[',\s]/g, '')) === Number(b))) return 'number stored as text';
+    return null;
+  }
+  const showWs = v => v === '' || v == null ? '(blank)' : String(v).replace(/^ +| +$/g, m => '\u00b7'.repeat(m.length)).replace(/[\xa0\u200b-\u200f\ufeff]/g, '\u25e6');
   function drawCleanOffer() {
     const slot = $('cleanoffer'); if (!slot || !state.report) return;
     const r = state.report, hash = r.file_hash, dismissed = store.get('rd-clean-no', []);
@@ -592,13 +605,16 @@
     const kindOf = reason => String(reason || 'Other corrections').replace(/"[^"]*"|“[^”]*”/g, '"…"').replace(/\d+/g, '#');
     const LABELS = [[/same part, different capitals/i, 'Part numbers typed with different capitals: each one is changed to match the other rows for the same part.']];
     const labelOf = (key, items) => items.length === 1 ? items[0].reason || key : (LABELS.find(([re]) => re.test(key)) || [])[1] || key.replace(/"…"/g, 'a value').replace(/#/g, 'some');
-    for (const f of pending) { const k = kindOf(f.reason); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(f); }
+    const fmt = pending.filter(f => fmtKind(f)), other = pending.filter(f => !fmtKind(f));
+    for (const f of other) { const k = kindOf(f.reason); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(f); }
     const show = v => v === '' || v == null ? '(blank)' : `“${v}”`;
     const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
     const sheetCount = new Set(pending.map(f => f.sheet)).size;
     const checkNow = () => {
       showSide('fixes');
-      const list = walkIssues(), keys = new Set(unsure.issues.map(i => i.key)), first = list.find(i => keys.has(i.key));
+      const list = walkIssues(), keys = new Set(unsure.issues.map(i => i.key));
+      for (const f of unsure.fixes) { const i = list.find(x => fixCovers(f, x)); if (i) keys.add(i.key); }   // one stop per unsure fix, on the issue it settles
+      const first = list.find(i => keys.has(i.key));
       if (first) { state.groupWalk = {keys, label: 'Not sure'}; focusIssue(list.indexOf(first)); }
       else if (unsure.fixes[0]) showCell(unsure.fixes[0].sheet, unsure.fixes[0].cell);
       document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'});
@@ -618,12 +634,28 @@
       slot.replaceChildren(h('section', {class: 'cleanoffer', 'aria-labelledby': 'clean-title'}, h('div', {class: 'cleanhead'}, h('h2', {id: 'clean-title'}, 'Before this can be approved')), checkList));
       return;
     }
-    const sureCount = pending.length + dupIssues.length;
+    const sureCount = pending.length + dupIssues.length, onlyFmt = fmt.length > 0 && !other.length && !dupIssues.length;
+    const seenKind = new Set(), samples = [];   // up to 3 examples, a different kind each when possible
+    for (const f of fmt) if (samples.length < 3 && !seenKind.has(fmtKind(f))) { seenKind.add(fmtKind(f)); samples.push(f); }
+    for (const f of fmt) if (samples.length < 3 && !samples.includes(f)) samples.push(f);
+    const fmtExamples = h('ul', {class: 'fmtexamples'}, samples.map(f => h('li', {},
+      h('code', {}, showWs(f.before)), h('span', {class: 'arrow', 'aria-label': 'becomes'}, ' → '), h('code', {}, showWs(f.after)),
+      h('span', {class: 'fmtkind'}, fmtKind(f)),
+      h('button', {type: 'button', class: 'linkish', title: 'Show this cell in the spreadsheet', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`))));
     slot.replaceChildren(h('section', {class: 'cleanoffer', 'aria-labelledby': 'clean-title'},
       h('div', {class: 'cleanhead'},
-        h('h2', {id: 'clean-title'}, 'Want me to clean this data for you?'),
-        h('p', {}, `I'm sure about ${plural(sureCount, 'change')}. Here is exactly what cleaning means for this report:`)),
-      h('ul', {class: 'cleanlist'}, [...groups].map(([key, items]) => h('li', {},
+        h('h2', {id: 'clean-title'}, onlyFmt ? (fmt.length === 1 ? 'Would you like me to fix this formatting issue?' : `Would you like me to fix all ${fmt.length} formatting issues, like these?`) : 'Want me to clean this data for you?'),
+        onlyFmt ? h('p', {}, fmt.length === 1 ? 'It is only written differently. The value stays the same; only how it is typed changes:' : 'They are only written differently. The values stay the same; only how they are typed changes. For example:')
+          : h('p', {}, `I'm sure about ${plural(sureCount, 'change')}. Here is exactly what cleaning means for this report:`)),
+      onlyFmt ? fmtExamples : null,
+      h('ul', {class: 'cleanlist'}, fmt.length ? h('li', {class: 'fmtline'},
+          h('b', {}, onlyFmt ? 'All the formatting fixes' : 'Formatting only: the values stay the same, only how they are typed changes'),
+          onlyFmt ? null : fmtExamples, h('span', {class: 'count'}, plural(fmt.length, 'cell')),
+          h('details', {}, h('summary', {}, fmt.length === 1 ? 'See the change' : `See all ${fmt.length} changes`),
+            h('ul', {}, fmt.map(f => h('li', {},
+              h('button', {type: 'button', class: 'linkish', title: 'Show this cell in the spreadsheet', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`),
+              `: ${show(f.before)} becomes ${show(f.after)} `, h('em', {class: 'fmtkind'}, `(${fmtKind(f)})`)))))) : null,
+        ...[...groups].map(([key, items]) => h('li', {},
         h('b', {}, labelOf(key, items)),
         items.every(f => f.only) ? h('span', {class: 'only-note'}, items[0].only) : null, h('span', {class: 'count'}, plural(items.length, 'cell')),
         h('details', {}, h('summary', {}, items.length === 1 ? 'See the change' : `See all ${items.length} changes`),
@@ -646,7 +678,7 @@
           if (!rows.length) applyFixes(all, c.dec, c.edits, {download: false});
           else if (!all.length && !Object.keys(c.edits).length) removeRows(rows);
           else (async () => { const d = store.get(decisionsKey(), {}); for (const f of pending) d[f.id] = {state: 'accepted', after: f.after}; store.set(decisionsKey(), d); await removeRows(rows); })();
-        }}, `Yes, make the ${plural(sureCount, 'sure change')}`),
+        }}, onlyFmt ? `Yes, fix ${fmt.length === 1 ? 'it' : `all ${fmt.length}`}` : `Yes, make the ${plural(sureCount, 'sure change')}`),
         h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); state.issueNav = null; drawSide();
           document.querySelector('.workspace')?.scrollIntoView({block: 'start'});
           requestAnimationFrame(() => $('fixes-block')?.scrollIntoView({behavior: 'smooth', block: 'nearest'})); }}, 'Let me choose'),
@@ -761,12 +793,19 @@
   }
   // Owner's rule: anything the app is not sure about is checked by a person before the report can be approved.
   const isSureFix = f => f.sure !== undefined ? f.sure === true : (f.confidence || 'high') === 'high' && f.source !== 'AI fix';
+  // a fix settles an issue when it is on the same cell, or the same row and the issue names the value being fixed
+  function fixCovers(f, i) {
+    if (!f || !i || i.sheet !== f.sheet) return false;
+    const cell = String(f.cell || '').toUpperCase();
+    if (i.cell && String(i.cell).toUpperCase() === cell) return true;
+    const row = cell.replace(/^[A-Z]+/, ''), val = String(f.before ?? '').trim();
+    return !!val && String(i.row) === row && String(i.text || '').includes(val);
+  }
   function needsCheck() {
     if (!state.report) return {fixes: [], issues: [], total: 0};
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {}), done = reviewedSet();
     const fixes = (state.fixes || []).filter(f => !isSureFix(f) && !edits[editId(f.sheet, f.cell)] && !dec[f.id]);
-    const fixCells = new Set((state.fixes || []).map(f => `${f.sheet}!${String(f.cell).toUpperCase()}`));
-    const issues = walkIssues().filter(i => i.sure === false && !done.has(i.key) && !(i.cell && fixCells.has(`${i.sheet}!${String(i.cell).toUpperCase()}`)));
+    const issues = walkIssues().filter(i => i.sure === false && !done.has(i.key) && !(state.fixes || []).some(f => fixCovers(f, i)));
     return {fixes, issues, total: fixes.length + issues.length};
   }
   function readyChanges() {
@@ -1165,7 +1204,7 @@
       confetti(),
       h('div', {class: 'finish-mark'}, '✓'),
       h('h2', {id: 'finish-title'}, 'All clear!'),
-      h('p', {class: 'wins'}, handled ? `You handled all ${handled} item${handled === 1 ? '' : 's'} on ${r.review.job || r.filename}.` : `${r.review.job || r.filename} is clean.`),
+      h('p', {class: 'wins'}, handled ? `You handled ${handled === 1 ? 'the one item' : `all ${handled} items`} on ${r.review.job || r.filename}.` : `${r.review.job || r.filename} is clean.`),
       h('p', {}, (p.saved ? `${p.saved} change${p.saved === 1 ? ' is' : 's are'} saved in this version, and it has been checked again. ` : p.ready ? `${p.ready} change${p.ready === 1 ? '' : 's'} will go into the final report. ` : 'Nothing needs changing. ') + 'Next: approve it and send it to the client, or download it.'),
       h('div', {class: 'row'},
         nextRep ? h('button', {type: 'button', class: 'btn ghost', onclick: () => { dlg.close(); select(nextRep.file_hash); }}, 'Next report ›') : h('button', {type: 'button', class: 'btn ghost', onclick: () => dlg.close()}, 'Not now'),
@@ -2002,8 +2041,7 @@
     const fx = fixesFor(issue).filter(f => f.state !== 'rejected');
     const decideFix = (f, st) => { const d = store.get(decisionsKey(), {}); d[f.id] = {state: st, after: f.after}; store.set(decisionsKey(), d);
       if (st === 'accepted') {   // the change settles every issue on that cell (a typo is often flagged twice: wrong format and likely typo)
-        const done = reviewedSet(); const row = String(f.cell || '').replace(/^[A-Z]+/, ''), val = String(f.before ?? '').trim();
-        walkIssues().filter(i => i.key !== issue.key && i.sheet === f.sheet && (i.cell === f.cell || (val && String(i.row) === row && String(i.text || '').includes(val)))).forEach(i => done.add(i.key));
+        const done = reviewedSet(); walkIssues().filter(i => i.key !== issue.key && fixCovers(f, i)).forEach(i => done.add(i.key));
         store.set('rd-reviewed:' + state.report.file_hash, [...done]); }
       drawFixes(); if (st === 'accepted' || st === 'rejected') next(); };
     const show = v => v === '' || v == null ? '(blank)' : `“${v}”`;
