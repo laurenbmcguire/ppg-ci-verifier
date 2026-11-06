@@ -65,6 +65,22 @@ class Autopilot(unittest.TestCase):
             again = self.call('/api/autopilot', {'run': True, 'force': True})[1]['last']
         self.assertEqual(again['cleaned'], 0)                              # a report is cleaned once
 
+    def test_remove_duplicate_rows(self):
+        rows = [tuple(r) for r in ROWS]
+        rows[4] = rows[2]
+        st, up = self.call('/api/spreadsheets/import', {'filename': '2230-OWENS-BASCO - EOS - 2026-10-07.xlsx',
+                                                        'content_base64': base64.b64encode(build(rows)).decode()})
+        h = up['item']['file_hash']
+        with urllib.request.urlopen(self.base + '/api/spreadsheet?id=' + h, timeout=30) as r:
+            dups = [i for i in json.loads(r.read())['review']['issues'] if i['code'] == 'duplicate_row']
+        self.assertEqual(len(dups), 1)
+        st, out = self.call('/api/spreadsheets/remove-rows', {'file_hash': h, 'rows': [{'sheet': dups[0]['sheet'], 'row': dups[0]['row']}]})
+        self.assertEqual(st, 200, out)
+        with urllib.request.urlopen(self.base + '/api/spreadsheet?id=' + out['item']['file_hash'], timeout=30) as r:
+            after = json.loads(r.read())['review']['issues']
+        self.assertFalse([i for i in after if i['code'] == 'duplicate_row'])      # the extra copy is gone
+        self.assertEqual(self.call('/api/spreadsheets/remove-rows', {'file_hash': h, 'rows': []})[0], 409)
+
 
 if __name__ == '__main__':
     unittest.main()

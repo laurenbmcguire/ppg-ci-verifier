@@ -426,18 +426,20 @@
       kids.push(h('div', {class: 'issuenav sev-' + issue.severity},
         h('div', {class: 'in-top'}, h('span', {class: 'sev ' + issue.severity}), h('b', {}, gw ? `${pos + 1} of ${nav.length} in ${gw.label}` : `Issue ${idx + 1} of ${list.length}`), gw ? null : h('span', {class: 'in-type'}, issueType(issue)),
           h('button', {type: 'button', class: 'btn ghost small', onclick: () => { state.issueNav = null; state.groupWalk = null; state.gridCell = null; drawGrid(); drawSide(); }}, 'Close')),
+        issue.where ? h('p', {class: 'in-where'}, `Where: ${issue.where}`) : null,
         h('p', {class: 'in-text'}, issue.text),
         issue.only ? h('p', {class: 'only-note big'}, issue.only) : null,
         issue.sure === false ? h('p', {class: 'in-unsure'}, 'The app is not sure about this one, so a person has to look at it before the report can be approved.') : null,
         issue.why ? h('p', {class: 'in-why'}, h('b', {}, 'Why it matters: '), issue.why) : null,
         issue.fix && issue.fix !== issue.check ? h('p', {class: 'in-why'}, h('b', {}, 'What to do: '), issue.fix) : null,
         issue.check ? h('p', {class: 'hint'}, 'Check: ' + issue.check) : null,
+        fixChoices(issue, markNext),
         issue.verdict_reason ? h('p', {class: 'hint'}, 'Claude: ' + issue.verdict_reason) : null,
         !issue.sheet && !issue.row ? h('p', {class: 'hint'}, 'This one is about the report as a whole, not one cell.') : null,
         h('div', {class: 'in-nav'},
           h('button', {type: 'button', class: 'btn small', disabled: pos === 0, onclick: () => go(pos - 1)}, '‹ Previous'),
           h('button', {type: 'button', class: 'btn small', disabled: pos >= nav.length - 1, onclick: () => go(pos + 1)}, 'Next ›'),
-          h('button', {type: 'button', class: 'btn primary small', onclick: markNext}, done.has(issue.key) ? 'Reviewed · next open' : 'Mark reviewed and next'))));
+          h('button', {type: 'button', class: 'btn primary small', onclick: markNext}, done.has(issue.key) ? 'Reviewed · next open' : 'Next ›'))));
     }
     if (state.grid && state.gridCell) { const p = cellPanel(marks(), !!issue); if (p) kids.push(p); }
     slot.replaceChildren(...kids);
@@ -560,7 +562,8 @@
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
     const undecided = (state.fixes || []).filter(f => !edits[editId(f.sheet, f.cell)] && !dec[f.id]);
     const pending = undecided.filter(isSureFix), unsure = needsCheck();
-    if ((!pending.length && !unsure.total) || r.approval || (r.sent || []).some(x => x.sent) || dismissed.includes(hash) || state.busy) { slot.replaceChildren(); return; }
+    const revd = reviewedSet(), dupIssues = walkIssues().filter(i => isDupRow(i) && i.row && !revd.has(i.key) && !fixesFor(i).length);
+    if ((!pending.length && !unsure.total && !dupIssues.length) || r.approval || (r.sent || []).some(x => x.sent) || dismissed.includes(hash) || state.busy) { slot.replaceChildren(); return; }
     const groups = new Map();
     // the same kind of fix for different values is one group: 95 part-number spellings are one line, not 95
     const kindOf = reason => String(reason || 'Other corrections').replace(/"[^"]*"|“[^”]*”/g, '"…"').replace(/\d+/g, '#');
@@ -570,30 +573,45 @@
     const show = v => v === '' || v == null ? '(blank)' : `“${v}”`;
     const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
     const sheetCount = new Set(pending.map(f => f.sheet)).size;
+    const checkNow = () => {
+      showSide('fixes');
+      const list = walkIssues(), keys = new Set(unsure.issues.map(i => i.key)), first = list.find(i => keys.has(i.key));
+      if (first) { state.groupWalk = {keys, label: 'Not sure'}; focusIssue(list.indexOf(first)); }
+      else if (unsure.fixes[0]) showCell(unsure.fixes[0].sheet, unsure.fixes[0].cell);
+      document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'});
+    };
+    const where = i => i.sheet ? `${i.sheet}${i.cell ? ' ' + i.cell : i.row ? ' row ' + i.row : ''}` : 'Whole report';
     const checkList = unsure.total ? h('div', {class: 'unsure'},
-      h('h3', {}, `${plural(unsure.total, 'thing')} I'm not sure about: a person has to check ${unsure.total === 1 ? 'it' : 'these'}`),
-      h('p', {}, 'These are never changed automatically, and the report cannot be approved until each one is accepted, skipped or marked reviewed.'),
-      h('ul', {}, [...unsure.fixes.slice(0, 3).map(f => h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`),
-          `: maybe ${show(f.before)} should be ${show(f.after)}. ${f.only || f.reason || ''}`)),
-        ...unsure.issues.slice(0, Math.max(0, 3 - unsure.fixes.length)).map(i => h('li', {}, i.sheet ? h('b', {}, `${i.sheet}${i.cell ? ' ' + i.cell : i.row ? ' row ' + i.row : ''}: `) : null, i.text || i.message || '',
-          i.only ? h('span', {class: 'only-note'}, ' ' + i.only) : null))]),
-      unsure.total > 3 ? h('p', {class: 'more'}, `and ${unsure.total - 3} more on the right.`) : null,
-      h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); const keys = new Set(unsure.issues.map(i => i.key)), list = walkIssues(), at = list.findIndex(i => keys.has(i.key)); if (at >= 0) focusIssue(at); else if (unsure.fixes[0]) showCell(unsure.fixes[0].sheet, unsure.fixes[0].cell); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, 'Check them now')) : null;
-    if (!pending.length) {
+      h('div', {class: 'unsure-top'},
+        h('div', {}, h('h3', {}, `${plural(unsure.total, 'thing')} I'm not sure about: a person has to check ${unsure.total === 1 ? 'it' : 'them'}`),
+          h('p', {}, 'Never changed automatically. The report can be approved once each one is accepted, skipped or marked reviewed.')),
+        h('button', {type: 'button', class: 'btn', onclick: checkNow}, unsure.total === 1 ? 'Check it now' : 'Check them one at a time')),
+      h('details', {class: 'unsure-all'}, h('summary', {}, `See ${unsure.total === 1 ? 'it' : `all ${unsure.total}`}`),
+        h('ul', {}, [...unsure.fixes.map(f => h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`),
+            `: maybe ${show(f.before)} should be ${show(f.after)}. `, h('span', {class: f.only ? 'only-note' : ''}, f.only || f.reason || ''))),
+          ...unsure.issues.map(i => h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => { const list = walkIssues(); state.groupWalk = null; focusIssue(list.indexOf(list.find(x => x.key === i.key))); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, where(i)),
+            `: ${i.text || i.message || ''} `, i.only ? h('span', {class: 'only-note'}, i.only) : null))]))) : null;
+    if (!pending.length && !dupIssues.length) {
       slot.replaceChildren(h('section', {class: 'cleanoffer', 'aria-labelledby': 'clean-title'}, h('div', {class: 'cleanhead'}, h('h2', {id: 'clean-title'}, 'Before this can be approved')), checkList));
       return;
     }
+    const sureCount = pending.length + dupIssues.length;
     slot.replaceChildren(h('section', {class: 'cleanoffer', 'aria-labelledby': 'clean-title'},
       h('div', {class: 'cleanhead'},
         h('h2', {id: 'clean-title'}, 'Want me to clean this data for you?'),
-        h('p', {}, `I'm sure about ${plural(pending.length, 'change')} across ${plural(sheetCount, 'sheet')}. Here is exactly what cleaning means for this report:`)),
+        h('p', {}, `I'm sure about ${plural(sureCount, 'change')}. Here is exactly what cleaning means for this report:`)),
       h('ul', {class: 'cleanlist'}, [...groups].map(([key, items]) => h('li', {},
         h('b', {}, labelOf(key, items)),
         items.every(f => f.only) ? h('span', {class: 'only-note'}, items[0].only) : null, h('span', {class: 'count'}, plural(items.length, 'cell')),
         h('details', {}, h('summary', {}, items.length === 1 ? 'See the change' : `See all ${items.length} changes`),
           h('ul', {}, items.map(f => h('li', {},
             h('button', {type: 'button', class: 'linkish', title: 'Show this cell in the spreadsheet', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`),
-            `: ${show(f.before)} becomes ${show(f.after)}`, f.source === 'AI fix' ? h('em', {}, ' suggested by AI, check it') : null))))))),
+            `: ${show(f.before)} becomes ${show(f.after)}`, f.source === 'AI fix' ? h('em', {}, ' suggested by AI, check it') : null)))))),
+        dupIssues.length ? h('li', {}, h('b', {}, 'Exact duplicate rows: the extra copies are taken out.'),
+          h('span', {class: 'only-note'}, 'Every field is identical to another row, so the same scan was entered twice. Rows below move up; totals are re-checked.'),
+          h('span', {class: 'count'}, plural(dupIssues.length, 'row')),
+          h('details', {}, h('summary', {}, dupIssues.length === 1 ? 'See the row' : `See all ${dupIssues.length} rows`),
+            h('ul', {}, dupIssues.map(i => h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(i.sheet, `A${i.row}`)}, `${i.sheet} row ${i.row}`), `: ${i.text}`))))) : null),
       checkList,
       h('ul', {class: 'cleanpromise'},
         h('li', {}, 'Only the cells listed under the sure changes change. Anything you have to check is left exactly as it is.'),
@@ -601,9 +619,11 @@
         h('li', {}, 'Nothing goes to the client until you approve and send it.')),
       h('div', {class: 'cleanbtns'},
         h('button', {type: 'button', class: 'btn primary', onclick: () => {
-          const c = readyChanges(), all = [...c.accepted, ...pending];
-          applyFixes(all, c.dec, c.edits, {download: false});
-        }}, `Yes, make the ${plural(pending.length, 'sure change')}`),
+          const c = readyChanges(), all = [...c.accepted, ...pending], rows = dupIssues.map(i => [i.sheet, Number(i.row)]);
+          if (!rows.length) applyFixes(all, c.dec, c.edits, {download: false});
+          else if (!all.length && !Object.keys(c.edits).length) removeRows(rows);
+          else (async () => { const d = store.get(decisionsKey(), {}); for (const f of pending) d[f.id] = {state: 'accepted', after: f.after}; store.set(decisionsKey(), d); await removeRows(rows); })();
+        }}, `Yes, make the ${plural(sureCount, 'sure change')}`),
         h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); state.issueNav = null; drawSide();
           document.querySelector('.workspace')?.scrollIntoView({block: 'start'});
           requestAnimationFrame(() => $('fixes-block')?.scrollIntoView({behavior: 'smooth', block: 'nearest'})); }}, 'Let me choose'),
@@ -759,10 +779,25 @@
         document.body.append(link); link.click(); link.remove();
       }
       toast(`${opts.download !== false ? 'Saved and downloaded' : 'Saved'} "${answer.item.filename}" with ${changes.length} change${changes.length === 1 ? '' : 's'}. It has been checked again. The original is unchanged.`);
-      await loadList(); select(answer.item.file_hash);
-    } catch (e) { toast(e.message, true); }
+      if (opts.thenOpen !== false) { await loadList(); select(answer.item.file_hash); }
+      return answer.item.file_hash;
+    } catch (e) { toast(e.message, true); return null; }
     finally { state.busy = false; if ($('fixes-block')) drawFixes(); }
   }
+  // Take out extra copies of duplicate rows (new corrected version; original untouched). Accepted cell changes are saved first.
+  async function removeRows(rows, what) {
+    if (!rows.length || state.busy) return;
+    let hash = state.report.file_hash;
+    const c = readyChanges();
+    if (c.total) { hash = await applyFixes(c.accepted, c.dec, c.edits, {download: false, thenOpen: false}); if (!hash) return; }
+    state.busy = true; toast(`Taking out ${rows.length} extra row${rows.length === 1 ? '' : 's'}…`);
+    try {
+      const out = await api('/api/spreadsheets/remove-rows', {file_hash: hash, rows: rows.map(([sheet, row]) => ({sheet, row}))});
+      toast(`${what || `Took out ${out.removed} extra row${out.removed === 1 ? '' : 's'}`}. Saved as "${out.item.filename}" and checked again. The original is unchanged.`);
+      state.busy = false; await loadList(); select(out.item.file_hash);
+    } catch (e) { state.busy = false; toast(e.message, true); if (hash !== state.report.file_hash) { await loadList(); select(hash); } }
+  }
+  const isDupRow = i => i.code === 'duplicate_row';
 
   // ---------------- spreadsheet view
   const colNum = l => [...l].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
@@ -1813,6 +1848,35 @@
     return (state.fixes || []).filter(f => f.sheet === (issue.sheet || f.sheet) && (issue.cell ? f.cell === String(issue.cell).toUpperCase() : rowNo && splitCell(f.cell)?.[1] === rowNo))
       .map(f => ({...f, after: dec[f.id]?.after ?? f.after, state: dec[f.id]?.state}));
   }
+  // Every error ends in a click: accept the change, take out the extra row, let Claude write a fix, or say it is fine.
+  function fixChoices(issue, next) {
+    const fx = fixesFor(issue).filter(f => f.state !== 'rejected');
+    const decideFix = (f, st) => { const d = store.get(decisionsKey(), {}); d[f.id] = {state: st, after: f.after}; store.set(decisionsKey(), d); drawFixes(); if (st === 'accepted' || st === 'rejected') next(); };
+    const show = v => v === '' || v == null ? '(blank)' : `“${v}”`;
+    const kids = [];
+    for (const f of fx) kids.push(h('div', {class: 'choice'},
+      h('span', {}, f.state === 'accepted' ? '✓ Will change ' : 'Change ', h('b', {}, `${f.sheet} ${f.cell}`), ` from ${show(f.before)} to ${show(f.after)}`),
+      f.state === 'accepted' ? h('button', {type: 'button', class: 'btn small', onclick: () => decideFix(f, undefined)}, 'Undo')
+        : h('span', {class: 'cbtns'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => decideFix(f, 'accepted')}, 'Make this change'),
+          h('button', {type: 'button', class: 'btn small', onclick: () => decideFix(f, 'rejected')}, 'Skip'))));
+    if (!fx.length && isDupRow(issue) && issue.row) kids.push(h('div', {class: 'choice'},
+      h('span', {}, `Row ${issue.row} is an exact copy of another row.`),
+      h('button', {type: 'button', class: 'btn primary small', onclick: () => removeRows([[issue.sheet, Number(issue.row)]], `Took out the extra copy (${issue.sheet} row ${issue.row})`)}, 'Take out this extra row')));
+    if (!fx.length && issue.code === 'duplicate_identifier' && issue.row) kids.push(h('div', {class: 'choice'},
+      h('span', {}, 'If this row is the same part scanned twice:'),
+      h('button', {type: 'button', class: 'btn small', onclick: () => removeRows([[issue.sheet, Number(issue.row)]], `Took out ${issue.sheet} row ${issue.row}`)}, 'Take out this row')));
+    if (!fx.length && !isDupRow(issue) && state.aiOn) kids.push(h('div', {class: 'choice'},
+      h('span', {}, 'No automatic fix for this one yet.'),
+      h('button', {type: 'button', class: 'btn small', onclick: async e => {
+        e.target.disabled = true; e.target.textContent = 'Claude is writing a fix…';
+        try { await api('/api/spreadsheets/ai-fixes', {file_hash: state.report.file_hash}); const d = await api('/api/spreadsheets/fixes', {file_hash: state.report.file_hash});
+          state.fixes = d.proposals || []; state.aiFix = d.ai || {}; drawFixes(); drawSide();
+          if (!fixesFor(issue).length) toast('Claude could not find a safe change for this one. If it looks right to you, choose "It\'s fine as is".', true);
+        } catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Let Claude write a fix'; } }}, 'Let Claude write a fix')));
+    return h('div', {class: 'choices'}, h('b', {class: 'choices-h'}, 'How to fix it'), ...kids,
+      h('div', {class: 'choice'}, h('span', {}, kids.length ? 'Or, if the value is actually right:' : 'If the value is actually right:'),
+        h('button', {type: 'button', class: 'btn small', onclick: next}, 'It\'s fine as is')));
+  }
   function cellPanel(m, underIssue) {
     const g = state.grid, addr = state.gridCell; if (!addr) return null;
     const [c, r] = splitCell(addr), sheet = g.sheet;
@@ -1907,10 +1971,10 @@
         h('button', {type: 'button', class: 'errsum-go', title: `Show ${plural(l.items.length, 'error')} in the spreadsheet, one at a time`, onclick: walk(l.items, l.label)},
           l.text, l.example ? h('span', {class: 'errsum-ex', role: 'link', tabindex: '0', title: 'Show this one in the spreadsheet', onclick: jump(l.example)}, clip(l.example.text)) : null,
           h('span', {class: 'errsum-arrow', 'aria-hidden': 'true'}, ' ›'))))),
-      h('table', {class: 'errsum-table'}, h('tbody', {}, rows.map(([t, c]) => h('tr', {class: 'errsum-row', tabindex: '0', title: `Show the ${t.toLowerCase()} in the spreadsheet, one at a time`,
+      h('details', {class: 'errsum-kinds'}, h('summary', {}, `By kind (${rows.length})`), h('table', {class: 'errsum-table'}, h('tbody', {}, rows.map(([t, c]) => h('tr', {class: 'errsum-row', tabindex: '0', title: `Show the ${t.toLowerCase()} in the spreadsheet, one at a time`,
           onclick: walk(open.filter(i => issueType(i) === t), t), onkeydown: e => { if (e.key === 'Enter') walk(open.filter(i => issueType(i) === t), t)(); }},
         h('td', {}, t), h('td', {class: 'n'}, String(c.n)),
-        h('td', {class: 'note'}, c.only === c.n ? 'only written differently' : c.only ? `${c.only} only written differently` : c.high ? 'must fix' : ''), h('td', {class: 'go'}, '›'))))));
+        h('td', {class: 'note'}, c.only === c.n ? 'only written differently' : c.only ? `${c.only} only written differently` : c.high ? 'must fix' : ''), h('td', {class: 'go'}, '›')))))));
   }
   function issuesBlock(rv) {
     const reviewedKey = 'rd-reviewed:' + state.report.file_hash;
@@ -1926,6 +1990,7 @@
     // accept every suggested fix for the selected issues; ask Claude for the rest when AI is on
     const fixSelected = async btn => {
       const hash = state.report.file_hash, picked = issues.filter(i => sel.has(i.key));
+      const dupRows = picked.filter(i => isDupRow(i) && i.row && !fixesFor(i).length).map(i => [i.sheet, Number(i.row)]);
       const accept = () => {
         const d = store.get(decisionsKey(), {}), fixedKeys = [];
         let n = 0;
@@ -1938,7 +2003,7 @@
         return {n, fixedKeys};
       };
       let {n, fixedKeys} = accept();
-      const missing = picked.filter(i => !fixedKeys.includes(i.key));
+      const missing = picked.filter(i => !fixedKeys.includes(i.key) && !isDupRow(i));
       if (missing.length && state.aiOn) {
         btn.disabled = true; btn.textContent = `Claude is fixing ${missing.length}…`;
         try {
@@ -1952,9 +2017,10 @@
       fixedKeys.forEach(k => done.add(k)); store.set(reviewedKey, [...done]);
       const left = picked.length - fixedKeys.length;
       sel.clear();
-      toast(fixedKeys.length ? `${n} fix${n === 1 ? '' : 'es'} accepted for ${fixedKeys.length} issue${fixedKeys.length === 1 ? '' : 's'}; they go into the download.` + (left ? ` ${left} had no automatic fix: click them to change the cell yourself.` : '')
-        : 'None of these have an automatic fix yet. Click an issue to change its cell yourself' + (state.aiOn ? '.' : ', or turn on AI review so Claude can write fixes.'), !fixedKeys.length);
+      toast(fixedKeys.length ? `${n} fix${n === 1 ? '' : 'es'} accepted for ${fixedKeys.length} issue${fixedKeys.length === 1 ? '' : 's'}; they go into the download.` + (left - dupRows.length > 0 ? ` ${left - dupRows.length} have no automatic fix yet: open each one to choose what to do.` : '')
+        : dupRows.length ? '' : 'None of these have an automatic fix yet. Open each one to choose what to do' + (state.aiOn ? '.' : ', or turn on AI review so Claude can write fixes.'), !fixedKeys.length && !dupRows.length);
       drawFixes(); draw(); updateFinish(); drawSideTabs();
+      if (dupRows.length) await removeRows(dupRows);
     };
     const draw = () => {
       const left = issues.filter(i => !done.has(i.key)).length;
@@ -1968,7 +2034,7 @@
       const summary = errorSummary(issues, done);
       if (summary) block.append(summary);
       if (sel.size) {
-        const picked = issues.filter(i => sel.has(i.key)), ready = picked.filter(i => fixesFor(i).some(f => f.state !== 'rejected')).length;
+        const picked = issues.filter(i => sel.has(i.key)), ready = picked.filter(i => fixesFor(i).some(f => f.state !== 'rejected') || isDupRow(i)).length;
         block.append(h('div', {class: 'selbar issel'},
           h('span', {}, h('b', {}, `${picked.length} selected`), ` · ${ready} with a suggested fix` + (picked.length > ready ? (state.aiOn ? `, Claude will write the other ${picked.length - ready}` : `, ${picked.length - ready} without one`) : '')),
           h('button', {type: 'button', class: 'btn ghost small', onclick: () => { sel.clear(); draw(); }}, 'Clear'),

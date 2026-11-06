@@ -313,6 +313,30 @@ def shift_fix(h, file_hash):
     return _get(h, fixed['file_hash']), sum(1 for m in moves if m[2]), sum(1 for m in moves if not m[2])
 
 
+def remove_rows(h, file_hash, rows):
+    """Corrected copy with the given report rows taken out (extra copies of duplicate rows). Rows below move up;
+    totals and formulas are never touched. rows: [(sheet, row)]. Returns the new item."""
+    from hosting.fixes import relocate_rows, FixError
+    rows = [(str(s_), int(r)) for s_, r in rows][:500]
+    if not rows:
+        raise ApiError(409, 'Pick at least one row to remove.')
+    with h.store().session() as directory:
+        inbox = SpreadsheetInbox(directory)
+        item = inbox.get(file_hash)
+        _, data = inbox.original_bytes(file_hash)
+    try:
+        changes = relocate_rows(item['filename'], data, [(s_, r, None) for s_, r in rows])
+        for c in changes:
+            c.setdefault('reason', 'Extra copy of a duplicate row taken out')
+            c.setdefault('source', 'Duplicate rows')
+        with h.store().session() as directory:
+            fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, changes)
+    except FixError as exc:
+        raise ApiError(409, str(exc)) from None
+    _after_change(h, fixed['file_hash'])
+    return _get(h, fixed['file_hash'])
+
+
 def op_shift_fix(h, file_hash):
     file_hash = _id(file_hash); _get(h, file_hash)
     fixed, moved, removed = shift_fix(h, file_hash)
