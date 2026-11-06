@@ -185,7 +185,6 @@
     const more = h('details', {class: 'more-menu'}, h('summary', {class: 'btn'}, 'More'),
       h('div', {class: 'menu'},
         !r.approval && (r.review_request || {}).status !== 'waiting' ? h('button', {type: 'button', onclick: e => { close(e); reviewForm('request'); }}, 'Send for review') : null,
-        h('button', {type: 'button', onclick: e => { close(e); openDashboard(false); }}, 'Create dashboard'),
         h('a', {href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename, onclick: close}, 'Download the original file')));
     const head = h('div', {class: 'rhead'},
       h('button', {type: 'button', class: 'back', onclick: () => { location.hash = ''; }}, '‹ All reports'),
@@ -1132,16 +1131,7 @@
           h('tbody', {}, people.map(p => h('tr', {}, h('td', {}, p.name), h('td', {}, fmt(p.scans)), h('td', {}, hm(p.first)), h('td', {}, hm(p.last)), h('td', {}, p.shifts.join(', '))))))) : null);
   }
 
-  // ---------------- dashboards and slide shows: built from the data, shown in a sandbox, changed by talking to Claude, downloadable
-  function dailyDashboard() {
-    const r = state.report, hash = r.file_hash;
-    return {id: 'd:' + hash, noun: 'dashboard', title: `${r.review.job || r.filename}, ${shortDay(r.review.day)}`,
-      ideas: ['One clean page for printing', 'Add a donut chart of reject reasons', 'White background for a client presentation', 'Put the reject rate by shift at the top'],
-      create: rebuild => api('/api/spreadsheets/dashboard', {file_hash: hash, rebuild}),
-      chat: message => api('/api/spreadsheets/dashboard/chat', {file_hash: hash, message}),
-      undo: () => api('/api/spreadsheets/dashboard/undo', {file_hash: hash})};
-  }
-  const openDashboard = rebuild => openArtifact(dailyDashboard(), rebuild);
+  // ---------------- weekly/monthly and overview dashboards and slide shows: built from the data, changed by talking to Claude, downloadable
   async function openArtifact(ctx, rebuild) {
     let dlg = $('dash-dialog');
     if (!dlg) { dlg = h('dialog', {id: 'dash-dialog', class: 'walk dashdlg', 'aria-labelledby': 'dash-title'}); document.body.append(dlg);
