@@ -1218,3 +1218,40 @@ details.fixedlog .checkme{color:#9a6a00;font-weight:600}
 .sidepane table.plan tr.needs-you{background:#fdf7ea;border-radius:8px;padding-left:6px;padding-right:6px}
 .sidepane table.plan tr.needs-you td{background:none}
 .sidepane .guide-steps li{font-size:12.5px}
+/* the review checklist in the right-hand panel */
+.plan2wrap{border:0;box-shadow:none;padding:4px 0 0;gap:8px}
+.plan2-done{margin:0;font-size:12.5px;color:var(--green)}
+.plan2{display:flex;flex-direction:column;gap:10px}
+.plan2-title{margin:0;font-size:18px}
+.plan2-help{margin:0;font-size:13px;color:var(--muted);line-height:1.5}
+.pg-all{display:flex;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid var(--line);font-size:13.5px;font-weight:600;cursor:pointer}
+.pg-all input,.pg-head input,.pg-items input{width:17px;height:17px;accent-color:var(--green);flex:none;margin:0}
+.pg-list{display:flex;flex-direction:column;gap:8px}
+.pg{border:1px solid var(--line);border-radius:10px;background:#fff}
+.pg.some{border-color:#b7d7c6;background:#f7fbf9}
+.pg-head{display:flex;align-items:flex-start;gap:10px;padding:10px 12px}
+.pg-head input{margin-top:3px}
+.pg-toggle{flex:1;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;text-align:left;background:none;border:0;padding:0;cursor:pointer;color:inherit;font:inherit}
+.pg-title{font-weight:600;font-size:14px;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}
+.pg-count{font-weight:500;font-size:12px;color:var(--muted)}
+.pg-sub{grid-column:1;font-size:12.5px;color:var(--muted);line-height:1.4}
+.pg-chev{grid-column:2;grid-row:1 / span 2;align-self:center;font-size:14px;color:var(--green);width:22px;height:22px;display:grid;place-items:center;border-radius:6px;background:#eef5f1}
+.pg-items{list-style:none;margin:0;padding:4px 12px 8px 38px;border-top:1px solid var(--line);max-height:320px;overflow:auto}
+.pg-items li{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px dashed #e4ebe8;font-size:13px}
+.pg-items li:last-child{border-bottom:0}
+.pg-items label{display:flex;gap:8px;align-items:flex-start;cursor:pointer;min-width:0}
+.pg-items label input{margin-top:2px}
+.pi-text{display:flex;flex-direction:column;min-width:0}
+.pi-where{font-weight:600;font-size:12.5px}
+.pi-change{color:var(--muted);font-size:12.5px;word-break:break-word}
+.pi-change b{color:var(--ink,#1d2b28)}
+.plan2-walk{margin:0}
+.pbar{position:sticky;bottom:0;margin:6px -14px -14px;padding:12px 14px;background:#fff;border-top:1px solid var(--line);box-shadow:0 -6px 12px -8px rgba(20,40,30,.15);display:flex;flex-direction:column;gap:8px;z-index:2}
+.pbar-count{margin:0;font-size:13px;font-weight:600}
+.pbar-btns{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+.pbar-btns .btn{justify-content:center;padding-left:6px;padding-right:6px}
+.pbar-btns .btn[disabled]{opacity:.45;cursor:not-allowed}
+.pbar-note{margin:0;font-size:12px;color:#9a6a00}
+.sidepane #cleanoffer{padding:0}
+.sidepane .pbar{margin:6px -16px -16px;padding:12px 16px}
+.pbar,.sidepane .pbar{position:sticky;top:-16px;bottom:auto;margin:0 -16px;padding:10px 16px;border-top:0;border-bottom:1px solid var(--line);box-shadow:0 6px 12px -10px rgba(20,40,30,.25);background:#fff}

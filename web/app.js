@@ -827,8 +827,8 @@
     const mine = (r.fixed_from?.changes || []).filter(x => !/automatic cleanup|AI fix|AI\b/.test(x.source || ''));
     if (mine.length) steps.push({id: 'saved', title: `Saved: ${plural(mine.length, 'change')}`, done: true});
     // ---- one summary of every proposed change: accept them all (Claude takes whatever has no proposal), or review by issue type
-    state.planOff ||= {};
-    const off = (state.planOff[hash] ||= new Set()), openIssues = open;
+    state.planSel ||= {};
+    const sel = (state.planSel[hash] ||= new Set()), off = new Set(), openIssues = open;
     const isFix = f => f.state !== 'rejected';
     const groupsMap = new Map();
     for (const i of openIssues) { const k = sameKey(i); if (!groupsMap.has(k)) groupsMap.set(k, []); groupsMap.get(k).push(i); }
@@ -859,7 +859,7 @@
     ].filter(Boolean);
     groups.forEach(g => { g.id = 'g:' + sameKey(g.items[0]); }); fixRows.forEach(r => { r.id = 'f:' + r.id; });
     // selection: every item is ticked unless unticked; a type's box ticks or clears all of its items
-    const isOn = x => !off.has(x.key || x.id);
+    const isOn = x => sel.has(x.key || x.id);
     for (const g of groups) { const t = g.items.filter(isOn); g.t = t; g.tFix = g.withFix.filter(isOn); g.tDups = g.dups.filter(isOn); g.tNone = g.none.filter(isOn); }
     for (const r of fixRows) r.t = r.fixes.filter(isOn);
     const everyItem = [...fixRows.flatMap(r => r.fixes), ...groups.flatMap(g => g.items)];
@@ -868,7 +868,7 @@
     const nChanges = fixIds.size + new Set(groups.flatMap(g => g.tDups.map(x => `${x.sheet}|${x.row}`))).size;
     const nClaude = state.aiOn ? groups.reduce((n, g) => n + g.tNone.length, 0) : 0, nYou = state.aiOn ? 0 : groups.reduce((n, g) => n + g.tNone.length, 0);
     const totalItems = everyItem.length;
-    const setAll = (list, on) => { list.forEach(x => on ? off.delete(x.key || x.id) : off.add(x.key || x.id)); drawCleanOffer(); };
+    const setAll = (list, on) => { list.forEach(x => on ? sel.add(x.key || x.id) : sel.delete(x.key || x.id)); drawCleanOffer(); };
     const tick = (list, label) => { const n = list.filter(isOn).length, b = h('input', {type: 'checkbox', class: 'plan-tick', checked: n === list.length && n > 0, 'aria-label': `Select ${label}`, onchange: e => setAll(list, e.target.checked)}); b.indeterminate = n > 0 && n < list.length; return b; };
     const idOf = i => `${i.code}|${i.text}|${i.row ?? ''}`;
     const tIssues = groups.flatMap(g => g.t);
@@ -885,6 +885,7 @@
       const d = store.get(decisionsKey(), {}); for (const r of fixRows) for (const f of r.t) d[f.id] = {state: 'rejected'}; store.set(decisionsKey(), d);
       if (tIssues.length) await markFine(tIssues);
       const dn = reviewedSet(); tIssues.forEach(x => dn.add(x.key)); store.set('rd-reviewed:' + hash, [...dn]);
+      sel.clear();
       toast(`${plural(nOn, 'item')} ignored: marked fine as is. Nothing in the report was changed.`);
       drawFixes(); updateFinish(); drawSideTabs();
     };
@@ -909,48 +910,46 @@
       await loadList(); select(cur); showResult(cur, true);
     };
     if (groups.length || fixRows.length) {
-      const reviewKind = g => { state.oneByOne.delete(sameKey(g.items[0])); state.groupWalk = null; state.walkNote = `Reviewing ${g.items.length === 1 ? 'this issue' : `all ${g.items.length} with this issue`}: tick or untick, then pick one answer for the group.`;
+      const reviewKind = g => { state.oneByOne.delete(sameKey(g.items[0])); state.groupWalk = null; state.walkNote = `Going through ${g.items.length === 1 ? 'this issue' : `the ${g.items.length} with this issue`} one at a time.`;
         focusIssue(walkIssues().indexOf(g.items[0])); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); };
-      state.oneByOne ||= new Set();
-      state.planOpen ||= new Set();
+      state.oneByOne ||= new Set(); state.planOpen ||= new Set();
       const where = x => x.sheet ? `${x.sheet}${x.cell ? ' ' + x.cell : x.row ? ' row ' + x.row : ''}` : 'Whole report';
-      const opener = (id, n) => h('button', {type: 'button', class: 'linkish small', 'aria-expanded': String(state.planOpen.has(id)),
-        onclick: () => { state.planOpen.has(id) ? state.planOpen.delete(id) : state.planOpen.add(id); drawCleanOffer(); }}, state.planOpen.has(id) ? 'Hide items' : `Show the ${fmt(n)}`);
-      const itemRow = (key, label, change, showIt) => h('li', {class: off.has(key) ? 'off' : ''},
-        h('label', {}, h('input', {type: 'checkbox', checked: !off.has(key), onchange: e => { e.target.checked ? off.delete(key) : off.add(key); drawCleanOffer(); }}), ' ', h('span', {}, label)),
-        h('span', {class: 'plan-change'}, change), h('button', {type: 'button', class: 'linkish small', onclick: showIt}, 'show'));
-      const tableRows = [];
-      for (const r of fixRows) {
-        tableRows.push(h('tr', {class: noneOf(r.t) ? 'off' : ''},
-          h('td', {class: 'tk'}, tick(r.fixes, r.label)),
-          h('td', {}, h('b', {}, r.label), h('div', {}, opener(r.id, r.fixes.length))), h('td', {class: 'n'}, r.t.length === r.fixes.length ? fmt(r.fixes.length) : `${fmt(r.t.length)} of ${fmt(r.fixes.length)}`), h('td', {}, r.plan), h('td', {})));
-        if (state.planOpen.has(r.id)) tableRows.push(h('tr', {class: 'plan-items'}, h('td', {}), h('td', {colspan: '4'}, h('ul', {class: 'bulk-list'},
-          r.fixes.slice(0, 500).map(f => itemRow(f.id, `${f.sheet} ${f.cell}: ${show(f.before)}`, ['→ ', h('code', {}, showWs(f.after))], () => showCell(f.sheet, f.cell)))))));
-      }
-      for (const g of groups) {
-        tableRows.push(h('tr', {class: (g.tNone.length && !state.aiOn ? 'needs-you' : '') + (noneOf(g.t) ? ' off' : '')},
-          h('td', {class: 'tk'}, tick(g.items, g.label)),
-          h('td', {}, h('b', {}, g.label), h('div', {class: 'quiet plan-ex'}, g.text), g.items.length > 1 ? h('div', {}, opener(g.id, g.items.length)) : null),
-          h('td', {class: 'n'}, g.t.length === g.items.length ? fmt(g.items.length) : `${fmt(g.t.length)} of ${fmt(g.items.length)}`), h('td', {}, g.plan),
-          h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => reviewKind(g)}, 'Review'))));
-        if (state.planOpen.has(g.id)) tableRows.push(h('tr', {class: 'plan-items'}, h('td', {}), h('td', {colspan: '4'}, h('ul', {class: 'bulk-list'},
-          g.items.slice(0, 500).map(x => { const f = fixesFor(x).find(isFix);
-            return itemRow(x.key, where(x) + (f ? `: ${show(f.before)}` : ''), f ? ['→ ', h('code', {}, showWs(f.after))] : isDupRow(x) ? 'take out the extra copy' : state.aiOn ? 'Claude fixes it' : 'needs you',
-              () => { state.walkNote = null; focusIssue(walkIssues().indexOf(x)); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }); })))));
-      }
-      steps.push({id: 'review', title: `${plural(totalItems, 'item')} to review`,
-        say: walking ? 'You are going through one issue type above. When you are done there, the rest is still listed here.'
-          : `${plural(totalItems, 'item')}, grouped by issue type. Tick one, some or all, then choose what to do.` + (nYou ? ` ${plural(nYou, 'ticked item')} ${nYou === 1 ? 'has' : 'have'} no proposed change.` : ''),
-        body: [h('div', {class: 'tablewrap'}, h('table', {class: 'plan'}, h('thead', {}, h('tr', {}, h('th', {class: 'tk'}, (() => { const a = h('input', {type: 'checkbox', checked: allOn, 'aria-label': 'Select all issue types', title: 'Select all',
-              onchange: e => setAll(everyItem, e.target.checked)}); a.indeterminate = !allOn && !noneOn; return a; })()),
-            ...['Issue type', 'Items', 'Proposed change', ''].map(x => h('th', {}, x)))), h('tbody', {}, tableRows)))],
-        go: [`Approve ${allOn ? 'all ' : ''}${fmt(nChanges + nClaude)}${allOn ? '' : ' selected'}`, e => acceptEverything(e.target)],
-        alt: state.aiOn && tIssues.length ? [`Fix ${allOn ? 'all ' : ''}${fmt(tIssues.length)}${allOn ? '' : ' selected'} with AI`, e => aiFixSelected(e.target)] : null,
-        more: nOn ? [[`Ignore ${allOn ? 'all ' : ''}${fmt(nOn)}${allOn ? '' : ' selected'}`, () => ignoreSelected()]] : [],
-        foot: h('p', {class: 'guide-foot'}, h('b', {}, 'Approve'), ' makes the proposed changes', state.aiOn ? ' (Claude fixes anything without one)' : '', '. ',
-          state.aiOn ? [h('b', {}, 'Fix with AI'), ' lets Claude decide every ticked item. '] : '', h('b', {}, 'Ignore'), ' marks them fine as is. ',
-          groups.length ? h('button', {type: 'button', class: 'linkish small', onclick: () => reviewKind(groups[0])}, 'Or go through one type at a time') : null)});
-      if (!nChanges && !nClaude) steps[steps.length - 1].go = state.aiOn && tIssues.length ? steps[steps.length - 1].alt : ['Go through them one type at a time', () => reviewKind(groups[0])], steps[steps.length - 1].alt = null;
+      const box = (key, label) => h('input', {type: 'checkbox', checked: sel.has(key), 'aria-label': `Select ${label}`, onchange: e => { e.target.checked ? sel.add(key) : sel.delete(key); drawCleanOffer(); }});
+      const item = (key, label, change, showIt) => h('li', {class: sel.has(key) ? 'on' : ''},
+        h('label', {}, box(key, label), h('span', {class: 'pi-text'}, h('span', {class: 'pi-where'}, label), h('span', {class: 'pi-change'}, change))),
+        h('button', {type: 'button', class: 'linkish small', onclick: showIt}, 'Show'));
+      const typeBlock = (id, title, sub, list, kids) => { const isOpen = state.planOpen.has(id), n = list.filter(isOn).length;
+        return h('div', {class: 'pg' + (isOpen ? ' open' : '') + (n ? ' some' : '')},
+          h('div', {class: 'pg-head'}, tick(list, title),
+            h('button', {type: 'button', class: 'pg-toggle', 'aria-expanded': String(isOpen), onclick: () => { isOpen ? state.planOpen.delete(id) : state.planOpen.add(id); drawCleanOffer(); }},
+              h('span', {class: 'pg-title'}, title, h('span', {class: 'pg-count'}, n ? `${n} of ${list.length} selected` : `${list.length} item${list.length === 1 ? '' : 's'}`)),
+              h('span', {class: 'pg-sub'}, sub), h('span', {class: 'pg-chev', 'aria-hidden': 'true'}, isOpen ? '▴' : '▾'))),
+          isOpen ? h('ul', {class: 'pg-items'}, kids()) : null); };
+      const blocks = [
+        ...fixRows.map(r => typeBlock(r.id, r.label, r.plan, r.fixes, () => r.fixes.slice(0, 500).map(f =>
+          item(f.id, `${f.sheet} ${f.cell}`, [show(f.before), ' → ', h('b', {}, showWs(f.after))], () => showCell(f.sheet, f.cell))))),
+        ...groups.map(g => typeBlock(g.id, g.label, g.plan.replace(/^Change to the suggested value, e\.g\. /, 'Suggested change, e.g. '), g.items, () => g.items.slice(0, 500).map(x => { const f = fixesFor(x).find(isFix);
+          return item(x.key, where(x), f ? [show(f.before), ' → ', h('b', {}, showWs(f.after))] : isDupRow(x) ? 'Extra copy: take it out' : state.aiOn ? h('em', {}, 'No suggested change: Claude can fix it') : h('em', {}, 'No suggested change'),
+            () => { state.walkNote = null; focusIssue(walkIssues().indexOf(x)); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }); })))];
+      const none = !nOn, approveN = nChanges + nClaude;
+      const bar = h('div', {class: 'pbar'},
+        h('p', {class: 'pbar-count'}, none ? 'Tick the items you want to handle.' : `${plural(nOn, 'item')} selected`),
+        h('div', {class: 'pbar-btns'},
+          h('button', {type: 'button', class: 'btn primary', disabled: none || !approveN, title: 'Make the suggested changes' + (state.aiOn ? '; Claude fixes the ones without one' : ''), onclick: e => acceptEverything(e.target)},
+            none ? 'Approve' : `Approve ${fmt(approveN)}`),
+          state.aiOn ? h('button', {type: 'button', class: 'btn ai', disabled: none || !tIssues.length, title: 'Claude decides each selected item', onclick: e => aiFixSelected(e.target)},
+            none || !tIssues.length ? 'Fix with AI' : `Fix ${fmt(tIssues.length)} with AI`) : null,
+          h('button', {type: 'button', class: 'btn ghost', disabled: none, title: 'Leave them as they are and mark them fine', onclick: () => ignoreSelected()}, none ? 'Ignore' : `Ignore ${fmt(nOn)}`)),
+        !none && nYou ? h('p', {class: 'pbar-note'}, `${plural(nYou, 'selected item')} ${nYou === 1 ? 'has' : 'have'} no suggested change, so Approve leaves ${nYou === 1 ? 'it' : 'them'} open.`) : null);
+      steps.push({id: 'review', title: `${plural(totalItems, 'item')} to review`, panel: h('div', {class: 'plan2'},
+        h('h2', {id: 'clean-title', class: 'plan2-title'}, `${plural(totalItems, 'item')} to review`),
+        h('p', {class: 'plan2-help'}, 'Tick single items, a whole type, or everything. Then choose ', h('b', {}, 'Approve'), ' (make the suggested changes), ',
+          state.aiOn ? [h('b', {}, 'Fix with AI'), ' (Claude decides), '] : '', 'or ', h('b', {}, 'Ignore'), ' (leave as is). Click ▾ to see the items in a type.'),
+        bar,
+        h('label', {class: 'pg-all'}, (() => { const a = h('input', {type: 'checkbox', checked: allOn && nOn > 0, onchange: e => setAll(everyItem, e.target.checked)}); a.indeterminate = !allOn && !noneOn; return a; })(),
+          h('span', {}, allOn && nOn ? 'All selected' : `Select all ${fmt(totalItems)}`)),
+        h('div', {class: 'pg-list'}, blocks),
+        groups.length ? h('p', {class: 'plan2-walk'}, h('button', {type: 'button', class: 'linkish small', onclick: () => reviewKind(groups[0])}, 'Or go through them one at a time')) : null)});
     }
     const walkOpen = openIssues;
     const wentThrough = walkIssues().filter(i => revd.has(i.key)).length;
@@ -963,6 +962,12 @@
     const current = live[0];
     const numbered = steps;
     const no = s => numbered.indexOf(s) + 1;
+    if (current?.panel) {
+      const doneLine = steps.filter(s => s.done).map(s => s.title).join(' · ');
+      slot.replaceChildren(h('section', {class: 'cleanoffer guide plan2wrap', 'aria-labelledby': 'clean-title'},
+        doneLine ? h('p', {class: 'plan2-done'}, '✓ ', doneLine) : null, current.panel));
+      return;
+    }
     slot.replaceChildren(h('section', {class: 'cleanoffer guide', 'aria-labelledby': 'clean-title'},
       h('ol', {class: 'guide-steps'}, steps.map(s => h('li', {class: s.done ? 'done' : s === current ? 'now' : skipped.includes(s.id) && s.skippable ? 'skipped' : 'later'},
         h('span', {class: 'gs-dot', 'aria-hidden': 'true'}, s.done ? '✓' : String(no(s))),
