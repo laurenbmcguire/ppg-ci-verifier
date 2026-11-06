@@ -154,7 +154,7 @@
       list.append(h('button', {type: 'button', class: 'item' + (r.file_hash === state.selected ? ' sel' : ''), onclick: () => select(r.file_hash),
         'aria-label': `${rv.job || r.filename}, ${STATUS[rv.status] || 'Check'}, ${count}`},
         h('span', {class: 'tag tag-' + rv.status}, STATUS[rv.status] || 'Check'),
-        h('span', {class: 'job', title: rv.job ? null : 'No job number was found in this file. The file name is shown instead.'}, (rv.job || r.filename.replace(/\.(xlsx|xlsm|xls|csv)$/i, '')) + (rv.fixed_from ? ' (fixed)' : '')),
+        h('span', {class: 'job', title: rv.job ? null : 'No job number was found in this file. The file name is shown instead.'}, (rv.job || r.filename.replace(/\.(xlsx|xlsm|xls|csv)$/i, '').replace(/\s*\(fixed\)/g, ''))), rv.fixed_from ? h('span', {class: 'vtag', title: 'A corrected copy; the original upload is kept too'}, 'corrected') : null,
         h('span', {class: 'count'}, rv.sent_at ? 'Sent' : rv.approved ? 'Approved' : rv.review_state === 'waiting' ? 'For review' : rv.review_state === 'sent_back' ? 'Sent back' : count),
         h('span', {class: 'file'}, `${r.filename} · v${r.version} · ${ago(r.received_at)}`)));
     }
@@ -447,6 +447,15 @@
     paint({}); api('/api/settings/sharepoint-jobs', {}).then(paint).catch(() => {});
     return box;
   }
+  function fixedLog(r) {   // everything fixed automatically, folded into one line you can open
+    const a = r.auto_formatting?.count || 0, s = r.ai_fixed || {}, ai = (s.changed || []).length + (s.removed || []).length + (s.moved || []).length, fine = (s.fine || []).length;
+    if (!a && !ai && !fine) return null;
+    const parts = [a ? `${a} cleaned up` : '', ai ? `${ai} fixed by Claude` : '', fine ? `${fine} checked and fine` : ''].filter(Boolean);
+    const checks = [...(s.changed || []), ...(s.removed || []), ...(s.moved || [])].filter(x => x.check).length;
+    return h('details', {class: 'fixedlog'}, h('summary', {}, h('span', {class: 'autofmt-mark', 'aria-hidden': 'true'}, '✓'),
+        h('b', {}, 'Fixed automatically: '), parts.join(', '), checks ? h('span', {class: 'checkme'}, ` · ${checks} to double-check`) : null, h('span', {class: 'quiet'}, ' · see what changed')),
+      autoFmtBanner(r), aiFixedBanner(r));
+  }
   function autoFmtBanner(r) {
     const a = r.auto_formatting; if (!a || !a.count) return null;
     const kinds = Object.entries(a.kinds || {}).map(([k, n], i) => `${i ? k : k[0].toUpperCase() + k.slice(1)}: ${n}`).join(', ');
@@ -496,7 +505,7 @@
         h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download report'),
         h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
     const status = h('div', {class: 'rstatus'},
-      spJobLine(r), docBanner(r), autoFmtBanner(r), aiFixedBanner(r),
+      spJobLine(r), docBanner(r), fixedLog(r),
       h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
       h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)),
       h('div', {id: 'cleanoffer'}));
@@ -504,6 +513,7 @@
     const ws = h('div', {class: 'workspace'},
       h('section', {class: 'sheetpane', id: 'sheet-block', 'aria-label': 'Spreadsheet'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Loading the spreadsheet…')),
       h('aside', {class: 'sidepane', id: 'side', 'aria-label': 'Facts and fixes'}));
+    steps.hidden = true;   // the step-by-step guide shows where the report stands
     $('report').replaceChildren(h('div', {class: 'rws'}, head, steps, status, ws));
     drawSteps();
     state.grid = null; state.gridSheet = null; state.gridCell = null; state.issueNav = null;
@@ -815,6 +825,12 @@
         : state.aiOn ? 'Claude fixes ' + (items.length === 1 ? 'it' : 'them') : 'No change proposed: needs you';
       return {items, withFix, dups, none, plan, label: issueType(items[0]), text: items[0].text};
     });
+    const seenFix = new Set();   // two flags on the same cell are settled by one change: say so instead of listing it twice
+    for (const g of groups) {
+      const ids = g.withFix.flatMap(x => fixesFor(x).filter(isFix).map(f => f.id));
+      if (ids.length && g.withFix.length === g.items.length && ids.every(id => seenFix.has(id))) g.plan = 'Settled by the same change as above (one change fixes both flags)';
+      ids.forEach(id => seenFix.add(id));
+    }
     const loose = undecided.filter(f => isFix(f) && !covered.has(f.id) && f.source !== 'AI fix');
     const fmtLoose = loose.filter(f => fmtKind(f)), suggLoose = loose.filter(f => f.source === 'Suggested'), otherLoose = loose.filter(f => !fmtKind(f) && f.source !== 'Suggested' && isSureFix(f));
     const fixRows = [
@@ -829,7 +845,8 @@
     for (const r of fixRows) r.t = r.fixes.filter(isOn);
     const everyItem = [...fixRows.flatMap(r => r.fixes), ...groups.flatMap(g => g.items)];
     const nOn = everyItem.filter(isOn).length, allOn = nOn === everyItem.length, noneOn = nOn === 0;
-    const nChanges = fixRows.reduce((n, r) => n + r.t.length, 0) + groups.reduce((n, g) => n + g.tFix.length + g.tDups.length, 0);
+    const fixIds = new Set([...fixRows.flatMap(r => r.t.map(f => f.id)), ...groups.flatMap(g => g.tFix.flatMap(x => fixesFor(x).filter(isFix).map(f => f.id)))]);
+    const nChanges = fixIds.size + new Set(groups.flatMap(g => g.tDups.map(x => `${x.sheet}|${x.row}`))).size;
     const nClaude = state.aiOn ? groups.reduce((n, g) => n + g.tNone.length, 0) : 0, nYou = state.aiOn ? 0 : groups.reduce((n, g) => n + g.tNone.length, 0);
     const totalItems = everyItem.length;
     const setAll = (list, on) => { list.forEach(x => on ? off.delete(x.key || x.id) : off.add(x.key || x.id)); drawCleanOffer(); };
@@ -887,7 +904,7 @@
       }
       steps.push({id: 'review', title: nChanges + nClaude ? `Review ${plural(nChanges + nClaude, 'proposed change')}` + (nYou ? ` (and ${fmt(nYou)} that need you)` : '') : `${plural(nYou, 'item')} need${nYou === 1 ? 's' : ''} you: review by issue type`,
         say: walking ? 'You are reviewing one issue type on the right. When you are done there, come back here, or accept everything that is left.'
-          : `Here is everything I would change, by issue type (${plural(totalItems, 'item')} in all). Tick everything, whole issue types, or single items (Show the items), then approve: the proposed changes are made${state.aiOn ? ' and Claude makes the changes for anything without one' : ''}. Or review a type first.` + (nYou ? ` ${plural(nYou, 'ticked item')} ${nYou === 1 ? 'has' : 'have'} no proposed change, so ${nYou === 1 ? 'it needs' : 'they need'} you.` : ''),
+          : `${plural(totalItems, 'item')}, grouped by issue type. Tick everything, a whole type, or single items, then approve. The proposed changes are made${state.aiOn ? ' and Claude fixes anything without one' : ''}.` + (nYou ? ` ${plural(nYou, 'ticked item')} ${nYou === 1 ? 'has' : 'have'} no proposed change, so ${nYou === 1 ? 'it needs' : 'they need'} you.` : ''),
         body: [h('div', {class: 'tablewrap'}, h('table', {class: 'plan'}, h('thead', {}, h('tr', {}, h('th', {class: 'tk'}, (() => { const a = h('input', {type: 'checkbox', checked: allOn, 'aria-label': 'Select all issue types', title: 'Select all',
               onchange: e => setAll(everyItem, e.target.checked)}); a.indeterminate = !allOn && !noneOn; return a; })()),
             ...['Issue type', 'Items', 'Proposed change', ''].map(x => h('th', {}, x)))), h('tbody', {}, tableRows)))],
@@ -1805,7 +1822,7 @@
                 h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => { state.periodQuery = {kind: 'week', day, job: r.job}; location.hash = 'periods'; }}, 'Week'),
                   r.watched ? h('button', {type: 'button', class: 'btn ghost small', onclick: async () => { if (await load({remove: r.job})) draw(); }}, 'Stop watching') : null));
             })))) : h('p', {class: 'note'}, 'No jobs yet. Upload a daily report, or add a job to watch below.'),
-          h('div', {class: 'keyform addjob'}, addBox, h('button', {type: 'button', class: 'btn', onclick: async () => { if (!addBox.value.trim()) return; if (await load({add: addBox.value})) { draw(); fetchScans(); } }}, 'Watch job'))));
+          h('div', {class: 'keyform addjob'}, addBox, h('button', {type: 'button', class: 'btn', onclick: async () => { if (!addBox.value.trim()) { addBox.focus(); return toast('Type a job number to watch, for example HANDS-HMMA-2219.', true); } if (await load({add: addBox.value})) { draw(); fetchScans(); } }}, 'Watch job'))));
     };
     const fetchScans = async () => {
       if (!data.sharepoint_on) return;
@@ -1998,7 +2015,11 @@
             h('label', {}, 'Ends', h('input', {type: 'time', value: r.end, oninput: e => { r.end = e.target.value; }})),
             rows.length > 1 ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { rows.splice(i, 1); paint(); }}, 'Remove') : null))),
           h('div', {class: 'shiftbtns'},
-            rows.length < 4 ? h('button', {type: 'button', class: 'btn small', onclick: () => { const last = rows[rows.length - 1]; rows.push({name: ['1st', '2nd', '3rd', '4th'][rows.length], start: last.end, end: last.start}); paint(); }}, 'Add a shift') : null,
+            rows.length < 4 ? h('button', {type: 'button', class: 'btn small', onclick: () => {
+              const mins = t => { const [a, b] = String(t || '').split(':').map(Number); return a * 60 + b; }, cov = new Array(1440).fill(false);
+              for (const r of rows) { const a = mins(r.start), b = mins(r.end); if (isNaN(a) || isNaN(b)) continue; for (let t = a; t !== b; t = (t + 1) % 1440) cov[t] = true; }
+              if (cov.every(Boolean)) return toast('These shifts already cover the whole day. Change when one of them ends first, then add a shift for the time that frees up.', true);
+              const last = rows[rows.length - 1]; rows.push({name: ['1st', '2nd', '3rd', '4th'][rows.length], start: last.end, end: rows[0].start}); paint(); }}, 'Add a shift') : null,
             extra || null,
             h('button', {type: 'button', class: 'btn primary small', onclick: () => onSave(rows)}, 'Save shift times')));
       };
@@ -2513,8 +2534,6 @@
           {
             const openList = list.filter(i => !done.has(i.key));
             det.append(h('div', {class: 'gactions'},
-              h('button', {type: 'button', class: 'btn small', onclick: () => { allSel ? openKeys.forEach(k => sel.delete(k)) : openKeys.forEach(k => sel.add(k)); draw(); }},
-                allSel ? 'Unselect all' : `Select all ${openKeys.length}`),
               openT ? h('button', {type: 'button', class: 'btn small', onclick: () => {
                 state.groupWalk = {keys: new Set(openList.map(i => i.key)), label: type};
                 focusIssue(issues.indexOf(openList[0])); }}, openT === 1 ? 'Check it' : `Check one at a time (${openT})`) : null));

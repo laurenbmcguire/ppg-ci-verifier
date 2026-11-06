@@ -1153,3 +1153,32 @@ table.plan .plan-change{color:var(--muted);font-size:12.5px}
 table.plan tr.plan-items td{text-align:left !important}
 table.plan tr.plan-items li{grid-template-columns:minmax(200px,1.2fr) minmax(0,1fr) auto}
 table.plan tr.plan-items label{display:flex;gap:6px;align-items:center}
+.steps-bar[hidden]{display:none !important}
+details.fixedlog{background:#eef7f1;border:1px solid #cfe6d8;border-radius:10px;padding:8px 14px}
+details.fixedlog > summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:14px}
+details.fixedlog > summary::-webkit-details-marker{display:none}
+details.fixedlog > summary .autofmt-mark{width:20px;height:20px;font-size:12px}
+details.fixedlog > summary .quiet{color:var(--green);font-weight:600}
+details.fixedlog[open] > summary .quiet{display:none}
+details.fixedlog .autofmt,details.fixedlog .aifixed{margin-top:10px;border:0;padding:0;background:none;box-shadow:none}
+details.fixedlog .checkme{color:#9a6a00;font-weight:600}
+.vtag{margin-left:6px;font-size:11px;font-weight:600;color:var(--green);background:#e6f2ec;border-radius:999px;padding:1px 7px;vertical-align:middle}
+@media (max-width:640px){
+  table.plan,table.plan tbody,table.plan tr,table.plan td{display:block}
+  table.plan thead tr{display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--line);padding:6px 0}
+  table.plan thead th{border:0;padding:0}
+  table.plan thead th:not(.tk){display:none}
+  table.plan thead tr::after{content:'Select all';font-size:13px;color:var(--muted)}
+  table.plan tbody tr:not(.plan-items){display:grid;grid-template-columns:26px minmax(0,1fr) auto;column-gap:8px;row-gap:4px;padding:10px 0;border-bottom:1px solid var(--line)}
+  table.plan tbody td{border:0;padding:0;text-align:left!important}
+  table.plan tbody tr:not(.plan-items) td.tk{grid-row:1 / span 3}
+  table.plan tbody tr:not(.plan-items) td:nth-child(2){grid-column:2}
+  table.plan tbody tr:not(.plan-items) td.n{grid-column:3;grid-row:1;font-weight:600}
+  table.plan tbody tr:not(.plan-items) td:nth-child(4){grid-column:2 / span 2;font-size:13px}
+  table.plan tbody tr:not(.plan-items) td:nth-child(5){grid-column:2 / span 2}
+  table.plan tbody tr:not(.plan-items) td:nth-child(5):empty{display:none}
+  table.plan tr.plan-items > td:first-child{display:none}
+  table.plan tr.plan-items li{grid-template-columns:1fr auto}
+  table.plan tr.plan-items li .plan-change{grid-column:1 / span 2;order:3;padding-left:26px}
+  table.plan .plan-ex{max-width:none}
+}
