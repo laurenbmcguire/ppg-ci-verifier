@@ -380,20 +380,39 @@
       if (out.item.file_hash !== hash) select(out.item.file_hash); else if (state.selected === hash) openReport(hash);
     } catch (e) { toast(e.message, true); if (btn) { btn.disabled = false; btn.textContent = label; } }
   }
-  function aiFixedBanner(r) {
+  function aiFixedBanner(r) {   // a short summary of what Claude did; every single change is one click away
     const s = r.ai_fixed; if (!s) return null;
-    const item = (title, rows, fmt) => rows.length ? h('div', {class: 'aifx-group'}, h('b', {}, title), h('ul', {}, rows.map(x => h('li', {class: x.check ? 'check' : ''}, fmt(x), x.check ? h('em', {class: 'checkme'}, ' please double-check') : null)))) : null;
-    const checks = [...(s.changed || []), ...(s.removed || []), ...(s.moved || [])].filter(x => x.check).length;
+    const plural = (n, w) => `${fmt(n)} ${w}${n === 1 ? '' : 's'}`;
+    const norm = t => String(t || '').replace(/"[^"]*"|“[^”]*”/g, '"…"').replace(/\b[A-Za-z0-9-]*\d[A-Za-z0-9-]*\b/g, '#').replace(/\s+/g, ' ').trim();
+    const groupBy = (rows, key) => { const g = new Map(); for (const x of rows) { const k = key(x); g.set(k, [...(g.get(k) || []), x]); } return [...g.values()].sort((a, b) => b.length - a.length); };
+    const changed = s.changed || [], removed = s.removed || [], moved = s.moved || [], fine = s.fine || [], left = s.left || [];
+    const checks = [...changed, ...removed, ...moved].filter(x => x.check).length;
+    const lines = [];
+    for (const g of groupBy(changed, x => norm(x.reason)).slice(0, 4)) { const x = g[0];
+      lines.push(h('li', {}, h('b', {}, g.length === 1 ? 'Changed 1 cell' : `Changed ${fmt(g.length)} cells`), `: ${x.reason}`, h('span', {class: 'quiet'}, ` e.g. ${x.sheet} ${x.cell}: ${showWs(x.before)} → ${showWs(x.after)}`))); }
+    const moreChanged = groupBy(changed, x => norm(x.reason)).slice(4).reduce((n, g) => n + g.length, 0);
+    if (moreChanged) lines.push(h('li', {}, `${plural(moreChanged, 'other change')}.`));
+    if (removed.length) lines.push(h('li', {}, h('b', {}, `Took out ${plural(removed.length, 'row')}`), `: ${removed[0].reason}`));
+    if (moved.length) lines.push(h('li', {}, h('b', {}, `Moved ${plural(moved.length, 'row')} to the right shift`)));
+    for (const g of groupBy(fine, x => norm(x.text)).slice(0, 3)) lines.push(h('li', {}, h('b', {}, `Checked ${g.length === 1 ? '1 flag' : `${fmt(g.length)} flags`}, fine as is`), `: ${g[0].text}`));
+    const moreFine = groupBy(fine, x => norm(x.text)).slice(3).reduce((n, g) => n + g.length, 0);
+    if (moreFine) lines.push(h('li', {}, `${plural(moreFine, 'other flag')} checked and fine.`));
+    if (left.length) { const lg = groupBy(left, x => norm(x.text));
+      lines.push(h('li', {class: 'check'}, h('b', {}, `${plural(left.length, 'item')} left for you`), ': ' + lg.slice(0, 2).map(g => (g.length > 1 ? `${fmt(g.length)}× ` : '') + g[0].text).join(' · ') + (lg.length > 2 ? ` and ${lg.length - 2} more kinds` : '') + '. They are in the summary below.')); }
+    const did = changed.length + removed.length + moved.length;
+    const item = (title, rows, f) => rows.length ? h('div', {class: 'aifx-group'}, h('b', {}, title), h('ul', {}, rows.map(x => h('li', {class: x.check ? 'check' : ''}, f(x), x.check ? h('em', {class: 'checkme'}, ' please double-check') : null)))) : null;
     return h('div', {class: 'aifixed'},
       h('div', {class: 'autofmt-top'}, h('span', {class: 'autofmt-mark ai', 'aria-hidden': 'true'}, 'AI'),
-        h('div', {}, h('b', {}, s.auto ? `Fixed automatically by Claude: ${s.asked} issue${s.asked === 1 ? '' : 's'} looked at` : `Fixed with AI: ${s.asked} issue${s.asked === 1 ? '' : 's'} you picked`),
-          h('span', {}, `Done by Claude ${ago(s.made_at)}.` + (checks ? ` ${checks} of its changes are its best judgment: please double-check those.` : ''))),
+        h('div', {}, h('b', {}, [did ? `Claude fixed ${plural(did, 'thing')}` : '', fine.length ? `checked ${fmt(fine.length)} and found ${fine.length === 1 ? 'it' : 'them'} fine` : '', left.length ? `left ${fmt(left.length)} for you` : ''].filter(Boolean).join(', ').replace(/^./, c => c.toUpperCase()) || 'Claude looked at this report'),
+          h('span', {}, `${s.auto ? 'Done automatically' : `${plural(s.asked, 'issue')} you picked`}, ${ago(s.made_at)}.` + (checks ? ` ${plural(checks, 'change')} ${checks === 1 ? 'is' : 'are'} Claude's best judgment: please double-check ${checks === 1 ? 'it' : 'them'}.` : ''))),
         s.from_hash && s.from_hash !== r.file_hash ? h('button', {type: 'button', class: 'linkish small', onclick: () => select(s.from_hash)}, 'Open the version before') : null),
-      item('Changed', s.changed || [], x => h('span', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(x.sheet, x.cell)}, `${x.sheet} ${x.cell}`), `: ${showWs(x.before)} → ${showWs(x.after)}. ${x.reason}`)),
-      item('Rows taken out', s.removed || [], x => `${x.sheet} row ${x.row}: ${x.reason}`),
-      item('Rows moved', s.moved || [], x => `${x.sheet} row ${x.row} → ${x.to_sheet}: ${x.reason}`),
-      item('Checked and fine as is', s.fine || [], x => `${x.text} ${x.reason}`),
-      item('Left for you', s.left || [], x => `${x.text} (${x.why})`));
+      h('ul', {class: 'aifx-summary'}, lines),
+      did + fine.length + left.length > lines.length ? h('details', {class: 'autofmt-all'}, h('summary', {}, `See every change (${fmt(did + fine.length + left.length)})`),
+        item('Changed', changed, x => h('span', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(x.sheet, x.cell)}, `${x.sheet} ${x.cell}`), `: ${showWs(x.before)} → ${showWs(x.after)}. ${x.reason}`)),
+        item('Rows taken out', removed, x => `${x.sheet} row ${x.row}: ${x.reason}`),
+        item('Rows moved', moved, x => `${x.sheet} row ${x.row} → ${x.to_sheet}: ${x.reason}`),
+        item('Checked and fine as is', fine, x => `${x.text} ${x.reason}`),
+        item('Left for you', left, x => `${x.text} (${x.why})`)) : null);
   }
   // ---------------- SharePoint job check, change summary PDFs and the record of them
   function spJobLine(r) {

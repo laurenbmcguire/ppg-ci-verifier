@@ -1182,3 +1182,7 @@ details.fixedlog .checkme{color:#9a6a00;font-weight:600}
   table.plan tr.plan-items li .plan-change{grid-column:1 / span 2;order:3;padding-left:26px}
   table.plan .plan-ex{max-width:none}
 }
+.aifx-summary{margin:8px 0 0;padding-left:20px;display:grid;gap:4px;font-size:13.5px}
+.aifx-summary .quiet{color:var(--muted);font-size:12.5px}
+.aifx-summary li.check b{color:#9a6a00}
+.aifixed details.autofmt-all{margin-top:8px}
