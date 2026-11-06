@@ -953,6 +953,8 @@ class handler(BaseHTTPRequestHandler):
                 from hosting import autopilot
                 from zoneinfo import ZoneInfo
                 payload = json.loads(raw) or {}
+                if not autopilot.enabled():   # paused for now: nothing is built or cleaned in the background
+                    return self.send(200, encode_json(dict(on=False, ran=False, paused=True, last=None, sharepoint_on=sharepoint_configured(), can_change=False)))
                 if 'on' in payload:
                     if not self.is_admin():
                         return self.fail(403, 'Only an admin can turn autopilot on or off.')

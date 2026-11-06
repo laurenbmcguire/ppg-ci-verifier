@@ -33,7 +33,15 @@ class Autopilot(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
 
+    def test_paused_by_default(self):
+        os.environ.pop('PPG_AUTOPILOT', None)
+        st, out = self.call('/api/autopilot', {'run': True, 'force': True})
+        self.assertEqual((st, out['ran'], out['paused']), (200, False, True))
+        st, out = self.call('/api/autopilot', {'on': True})
+        self.assertFalse(out['on'])
+
     def test_only_sure_fixes_and_never_sends(self):
+        os.environ['PPG_AUTOPILOT'] = '1'; self.addCleanup(os.environ.pop, 'PPG_AUTOPILOT', None)   # when it is brought back
         rows = [tuple(r) for r in ROWS]
         rows[1] = (rows[1][0], ' 80139189 ') + rows[1][2:]              # stray spaces: a sure fix
         st, up = self.call('/api/spreadsheets/import', {'filename': '2230-OWENS-BASCO - EOS - 2026-10-07.xlsx',

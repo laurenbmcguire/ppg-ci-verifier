@@ -34,7 +34,7 @@ class Totals(unittest.TestCase):
 
 
 class Endpoint(test_autopilot.Autopilot):
-    test_only_sure_fixes_and_never_sends = test_remove_duplicate_rows = None   # reuse the server setup only
+    test_only_sure_fixes_and_never_sends = test_remove_duplicate_rows = test_paused_by_default = None   # reuse the server setup only
     def upload(self, name, day, rows):
         st, out = self.call('/api/spreadsheets/import', {'filename': name, 'content_base64': base64.b64encode(build(rows, day=day)).decode()})
         self.assertEqual(st, 200, out)

@@ -31,7 +31,7 @@ class Lookup(unittest.TestCase):
 
 
 class Summaries(test_autopilot.Autopilot):
-    test_only_sure_fixes_and_never_sends = test_remove_duplicate_rows = None
+    test_only_sure_fixes_and_never_sends = test_remove_duplicate_rows = test_paused_by_default = None
 
     def upload(self, rows, day='2026-10-07'):
         st, up = self.call('/api/spreadsheets/import', {'filename': f'2230-OWENS-BASCO - EOS - {day}.xlsx', 'content_base64': base64.b64encode(build(rows, day=day)).decode()})

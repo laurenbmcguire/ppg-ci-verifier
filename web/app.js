@@ -1666,7 +1666,6 @@
       wrap.replaceChildren(
         h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Today'), h('div', {class: 'meta'}, 'Every job’s day at a glance: scans on SharePoint so far, and where each daily report stands.'))),
         todaysWins(),
-        autopilotPanel(),
         h('div', {class: 'periodbar'}, h('div', {class: 'pnav'}, h('button', {type: 'button', class: 'btn small', 'aria-label': 'Previous day', onclick: () => shift(-1)}, '‹'),
           h('b', {}, label), h('button', {type: 'button', class: 'btn small', 'aria-label': 'Next day', onclick: () => shift(1)}, '›')),
           readyJobs.length ? h('button', {type: 'button', class: 'btn primary', onclick: async e => {
@@ -2557,7 +2556,7 @@
     if (!state.me.user || hm) { showSignIn(hm ? decodeURIComponent(hm[1]) : ''); if (!state.me.user) return; history.replaceState(null, '', location.pathname); }
     drawMe();
     loadClients();
-    loadList().then(route).then(autopilotTick).catch(e => toast(e.message, true));
+    loadList().then(route).catch(e => toast(e.message, true));   // autopilot is paused for now (autopilotTick / autopilotPanel kept for later)
   }
 
   // ---------------------------------------------------------------- autopilot: the daily work, done when the app is opened

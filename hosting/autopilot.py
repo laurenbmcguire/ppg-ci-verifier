@@ -16,6 +16,12 @@ EVERY = timedelta(minutes=15)
 KEY = 'autopilot'
 
 
+def enabled():
+    """Autopilot is paused for now; set PPG_AUTOPILOT=1 to bring it back."""
+    import os
+    return os.environ.get('PPG_AUTOPILOT') == '1'
+
+
 def settings(inbox):
     return inbox.setting(KEY, {}) or {}
 

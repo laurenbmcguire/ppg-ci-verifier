@@ -26,7 +26,7 @@ def fake_post(body, opener=None, timeout=None):
 
 
 class AIFix(test_autopilot.Autopilot):
-    test_only_sure_fixes_and_never_sends = test_remove_duplicate_rows = None   # reuse the server setup only
+    test_only_sure_fixes_and_never_sends = test_remove_duplicate_rows = test_paused_by_default = None   # reuse the server setup only
 
     def setUp(self):
         super().setUp()
