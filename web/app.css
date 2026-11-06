@@ -1130,3 +1130,14 @@ body[data-page=reports] .mnav .mup,body[data-page=reports] label.nav[for=file-in
 .bulk-list li{display:flex;justify-content:space-between;gap:8px;align-items:center}
 .bulk-list code{margin-left:6px;font-size:12px}
 .bulk-btns{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+/* summary of proposed changes */
+table.plan{width:100%;border-collapse:collapse;font-size:13.5px}
+table.plan th{text-align:left;font-weight:600;color:var(--muted);font-size:12px;padding:6px 8px;border-bottom:1px solid var(--line)}
+table.plan td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+table.plan td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+table.plan td:last-child{text-align:right;white-space:nowrap}
+table.plan .plan-ex{font-size:12px;margin-top:2px;max-width:46ch}
+table.plan tr.needs-you td{background:#fdf7ea}
+table.plan details.plan-more summary{cursor:pointer;color:var(--green);font-weight:600;list-style:none}
+table.plan details.plan-more[open]{text-align:left}
+table.plan details.plan-more .bulk-list{min-width:280px}

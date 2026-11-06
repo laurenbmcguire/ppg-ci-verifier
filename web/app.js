@@ -797,54 +797,72 @@
     if (auto) steps.push({id: 'auto', title: `Fixed automatically: ${plural(auto, 'change')}`, done: true});
     const mine = (r.fixed_from?.changes || []).filter(x => !/automatic cleanup|AI fix|AI\b/.test(x.source || ''));
     if (mine.length) steps.push({id: 'saved', title: `Saved: ${plural(mine.length, 'change')}`, done: true});
-    if (pending.length || dupIssues.length) {
-      const n = pending.length + dupIssues.length;
-      const samples = []; for (const f of pending) if (samples.length < 3 && !samples.some(x => fmtKind(x) === fmtKind(f))) samples.push(f);
-      for (const f of pending) if (samples.length < 3 && !samples.includes(f)) samples.push(f);
-      steps.push({id: 'sure', title: onlyFmt ? `Fix ${plural(n, 'formatting issue')}` : `Make ${plural(n, 'change')} I'm sure about`,
-        say: onlyFmt ? 'Only how the values are typed changes (capitals, spaces and the like). The values stay the same. For example:' : 'Each one is certain: a value written differently, or an exact duplicate row. For example:',
-        body: [h('ul', {class: 'fmtexamples'}, samples.map(f => h('li', {}, h('code', {}, showWs(f.before)), h('span', {class: 'arrow', 'aria-label': 'becomes'}, ' → '), h('code', {}, showWs(f.after)),
-            h('span', {class: 'fmtkind'}, fmtKind(f) || 'sure correction'), h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`)))),
-          dupIssues.length ? h('p', {}, `Also takes out ${plural(dupIssues.length, 'exact duplicate row')}: ${dupIssues.slice(0, 5).map(i => `${i.sheet} row ${i.row}`).join(', ')}${dupIssues.length > 5 ? '…' : ''}.`) : null,
-          pending.length > samples.length ? h('details', {}, h('summary', {}, `See all ${fmt(pending.length)}`), h('ul', {}, pending.map(f => h('li', {},
-            h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`), `: ${show(f.before)} becomes ${show(f.after)}`)))) : null],
-        go: [onlyFmt ? `Yes, fix ${n === 1 ? 'it' : `all ${fmt(n)}`}` : `Yes, make ${n === 1 ? 'it' : `all ${fmt(n)}`}`, () => {
-          const d = store.get(decisionsKey(), {}); for (const f of pending) d[f.id] = {state: 'accepted', after: f.after}; store.set(decisionsKey(), d);
-          toast(`Step done: ${plural(n, onlyFmt ? 'formatting fix' : 'sure change')} accepted. Saving them and moving to the next step…`);
-          const rows = dupIssues.map(i => [i.sheet, Number(i.row)]); const k = readyChanges();
-          if (rows.length) removeRows(rows); else applyFixes(k.accepted, k.dec, k.edits, {download: false}); }], skippable: true});
+    // ---- one summary of every proposed change: accept them all (Claude takes whatever has no proposal), or review by issue type
+    state.planOff ||= new Set();
+    const off = state.planOff, openIssues = open;
+    const isFix = f => f.state !== 'rejected';
+    const groupsMap = new Map();
+    for (const i of openIssues) { const k = sameKey(i); if (!groupsMap.has(k)) groupsMap.set(k, []); groupsMap.get(k).push(i); }
+    const covered = new Set();
+    const groups = [...groupsMap.values()].map(items => {
+      const withFix = items.filter(x => fixesFor(x).some(isFix)), dups = items.filter(x => isDupRow(x) && x.row && !fixesFor(x).length);
+      withFix.forEach(x => fixesFor(x).filter(isFix).forEach(f => covered.add(f.id)));
+      const none = items.filter(x => !withFix.includes(x) && !dups.includes(x));
+      const ex = withFix[0] && fixesFor(withFix[0]).find(isFix);
+      const plan = dups.length === items.length ? `Take out the extra ${dups.length === 1 ? 'copy' : 'copies'}`
+        : withFix.length === items.length ? `Change to the suggested value` + (ex ? `, e.g. ${show(ex.before)} → ${show(ex.after)}` : '')
+        : withFix.length || dups.length ? `${withFix.length + dups.length} get the suggested change; ${none.length} ${state.aiOn ? 'Claude fixes' : 'need you'}`
+        : state.aiOn ? 'Claude fixes ' + (items.length === 1 ? 'it' : 'them') : 'No change proposed: needs you';
+      return {items, withFix, dups, none, plan, label: issueType(items[0]), text: items[0].text};
+    });
+    const loose = undecided.filter(f => isFix(f) && !covered.has(f.id) && f.source !== 'AI fix');
+    const fmtLoose = loose.filter(f => fmtKind(f)), suggLoose = loose.filter(f => f.source === 'Suggested'), otherLoose = loose.filter(f => !fmtKind(f) && f.source !== 'Suggested' && isSureFix(f));
+    const fixRows = [
+      fmtLoose.length ? {id: 'fmt', label: 'Formatting', count: fmtLoose.length, plan: 'Only how values are typed (capitals, spaces): the values stay the same', fixes: fmtLoose} : null,
+      suggLoose.length ? {id: 'sugg', label: 'Blank details', count: suggLoose.length, plan: 'Fill in the likely value', fixes: suggLoose} : null,
+      otherLoose.length ? {id: 'other', label: 'Other sure corrections', count: otherLoose.length, plan: 'Change to the corrected value', fixes: otherLoose} : null,
+    ].filter(Boolean);
+    const nChanges = fixRows.reduce((n, r) => n + r.fixes.filter(f => !off.has(f.id)).length, 0) + groups.reduce((n, g) => n + g.withFix.length + g.dups.length, 0);
+    const nClaude = state.aiOn ? groups.reduce((n, g) => n + g.none.length, 0) : 0, nYou = state.aiOn ? 0 : groups.reduce((n, g) => n + g.none.length, 0);
+    const acceptEverything = async btn => {
+      if (state.busy) return;
+      btn.disabled = true; btn.textContent = 'Fixing everything…';
+      const d = store.get(decisionsKey(), {}), dn = reviewedSet();
+      for (const r of fixRows) for (const f of r.fixes) d[f.id] = off.has(f.id) ? {state: 'rejected'} : {state: 'accepted', after: d[f.id]?.after ?? f.after};
+      for (const g of groups) for (const x of g.withFix) { for (const f of fixesFor(x).filter(isFix)) d[f.id] = {state: 'accepted', after: d[f.id]?.after ?? f.after}; dn.add(x.key); }
+      store.set(decisionsKey(), d); store.set('rd-reviewed:' + hash, [...dn]);
+      let cur = hash;
+      const k = readyChanges();
+      if (k.total) { cur = await applyFixes(k.accepted, k.dec, k.edits, {download: false, thenOpen: false}); if (!cur) { btn.disabled = false; return; } }
+      const dupRows = groups.flatMap(g => g.dups).map(x => ({sheet: x.sheet, row: Number(x.row)}));
+      if (dupRows.length) { try { cur = (await api('/api/spreadsheets/remove-rows', {file_hash: cur, rows: dupRows})).item.file_hash; } catch (e) { toast(e.message, true); } }
+      if (nClaude) cur = await autoFixAll(cur);
+      await loadList(); select(cur); showResult(cur, true);
+    };
+    if (groups.length || fixRows.length) {
+      const reviewKind = g => { state.oneByOne.delete(sameKey(g.items[0])); state.groupWalk = null; state.walkNote = `Reviewing ${g.items.length === 1 ? 'this issue' : `all ${g.items.length} with this issue`}: tick or untick, then pick one answer for the group.`;
+        focusIssue(walkIssues().indexOf(g.items[0])); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); };
+      state.oneByOne ||= new Set();
+      const tableRows = [
+        ...fixRows.map(r => h('tr', {},
+          h('td', {}, h('b', {}, r.label)), h('td', {class: 'n'}, fmt(r.count)), h('td', {}, r.plan),
+          h('td', {}, h('details', {class: 'plan-more'}, h('summary', {}, 'Review'), h('ul', {class: 'bulk-list'}, r.fixes.map(f => h('li', {},
+            h('label', {}, h('input', {type: 'checkbox', checked: !off.has(f.id), onchange: e => { e.target.checked ? off.delete(f.id) : off.add(f.id); drawCleanOffer(); }}), ' ',
+              h('span', {}, `${f.sheet} ${f.cell}: ${show(f.before)} → `, h('code', {}, showWs(f.after)))),
+            h('button', {type: 'button', class: 'linkish small', onclick: () => showCell(f.sheet, f.cell)}, 'show')))))))),
+        ...groups.map(g => h('tr', {class: g.none.length && !state.aiOn ? 'needs-you' : ''},
+          h('td', {}, h('b', {}, g.label), h('div', {class: 'quiet plan-ex'}, g.text)), h('td', {class: 'n'}, fmt(g.items.length)), h('td', {}, g.plan),
+          h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => reviewKind(g)}, 'Review'))))];
+      steps.push({id: 'review', title: nChanges + nClaude ? `Review ${plural(nChanges + nClaude, 'proposed change')}` + (nYou ? ` (and ${fmt(nYou)} that need you)` : '') : `${plural(nYou, 'item')} need${nYou === 1 ? 's' : ''} you: review by issue type`,
+        say: walking ? 'You are reviewing one issue type on the right. When you are done there, come back here, or accept everything that is left.'
+          : `Here is everything I would change, by issue type. Accept them all in one click, or review any type first.` + (nYou ? ` ${plural(nYou, 'item')} ${nYou === 1 ? 'has' : 'have'} no proposed change, so ${nYou === 1 ? 'it needs' : 'they need'} you.` : ''),
+        body: [h('div', {class: 'tablewrap'}, h('table', {class: 'plan'}, h('thead', {}, h('tr', {}, ['Issue type', 'Items', 'Proposed change', ''].map(x => h('th', {}, x)))), h('tbody', {}, tableRows)))],
+        go: [nClaude ? `Accept all ${fmt(nChanges)} and let Claude fix the other ${fmt(nClaude)}` : nYou ? `Accept all ${fmt(nChanges)} proposed changes` : `Accept all ${fmt(nChanges)} and fix everything`, e => acceptEverything(e.target)],
+        alt: ['Review by issue type', () => reviewKind(groups[0] || {items: []})]});
+      if (!groups.length) steps[steps.length - 1].alt = null;
+      if (!nChanges && !nClaude) steps[steps.length - 1].go = ['Review by issue type', () => reviewKind(groups[0])], steps[steps.length - 1].alt = null;
     }
-    if (sugg.length) {
-      state.suggOff ||= new Set();
-      const off = state.suggOff, on = sugg.filter(f => !off.has(f.id));
-      const labelOf = f => (String(f.reason || '').match(/^"?(.+?)"? is blank/) || [])[1] || 'This detail';
-      const whyOf = f => { const t = String(f.reason || '').replace(/^.*?Suggested: /, '').slice(String(f.after).length).replace(/^[.\s]*\(?|\)?\.?\s*$/g, ''); return t ? t[0].toUpperCase() + t.slice(1) + '.' : ''; };
-      const fill = on.length === sugg.length ? (sugg.length === 1 ? 'Fill in this blank' : sugg.length === 2 ? 'Fill in both blanks' : `Fill in all ${sugg.length} blanks`) : on.length ? `Fill in the ${on.length === 1 ? 'one' : on.length} ticked` : 'Fill in the ticked ones';
-      steps.push({id: 'suggest', title: `Fill in ${plural(sugg.length, 'blank detail')}`,
-        say: sugg.length === 1 ? 'This cell was left empty. Here is what I would put in it:' : 'These cells were left empty. Here is what I would put in each one. Untick any you want to leave blank:',
-        body: [h('ul', {class: 'sugglist'}, sugg.map(f => h('li', {},
-          sugg.length > 1 ? h('input', {type: 'checkbox', checked: !off.has(f.id), 'aria-label': `Fill in ${labelOf(f)}`, onchange: e => { e.target.checked ? off.delete(f.id) : off.add(f.id); drawCleanOffer(); }}) : null,
-          h('b', {}, labelOf(f)), ' ', h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `(${f.sheet} ${f.cell})`),
-          h('span', {class: 'arrow', 'aria-label': 'becomes'}, ' empty → '), h('code', {}, f.after),
-          whyOf(f) ? h('span', {class: 'quiet'}, ' ' + whyOf(f)) : null)))],
-        go: [fill, () => {
-          if (!on.length) return toast('Tick at least one, or choose Skip this step.', true);
-          const d = store.get(decisionsKey(), {}); for (const f of sugg) d[f.id] = off.has(f.id) ? {state: 'rejected'} : {state: 'accepted', after: f.after}; store.set(decisionsKey(), d);
-          toast(`Step done: ${plural(on.length, 'blank')} filled in${off.size ? `, ${plural(sugg.length - on.length, 'one')} left empty` : ''}. Saving and moving to the next step…`);
-          const k = readyChanges(); applyFixes(k.accepted, k.dec, k.edits, {download: false}); }],
-        skipLabel: sugg.length === 1 ? 'Leave it blank' : 'Leave them all blank', skippable: true});
-    }
-    const walkOpen = open.filter(i => !dupIssues.includes(i) || skipped.includes('sure'));
-    if (walkOpen.length) {
-      const first = walkOpen[0], list = walkIssues(), cur = walking ? list[state.issueNav] : null;
-      const start = () => { state.groupWalk = null; state.walkNote = new Set(walkOpen.map(sameKey)).size < walkOpen.length ? `Starting with kind 1 of ${new Set(walkOpen.map(sameKey)).size}.` : `Starting with item 1 of ${walkOpen.length}.`; focusIssue(list.indexOf(cur && walkOpen.includes(cur) ? cur : first)); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); };
-      const nKinds = new Set(walkOpen.map(sameKey)).size;
-      steps.push({id: 'walk', title: nKinds < walkOpen.length ? `Go through ${plural(walkOpen.length, 'item')}: only ${plural(nKinds, 'kind')} of issue` : `Go through ${plural(walkOpen.length, 'thing')} that need${walkOpen.length === 1 ? 's' : ''} you, one at a time`,
-        say: walking ? `You're on item ${walkOpen.indexOf(cur) + 1 || 1} of ${walkOpen.length}. It's open on the right, next to the spreadsheet. Pick one of the choices there and I'll move you to the next one.`
-          : (nKinds < walkOpen.length ? `Items with exactly the same issue are grouped, so you handle each kind with one click (and can untick any that are different). ` : '') + `I'll show each one in the spreadsheet, say what's wrong and give you the choices: make the suggested change, type the right value, or say it's fine as is. ${(m => m ? `${plural(m, 'must-fix item')} ${m === 1 ? 'comes' : 'come'} first.` : '')(walkOpen.filter(i => i.severity === 'high').length)}`,
-        go: [walking ? 'Show me the current one' : `Start with item 1`, start],
-        alt: state.aiOn && !walking ? ['Let Claude try them all first', e => aiFix(walkOpen.map(i => i.key), e.target)] : null});
-    }
+    const walkOpen = openIssues;
     const wentThrough = walkIssues().filter(i => revd.has(i.key)).length;
     if (!walkOpen.length && wentThrough) steps.push({id: 'walked', title: `Went through ${plural(wentThrough, 'item')}`, done: true});
     if (c.total) steps.push({id: 'save', title: `Save your ${plural(c.total, 'change')}`, say: 'They go into a new version, which is checked again. Your original stays as it is.',
@@ -2620,9 +2638,11 @@
     const rv = data.review, dialog = $('result-dialog'), plural = (n, w) => `${fmt(n)} ${w}${n === 1 ? '' : 's'}`;
     const a = data.auto_formatting || {}, s = data.ai_fixed || {};
     const aiDid = (s.changed || []).length + (s.removed || []).length + (s.moved || []).length, aiFine = (s.fine || []).length;
+    const youDid = (data.fixed_from?.changes || []).filter(x => !/automatic cleanup|AI/.test(x.source || '')).length;
     const checks = [...(s.changed || []), ...(s.removed || []), ...(s.moved || [])].filter(x => x.check).length;
     const left = (rv.issues || []).filter(i => i.severity !== 'info'), must = left.filter(i => i.severity === 'high').length;
     const fixedLines = [
+      youDid ? `Made the ${plural(youDid, 'proposed change')} you accepted.` : null,
       a.count ? `Cleaned up ${plural(a.count, 'value')} the app was sure about (capitals, spaces, duplicates and the like).` : null,
       aiDid ? `Claude fixed ${plural(aiDid, 'problem')}` + ((s.removed || []).length || (s.moved || []).length ? `, including ${[(s.removed || []).length ? plural(s.removed.length, 'row') + ' taken out' : '', (s.moved || []).length ? plural(s.moved.length, 'row') + ' moved to the right shift' : ''].filter(Boolean).join(' and ')}` : '') + '.' : null,
       aiFine ? `Claude checked ${plural(aiFine, 'flag')} and found ${aiFine === 1 ? 'it is' : 'they are'} fine as is.` : null,
@@ -2639,12 +2659,15 @@
       fixedLines.length ? h('div', {class: 'res-fixed'}, h('b', {}, 'What was fixed'), h('ul', {}, fixedLines.map(t => h('li', {}, t))),
         h('p', {class: 'quiet'}, 'Every change is listed at the top of the report, with a link to the version before.' + (checks ? ` ${plural(checks, 'change')} ${checks === 1 ? 'is' : 'are'} Claude's best judgment and marked "please double-check".` : ''))) : null,
       left.length ? h('div', {class: 'res-left'}, h('b', {}, 'What needs you'),
-        h('p', {}, (must ? `${plural(must, 'must-fix item')} before it goes out. ` : '') + `I'll show each one in the spreadsheet, tell you what's wrong and give you the choices: make the suggested change, type the right value, or say it's fine as is.`),
-        h('ul', {}, left.slice(0, 4).map(i => h('li', {}, h('span', {class: 'sev ' + i.severity}), h('span', {}, i.text)))),
-        left.length > 4 ? h('p', {class: 'quiet'}, `and ${fmt(left.length - 4)} more.`) : null)
+        h('p', {}, (must ? `${plural(must, 'must-fix item')} before it goes out. ` : '') + 'The summary at the top of the report lists every proposed change by issue type: accept them all in one click, or review any type first.'),
+        (() => { const g = new Map(); for (const i of left) { const k = sameKey(i); g.set(k, [...(g.get(k) || []), i]); }
+          const kinds = [...g.values()].sort((x, y) => y.length - x.length);
+          return [h('ul', {}, kinds.slice(0, 5).map(k => h('li', {}, h('span', {class: 'sev ' + k[0].severity}), h('span', {}, k.length > 1 ? h('b', {}, `${fmt(k.length)}× `) : null, k[0].text)))),
+            kinds.length > 5 ? h('p', {class: 'quiet'}, `and ${kinds.length - 5} more kinds.`) : null,
+            kinds.length < left.length ? h('p', {class: 'quiet'}, `Only ${plural(kinds.length, 'kind')} of issue, so each kind can be handled in one go.`) : null]; })())
         : h('p', {}, 'Check the totals, then approve and send when you are ready.')),
       h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dialog.close()}, left.length ? 'Later' : 'Open report'),
-        left.length ? h('button', {type: 'button', class: 'btn primary', onclick: walk}, `Walk me through ${left.length === 1 ? 'it' : `the ${fmt(left.length)}`}`) : null));
+        left.length ? h('button', {type: 'button', class: 'btn primary', onclick: async () => { dialog.close(); for (let i = 0; i < 40 && !(state.report?.file_hash === hash && state.fixes); i++) await new Promise(r => setTimeout(r, 250)); document.getElementById('cleanoffer')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, 'See the proposed changes') : null));
     dialog.showModal();
   }
   $('result-dialog').addEventListener('click', e => { if (e.target === $('result-dialog')) $('result-dialog').close(); });
