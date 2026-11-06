@@ -153,3 +153,21 @@ class IndexBudget(unittest.TestCase):
         inbox.index_vins = lambda h: (calls.append(h), time.sleep(0.2))
         left = inbox.index_missing(seconds=0.5)
         self.assertLessEqual(len(calls), 4); self.assertEqual(left, 10 - len(calls))
+
+
+class BigFileIndex(unittest.TestCase):
+    def test_huge_file_is_marked_done_without_reading_it(self):
+        import tempfile, pathlib
+        from hosting.spreadsheet_inbox import SpreadsheetInbox
+        with tempfile.TemporaryDirectory() as d:
+            inbox = SpreadsheetInbox(pathlib.Path(d))
+            item = inbox.ingest('2230-OWENS-BASCO - EOS - 2026-10-07.xlsx', build([tuple(r) for r in ROWS]))
+            h = item['file_hash']
+            with inbox.connect() as db:
+                db.execute('DELETE FROM vin_indexed'); db.execute('DELETE FROM vin_index')
+            with patch.object(SpreadsheetInbox, 'VIN_INDEX_MAX_BYTES', 10), patch('hosting.spreadsheets.report_records', side_effect=AssertionError('read the big file')):
+                inbox.index_vins(h)
+                self.assertEqual(inbox.index_missing(), 0)
+            with inbox.connect() as db:
+                self.assertTrue(db.execute('SELECT 1 FROM vin_indexed WHERE file_hash=?', (h,)).fetchone())
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM vin_index').fetchone()[0], 0)

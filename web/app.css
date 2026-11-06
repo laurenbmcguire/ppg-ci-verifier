@@ -805,3 +805,18 @@ body:not([data-page=reports]):not([data-page=today]) .clienttabs{display:none}
 .how{margin:8px 0 0;padding-left:18px;display:grid;gap:8px;color:var(--muted);font-size:14px}
 .how code{background:#f1f5f3;padding:1px 6px;border-radius:4px;font-size:12px;overflow-wrap:anywhere}
 @media (max-width:900px){.person{grid-template-columns:1fr}.person .btns{justify-content:flex-start}}
+
+/* "Want me to clean this data?" */
+.cleanoffer{background:#fff;border:1px solid var(--line);border-left:4px solid var(--green);border-radius:10px;padding:16px 18px;display:grid;gap:10px}
+.cleanoffer h2{font-size:17px;margin:0}
+.cleanoffer .cleanhead p{margin:2px 0 0}
+.cleanlist{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.cleanlist>li{display:grid;grid-template-columns:1fr auto;gap:2px 12px;padding:8px 10px;background:var(--page);border-radius:8px}
+.cleanlist>li .count{color:var(--muted);font-size:13px;white-space:nowrap}
+.cleanlist details{grid-column:1/-1;font-size:13px}
+.cleanlist summary{cursor:pointer;color:#1a6654}
+.cleanlist details ul{margin:6px 0 2px;padding-left:18px;max-height:220px;overflow:auto}
+.cleanlist details li{margin:2px 0;color:var(--ink)}
+.cleanlist details em{color:var(--med-ink);font-style:normal;font-size:12px}
+.cleanpromise{margin:0;padding-left:18px;font-size:13px;color:var(--muted)}
+.cleanbtns{display:flex;gap:8px;flex-wrap:wrap}

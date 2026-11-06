@@ -616,7 +616,7 @@ class handler(BaseHTTPRequestHandler):
                     data = inbox.get(file_hash)
                     from hosting.review_summary import summarize
                     try:
-                        repeats = inbox.repeats_elsewhere(file_hash)
+                        repeats = inbox.repeats_elsewhere(file_hash, index_old=False)   # never slow down opening a report
                     except Exception:
                         debug_log(); repeats = []
                     data = dict(data, review=summarize(data), other_days=repeats, built=inbox.setting(f'built|{file_hash}', None))

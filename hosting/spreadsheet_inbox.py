@@ -313,14 +313,16 @@ class SpreadsheetInbox:
     @staticmethod
     def vin_key(text):
         return re.sub(r'[^A-Z0-9]', '', str(text or '').upper())
+    VIN_INDEX_MAX_BYTES = 3 * 1024 * 1024
+
     def index_vins(self, file_hash):
         from hosting.spreadsheets import report_records
         with self.connect() as db:
             if db.execute('SELECT 1 FROM vin_indexed WHERE file_hash=?', (file_hash,)).fetchone():
                 return
             original, raw = self._original(db, file_hash)
-        try:
-            recs = [r for r in report_records(original['filename'], raw) if r.get('table_kind') == 'detail']
+        try:   # a file this big is a load test, not an end-of-shift report: reading it would stall every request
+            recs = [] if len(raw or b'') > self.VIN_INDEX_MAX_BYTES else [r for r in report_records(original['filename'], raw) if r.get('table_kind') == 'detail']
         except Exception:
             recs = []
         rows = [(self.vin_key(r['labels'].get('identifier')), str(r['labels'].get('identifier')).strip(), file_hash, r['sheet'], r['row'])

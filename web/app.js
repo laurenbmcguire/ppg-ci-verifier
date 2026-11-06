@@ -128,9 +128,11 @@
         : 'No reports yet. Upload an end-of-shift report to start.'));
       return;
     }
+    const dayOf = r => r.review?.day || (r.received_at || '').slice(0, 10);
+    rows = [...rows].sort((a, b) => dayOf(b).localeCompare(dayOf(a)) || (b.received_at || '').localeCompare(a.received_at || ''));   // newest report day first, one heading per day
     let lastDay = null;
     for (const r of rows) {
-      const day = r.review?.day || (r.received_at || '').slice(0, 10);
+      const day = dayOf(r);
       if (day !== lastDay) { list.append(h('div', {class: 'day'}, dayLabel(day))); lastDay = day; }
       const rv = r.review || {status: 'check', counts: {}};
       const c = rv.counts || {};
@@ -138,7 +140,7 @@
       list.append(h('button', {type: 'button', class: 'item' + (r.file_hash === state.selected ? ' sel' : ''), onclick: () => select(r.file_hash),
         'aria-label': `${rv.job || r.filename}, ${STATUS[rv.status] || 'Check'}, ${count}`},
         h('span', {class: 'tag tag-' + rv.status}, STATUS[rv.status] || 'Check'),
-        h('span', {class: 'job'}, (rv.job || 'Unknown job') + (rv.fixed_from ? ' (fixed)' : '')),
+        h('span', {class: 'job', title: rv.job ? null : 'No job number was found in this file. The file name is shown instead.'}, (rv.job || r.filename.replace(/\.(xlsx|xlsm|xls|csv)$/i, '')) + (rv.fixed_from ? ' (fixed)' : '')),
         h('span', {class: 'count'}, rv.sent_at ? 'Sent' : rv.approved ? 'Approved' : rv.review_state === 'waiting' ? 'For review' : rv.review_state === 'sent_back' ? 'Sent back' : count),
         h('span', {class: 'file'}, `${r.filename} · v${r.version} · ${ago(r.received_at)}`)));
     }
@@ -313,7 +315,8 @@
         h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
     const status = h('div', {class: 'rstatus'},
       h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
-      h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
+      h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)),
+      h('div', {id: 'cleanoffer'}));
     const ws = h('div', {class: 'workspace'},
       h('section', {class: 'sheetpane', id: 'sheet-block', 'aria-label': 'Spreadsheet'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Loading the spreadsheet…')),
       h('aside', {class: 'sidepane', id: 'side', 'aria-label': 'Facts and fixes'}));
@@ -400,6 +403,15 @@
     drawSide(); drawGrid();
     const td = cell && document.querySelector(`#sheet-block td[data-cell="${cell}"]`), wrap = document.querySelector('#sheet-block .gridwrap');
     if (td && wrap) reveal(wrap, td, true);
+  }
+
+  async function showCell(sheet, cell) {
+    if (!state.report || !sheet) return;
+    if (!state.grid || state.grid.sheet !== sheet) await loadGrid(sheet, true);
+    state.gridCell = String(cell || '').toUpperCase() || null; drawGrid();
+    const td = state.gridCell && document.querySelector(`#sheet-block td[data-cell="${state.gridCell}"]`), wrap = document.querySelector('#sheet-block .gridwrap');
+    if (td && wrap) reveal(wrap, td, true);
+    $('sheet-block')?.scrollIntoView({behavior: 'smooth', block: 'nearest'});
   }
 
   function numbers(r) {
@@ -489,8 +501,43 @@
   const editsKey = () => 'rd-edits:' + state.report.file_hash;
   const editId = (sheet, cell) => `${sheet}!${cell}`;
 
+  // ---------------- "Want me to clean this data?": every change listed in plain words before anything happens
+  function drawCleanOffer() {
+    const slot = $('cleanoffer'); if (!slot || !state.report) return;
+    const r = state.report, hash = r.file_hash, dismissed = store.get('rd-clean-no', []);
+    const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
+    const pending = (state.fixes || []).filter(f => !edits[editId(f.sheet, f.cell)] && !dec[f.id]);
+    if (!pending.length || r.approval || (r.sent || []).some(x => x.sent) || dismissed.includes(hash) || state.busy) { slot.replaceChildren(); return; }
+    const groups = new Map();
+    for (const f of pending) { const k = f.reason || 'Other corrections'; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(f); }
+    const show = v => v === '' || v == null ? '(blank)' : `“${v}”`;
+    const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+    const sheetCount = new Set(pending.map(f => f.sheet)).size;
+    slot.replaceChildren(h('section', {class: 'cleanoffer', 'aria-labelledby': 'clean-title'},
+      h('div', {class: 'cleanhead'},
+        h('h2', {id: 'clean-title'}, 'Want me to clean this data for you?'),
+        h('p', {}, `I can make ${plural(pending.length, 'change')} across ${plural(sheetCount, 'sheet')}. Here is exactly what cleaning means for this report:`)),
+      h('ul', {class: 'cleanlist'}, [...groups].map(([reason, items]) => h('li', {},
+        h('b', {}, reason), h('span', {class: 'count'}, plural(items.length, 'cell')),
+        h('details', {}, h('summary', {}, items.length === 1 ? 'See the change' : `See all ${items.length} changes`),
+          h('ul', {}, items.map(f => h('li', {},
+            h('button', {type: 'button', class: 'linkish', title: 'Show this cell in the spreadsheet', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`),
+            `: ${show(f.before)} becomes ${show(f.after)}`, f.source === 'AI fix' ? h('em', {}, ' suggested by AI, check it') : null))))))),
+      h('ul', {class: 'cleanpromise'},
+        h('li', {}, 'Only the cells listed above change. Anything else flagged on the right still needs your eyes.'),
+        h('li', {}, 'Your original file is never touched. The cleaned copy is saved as a new version and checked again.'),
+        h('li', {}, 'Nothing goes to the client until you approve and send it.')),
+      h('div', {class: 'cleanbtns'},
+        h('button', {type: 'button', class: 'btn primary', onclick: () => {
+          const c = readyChanges(), all = [...c.accepted, ...pending];
+          applyFixes(all, c.dec, c.edits, {download: false});
+        }}, `Yes, clean it (${pending.length})`),
+        h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); $('side')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, 'Let me choose'),
+        h('button', {type: 'button', class: 'btn ghost', onclick: () => { store.set('rd-clean-no', [...dismissed, hash].slice(-200)); slot.replaceChildren(); }}, 'Not now'))));
+  }
   function drawFixes() {
     const block = $('fixes-block'); if (!state.fixes) return;
+    drawCleanOffer();
     if (!block) { drawGrid(); updateDownloads(); if (!state.chatBusy) drawChat(); updateFinish(); drawSideTabs(); return; }
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
     const editList = Object.entries(edits);
