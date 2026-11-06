@@ -913,3 +913,9 @@ body{-webkit-font-smoothing:antialiased}
 .in-unsure{font-size:13px;font-weight:600;color:var(--med-ink);background:#fffaf0;border-radius:6px;padding:6px 9px;margin:4px 0}
 .in-why{font-size:13px;margin:4px 0;color:var(--ink)}
 .in-why b{color:var(--muted);font-weight:700}
+/* report page: the spreadsheet and the fixes panel always get a full screen; the page scrolls past the boxes above them */
+@media (min-width:1101px){
+  .rws{height:auto;min-height:calc(100vh - 16px)}
+  .workspace{flex:0 0 auto;height:calc(100vh - 24px);min-height:520px;scroll-margin-top:8px}
+}
+.cleanoffer{scroll-margin-top:8px}
