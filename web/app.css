@@ -1301,3 +1301,7 @@ details.fixedlog .checkme{color:#9a6a00;font-weight:600}
 .kind-list label{display:flex;gap:8px;align-items:flex-start;cursor:pointer;min-width:0}
 .kind-all input,.kind-list input{width:16px;height:16px;accent-color:var(--green);flex:none;margin:2px 0 0}
 .sum-list .sev{flex:none;width:8px;height:8px;border-radius:50%;padding:0;align-self:center;min-height:0}
+.kind-pill.unsure{color:#7a5300;background:#fff4d6}
+.kind-again{align-self:flex-start}
+.btn.dl-fixed{align-self:stretch;justify-content:center;border-color:var(--green);color:var(--green);font-weight:600;text-decoration:none;margin:2px 0 6px}
+#result-dialog .btn.dl-fixed{display:flex;margin:10px 0 0}

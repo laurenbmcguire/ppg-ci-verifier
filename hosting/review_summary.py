@@ -63,12 +63,23 @@ def _annotate(issue):
     return issue
 
 
+def _col_letter(n):
+    s = ''
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
 def _cell(f):
-    return f.get('cell') or (f'{f["column"]}{f["row"]}' if isinstance(f.get('column'), str) and re.fullmatch(r'[A-Z]{1,3}', f['column']) and f.get('row') else None)
+    col = f.get('column')
+    if isinstance(col, int) and not isinstance(col, bool) and col > 0 and f.get('row'):   # a 1-based column number: name the exact cell
+        return f'{_col_letter(col)}{f["row"]}'
+    return f.get('cell') or (f'{col}{f["row"]}' if isinstance(col, str) and re.fullmatch(r'[A-Z]{1,3}', col) and f.get('row') else None)
 
 
 def _where(f):
-    cell = f.get('cell') or (f'{f["column"]}{f["row"]}' if isinstance(f.get('column'), str) and f.get('row') else None)
+    cell = _cell(f) or (f'{f["column"]}{f["row"]}' if isinstance(f.get('column'), str) and f.get('row') else None)
     parts = [f.get('sheet') if f.get('sheet') not in (None, 'SharePoint comparison', 'Compared with usual') else None,
              cell or (f'row {f["row"]}' if f.get('row') else None)]
     return ' · '.join(p for p in parts if p)
@@ -131,8 +142,10 @@ def summarize(result, with_issues=True, use_verdicts=True):
                     return False
                 if a.get('by_person'):   # a person's "fine as is" is about that one row: the same message on another row is still open
                     return a.get('text') == x.get('text') and (a.get('row') is None or (a.get('sheet') == x.get('sheet') and str(a.get('row')) == str(x.get('row'))))
-                if a.get('row') is not None:   # Claude's "fine" is about that row: the same message on another row is still checked
-                    return a.get('sheet') == x.get('sheet') and str(a.get('row')) == str(x.get('row'))
+                if a.get('cell') and x.get('cell'):   # Claude's "fine" is about that one cell
+                    return a.get('sheet') == x.get('sheet') and str(a['cell']).upper() == str(x['cell']).upper()
+                if a.get('row') is not None:   # ... or that row: the same message on another row is still checked
+                    return a.get('sheet') == x.get('sheet') and str(a.get('row')) == str(x.get('row')) and (a.get('text') == x.get('text') or not x.get('cell'))
                 return a.get('text') == x.get('text')
             hit = next((a for a in accepted if same(a)), None)
             if hit:

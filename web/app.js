@@ -520,7 +520,7 @@
         h('h1', {}, rv.job || r.filename),
         h('span', {class: 'meta'}, `${dayLabel(rv.day)} · ${r.filename} · version ${r.version} · uploaded ${ago(r.received_at)}`)),
       h('div', {class: 'ractions'}, more,
-        h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download report'),
+        h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, r.fixed_from ? 'Download fixed version' : 'Download report'),
         h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
     const status = h('div', {class: 'rstatus'},
       spJobLine(r), docBanner(r), fixedLog(r),
@@ -803,12 +803,19 @@
     return null;
   }
   const showWs = v => v === '' || v == null ? '(blank)' : String(v).replace(/^ +| +$/g, m => '\u00b7'.repeat(m.length)).replace(/[\xa0\u200b-\u200f\ufeff]/g, '\u25e6');
+  // Claude already looked at this one and was not sure: it is for a person now (Fix myself or Ignore), not for another AI pass
+  function claudeLeft(i) {
+    const left = state.report?.ai_fixed?.left || [];
+    return left.some(x => x.text === i.text && (x.cell && i.cell ? String(x.cell).toUpperCase() === String(i.cell).toUpperCase() && (x.sheet || null) === (i.sheet || null)
+      : x.row == null || (String(x.row) === String(i.row) && (x.sheet || null) === (i.sheet || null))));
+  }
   // a short plural name for a kind of issue: "122 blank cells", "12 part numbers in a different format"
   function kindNames(x) {
     const t = x.text || '', c = x.code || '';
     if (/different format from the other/i.test(t)) return /^Identifier/.test(t) ? ['identifier in a different format', 'identifiers in a different format'] : ['part number in a different format', 'part numbers in a different format'];
     if (/far (above|below) the usual/i.test(t)) return ['number far from the usual (possible typo)', 'numbers far from the usual (possible typos)'];
-    if (/^missing cell/i.test(t) || /missing_cell|blank_cell/.test(c)) return ['blank cell', 'blank cells'];
+    if (/^missing cell/i.test(t) || /missing_cell|blank_cell/.test(c)) { const col = (String(x.cell || '').match(/^[A-Z]+/i) || [''])[0].toUpperCase();
+      return col ? [`blank cell in column ${col}`, `blank cells in column ${col}`] : ['blank cell', 'blank cells']; }
     if (/duplicate/.test(c)) return ['duplicate', 'duplicates'];
     if (/wrong_shift/.test(c)) return ['scan on the wrong shift', 'scans on the wrong shift'];
     if (/vin_/.test(c)) return ['VIN problem', 'VIN problems'];
@@ -876,7 +883,7 @@
     state.planOff ||= {}; state.planOpen ||= new Set(); state.oneByOne ||= new Set();
     const off = (state.planOff[hash] ||= new Set());
     const kOf = x => x.key || x.id, isOn = x => !off.has(kOf(x));
-    const idOf = i => `${i.code}|${i.text}|${i.row ?? ''}`;
+    const idOf = i => `${i.code}|${i.text}|${i.sheet}|${i.row ?? ''}|${i.cell || ''}`;
     const where = x => x.sheet ? `${x.sheet}${x.cell ? ' ' + x.cell : x.row ? ' row ' + x.row : ''}` : 'Whole report';
     const goTo = x => { state.walkNote = null; focusIssue(walkIssues().indexOf(x)); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); };
     const FMT_NAMES = {'capital letters': ['capitalization error', 'capitalization errors'], 'extra spaces': ['value with extra spaces', 'values with extra spaces'],
@@ -886,16 +893,17 @@
       ...fixRows.map(r => { const names = r.fmt ? FMT_NAMES[r.fmt] : r.id === 'f:sugg' ? ['blank detail with a likely value', 'blank details with a likely value'] : ['sure correction', 'sure corrections'];
         return {id: r.id, entries: r.fixes, names, row: r, hasSugg: true, ai: false, sev: 'low'}; }),
       ...groups.map(g => ({id: g.id, entries: g.items, names: kindNames(g.items[0]), group: g, hasSugg: g.withFix.length + g.dups.length > 0, ai: state.aiOn,
+        unsure: state.aiOn && g.items.every(x => claudeLeft(x) && !fixesFor(x).some(isFix)),
         sev: g.items.some(x => x.severity === 'high') ? 'high' : g.items.some(x => x.severity === 'medium') ? 'medium' : 'low'})),
     ].sort((x, y) => ({high: 0, medium: 1, low: 2}[x.sev] - {high: 0, medium: 1, low: 2}[y.sev]) || y.entries.length - x.entries.length);
     const titleOf = (k, n = k.entries.length) => k.names.length === 2 ? `${fmt(n)} ${n === 1 ? k.names[0] : k.names[1]}` : `${fmt(n)} × ${k.names[0]}`;
-    const partsOf = list => {   // the ticked items of these kinds, sorted by what can be done with them
+    const partsOf = (list, opt = {}) => {   // the ticked items of these kinds, sorted by what can be done with them
       const p = {fixes: new Map(), issues: [], dups: [], none: [], n: 0};
       for (const k of list) {
         if (k.row) for (const f of k.row.fixes.filter(isOn)) { p.fixes.set(f.id, f); p.n++; }
         if (k.group) for (const x of k.group.items.filter(isOn)) { p.issues.push(x); p.n++;
           const fx = fixesFor(x).filter(isFix);
-          if (fx.length) fx.forEach(f => p.fixes.set(f.id, f)); else if (isDupRow(x) && x.row) p.dups.push(x); else p.none.push(x); }
+          if (fx.length) fx.forEach(f => p.fixes.set(f.id, f)); else if (isDupRow(x) && x.row) p.dups.push(x); else if (opt.includeLeft || !claudeLeft(x)) p.none.push(x); }
       }
       p.fixes = [...p.fixes.values()];
       return p;
@@ -906,7 +914,7 @@
       if (btn) { btn.disabled = true; btn.textContent = 'Fixing…'; }
       const d = store.get(decisionsKey(), {}), dn = reviewedSet();
       for (const f of p.fixes) d[f.id] = {state: 'accepted', after: d[f.id]?.after ?? f.after};
-      p.issues.filter(x => !p.none.includes(x)).forEach(x => dn.add(x.key));
+      p.issues.filter(x => fixesFor(x).some(isFix) || (isDupRow(x) && x.row)).forEach(x => dn.add(x.key));   // only what this click actually settles
       store.set(decisionsKey(), d); store.set('rd-reviewed:' + hash, [...dn]);
       let cur = hash;
       const k = readyChanges();
@@ -939,6 +947,7 @@
       else { state.planOpen.add(k.id); drawCleanOffer(); const f = k.entries.find(isOn) || k.entries[0]; showCell(f.sheet, f.cell); toast('Click a cell in the list to go to it, then type the right value.'); }
     };
     const changeOf = (f, x) => f ? ['Now ', show(f.before), ' → becomes ', h('b', {}, showWs(f.after))] : x && isDupRow(x) ? 'Fix: take out the extra copy'
+      : x && state.aiOn && claudeLeft(x) ? 'Claude looked at this and was not sure, so it needs you: fix it yourself, or Ignore if it is fine'
       : state.aiOn ? 'No suggested change: Fix with AI lets Claude decide, or fix it yourself' : 'No suggested change: fix it yourself, or Ignore';
     const firstOf = k => { if (k.row) { const f = k.entries[0]; return {where: `${f.sheet} ${f.cell}`, what: f.reason || '', change: changeOf(f), go: () => showCell(f.sheet, f.cell)}; }
       const x = k.entries[0]; return {where: where(x), what: x.text, change: changeOf(fixesFor(x).find(isFix), x), go: () => goTo(x)}; };
@@ -952,15 +961,16 @@
           h('span', {class: 'pi-change'}, f ? [show(f.before), ' → ', h('b', {}, showWs(f.after))] : !k.row && isDupRow(e) ? 'Extra copy: take it out' : h('em', {}, 'No suggested change')))),
           h('button', {type: 'button', class: 'linkish small', onclick: () => k.row ? showCell(e.sheet, e.cell) : goTo(e)}, 'Show')); };
       return h('section', {class: `kind sev-${k.sev}`, id: 'kind-' + k.id.replace(/[^\w-]/g, '_')},
-        h('div', {class: 'kind-head'}, h('h3', {}, titleOf(k)), k.sev === 'high' ? h('span', {class: 'kind-pill'}, 'Must fix') : null),
+        h('div', {class: 'kind-head'}, h('h3', {}, titleOf(k)), k.sev === 'high' ? h('span', {class: 'kind-pill'}, 'Must fix') : k.unsure ? h('span', {class: 'kind-pill unsure'}, 'Needs you') : null),
         h('div', {class: 'kind-ex'}, h('span', {class: 'kind-ex-k'}, n > 1 ? 'The first one' : 'The issue'),
           h('button', {type: 'button', class: 'linkish small kind-ex-where', onclick: ex.go}, ex.where), ex.what ? h('span', {class: 'kind-ex-what'}, ex.what) : null, h('span', {class: 'kind-ex-change'}, ex.change)),
         h('div', {class: 'kind-btns'},
           k.hasSugg ? h('button', {type: 'button', class: 'btn primary', disabled: !on, onclick: e => approve(p, e.target)}, `Approve${cnt}`) : null,
-          k.ai ? h('button', {type: 'button', class: 'btn ai', disabled: !on, onclick: e => aiFix(p, e.target)}, `Fix${cnt} with AI`) : null,
+          k.ai && !k.unsure ? h('button', {type: 'button', class: 'btn ai', disabled: !on, onclick: e => aiFix(p, e.target)}, `Fix${cnt} with AI`) : null,
           h('button', {type: 'button', class: 'btn', disabled: !on, onclick: () => fixMyself(k)}, 'Fix myself'),
           h('button', {type: 'button', class: 'btn ghost', disabled: !on, onclick: () => ignore(p, k)}, `Ignore${cnt}`)),
         some ? h('p', {class: 'kind-note'}, `${fmt(n - on)} unticked ${n - on === 1 ? 'is' : 'are'} left out of these buttons.`) : null,
+        k.unsure ? h('button', {type: 'button', class: 'linkish small kind-again', onclick: e => aiFix(partsOf([k], {includeLeft: true}), e.target)}, 'Ask Claude to look again') : null,
         n > 1 ? h('button', {type: 'button', class: 'kind-more', 'aria-expanded': String(isOpen), onclick: () => { isOpen ? state.planOpen.delete(k.id) : state.planOpen.add(k.id); drawCleanOffer(); }},
           isOpen ? 'Hide the list ▴' : `Review all ${fmt(n)} ▾`) : null,
         isOpen ? h('div', {class: 'kind-listwrap'},
@@ -972,15 +982,17 @@
     if (kinds.length) {
       const all = partsOf(kinds), total = kinds.reduce((t, k) => t + k.entries.length, 0);
       const acceptAll = btn => { if (btn) { btn.disabled = true; btn.textContent = 'Fixing everything…'; } return fixEverythingLoop(); };
-      state.fixEverything = {hash, parts: () => partsOf(kinds), approve, run: () => acceptAll(document.querySelector('#cleanoffer .sum-accept'))};
+      state.fixEverything = {hash, parts: opt => partsOf(kinds, opt), approve, run: () => acceptAll(document.querySelector('#cleanoffer .sum-accept'))};
       const canAll = all.fixes.length || all.dups.length || (state.aiOn && all.none.length);
+      const unsureN = kinds.filter(k => k.unsure).reduce((t, k) => t + k.entries.length, 0);
       const summary = h('div', {class: 'sum'},
         h('h2', {id: 'clean-title', class: 'sum-title'}, 'Issue summary'),
         h('p', {class: 'sum-line'}, `${plural(total, 'issue')} in ${plural(kinds.length, 'kind')}.` + (r.fixed_from ? ' Nothing below has been changed yet.' : ' Nothing has been changed yet.')),
         h('ul', {class: 'sum-list'}, kinds.map(k => h('li', {}, h('span', {class: 'sev ' + k.sev}),
           h('button', {type: 'button', class: 'linkish', onclick: () => document.getElementById('kind-' + k.id.replace(/[^\w-]/g, '_'))?.scrollIntoView({behavior: 'smooth', block: 'start'})}, titleOf(k))))),
         canAll ? h('button', {type: 'button', class: 'btn primary sum-accept', onclick: e => acceptAll(e.target)}, 'Accept all fixes') : null,
-        h('p', {class: 'sum-note'}, canAll ? (state.aiOn ? 'Makes every suggested change, and Claude fixes the ones without a suggestion. ' : 'Makes every suggested change. ') + 'Or handle each kind below.' : 'Handle each kind below.'));
+        h('p', {class: 'sum-note'}, canAll ? (state.aiOn ? 'One click: makes every suggested change, and Claude fixes the rest. ' : 'Makes every suggested change. ') + 'Or handle each kind below.'
+          : unsureN ? `Claude already checked ${unsureN === 1 ? 'this one' : `these ${fmt(unsureN)}`} and was not sure, so ${unsureN === 1 ? 'it needs' : 'they need'} you: use Fix myself, or Ignore if ${unsureN === 1 ? 'it is' : 'they are'} fine.` : 'Handle each kind below.'));
       steps.push({id: 'review', title: `${plural(total, 'issue')} to review`, panel: h('div', {class: 'plan2'}, summary, h('div', {class: 'kinds'}, kinds.map(card)))});
     }
     const walkOpen = openIssues;
@@ -994,13 +1006,15 @@
     const current = live[0];
     const numbered = steps;
     const no = s => numbered.indexOf(s) + 1;
+    // a fixed version can be downloaded right here, the moment the changes are saved
+    const dlFixed = r.fixed_from ? h('a', {class: 'btn dl-fixed', href: '/api/spreadsheets/download?id=' + hash, download: r.filename}, '⬇ Download the fixed version') : null;
     if (current?.panel) {
       const doneLine = steps.filter(s => s.done).map(s => s.title).join(' · ');
       slot.replaceChildren(h('section', {class: 'cleanoffer guide plan2wrap', 'aria-labelledby': 'clean-title'},
-        doneLine ? h('p', {class: 'plan2-done'}, '✓ ', doneLine) : null, current.panel));
+        doneLine ? h('p', {class: 'plan2-done'}, '✓ ', doneLine) : null, dlFixed, current.panel));
       return;
     }
-    slot.replaceChildren(h('section', {class: 'cleanoffer guide', 'aria-labelledby': 'clean-title'},
+    slot.replaceChildren(h('section', {class: 'cleanoffer guide', 'aria-labelledby': 'clean-title'}, dlFixed,
       h('ol', {class: 'guide-steps'}, steps.map(s => h('li', {class: s.done ? 'done' : s === current ? 'now' : skipped.includes(s.id) && s.skippable ? 'skipped' : 'later'},
         h('span', {class: 'gs-dot', 'aria-hidden': 'true'}, s.done ? '✓' : String(no(s))),
         h('span', {}, s.done ? s.title : s.title.replace(/:.*/, '')),
@@ -1152,7 +1166,7 @@
     applyFixes(c.accepted, c.dec, c.edits);
   }
   function updateDownloads() {
-    const c = readyChanges(), label = c.total ? `Download with ${c.total} change${c.total === 1 ? '' : 's'}` : 'Download report';
+    const c = readyChanges(), label = c.total ? `Download with ${c.total} change${c.total === 1 ? '' : 's'}` : state.report?.fixed_from ? 'Download fixed version' : 'Download report';
     for (const b of document.querySelectorAll('.dl-changes')) { b.textContent = state.busy ? 'Building the fixed copy…' : label; b.disabled = !!state.busy; }
   }
   async function applyFixes(accepted, dec, edits, opts = {}) {
@@ -2709,20 +2723,22 @@
   // fixed too (a few rounds at most). Items Claude already tried are not asked again; whatever is left is for a person.
   async function fixEverythingLoop() {
     if (state.fixingAll) return; state.fixingAll = true;
-    const issueId = i => `${i.code}|${i.text}|${i.row ?? ''}`, tried = new Set(), wait = ms => new Promise(r => setTimeout(r, ms));
+    const issueId = i => `${i.code}|${i.text}|${i.sheet}|${i.row ?? ''}|${i.cell || ''}`, tries = new Map(), wait = ms => new Promise(r => setTimeout(r, ms));
     let cur = state.report?.file_hash;
     try {
-      for (let round = 1; round <= 4 && cur; round++) {
+      for (let round = 1; round <= 5 && cur; round++) {
         for (let i = 0; i < 120 && !(state.report?.file_hash === cur && state.fixes && !state.busy); i++) await wait(250);
         drawCleanOffer();
         const fe = state.fixEverything;
         if (!fe || fe.hash !== cur) break;   // nothing left on this version
-        const p = fe.parts();
-        p.none = p.none.filter(x => !tried.has(issueId(x)));
+        const p = fe.parts({includeLeft: true});
+        p.none = p.none.filter(x => (tries.get(issueId(x)) || 0) < 2);
         if (!p.fixes.length && !p.dups.length && !(state.aiOn && p.none.length)) break;
-        p.issues.forEach(x => tried.add(issueId(x)));
-        if (round > 1) toast(`Fixing what the re-check found (round ${round})…`);
-        const next = await fe.approve(p, null, true);
+        const retry = p.none.some(x => tries.get(issueId(x)));
+        p.none.forEach(x => tries.set(issueId(x), (tries.get(issueId(x)) || 0) + 1));
+        if (round > 1) toast(retry ? `Taking a closer look at the ones Claude was not sure about…` : `Fixing what the re-check found…`);
+        state.aiBatch = retry ? 20 : null;   // a second look goes in small batches, so Claude can take more care over each one
+        const next = await fe.approve(p, null, true).finally(() => { state.aiBatch = null; });
         if (!next) break;
         if (next === cur && !p.fixes.length && !p.dups.length) { await openReport(cur); continue; }   // Claude only confirmed items fine: same version, new notes
         cur = next; await loadList(); select(cur);
@@ -2737,13 +2753,14 @@
     const asked = new Set();
     let cur = hash;
     try {
-      for (let round = 1; round <= 8; round++) {
+      for (let round = 1; round <= 40; round++) {
         const data = await api('/api/spreadsheet?id=' + cur);
-        const open = (data.review?.issues || []).filter(i => i.severity !== 'info' && !asked.has(i.key) && !asked.has(i.text) && (!only || only(i)));
+        const sig = i => `${i.code}|${i.text}|${i.sheet}|${i.row ?? ''}|${i.column || i.cell || ''}`;   // keys change between versions; this does not
+        const open = (data.review?.issues || []).filter(i => i.severity !== 'info' && !asked.has(i.key) && !asked.has(sig(i)) && (!only || only(i)));
         if (!open.length) break;
-        const batch = open.slice(0, 100);
-        batch.forEach(i => { asked.add(i.key); asked.add(i.text); });
-        say(open.length > 100 ? `Fixing everything it can: part ${round}, ${fmt(open.length)} issues to go…` : `Fixing everything it can: ${open.length === 1 ? '1 issue' : `${fmt(open.length)} issues`}…`);
+        const size = state.aiBatch || 100, batch = open.slice(0, size);
+        batch.forEach(i => { asked.add(i.key); asked.add(sig(i)); });
+        say(open.length > size ? `Fixing everything it can: part ${round}, ${fmt(open.length)} issues to go…` : `Fixing everything it can: ${open.length === 1 ? '1 issue' : `${fmt(open.length)} issues`}…`);
         let out;
         try { out = await api('/api/spreadsheets/ai-fix', {file_hash: cur, keys: batch.map(i => i.key), auto: true}); }
         catch (e) { if (round === 1) toast(`Claude could not fix the issues this time (${e.message}). The sure cleanups were still made; the rest are listed for you.`, true); break; }
@@ -2820,6 +2837,7 @@
             kinds.length > 5 ? h('p', {class: 'quiet'}, `and ${kinds.length - 5} more kinds.`) : null,
             kinds.length < left.length ? h('p', {class: 'quiet'}, `Only ${plural(kinds.length, 'kind')} of issue, so each kind can be handled in one go.`) : null]; })())
         : h('p', {}, 'Check the totals, then approve and send when you are ready.')),
+      data.fixed_from ? h('a', {class: 'btn dl-fixed', href: '/api/spreadsheets/download?id=' + hash, download: data.filename}, '⬇ Download the fixed version') : null,
       h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dialog.close()}, left.length ? 'Later' : 'Open report'),
         left.length ? h('button', {type: 'button', class: 'btn primary', onclick: async () => { await ready(); showSide('fixes'); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, opts.afterAll ? "Review what's left" : 'Review them first') : null,
         left.length && !opts.afterAll ? h('button', {type: 'button', class: 'btn ' + (state.aiOn ? 'ai' : 'primary'), onclick: async () => { await ready(); showSide('fixes');

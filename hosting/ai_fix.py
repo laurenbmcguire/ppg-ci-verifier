@@ -55,10 +55,10 @@ def run(h, file_hash, keys=None, opener=None, auto=False):
                 current = inbox.apply_fixes(current, changes)['file_hash']
     except FixError as exc:
         raise AIFixError(f'Claude\'s changes could not be applied: {exc}') from None
-    fine = [dict(code=by_ref[f['ref']].get('code'), sheet=by_ref[f['ref']].get('sheet'), row=by_ref[f['ref']].get('row'),
+    fine = [dict(code=by_ref[f['ref']].get('code'), sheet=by_ref[f['ref']].get('sheet'), row=by_ref[f['ref']].get('row'), cell=by_ref[f['ref']].get('cell'),
                  text=by_ref[f['ref']].get('text'), reason=f['reason']) for f in plan['fine'] if f['ref'] in by_ref]
     handled = {c['ref'] for c in cells} | {r['ref'] for r in rows} | {f['ref'] for f in plan['fine'] if f['ref'] in by_ref}
-    left = [dict(text=i.get('text'), why='Claude\'s change did not fit the file' if i['key'] in {d.get('ref') for d in dropped} | {r['ref'] for r in bad_rows} else 'Claude did not resolve it')
+    left = [dict(text=i.get('text'), code=i.get('code'), sheet=i.get('sheet'), row=i.get('row'), cell=i.get('cell'), why='Claude\'s change did not fit the file' if i['key'] in {d.get('ref') for d in dropped} | {r['ref'] for r in bad_rows} else 'Claude did not resolve it')
             for i in issues if i['key'] not in handled]
     summary = dict(made_at=datetime.now(timezone.utc).isoformat(), model=plan.get('model'), asked=len(issues), from_hash=file_hash,
                    changed=[dict(sheet=c['sheet'], cell=c['cell'], before=c['before'], after=c['after'], reason=c['reason'], check=c['confidence'] == 'check') for c in cells],
@@ -67,10 +67,10 @@ def run(h, file_hash, keys=None, opener=None, auto=False):
                    fine=[dict(text=f['text'], reason=f['reason']) for f in fine], left=left)
     prev = item.get('ai_fixed')
     if prev:   # several rounds (a big report is fixed in batches): one running record of everything Claude did
-        asked_now = {i.get('text') for i in issues}
+        asked_now = {(i.get('text'), str(i.get('row'))) for i in issues}
         for k in ('changed', 'removed', 'moved', 'fine'):
             summary[k] = (prev.get(k) or []) + summary[k]
-        summary['left'] = summary['left'] + [x for x in prev.get('left') or [] if x.get('text') not in asked_now]
+        summary['left'] = summary['left'] + [x for x in prev.get('left') or [] if (x.get('text'), str(x.get('row'))) not in asked_now and ('row' in x or x.get('text') not in {t for t, _ in asked_now})]
         summary['asked'] = (prev.get('asked') or 0) + summary['asked']
         summary['from_hash'] = prev.get('from_hash') or file_hash
         summary['rounds'] = (prev.get('rounds') or 1) + 1
