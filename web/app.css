@@ -753,3 +753,19 @@ body:not([data-page=reports]):not([data-page=today]) .clienttabs{display:none}
 }
 .iopen{display:flex;flex-direction:column;align-items:flex-start}
 @media (max-width:700px){.more-menu .menu{left:0;right:auto}.ractions{flex-wrap:wrap}}
+.typesel{flex:none;margin:0;width:16px;height:16px;cursor:pointer}
+.selbar.issel{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0 4px;padding:10px 12px;border-radius:9px;background:#ece9fb;border:1px solid #cfc8f3;font-size:13px}
+.selbar.issel span{flex:1 1 200px;color:var(--ink)}
+.selbar.issel{position:sticky;top:-16px;z-index:5;box-shadow:0 4px 12px #1a373514}
+/* clients in the left menu (the tab strip is only for narrow screens, where the menu is hidden) */
+.rail-clients{margin-top:14px;padding-top:12px;border-top:1px solid #2a5552;overflow-y:auto;min-height:0;flex:0 1 auto}
+.rail-head{font-size:10px;font-weight:750;letter-spacing:1.6px;color:#8fb3aa;padding:0 10px 6px}
+.nav.client{display:flex;align-items:center;gap:8px;padding:9px 10px}
+.nav.client span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav.client i{font-style:normal;font-size:11px;background:#f4c8bf;color:#7a2217;border-radius:999px;padding:0 7px}
+@media (min-width:1201px){.clienttabs{display:none!important}}
+.clienthead{display:grid;gap:2px;padding:12px 16px;border-bottom:1px solid var(--line);background:#f7faf8}
+.clienthead b{font-size:15px}
+.clienthead span{font-size:12px;color:var(--muted)}
+.clienthead .linkish{justify-self:start;margin-top:4px}
+.rail{overflow-y:auto}

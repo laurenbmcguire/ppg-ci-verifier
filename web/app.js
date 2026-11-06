@@ -66,18 +66,25 @@
     catch (e) { state.clients = []; }
     if (state.client && state.client !== '_none' && !state.clients.some(c => c.key === state.client)) { state.client = ''; store.set('rd-client', ''); }
     drawClientTabs(); drawQueue();
-    if (location.hash === '#today') showToday();
   }
   function drawClientTabs() {
-    const bar = $('clienttabs'); if (!bar) return;
+    const bar = $('clienttabs'), rail = $('railclients'); if (!bar) return;
     const cl = state.clients || [];
-    bar.hidden = !cl.length; if (!cl.length) return;
+    bar.hidden = !cl.length; if (rail) rail.hidden = !cl.length; if (!cl.length) return;
     const ofKey = (r, key) => key === '' || (key === '_none' ? !clientOf(r.review?.job) : clientOf(r.review?.job) === key);
     const need = key => state.list.filter(r => ofKey(r, key) && r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
+    const go = key => { location.hash = key ? 'c=' + encodeURIComponent(key) : ''; };
     const tab = (key, label, title) => { const n = need(key);
-      return h('button', {type: 'button', role: 'tab', class: state.client === key ? 'on' : '', 'aria-selected': String(state.client === key), title: title || null,
-        onclick: () => { state.client = key; store.set('rd-client', key); drawClientTabs(); drawQueue(); if (location.hash === '#today') showToday(); }},
+      return h('button', {type: 'button', role: 'tab', class: state.client === key ? 'on' : '', 'aria-selected': String(state.client === key), title: title || null, onclick: () => go(key)},
         label, n ? h('i', {title: `${n} report${n === 1 ? '' : 's'} need attention`}, String(n)) : null); };
+    if (rail) {
+      const onList = !location.hash.match(/^#(today|overview|periods|checks|api)$/);
+      const item = (key, label, title) => { const n = need(key), href = '#c=' + encodeURIComponent(key);
+        return h('a', {class: 'nav client' + (onList && state.client === key ? ' active' : ''), href, title: title || null}, h('span', {}, label), n ? h('i', {title: `${n} need attention`}, String(n)) : null); };
+      rail.replaceChildren(h('div', {class: 'rail-head'}, 'Clients'),
+        ...[...cl.map(c => item(c.key, c.client, `${c.sites.map(x => x.location || x.site).join(', ')}: ${c.jobs.length} job${c.jobs.length === 1 ? '' : 's'} on SharePoint`)),
+          state.list.some(r => r.review?.job && !clientOf(r.review.job)) ? item('_none', 'Other', 'Reports whose job is not on a client site') : null].filter(Boolean));
+    }
     const unmatched = state.list.some(r => r.review?.job && !clientOf(r.review.job));
     bar.replaceChildren(...[tab('', 'All clients'),
       ...cl.map(c => tab(c.key, c.client, `${c.sites.map(x => x.location || x.site).join(', ')}: ${c.jobs.length} job${c.jobs.length === 1 ? '' : 's'} on SharePoint`)),
@@ -97,6 +104,15 @@
     if (state.filter === 'review') rows = rows.filter(r => r.review?.review_state === 'waiting');
     document.querySelectorAll('.segmented button').forEach(b => b.classList.toggle('on', b.dataset.filter === state.filter));
     const list = $('queue-list'); list.replaceChildren();
+    const client = (state.clients || []).find(c => c.key === state.client);
+    if (client) {
+      list.append(h('div', {class: 'clienthead'}, h('b', {}, client.client),
+        h('span', {}, `${client.sites.map(x => x.location || x.site).join(' · ')} · ${client.jobs.length} job${client.jobs.length === 1 ? '' : 's'} on SharePoint`),
+        client.jobs.length ? h('button', {type: 'button', class: 'linkish', onclick: async e => {
+          e.target.disabled = true; e.target.textContent = 'Adding to Today…';
+          try { for (const j of client.jobs) await api('/api/today', {add: j.job}); toast(`${client.client}'s ${client.jobs.length} job${client.jobs.length === 1 ? ' is' : 's are'} on Today.`); location.hash = 'today'; }
+          catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Watch these jobs on Today'; } }}, 'Watch these jobs on Today') : null));
+    }
     const vh = state.vinHits;
     if (vh && vh.query === state.search) {
       list.append(h('div', {class: 'vinhits'}, h('b', {}, vh.results.length ? `“${vh.query}” is in ${vh.results.length} report row${vh.results.length === 1 ? '' : 's'}` : `“${vh.query}” is not in any report`),
@@ -144,7 +160,11 @@
   async function route() {
     document.body.classList.remove('reportmode');
     document.body.dataset.page = (location.hash.match(/^#(today|overview|periods|checks|api)$/) || [])[1] || 'reports';
-    document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === (['#api', '#checks', '#periods', '#today', '#overview'].includes(location.hash) ? location.hash : '#')));
+    const cm = location.hash.match(/^#c=(.+)$/);
+    if (cm) { state.client = decodeURIComponent(cm[1]); store.set('rd-client', state.client); drawClientTabs(); }
+    else if (location.hash === '' || location.hash === '#') { if (state.client) { state.client = ''; store.set('rd-client', ''); drawClientTabs(); } }
+    const navOn = ['#api', '#checks', '#periods', '#today', '#overview'].includes(location.hash) ? location.hash : state.client ? '#c=' + encodeURIComponent(state.client) : '#';
+    document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === navOn));
     if (location.hash === '#overview') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showOverview(); return; }
     if (location.hash === '#today') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showToday(); return; }
     if (location.hash === '#periods') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showPeriods(); return; }
@@ -187,7 +207,7 @@
         !r.approval && (r.review_request || {}).status !== 'waiting' ? h('button', {type: 'button', onclick: e => { close(e); reviewForm('request'); }}, 'Send for review') : null,
         h('a', {href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename, onclick: close}, 'Download the original file')));
     const head = h('div', {class: 'rhead'},
-      h('button', {type: 'button', class: 'back', onclick: () => { location.hash = ''; }}, '‹ All reports'),
+      h('button', {type: 'button', class: 'back', onclick: () => { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }}, state.client ? `‹ ${clientName()} reports` : '‹ All reports'),
       h('div', {class: 'rtitle'},
         h('span', {class: `tag tag-${rv.status}`, title: statusNote(rv)}, STATUS[rv.status], h('small', {}, statusNote(rv))),
         h('h1', {}, rv.job || r.filename),
@@ -1016,9 +1036,7 @@
     if (!await load()) return;
     const sp = {};
     const draw = () => {
-      const day = data.day, rows = data.jobs.filter(r => inClient(r.job));
-      const client = (state.clients || []).find(c => c.key === state.client);
-      const unwatched = client ? client.jobs.filter(j => !data.jobs.some(r => r.job.toUpperCase() === j.job.toUpperCase() || jobNumbers(r.job).some(n => j.numbers.includes(n)))) : [];
+      const day = data.day, rows = data.jobs, unwatched = [];
       const label = new Date(day + 'T12:00:00').toLocaleDateString('en-US', {weekday: 'long', month: 'long', day: 'numeric'});
       const counts = {send: 0, missing: 0, hold: 0};
       for (const r of rows) {
@@ -1608,6 +1626,41 @@
     const block = h('section', {class: 'block', id: 'issues'});
     state.openGroups ||= {};
     const setDone = (keys, on) => { keys.forEach(k => on ? done.add(k) : done.delete(k)); store.set(reviewedKey, [...done]); draw(); updateFinish(); drawSideTabs(); };
+    if (state.issueSelFor !== state.report.file_hash) { state.issueSel = new Set(); state.issueSelFor = state.report.file_hash; }
+    const sel = state.issueSel;
+    // accept every suggested fix for the selected issues; ask Claude for the rest when AI is on
+    const fixSelected = async btn => {
+      const hash = state.report.file_hash, picked = issues.filter(i => sel.has(i.key));
+      const accept = () => {
+        const d = store.get(decisionsKey(), {}), fixedKeys = [];
+        let n = 0;
+        for (const i of picked) {
+          const fx = fixesFor(i).filter(f => f.state !== 'rejected');
+          for (const f of fx) if (d[f.id]?.state !== 'accepted') { d[f.id] = {state: 'accepted', after: d[f.id]?.after ?? f.after}; n++; }
+          if (fx.length) fixedKeys.push(i.key);
+        }
+        store.set(decisionsKey(), d);
+        return {n, fixedKeys};
+      };
+      let {n, fixedKeys} = accept();
+      const missing = picked.filter(i => !fixedKeys.includes(i.key));
+      if (missing.length && state.aiOn) {
+        btn.disabled = true; btn.textContent = `Claude is fixing ${missing.length}…`;
+        try {
+          await api('/api/spreadsheets/ai-fixes', {file_hash: hash});
+          if (state.selected !== hash) return;
+          const data = await api('/api/spreadsheets/fixes', {file_hash: hash});
+          state.fixes = data.proposals || []; state.aiFix = data.ai || {};
+          ({n, fixedKeys} = accept());
+        } catch (e) { toast(e.message, true); }
+      }
+      fixedKeys.forEach(k => done.add(k)); store.set(reviewedKey, [...done]);
+      const left = picked.length - fixedKeys.length;
+      sel.clear();
+      toast(fixedKeys.length ? `${n} fix${n === 1 ? '' : 'es'} accepted for ${fixedKeys.length} issue${fixedKeys.length === 1 ? '' : 's'}; they go into the download.` + (left ? ` ${left} had no automatic fix: click them to change the cell yourself.` : '')
+        : 'None of these have an automatic fix yet. Click an issue to change its cell yourself' + (state.aiOn ? '.' : ', or turn on AI review so Claude can write fixes.'), !fixedKeys.length);
+      drawFixes(); draw(); updateFinish(); drawSideTabs();
+    };
     const draw = () => {
       const left = issues.filter(i => !done.has(i.key)).length;
       const cur = state.issueNav != null ? issues[state.issueNav]?.key : null;
@@ -1617,6 +1670,13 @@
           : dismissed.length ? 'Nothing left: Claude checked every flagged item and none are real problems.' : 'Nothing flagged by the checks, SharePoint, the usual-day comparison or AI.'),
         left ? h('div', {class: 'right'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => focusIssue(Math.max(0, issues.findIndex(i => !done.has(i.key))))},
           left < issues.length ? 'Next open issue' : 'Start with the first')) : null));
+      if (sel.size) {
+        const picked = issues.filter(i => sel.has(i.key)), ready = picked.filter(i => fixesFor(i).some(f => f.state !== 'rejected')).length;
+        block.append(h('div', {class: 'selbar issel'},
+          h('span', {}, h('b', {}, `${picked.length} selected`), ` · ${ready} with a suggested fix` + (picked.length > ready ? (state.aiOn ? `, Claude will write the other ${picked.length - ready}` : `, ${picked.length - ready} without one`) : '')),
+          h('button', {type: 'button', class: 'btn ghost small', onclick: () => { sel.clear(); draw(); }}, 'Clear'),
+          h('button', {type: 'button', class: 'btn primary small', onclick: e => fixSelected(e.target)}, `Fix ${picked.length === 1 ? 'it' : `all ${picked.length}`}`)));
+      }
       for (const [sev, label] of SEVERITIES) {
         const ofSev = issues.filter(i => i.severity === sev); if (!ofSev.length) continue;
         const openSev = ofSev.filter(i => !done.has(i.key)).length;
@@ -1627,8 +1687,12 @@
         for (const [type, list] of Object.entries(groups).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
           const gk = state.report.file_hash + '|' + sev + '|' + type, openT = list.filter(i => !done.has(i.key)).length;
           const isOpen = state.openGroups[gk] ?? (openT > 0 && (sev === 'high' || list.some(i => i.key === cur) || Object.keys(groups).length === 1));
+          const openKeys = list.filter(i => !done.has(i.key)).map(i => i.key), allSel = openKeys.length > 0 && openKeys.every(k => sel.has(k));
+          const pick = h('input', {type: 'checkbox', class: 'typesel', checked: allSel, title: `Select all ${openKeys.length} open ${type.toLowerCase()} issues to fix`, 'aria-label': `Select all ${type} issues to fix`, disabled: !openKeys.length,
+            onclick: e => e.stopPropagation(), onchange: e => { openKeys.forEach(k => e.target.checked ? sel.add(k) : sel.delete(k)); draw(); }});
+          if (!allSel && openKeys.some(k => sel.has(k))) pick.indeterminate = true;
           const det = h('details', {class: 'itype', open: isOpen || list.some(i => i.key === cur)},
-            h('summary', {}, h('b', {}, type), h('span', {class: 'cnt' + (openT ? '' : ' ok')}, openT ? `${openT} open` : '✓ reviewed'), h('span', {class: 'tot'}, String(list.length))));
+            h('summary', {}, pick, h('b', {}, type), h('span', {class: 'cnt' + (openT ? '' : ' ok')}, openT ? `${openT} open` : '✓ reviewed'), h('span', {class: 'tot'}, String(list.length))));
           det.addEventListener('toggle', () => { state.openGroups[gk] = det.open; });
           const ul = h('ul', {class: 'ilist'});
           const limit = state.openGroups[gk + '|all'] ? list.length : 25;
