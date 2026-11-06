@@ -333,7 +333,6 @@
       drawReport();
       if (keepScroll) report.scrollTop = top;
       loadFixes(hash);
-      autoCleanOlder(data);
       if (state.openSendFor && (state.openSendFor === hash || state.openSendFor === 'next' && data.fixed_from)) { state.openSendFor = null; openSend(); }
     } catch (e) {
       report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note'}, e.message)));
@@ -938,6 +937,8 @@
           (() => { const x = g.items[0], f = fixesFor(x).find(isFix);
             return exampleOf(where(x), x.text, f ? ['Now ', show(f.before), ' → becomes ', h('b', {}, showWs(f.after))] : isDupRow(x) ? 'Fix: take out the extra copy' : state.aiOn ? 'No suggested change: Fix with AI lets Claude decide' : 'No suggested change: fix it by hand or Ignore',
               () => { state.walkNote = null; focusIssue(walkIssues().indexOf(x)); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }); })()))];
+      const fixEverything = () => { everyItem.forEach(x => sel.add(x.key || x.id)); drawCleanOffer(); document.querySelector('#cleanoffer .pbar .btn.primary')?.click(); };
+      state.fixEverything = {hash, run: fixEverything};
       const none = !nOn, approveN = nChanges + nClaude;
       const bar = h('div', {class: 'pbar'},
         h('p', {class: 'pbar-count'}, none ? 'Tick the items you want to handle.' : `${plural(nOn, 'item')} selected`),
@@ -950,8 +951,12 @@
         !none && nYou ? h('p', {class: 'pbar-note'}, `${plural(nYou, 'selected item')} ${nYou === 1 ? 'has' : 'have'} no suggested change, so Approve leaves ${nYou === 1 ? 'it' : 'them'} open.`) : null);
       steps.push({id: 'review', title: `${plural(totalItems, 'item')} to review`, panel: h('div', {class: 'plan2'},
         h('h2', {id: 'clean-title', class: 'plan2-title'}, `${plural(totalItems, 'item')} to review`),
-        h('p', {class: 'plan2-help'}, 'Tick single items, a whole type, or everything. Then choose ', h('b', {}, 'Approve'), ' (make the suggested changes), ',
-          state.aiOn ? [h('b', {}, 'Fix with AI'), ' (Claude decides), '] : '', 'or ', h('b', {}, 'Ignore'), ' (leave as is). Click ▾ to see the items in a type.'),
+        h('div', {class: 'plan2-choice'},
+          h('button', {type: 'button', class: 'btn ' + (state.aiOn ? 'ai' : 'primary') + ' plan2-all', onclick: fixEverything},
+            state.aiOn ? `Let AI fix all ${fmt(totalItems)}` : `Approve all ${fmt(totalItems)} suggested changes`),
+          h('p', {class: 'plan2-or'}, state.aiOn ? 'Makes every suggested change, and Claude fixes the ones without a suggestion. Or review them yourself below.' : 'Or review them yourself below.')),
+        h('p', {class: 'plan2-help'}, 'Each type shows an example. Tick single items, a whole type, or everything, then choose ', h('b', {}, 'Approve'), ' (make the suggested changes), ',
+          state.aiOn ? [h('b', {}, 'Fix with AI'), ' (Claude decides), '] : '', 'or ', h('b', {}, 'Ignore'), ' (leave as is).'),
         bar,
         h('label', {class: 'pg-all'}, (() => { const a = h('input', {type: 'checkbox', checked: allOn && nOn > 0, onchange: e => setAll(everyItem, e.target.checked)}); a.indeterminate = !allOn && !noneOn; return a; })(),
           h('span', {}, allOn && nOn ? 'All selected' : `Select all ${fmt(totalItems)}`)),
@@ -2675,9 +2680,7 @@
     for (const file of files) last = (await uploadOne(file)) || last;
     if (!last) return;
     await loadList(); select(last.file_hash);
-    const before = last.file_hash, after = await autoFixAll(before);
-    if (after !== before) { await loadList(); select(after); } else if (state.aiOn && state.selected === after) await openReport(after);   // same version, new notes on it
-    showResult(after, true);
+    showResult(last.file_hash, true);   // nothing is fixed until the person chooses: AI fixes everything, or they review first
   }
   // After an upload the app fixes everything it can by itself: the sure cleanups already ran on the server, then Claude
   // works through every open issue (in batches, so a report with hundreds of errors is still covered). The person only
@@ -2752,10 +2755,11 @@
       aiDid ? `Claude fixed ${plural(aiDid, 'problem')}` + ((s.removed || []).length || (s.moved || []).length ? `, including ${[(s.removed || []).length ? plural(s.removed.length, 'row') + ' taken out' : '', (s.moved || []).length ? plural(s.moved.length, 'row') + ' moved to the right shift' : ''].filter(Boolean).join(' and ')}` : '') + '.' : null,
       aiFine ? `Claude checked ${plural(aiFine, 'flag')} and found ${aiFine === 1 ? 'it is' : 'they are'} fine as is.` : null,
     ].filter(Boolean);
+    const ready = async () => { dialog.close(); for (let i = 0; i < 60 && !(state.report?.file_hash === hash && state.fixes); i++) await new Promise(r => setTimeout(r, 250)); };
     const walk = async () => { dialog.close();
       for (let i = 0; i < 40 && !(state.report?.file_hash === hash && state.fixes); i++) await new Promise(r => setTimeout(r, 250));
       if (state.report?.file_hash === hash) { const done = reviewedSet(); await focusIssue(Math.max(0, walkIssues().findIndex(i => !done.has(i.key)))); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); } };
-    const title = left.length ? (fixedLines.length ? `Fixed what I could. ${plural(left.length, 'thing')} need${left.length === 1 ? 's' : ''} you` : `${plural(left.length, 'thing')} to look at`)
+    const title = left.length ? (fixedLines.length ? `${plural(left.length, 'thing')} still to decide` : `Found ${plural(left.length, 'thing')} to fix`)
       : fixedLines.length ? 'All fixed. Nothing left for you' : 'Nothing flagged';
     dialog.replaceChildren(h('div', {class: 'inner'},
       h('div', {class: `tag tag-big tag-${rv.status}`}, STATUS[rv.status], h('small', {}, statusNote(rv))),
@@ -2763,8 +2767,8 @@
       h('p', {class: 'note'}, `${rv.job || data.filename}, ${shortDay(rv.day)}. ${fmt(rv.scans)} rows, ${fmt(rv.inspected)} inspected, ${fmt(rv.rejected)} rejected.`),
       fixedLines.length ? h('div', {class: 'res-fixed'}, h('b', {}, 'What was fixed'), h('ul', {}, fixedLines.map(t => h('li', {}, t))),
         h('p', {class: 'quiet'}, 'Every change is listed at the top of the report, with a link to the version before.' + (checks ? ` ${plural(checks, 'change')} ${checks === 1 ? 'is' : 'are'} Claude's best judgment and marked "please double-check".` : ''))) : null,
-      left.length ? h('div', {class: 'res-left'}, h('b', {}, 'What needs you'),
-        h('p', {}, (must ? `${plural(must, 'must-fix item')} before it goes out. ` : '') + 'The summary at the top of the report lists every proposed change by issue type: accept them all in one click, or review any type first.'),
+      left.length ? h('div', {class: 'res-left'}, h('b', {}, 'What was found'),
+        h('p', {}, (must ? `${plural(must, 'must-fix item')} before it goes out. ` : '') + 'Nothing has been changed yet. ' + (state.aiOn ? 'Let AI fix everything in one click, or review them first: each type shows an example, and you tick what to approve, ignore or hand to AI.' : 'Approve every suggested change in one click, or review them first: each type shows an example, and you tick what to approve or ignore.')),
         (() => { const g = new Map(); for (const i of left) { const k = sameKey(i); g.set(k, [...(g.get(k) || []), i]); }
           const kinds = [...g.values()].sort((x, y) => y.length - x.length);
           return [h('ul', {}, kinds.slice(0, 5).map(k => h('li', {}, h('span', {class: 'sev ' + k[0].severity}), h('span', {}, k.length > 1 ? h('b', {}, `${fmt(k.length)}× `) : null, k[0].text)))),
@@ -2772,7 +2776,9 @@
             kinds.length < left.length ? h('p', {class: 'quiet'}, `Only ${plural(kinds.length, 'kind')} of issue, so each kind can be handled in one go.`) : null]; })())
         : h('p', {}, 'Check the totals, then approve and send when you are ready.')),
       h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dialog.close()}, left.length ? 'Later' : 'Open report'),
-        left.length ? h('button', {type: 'button', class: 'btn primary', onclick: async () => { dialog.close(); for (let i = 0; i < 40 && !(state.report?.file_hash === hash && state.fixes); i++) await new Promise(r => setTimeout(r, 250)); showSide('fixes'); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, 'See the proposed changes') : null));
+        left.length ? h('button', {type: 'button', class: 'btn primary', onclick: async () => { await ready(); showSide('fixes'); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, 'Review them first') : null,
+        left.length ? h('button', {type: 'button', class: 'btn ' + (state.aiOn ? 'ai' : 'primary'), onclick: async () => { await ready(); showSide('fixes');
+          if (state.fixEverything?.hash === hash) state.fixEverything.run(); else toast('Open the Fixes tab to choose what to fix.', true); }}, state.aiOn ? 'Let AI fix everything' : 'Approve all suggested changes') : null));
     dialog.showModal();
   }
   $('result-dialog').addEventListener('click', e => { if (e.target === $('result-dialog')) $('result-dialog').close(); });

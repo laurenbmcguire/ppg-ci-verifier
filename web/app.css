@@ -1262,3 +1262,8 @@ details.fixedlog .checkme{color:#9a6a00;font-weight:600}
 .pg-ex-change{color:var(--muted)}
 .pg-ex-change b{color:var(--green)}
 .pg-more{margin:-4px 12px 10px 39px}
+.plan2-choice{margin:6px 0 12px;padding:12px;border:1px solid #e3ebe7;border-radius:10px;background:#f6f8f7;display:flex;flex-direction:column;gap:6px}
+.plan2-all{align-self:flex-start}
+.plan2-or{margin:0;font-size:12.5px;color:var(--muted)}
+.btn.ai.plan2-all,#result-dialog .btn.ai{background:#5b3fb0;border-color:#5b3fb0;color:#fff}
+.btn.ai.plan2-all:hover,#result-dialog .btn.ai:hover{background:#4a3196}

@@ -1,3 +1,4 @@
+import os
 """SharePoint job check and the PDF change summary kept on record."""
 import base64, io, json, os, sys, unittest, urllib.request
 
@@ -42,6 +43,7 @@ class Summaries(test_autopilot.Autopilot):
             return r.read()
 
     def test_changed_report_gets_a_pdf_on_record(self):
+        os.environ['PPG_AUTOFORMAT_ON_UPLOAD'] = '1'; self.addCleanup(os.environ.pop, 'PPG_AUTOFORMAT_ON_UPLOAD', None)   # opt-in cleanup
         st, info = self.call('/api/settings/sharepoint-jobs', {'content_base64': base64.b64encode(job_list()).decode(), 'filename': 'jobs.xlsx'})
         self.assertEqual((st, info['real'], info['active']), (200, 2, 2))
         rows = [tuple(r) for r in ROWS]

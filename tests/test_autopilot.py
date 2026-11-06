@@ -40,8 +40,19 @@ class Autopilot(unittest.TestCase):
         st, out = self.call('/api/autopilot', {'on': True})
         self.assertFalse(out['on'])
 
+    def test_upload_changes_nothing_by_default(self):
+        os.environ.pop('PPG_AUTOFORMAT_ON_UPLOAD', None)
+        rows = [tuple(r) for r in ROWS]
+        rows[1] = (rows[1][0], ' 80139189 ') + rows[1][2:]              # a sure fix, but the person decides
+        st, up = self.call('/api/spreadsheets/import', {'filename': '2230-OWENS-BASCO - EOS - 2026-10-07.xlsx',
+                                                        'content_base64': base64.b64encode(build(rows)).decode()})
+        self.assertEqual(st, 200, up)
+        self.assertNotIn('auto_formatting', up['item'])
+        self.assertFalse(up['item'].get('fixed_from'))
+
     def test_only_sure_fixes_and_never_sends(self):
         os.environ['PPG_AUTOPILOT'] = '1'; self.addCleanup(os.environ.pop, 'PPG_AUTOPILOT', None)   # when it is brought back
+        os.environ['PPG_AUTOFORMAT_ON_UPLOAD'] = '1'; self.addCleanup(os.environ.pop, 'PPG_AUTOFORMAT_ON_UPLOAD', None)   # opt-in cleanup
         rows = [tuple(r) for r in ROWS]
         rows[1] = (rows[1][0], ' 80139189 ') + rows[1][2:]              # stray spaces: a sure fix
         st, up = self.call('/api/spreadsheets/import', {'filename': '2230-OWENS-BASCO - EOS - 2026-10-07.xlsx',

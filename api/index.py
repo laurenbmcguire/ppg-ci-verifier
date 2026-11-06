@@ -1450,13 +1450,13 @@ class handler(BaseHTTPRequestHandler):
                 except Exception:
                     debug_log()  # the upload itself was saved; the comparison can be re-run from the UI
             if route in ('/api/spreadsheets/upload/finish', '/api/spreadsheets/import'):
-                try:   # formatting-only fixes are made automatically; the cleaned copy is what opens
+                try:   # nothing is fixed on upload unless PPG_AUTOFORMAT_ON_UPLOAD=1; a re-upload of a cleaned file opens its cleaned copy
                     item = json.loads(body)['item']
                     if item.get('idempotent') and item.get('auto_formatted_to'):   # the same file again: open its cleaned copy
                         with self.store().session() as directory:
                             body = encode_json({'item': dict(SpreadsheetInbox(directory).get(item['auto_formatted_to']), idempotent=True)})
-                    elif not item.get('idempotent') and not item.get('fixed_from'):
-                        from hosting import autoformat
+                    elif not item.get('idempotent') and not item.get('fixed_from') and os.environ.get('PPG_AUTOFORMAT_ON_UPLOAD') == '1':
+                        from hosting import autoformat   # off by default: the person decides what gets fixed (Approve, Fix with AI, or Ignore)
                         cleaned = autoformat.run(self, item['file_hash'])
                         if cleaned:
                             body = encode_json({'item': cleaned})
