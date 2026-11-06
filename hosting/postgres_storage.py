@@ -65,7 +65,7 @@ class PostgresWorkspace:
                     after = immutable_files(root)
                     if any(after.get(name) != digest for name, digest in originals.items()):
                         raise StorageUnavailable('Original uploads are immutable; nothing was saved.')
-                    if old != new:
+                    if old != new and (old is not None or any(p.is_file() for p in root.rglob('*'))):   # an empty workspace is not a change
                         cur.execute('UPDATE ci_verifier_state SET payload=%s, revision=%s, updated_at=now() WHERE namespace=%s',
                                     (new, revision + 1, NAMESPACE))
             conn.commit()

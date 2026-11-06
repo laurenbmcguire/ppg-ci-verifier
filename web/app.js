@@ -23,6 +23,7 @@
       method: 'POST', headers: {'Content-Type': 'application/json', 'X-Review-Token': 'same-origin'}, body: JSON.stringify(body)});
     let data = {};
     try { data = await response.json(); } catch (e) { /* non-JSON error page */ }
+    if (response.status === 401 && data.signin) { showSignIn(); throw new Error('Sign in to continue.'); }
     if (!response.ok) throw new Error(data.error || `The server answered ${response.status}. Try again in a moment.`);
     return data;
   }
@@ -78,7 +79,7 @@
       return h('button', {type: 'button', role: 'tab', class: state.client === key ? 'on' : '', 'aria-selected': String(state.client === key), title: title || null, onclick: () => go(key)},
         label, n ? h('i', {title: `${n} report${n === 1 ? '' : 's'} need attention`}, String(n)) : null); };
     if (rail) {
-      const onList = !location.hash.match(/^#(today|overview|periods|checks|api)$/);
+      const onList = !location.hash.match(/^#(today|overview|periods|checks|api|users)$/);
       const item = (key, label, title) => { const n = need(key), href = '#c=' + encodeURIComponent(key);
         return h('a', {class: 'nav client' + (onList && state.client === key ? ' active' : ''), href, title: title || null}, h('span', {}, label), n ? h('i', {title: `${n} need attention`}, String(n)) : null); };
       rail.replaceChildren(h('div', {class: 'rail-head'}, 'Clients'),
@@ -154,21 +155,116 @@
   });
   document.querySelectorAll('.segmented button').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.filter; store.set('rd-filter', state.filter); drawQueue(); }));
 
+  // ---------------------------------------------------------------- sign-in and who is using the app
+  function showSignIn(message) {
+    const me = state.me || {};
+    let box = $('signin');
+    if (!box) { box = h('div', {id: 'signin', class: 'signin', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'signin-title'}); document.body.append(box); }
+    const email = h('input', {type: 'email', placeholder: 'you@ppgquality.com', 'aria-label': 'Your email', autocomplete: 'email'});
+    const note = h('p', {class: 'note'}, message || '');
+    const close = me.user ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => box.remove()}, 'Not now') : null;
+    box.replaceChildren(h('div', {class: 'signin-card'},
+      h('img', {src: '/assets/ppg-client-intelligence.png', alt: 'PPG Quality Client Intelligence'}),
+      h('h1', {id: 'signin-title'}, 'Sign in to the PPG Verifier'),
+      h('p', {}, 'You only see the clients you have been given access to. Ask an admin if something is missing.'),
+      message ? note : null,
+      me.microsoft !== false ? h('button', {type: 'button', class: 'btn primary ms', onclick: () => { location.href = '/auth/microsoft'; }}, 'Sign in with Microsoft') : null,
+      h('div', {class: 'or'}, h('span', {}, me.microsoft !== false ? 'or get a sign-in link by email' : 'Get a sign-in link by email')),
+      h('form', {class: 'keyform', onsubmit: async e => { e.preventDefault();
+        try { const out = await api('/api/auth/email', {email: email.value}); note.textContent = out.message; if (!note.isConnected) e.target.after(note); }
+        catch (err) { note.textContent = err.message; if (!note.isConnected) e.target.after(note); } }},
+        email, h('button', {type: 'submit', class: 'btn'}, 'Email me a link')),
+      close));
+    (me.microsoft !== false ? box.querySelector('.ms') : email)?.focus();
+  }
+  function drawMe() {
+    const me = state.me?.user, box = $('me'); if (!box || !me) return;
+    const admin = me.role === 'admin';
+    document.querySelectorAll('.rail [data-admin]').forEach(a => { a.hidden = !admin; });
+    box.replaceChildren(me.virtual
+      ? h('div', {}, h('b', {}, 'Signed in through Vercel'), h('button', {type: 'button', class: 'linkish', onclick: () => showSignIn()}, 'Sign in with your own account'))
+      : h('div', {}, h('b', {}, me.name || me.email), h('span', {}, `${me.email} · ${admin ? 'Admin' : 'Member'}`),
+          h('button', {type: 'button', class: 'linkish', onclick: async () => { await api('/api/auth/signout', {}); location.href = '/app'; }}, 'Sign out')));
+  }
+  async function showUsers() {
+    const wrap = h('div', {class: 'sheetwrap apiwrap'});
+    $('report').replaceChildren(wrap);
+    wrap.replaceChildren(h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Loading people…'));
+    let data;
+    try { data = await api('/api/users', {}); } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
+    if (location.hash !== '#users') return;
+    const clients = state.clients || [];
+    const cname = key => key === '_none' ? 'Jobs not on a client site' : clients.find(c => c.key === key)?.client || key;
+    const run = async (path, body, done) => { try { data = await api(path, body); if (done) toast(done); draw(); } catch (e) { toast(e.message, true); } };
+    const clientPicker = (picked, name) => h('div', {class: 'clientpick'}, ...[...clients.map(c => c.key), '_none'].map(k =>
+      h('label', {}, h('input', {type: 'checkbox', name, value: k, checked: picked.includes(k)}), cname(k))));
+    const draw = () => {
+      const me = data.me || {}, admins = data.users.filter(u => u.role === 'admin').length;
+      const form = h('form', {class: 'userform', onsubmit: e => { e.preventDefault(); const f = e.target;
+        run('/api/users/save', {email: f.email.value, name: f.uname.value, role: f.role.value, clients: [...f.querySelectorAll('input[name=nc]:checked')].map(x => x.value)}, 'Added. Now send them a sign-in link.'); }},
+        h('div', {class: 'row'},
+          h('label', {}, 'Email', h('input', {name: 'email', type: 'email', required: true, placeholder: 'name@ppgquality.com'})),
+          h('label', {}, 'Name', h('input', {name: 'uname', type: 'text', placeholder: 'Optional'})),
+          h('label', {}, 'Role', h('select', {name: 'role'}, h('option', {value: 'member'}, 'Member: only their clients'), h('option', {value: 'admin'}, 'Admin: everything, and manages people')))),
+        h('p', {class: 'hint'}, 'Clients this member can see:'), clientPicker([], 'nc'),
+        h('div', {class: 'btns'}, h('button', {type: 'submit', class: 'btn primary'}, 'Add person')));
+      const row = u => {
+        const picker = clientPicker(u.clients, 'c-' + u.id);
+        const role = h('select', {'aria-label': 'Role'}, h('option', {value: 'member', selected: u.role === 'member'}, 'Member'), h('option', {value: 'admin', selected: u.role === 'admin'}, 'Admin'));
+        const save = () => run('/api/users/save', {id: u.id, email: u.email, name: u.name, role: role.value, clients: [...picker.querySelectorAll('input:checked')].map(x => x.value)}, 'Saved.');
+        picker.addEventListener('change', save); role.addEventListener('change', save);
+        return h('li', {class: 'person'},
+          h('div', {class: 'who'}, h('b', {}, u.name || u.email), h('span', {}, u.email + (u.id === me.id ? ' · you' : '')),
+            h('small', {}, u.last_login ? `Last signed in ${ago(u.last_login)}` : 'Has not signed in yet')),
+          role,
+          u.role === 'admin' ? h('p', {class: 'hint'}, 'Admins see every client.') : picker,
+          h('div', {class: 'btns'},
+            h('button', {type: 'button', class: 'btn small', onclick: async () => { try { const out = await api('/api/users/link', {id: u.id});
+              await navigator.clipboard?.writeText(out.link).catch(() => {}); toast(`Sign-in link for ${out.email} copied. It works once, for ${out.hours} hours.`); prompt.value = out.link; prompt.hidden = false; prompt.select(); } catch (e) { toast(e.message, true); } }}, 'Copy sign-in link'),
+            data.email ? h('button', {type: 'button', class: 'btn small', onclick: () => run('/api/users/email', {id: u.id}, `Sign-in link emailed to ${u.email}.`)}, 'Email sign-in link') : null,
+            u.id !== me.id ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => run('/api/users/remove', {id: u.id}, `${u.email} removed.`)}, 'Remove') : null));
+      };
+      const prompt = h('input', {type: 'text', readonly: true, hidden: true, class: 'linkbox', 'aria-label': 'Sign-in link'});
+      const canRequire = !me.virtual && me.role === 'admin';
+      wrap.replaceChildren(
+        h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Users & access'), h('div', {class: 'meta'}, 'Who can use the verifier and which clients each person sees. Members only ever get their own clients’ reports, searches, downloads and numbers.'))),
+        h('section', {class: 'block accessstate ' + (data.required ? 'on' : 'off')}, h('header', {}, h('h2', {}, data.required ? 'Sign-in is required' : 'Sign-in is not required yet'),
+          h('p', {}, data.required ? 'Everyone signs in and sees only their clients. You can now turn off Vercel’s protection so coworkers can reach the app.'
+            : 'Right now Vercel’s sign-in is the only gate, and anyone who gets through sees everything. Add people, sign in yourself, then turn this on.'),
+          h('div', {class: 'right'}, data.required
+            ? h('button', {type: 'button', class: 'btn', onclick: () => run('/api/access/required', {on: false}, 'Sign-in is no longer required.')}, 'Turn off')
+            : h('button', {type: 'button', class: 'btn primary', disabled: !canRequire, title: canRequire ? '' : 'Sign in with your own account first', onclick: () => run('/api/access/required', {on: true}, 'Sign-in is now required.')}, 'Require sign-in'))),
+          !canRequire && !data.required ? h('p', {class: 'hint'}, me.virtual ? 'First add yourself as an admin below, copy your own sign-in link, open it, then come back and turn this on.' : '') : null,
+          data.required ? h('ol', {class: 'steps'}, h('li', {}, 'In Vercel, open ppg-ci-verifier → Settings → Deployment Protection.'), h('li', {}, 'Set Vercel Authentication to Disabled and save.'), h('li', {}, 'Share the app link with the people you added.')) : null),
+        h('section', {class: 'block'}, h('header', {}, h('h2', {}, `People (${data.users.length})`), h('p', {}, `${admins} admin${admins === 1 ? '' : 's'}. Changes to roles and clients save as you click.`)),
+          prompt,
+          data.users.length ? h('ul', {class: 'people'}, data.users.map(row)) : h('p', {class: 'note'}, 'Nobody yet. Add yourself first, as an admin.')),
+        h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Add a person')), form),
+        h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'How people sign in')),
+          h('ul', {class: 'how'},
+            h('li', {}, h('b', {}, 'Sign in with Microsoft: '), data.microsoft ? 'ready. People use their PPG Microsoft account.' : 'needs the Microsoft app settings.',
+              ' In Microsoft Entra, open the PPG app registration → Authentication → add a Web redirect address ', h('code', {}, data.callback), ', then API permissions → add Microsoft Graph delegated openid, email and profile → Grant admin consent.'),
+            h('li', {}, h('b', {}, 'Email sign-in link: '), data.email ? 'ready. Links come from the data@ppgquality.com mailbox.' : 'waits on the Mail.Send permission (the same one Approve and send needs). Until then, use Copy sign-in link and send it yourself.'))));
+    };
+    draw();
+  }
+
   // ---------------------------------------------------------------- routing
   function select(hash) { if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
   window.addEventListener('hashchange', route);
   async function route() {
     document.body.classList.remove('reportmode');
-    document.body.dataset.page = (location.hash.match(/^#(today|overview|periods|checks|api)$/) || [])[1] || 'reports';
+    document.body.dataset.page = (location.hash.match(/^#(today|overview|periods|checks|api|users)$/) || [])[1] || 'reports';
     const cm = location.hash.match(/^#c=(.+)$/);
     if (cm) { state.client = decodeURIComponent(cm[1]); store.set('rd-client', state.client); drawClientTabs(); }
     else if (location.hash === '' || location.hash === '#') { if (state.client) { state.client = ''; store.set('rd-client', ''); drawClientTabs(); } }
-    const navOn = ['#api', '#checks', '#periods', '#today', '#overview'].includes(location.hash) ? location.hash : state.client ? '#c=' + encodeURIComponent(state.client) : '#';
+    const navOn = ['#api', '#checks', '#periods', '#today', '#overview', '#users'].includes(location.hash) ? location.hash : state.client ? '#c=' + encodeURIComponent(state.client) : '#';
     document.querySelectorAll('.rail .nav[href]').forEach(a => a.classList.toggle('active', a.getAttribute('href') === navOn));
     if (location.hash === '#overview') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showOverview(); return; }
     if (location.hash === '#today') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showToday(); return; }
     if (location.hash === '#periods') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showPeriods(); return; }
     if (location.hash === '#checks') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showChecks(); return; }
+    if (location.hash === '#users') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showUsers(); return; }
     if (location.hash === '#api') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showApi(); return; }
     const m = location.hash.match(/^#r=([0-9a-f]{64})$/);
     document.body.classList.toggle('viewing', !!m);
@@ -933,17 +1029,11 @@
     try { o = state.ovRecs && state.ovRecs.days === state.ovDays ? state.ovRecs : await api('/api/overview', {days: state.ovDays}); state.ovRecs = null; } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
     if (location.hash !== '#overview') return;
     const t = o.totals, top = Math.max(1, ...o.categories.map(c => c.count));
-    const ctx = what => ({id: `o:${o.days}:${o.end}:${what}`, noun: what === 'slides' ? 'slide show' : 'dashboard', title: `Quality overview, ${o.label}`,
-      ideas: what === 'slides' ? ['Add a slide on our three biggest catches', 'Make it 4 slides for a quick update', 'Add a slide comparing jobs side by side', 'Use a white theme'] :
-        ['Lead with errors caught per job', 'One clean page for printing', 'Add a chart of reports sent on time by job', 'White background'],
-      create: rebuild => api('/api/overview/artifact', {days: o.days, what, rebuild}), chat: message => api('/api/overview/artifact/chat', {days: o.days, what, message}),
-      undo: () => api('/api/overview/artifact/undo', {days: o.days, what})});
     const pct = v => v == null ? '—' : v.toFixed(v < 10 ? 1 : 0) + '%';
     wrap.replaceChildren(...[
       h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Quality overview'), h('div', {class: 'meta'}, `Every job: ${o.label.replace(/^Last/, 'the last')}. What the verifier caught before any client saw it, and how reliably reports went out.`))),
       h('div', {class: 'periodbar'}, h('div', {class: 'pseg'}, [7, 30, 90].map(d => h('button', {type: 'button', class: state.ovDays === d ? 'on' : '', onclick: () => { state.ovDays = d; showOverview(); }}, `${d} days`))),
-        h('button', {type: 'button', class: 'btn primary', onclick: () => openArtifact(ctx('slides'))}, 'Create executive slide show'),
-        h('button', {type: 'button', class: 'btn', onclick: () => openArtifact(ctx('dashboard'))}, 'Create overview dashboard')),
+      ),
       h('div', {class: 'ovhero'}, h('b', {}, fmt(t.caught)), h('span', {}, `errors caught and fixed before the client saw them, across ${fmt(t.reports)} daily reports for ${fmt(t.jobs)} job${t.jobs === 1 ? '' : 's'}. ${fmt(t.must_fix)} were must-fix.`)),
       h('div', {class: 'numbers five'},
         h('div', {}, h('b', {}, fmt(t.corrected)), h('span', {}, 'Corrected before sending')),
@@ -1850,6 +1940,13 @@
 
   // ---------------------------------------------------------------- start
   document.addEventListener('click', e => { for (const d of document.querySelectorAll('.more-menu[open]')) if (!d.contains(e.target)) d.removeAttribute('open'); });
-  loadClients();
-  loadList().then(route).catch(e => { $('queue-list').replaceChildren(h('p', {class: 'queue-empty'}, e.message)); });
+  boot();
+  async function boot() {
+    try { state.me = await api('/api/me'); } catch (e) { return; }
+    const hm = location.hash.match(/^#signin=(.*)$/);
+    if (!state.me.user || hm) { showSignIn(hm ? decodeURIComponent(hm[1]) : ''); if (!state.me.user) return; history.replaceState(null, '', location.pathname); }
+    drawMe();
+    loadClients();
+    loadList().then(route).catch(e => toast(e.message, true));
+  }
 })();

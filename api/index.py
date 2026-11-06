@@ -139,6 +139,221 @@ class handler(BaseHTTPRequestHandler):
             raise StorageUnavailable('Start this LOCAL SQLITE COPY with hosting/sqlite_server.py. No storage is configured.')
         return store
 
+    # ---------------- who is asking, and which clients they can see
+    def secure(self):
+        return os.environ.get('VERCEL') == '1'
+
+    def origin(self):
+        return ('https://' if self.secure() else 'http://') + self.headers.get('Host', '')
+
+    def current_user(self):
+        from hosting import access
+        cookie_header = self.headers.get('Cookie') or ''
+        cached = getattr(self, '_user_cache', None)
+        if cached and cached[0] == cookie_header:
+            return cached[1]
+        token = access.read_cookie(cookie_header, access.COOKIE)
+        from hosting import pg_tables
+        with self.store().session() as directory:
+            if pg_tables.current.get() is None and not (directory / 'spreadsheet_inbox.sqlite3').exists():
+                user, needed = None, False      # brand-new workspace: nothing to look up, and nothing gets written
+            else:
+                inbox = SpreadsheetInbox(directory)
+                user = access.session_user(inbox, token) if token else None
+                needed = access.required(inbox)
+        if not user and not needed:
+            user = dict(access.OWNER)       # sign-in not required yet: Vercel's sign-in is the gate
+        self._user_cache = (cookie_header, user)
+        return user
+
+    def is_admin(self):
+        u = self.current_user()
+        return bool(u and u.get('role') == 'admin')
+
+    def clients_map(self):
+        if getattr(self, '_clients', None) is None:
+            from hosting import sharepoint
+            self._clients = []
+            if sharepoint.configured():
+                try:
+                    self._clients = sharepoint.clients()
+                except Exception:
+                    debug_log()
+        return self._clients
+
+    def can_job(self, job):
+        from hosting import access
+        return self.is_admin() or access.can_see_job(self.current_user(), job, self.clients_map())
+
+    def can_hash(self, file_hash):
+        if self.is_admin():
+            return True
+        if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+            return False
+        from hosting.source_compare import identify
+        try:
+            with self.store().session() as directory:
+                item = SpreadsheetInbox(directory).get(file_hash)
+        except ValueError:
+            return False
+        return self.can_job(identify(item.get('filename'), item)[0])
+
+    def redirect(self, location, cookies=()):
+        self.send_response(302)
+        self.send_header('Location', location)
+        self.send_header('Cache-Control', 'no-store')
+        for c in cookies:
+            self.send_header('Set-Cookie', c)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def auth_get(self, route):
+        """Microsoft sign-in, its callback, and one-time sign-in links."""
+        import secrets as _secrets
+        from urllib.parse import quote
+        from hosting import access
+        q = parse_qs(urlsplit(self.path).query)
+        callback = self.origin() + '/auth/microsoft/callback'
+        session_cookie = lambda token: access.cookie(access.COOKIE, token, access.SESSION_DAYS * 86400, self.secure())
+        oops = lambda msg: self.redirect('/app#signin=' + quote(msg), [access.cookie(access.STATE_COOKIE, '', 0, self.secure())])
+        try:
+            if route == '/auth/microsoft':
+                if not access.microsoft_ready():
+                    return oops('Microsoft sign-in is not set up yet.')
+                state = _secrets.token_urlsafe(24)
+                return self.redirect(access.microsoft_url(callback, state), [access.cookie(access.STATE_COOKIE, state, 600, self.secure())])
+            if route == '/auth/microsoft/callback':
+                if q.get('error'):
+                    return oops((q.get('error_description') or ['Microsoft sign-in was cancelled.'])[0][:200])
+                state = access.read_cookie(self.headers.get('Cookie'), access.STATE_COOKIE)
+                if not state or q.get('state', [''])[0] != state:
+                    return oops('The sign-in took too long or was opened in another browser. Try again.')
+                email, name = access.microsoft_email(q.get('code', [''])[0], callback)
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    user = access.get_user(inbox, email=email)
+                    if not user:
+                        return oops(f'{email} has not been given access yet. Ask an admin to add you.')
+                    if name and not user['name']:
+                        access.save_user(inbox, dict(user, name=name))
+                    token = access.start_session(inbox, user)
+                return self.redirect('/app', [session_cookie(token), access.cookie(access.STATE_COOKIE, '', 0, self.secure())])
+            if route == '/auth/link':
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    user = access.use_link(inbox, q.get('t', [''])[0])
+                    token = access.start_session(inbox, user)
+                return self.redirect('/app', [session_cookie(token)])
+        except access.AccessError as exc:
+            return oops(str(exc))
+        return self.fail(404, 'Not found.')
+
+    def gate(self, method, route, payload=None):
+        """None when the request may go ahead; otherwise the reply that refuses it."""
+        if route in ('/api/health', '/api/me') or route.startswith('/api/auth/'):
+            return None
+        user = self.current_user()
+        if not user:
+            return self.send(401, encode_json({'error': 'Sign in to continue.', 'signin': True}))
+        if user.get('role') == 'admin':
+            return None
+        admin_only = (route.startswith(('/api/keys', '/api/users', '/api/access', '/api/workflow', '/api/spreadsheets/demo'))
+                      or route in ('/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/state', '/api/reports', '/api/reports/import')
+                      or route.startswith('/api/overview/artifact'))
+        if admin_only:
+            return self.fail(403, 'Only an admin can do that.')
+        nope = lambda: self.fail(404, 'Not found, or not one of your clients.')
+        if method == 'GET':
+            q = parse_qs(urlsplit(self.path).query)
+            if q.get('id') and not self.can_hash(q['id'][0]):
+                return nope()
+            if route == '/api/artifacts/view':
+                from hosting import periods, overview as ov
+                key = q.get('key', [''])[0]
+                parsed = periods.parse_key(key)
+                if ov.parse_key(key) or not parsed or not self.can_job(parsed[0]):
+                    return nope()
+            return None
+        if isinstance(payload, dict):
+            if payload.get('file_hash') and not self.can_hash(payload['file_hash']):
+                return nope()
+            for field in ('job', 'add'):
+                if payload.get(field) and not self.can_job(str(payload[field])):
+                    return self.fail(403, "You don't have access to that client.")
+            if route.startswith('/api/periods/artifact') and payload.get('key'):
+                from hosting import periods
+                parsed = periods.parse_key(payload['key'])
+                if not parsed or not self.can_job(parsed[0]):
+                    return nope()
+        return None
+
+    def account_post(self, route, payload):
+        """Sign-in, sign-out, and (admins) managing people and the sign-in requirement."""
+        from hosting import access, mailer
+        payload = payload if isinstance(payload, dict) else {}
+        if route == '/api/auth/signout':
+            token = access.read_cookie(self.headers.get('Cookie'), access.COOKIE)
+            with self.store().session() as directory:
+                access.end_session(SpreadsheetInbox(directory), token)
+            return self.send(200, encode_json({'signed_out': True}), headers={'Set-Cookie': access.cookie(access.COOKIE, '', 0, self.secure())})
+        if route == '/api/auth/email':
+            if not mailer.configured():
+                raise Conflict("Email sign-in isn't set up yet. Ask an admin for a sign-in link, or use Microsoft.")
+            try:
+                email = access._clean_email(payload.get('email'))
+            except access.AccessError as exc:
+                raise Conflict(str(exc))
+            with self.store().session() as directory:
+                inbox = SpreadsheetInbox(directory)
+                user = access.get_user(inbox, email=email)
+                token = access.sign_in_link(inbox, user, access.LINK_MINUTES) if user else None
+            if token:
+                try:
+                    mailer.send_plain([email], 'Your PPG Verifier sign-in link',
+                                      f'Sign in to the PPG Verifier:\n\n{self.origin()}/auth/link?t={token}\n\nThis link works once and expires in {access.LINK_MINUTES} minutes. '
+                                      'If you did not ask for it, you can ignore this email.')
+                except mailer.MailError:
+                    debug_log()
+            return self.send(200, encode_json({'sent': True, 'message': 'If that email has access, a sign-in link is on its way.'}))
+        # admins only from here (the gate already refused everyone else)
+        valid = {c['key'] for c in self.clients_map()}
+        try:
+            with self.store().session() as directory:
+                inbox = SpreadsheetInbox(directory)
+                if route == '/api/access/required':
+                    access.set_required(inbox, payload.get('on') is True, self.current_user())
+                elif route == '/api/users/save':
+                    saved = access.save_user(inbox, payload, valid or None)
+                    me = self.current_user()
+                    if me and not me.get('virtual') and saved['id'] == me['id'] and saved['role'] != 'admin':
+                        access.save_user(inbox, dict(saved, role='admin'))
+                        raise access.AccessError("You can't remove your own admin rights.")
+                elif route == '/api/users/remove':
+                    access.remove_user(inbox, str(payload.get('id') or ''), self.current_user())
+                elif route in ('/api/users/link', '/api/users/email'):
+                    user = access.get_user(inbox, str(payload.get('id') or ''))
+                    if not user:
+                        raise access.AccessError('That person was removed. Reload the page.')
+                    hours = access.INVITE_HOURS if route.endswith('/link') else access.LINK_MINUTES / 60
+                    token = access.sign_in_link(inbox, user, int(hours * 60))
+                    link = f'{self.origin()}/auth/link?t={token}'
+                    if route.endswith('/link'):
+                        return self.send(200, encode_json({'link': link, 'hours': access.INVITE_HOURS, 'email': user['email']}))
+                    if not mailer.configured():
+                        raise access.AccessError('Email is not set up yet; copy the sign-in link and send it yourself.')
+                    mailer.send_plain([user['email']], 'You have access to the PPG Verifier',
+                                      f'You have been given access to the PPG Verifier.\n\nSign in here:\n{link}\n\nThe link works once and expires in '
+                                      f'{access.LINK_MINUTES} minutes. After that, sign in with your PPG Microsoft account or ask for a new link at {self.origin()}/app')
+                    return self.send(200, encode_json({'sent': True, 'email': user['email']}))
+                users = access.list_users(inbox)
+                needed = access.required(inbox)
+        except access.AccessError as exc:
+            raise Conflict(str(exc))
+        except mailer.MailError as exc:
+            raise Conflict(str(exc))
+        return self.send(200, encode_json({'users': users, 'required': needed, 'microsoft': access.microsoft_ready(), 'email': mailer.configured(),
+                                           'callback': self.origin() + '/auth/microsoft/callback', 'me': self.current_user()}))
+
     def demo_enabled(self):
         return (os.environ.get('CI_DEVELOPMENT_DEMO') == '1' and local_environment()
                 and os.environ.get('CI_LOCAL_DEV') == '1' and isinstance(self.store(), SQLiteWorkspace)
@@ -288,6 +503,16 @@ class handler(BaseHTTPRequestHandler):
         if route is None:
             return self.fail(403, f'This address is not one of the verifier’s approved addresses. Open https://{APP_HOST} instead.' if hosted_preview() else 'LOCAL SQLITE COPY is available only on this computer’s loopback address.')
         try:
+            if route.startswith('/auth/'):
+                return self.auth_get(route)
+            if route.startswith('/api/'):
+                refused = self.gate('GET', route)
+                if refused is not None:
+                    return refused
+            if route == '/api/me':
+                from hosting import access, mailer
+                user = self.current_user()
+                return self.send(200, encode_json({'user': user, 'microsoft': access.microsoft_ready(), 'email': mailer.configured()}))
             if route in ('/api/spreadsheets/demo/review','/api/spreadsheets/demo/download'):
                 if not self.demo_enabled():return self.fail(403,'Synthetic workbook simulation is disabled.')
                 file_hash=parse_qs(urlsplit(self.path).query).get('id',[''])[0]
@@ -380,6 +605,9 @@ class handler(BaseHTTPRequestHandler):
                     data['reviewer_identity_available']=False
                 elif route == '/api/spreadsheets':
                     data = SpreadsheetInbox(directory).list()
+                    if not self.is_admin():
+                        data['spreadsheets'] = [r for r in data['spreadsheets'] if self.can_job((r.get('review') or {}).get('job'))]
+                        data['count'] = len(data['spreadsheets'])
                 elif route == '/api/spreadsheet':
                     file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
                     if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
@@ -420,7 +648,7 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/overview', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload', '/api/periods/check-file') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
@@ -431,6 +659,15 @@ class handler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length)
             if len(raw) != length:
                 raise Conflict('Incomplete request body.')
+            try:
+                gate_payload = json.loads(raw)
+            except ValueError:
+                gate_payload = None
+            refused = self.gate('POST', route, gate_payload)
+            if refused is not None:
+                return refused
+            if route.startswith(('/api/auth/', '/api/users', '/api/access/')):
+                return self.account_post(route, gate_payload)
             content_type, headers = 'application/json; charset=utf-8', {}
             if route in ('/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes'):
                 payload = json.loads(raw)
@@ -670,7 +907,7 @@ class handler(BaseHTTPRequestHandler):
                         rv = r.get('review') or {}
                         if rv.get('job') and rv.get('day') and rv['day'] >= (d0 - timedelta(days=21)).isoformat():
                             recent.add(rv['job'].upper())
-                    jobs = sorted(set(watch) | recent)
+                    jobs = [j for j in sorted(set(watch) | recent) if self.can_job(j)]
                     rows = []
                     for job in jobs:
                         reps = inbox.reports_for(job, d0 - timedelta(days=1), d0)
@@ -682,7 +919,11 @@ class handler(BaseHTTPRequestHandler):
                 if not sharepoint.configured():
                     return self.send(200, encode_json(dict(clients=[], sharepoint=False)))
                 try:
-                    return self.send(200, encode_json(dict(clients=sharepoint.clients(refresh=payload.get('refresh') is True), sharepoint=True)))
+                    found = sharepoint.clients(refresh=payload.get('refresh') is True)
+                    if not self.is_admin():
+                        mine = set((self.current_user() or {}).get('clients') or [])
+                        found = [c for c in found if c['key'] in mine]
+                    return self.send(200, encode_json(dict(clients=found, sharepoint=True)))
                 except (sharepoint.SharePointError, OSError) as exc:
                     return self.send(200, encode_json(dict(clients=[], sharepoint=True, error=str(exc))))
             if route in ('/api/build', '/api/nexus', '/api/settings/report-header'):
@@ -751,7 +992,11 @@ class handler(BaseHTTPRequestHandler):
                 days = payload.get('days') if payload.get('days') in (7, 30, 90) else 30
                 end = datetime.now(ZoneInfo('America/Chicago')).date()
                 with self.store().session() as directory:
-                    o = ov.build(SpreadsheetInbox(directory).all_results(), days, end)
+                    results = SpreadsheetInbox(directory).all_results()
+                if not self.is_admin():
+                    from hosting.source_compare import identify
+                    results = [r for r in results if self.can_job(identify(r.get('filename'), r)[0])]
+                o = ov.build(results, days, end)
                 if route == '/api/overview':
                     from hosting import recommend
                     facts = recommend.overview_facts(o)
@@ -793,7 +1038,10 @@ class handler(BaseHTTPRequestHandler):
             if route == '/api/vins/search':
                 payload = json.loads(raw)
                 with self.store().session() as directory:
-                    return self.send(200, encode_json(SpreadsheetInbox(directory).find_vin((payload or {}).get('q'))))
+                    found = SpreadsheetInbox(directory).find_vin((payload or {}).get('q'))
+                if not self.is_admin():
+                    found['results'] = [x for x in found['results'] if self.can_job(x.get('job'))]
+                return self.send(200, encode_json(found))
             if route.startswith('/api/periods'):
                 from hosting import periods
                 from urllib.parse import quote
@@ -807,7 +1055,7 @@ class handler(BaseHTTPRequestHandler):
                     raise Conflict('Pick a valid date.')
                 with self.store().session() as directory:
                     inbox = SpreadsheetInbox(directory)
-                    jobs = inbox.jobs()
+                    jobs = [j for j in inbox.jobs() if self.can_job(j)]
                     job = ' '.join(str(payload.get('job') or '').split()).upper() or (jobs[0] if jobs else '')
                     if not job:
                         raise Conflict('Upload a daily report first, so there is a job to look at.')

@@ -30,7 +30,8 @@ class PostgresWorkspace:
                 restore(directory, old_payload)
                 yield Path(directory)
                 new_payload = pack(directory)
-                if old_payload is None or bytes(old_payload) != new_payload:
+                changed = any(p.is_file() for p in Path(directory).rglob('*')) if old_payload is None else bytes(old_payload) != new_payload
+                if changed:   # as in production: an empty new workspace is not a change
                     db.execute('UPDATE ci_verifier_state SET payload=%s, revision=%s, updated_at=now() WHERE namespace=%s',
                                (new_payload, revision + 1, NAMESPACE))
         # Context-manager exit commits, before the caller can send success.

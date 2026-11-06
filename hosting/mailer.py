@@ -207,3 +207,16 @@ def deliver(to, cc, subject, text, attachment_name, attachment_bytes, reply_to=N
     if send_now:
         _call('POST', f'{_box()}/messages/{did}/send', opener=opener, want=False)
     return dict(sender=sender(), draft_id=draft['id'], web_link=draft.get('webLink'), sent=bool(send_now))
+
+
+def send_plain(to, subject, text, opener=None):
+    """A short plain-text email from the sender mailbox, no attachment (sign-in links)."""
+    to = clean_addresses(to, 'To')
+    if not to:
+        raise MailError('No email address.')
+    if not configured():
+        raise MailError('Sending is not set up yet (the Microsoft app registration or the sender mailbox is missing).')
+    message = {'subject': ' '.join(str(subject).split())[:250], 'body': {'contentType': 'Text', 'content': str(text)[:5000]},
+               'toRecipients': [{'emailAddress': {'address': a}} for a in to]}
+    _call('POST', f'{_box()}/sendMail', {'message': message, 'saveToSentItems': True}, opener=opener)
+    return dict(sender=sender(), sent=True)

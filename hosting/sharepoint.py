@@ -79,20 +79,70 @@ def _get(path_or_url, opener=None, raw=False):
         raise SharePointError('Could not reach SharePoint.') from None
 
 
-def _sites(opener=None):
+SKIP_WORDS = ('test', 'demo', 'sandbox', 'template', 'training', 'sample')
+SITES_TTL = 1800
+_site_cache = {'until': 0, 'value': None}
+
+
+def _is_test(*names):
+    """Test, demo and sandbox sites are never treated as clients."""
+    words = re.split(r'[^a-z0-9]+', ' '.join(_words(n or '') for n in names).lower())
+    return any(w.startswith(SKIP_WORDS) for w in words if w)
+
+
+def _configured_sites(opener=None):
     names = [s.strip() for s in os.environ.get('SHAREPOINT_SITES', '').split(',') if s.strip()]
     host = os.environ.get('SHAREPOINT_HOST', 'ppgquality.sharepoint.com')
-    if names:
-        for name in names:
-            if name not in _site_ids:
-                site = _get(f'/sites/{host}:/sites/{urllib.parse.quote(name)}', opener)
-                _site_ids[name] = site['id'] if site else None
-            if _site_ids[name]:
-                yield name, _site_ids[name]
-        return
-    found = _get('/sites?search=*&$select=id,name,webUrl&$top=200', opener) or {}
-    for site in found.get('value', []):
-        yield site.get('name') or site['id'], site['id']
+    for name in names:
+        if name not in _site_ids:
+            site = _get(f'/sites/{host}:/sites/{urllib.parse.quote(name)}', opener)
+            _site_ids[name] = site['id'] if site else None
+        if _site_ids[name]:
+            yield name, _site_ids[name]
+
+
+def _site_lists(site_id, opener=None):
+    return (_get(f'/sites/{site_id}/lists?$select=id,displayName,webUrl&$top=500', opener) or {}).get('value', [])
+
+
+def client_sites(opener=None, refresh=False):
+    """Every client site: the configured ones plus any site on PPG's SharePoint with a "Data #" job list,
+    leaving out tests and demos. [(name, site_id, lists)], cached for 30 minutes; lists are fetched in parallel."""
+    from concurrent.futures import ThreadPoolExecutor
+    key = (opener is None, os.environ.get('SHAREPOINT_SITES', ''), os.environ.get('SHAREPOINT_HOST', ''))
+    if opener is None and not refresh and _site_cache.get('key') == key and _site_cache['value'] is not None and _site_cache['until'] > time.time():
+        return _site_cache['value']
+    sites = {sid: name for name, sid in _configured_sites(opener)}
+    try:   # needs the app's Sites.Read.All; without it only the configured sites are used
+        url = '/sites?search=*&$select=id,name,displayName,webUrl&$top=200'
+        while url:
+            page = _get(url, opener) or {}
+            for site in page.get('value', []):
+                name = site.get('name') or (site.get('webUrl') or '').rstrip('/').rsplit('/', 1)[-1]
+                if site.get('id') and name and not _is_test(name, site.get('displayName')):
+                    sites.setdefault(site['id'], name)
+            url = page.get('@odata.nextLink')
+    except SharePointError:
+        pass
+    configured = {sid for _, sid in _configured_sites(opener)}
+    with ThreadPoolExecutor(8) as pool:
+        lists = dict(zip(sites, pool.map(lambda sid: _safe_lists(sid, opener), sites)))
+    value = [(name, sid, lists[sid]) for sid, name in sites.items()
+             if not _is_test(name) and (sid in configured or any((l.get('displayName') or '').lower().startswith('data #') for l in lists[sid]))]
+    _site_cache.update(key=key, until=time.time() + SITES_TTL, value=value)
+    return value
+
+
+def _safe_lists(site_id, opener=None):
+    try:
+        return _site_lists(site_id, opener)
+    except SharePointError:
+        return []
+
+
+def _sites(opener=None):
+    for name, sid, _ in client_sites(opener):
+        yield name, sid
 
 
 def fetch_export(job, day, opener=None, schedule=None):
@@ -199,9 +249,8 @@ def _find_list(job, opener=None):
     often put it last (HANDS-HMMA-2219), so match on the job's parts in any order, then on the job number alone."""
     best = None
     _seen_lists.clear()
-    for name, site_id in _sites(opener):
-        lists = _get(f'/sites/{site_id}/lists?$select=id,displayName,webUrl&$top=500', opener) or {}
-        for lst in lists.get('value', []):
+    for name, site_id, site_lists in client_sites(opener):
+        for lst in site_lists:
             if (lst.get('displayName') or '').lower().startswith('data #'):
                 _seen_lists.append(lst['displayName'])
             score = _list_match(job, lst.get('displayName'), lst.get('webUrl'))
@@ -436,13 +485,11 @@ def clients(opener=None, refresh=False):
     if not refresh and _clients_cache['value'] is not None and _clients_cache['until'] > time.time():
         return _clients_cache['value']
     out = {}
-    for name, site_id in _sites(opener):
+    for name, site_id, site_lists in client_sites(opener, refresh=refresh):
         company, _, location = name.partition('_')
         c = out.setdefault(company, dict(client=NICE_NAMES.get(company) or _words(company), key=company, sites=[], jobs=[]))
-        site = _get(f'/sites/{site_id}?$select=webUrl,displayName', opener) or {}
-        c['sites'].append(dict(site=name, location=_words(location) if location else '', url=site.get('webUrl')))
-        lists = _get(f'/sites/{site_id}/lists?$select=id,displayName,webUrl&$top=500', opener) or {}
-        for lst in lists.get('value', []):
+        c['sites'].append(dict(site=name, location=_words(location) if location else ''))
+        for lst in site_lists:
             title = (lst.get('displayName') or '').strip()
             if not title.lower().startswith('data #'):
                 continue

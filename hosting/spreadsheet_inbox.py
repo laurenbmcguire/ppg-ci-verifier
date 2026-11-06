@@ -40,6 +40,9 @@ class SpreadsheetInbox:
             db.execute('CREATE INDEX IF NOT EXISTS vin_index_ident ON vin_index (ident)')
             db.execute('CREATE TABLE IF NOT EXISTS vin_indexed (file_hash TEXT PRIMARY KEY)')
             db.execute('CREATE TABLE IF NOT EXISTS dashboards (file_hash TEXT PRIMARY KEY, versions_json TEXT NOT NULL, messages_json TEXT NOT NULL, updated_at TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT, role TEXT NOT NULL, clients_json TEXT NOT NULL, created_at TEXT NOT NULL, last_login TEXT, disabled_at TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS login_tokens (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT)')
             db.execute('''CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
                 prefix TEXT NOT NULL, can_send INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_used TEXT, revoked_at TEXT)''')
     @contextmanager

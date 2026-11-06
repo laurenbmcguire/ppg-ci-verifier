@@ -83,7 +83,7 @@ class StorageTests(unittest.TestCase):
         self.database.fail_commit = True
         with self.assertRaises(RuntimeError):
             with self.store.session() as root: (root/'review.sqlite3').write_bytes(b'unsaved')
-        self.assertIsNone(self.database.state)
+        self.assertIsNone((self.database.state or (None,))[0])  # nothing saved (the sign-in lookup may create the empty row)
     def test_pack_is_deterministic(self):
         with tempfile.TemporaryDirectory() as root:
             (Path(root)/'review.sqlite3').write_bytes(b'x')
@@ -148,7 +148,7 @@ class VercelHTTPTests(unittest.TestCase):
     def test_cross_origin_and_missing_origin_fail(self):
         for headers in ({'Origin':'https://attacker.example'}, {'Origin':''}, {'Sec-Fetch-Site':'cross-site'}, {'X-Review-Token':''}):
             self.assertEqual(self.request('/api/reports/import', self.sample, headers)[0], 403)
-        self.assertIsNone(self.database.state)
+        self.assertIsNone((self.database.state or (None,))[0])  # nothing saved (the sign-in lookup may create the empty row)
     def test_non_json_fails(self):
         self.assertEqual(self.request('/api/reports/import', self.sample, {'Content-Type':'text/plain'})[0], 415)
     def test_import_persists_across_requests(self):
@@ -195,7 +195,7 @@ class VercelHTTPTests(unittest.TestCase):
         self.database.fail_commit = True
         code, raw, _ = self.request('/api/reports/import', self.sample)
         self.assertEqual(code, 503); self.assertNotIn(b'SECRET', raw)
-        self.assertIsNone(self.database.state)
+        self.assertIsNone((self.database.state or (None,))[0])  # nothing saved (the sign-in lookup may create the empty row)
     def test_storage_missing_fails_closed(self):
         self.server.workspace_store = PostgresWorkspace()
         self.assertEqual(self.request('/api/state')[0], 503)
@@ -267,11 +267,11 @@ class VercelUploadTests(VercelHTTPTests):
     def test_upload_failure_does_not_commit(self):
         self.database.fail_commit=True
         self.assertEqual(self.upload('counts.csv',b'id,count\nA,1\n')[0],503)
-        self.assertIsNone(self.database.state)
+        self.assertIsNone((self.database.state or (None,))[0])  # nothing saved (the sign-in lookup may create the empty row)
     def test_response_limit_rejects_before_commit(self):
         with patch('api.index.MAX_RESPONSE_BYTES',100):
             self.assertEqual(self.request('/api/reports/import',self.sample)[0],409)
-        self.assertIsNone(self.database.state)
+        self.assertIsNone((self.database.state or (None,))[0])  # nothing saved (the sign-in lookup may create the empty row)
     def test_large_finding_response_regression(self):
         sample=copy.deepcopy(self.sample)
         sample['report']['records']=[{'id':str(i).zfill(60),'inspected':10,'accepted':8,'rejected':2} for i in range(3000)]
@@ -279,7 +279,7 @@ class VercelUploadTests(VercelHTTPTests):
         sample['report']['totals']={'inspected':30000,'accepted':24000,'rejected':6000}
         self.assertLess(len(json.dumps(sample).encode()),1024*1024)
         self.assertEqual(self.request('/api/reports/import',sample)[0],409)
-        self.assertIsNone(self.database.state)
+        self.assertIsNone((self.database.state or (None,))[0])  # nothing saved (the sign-in lookup may create the empty row)
 
 # Inherited test methods are exercised once by VercelHTTPTests.
 for name in list(VercelHTTPTests.__dict__):
@@ -324,7 +324,7 @@ class VercelWorkflowTests(VercelHTTPTests):
         self.assertEqual(json.loads(raw)['item']['source_authenticity'],'not_authenticated')
     def test_workflow_cross_origin_blocked(self):
         self.assertEqual(self.request('/api/workflow/import',self.workflow_fixture(),{'Origin':'https://untrusted.example'})[0],403)
-        self.assertIsNone(self.database.state)
+        self.assertIsNone((self.database.state or (None,))[0])  # nothing saved (the sign-in lookup may create the empty row)
     def test_workflow_missing_values_remain_blocked(self):
         m=self.workflow_fixture()
         for side in ('report','source_snapshot'):m[side]['records'][0]['values']['rejected']=None
@@ -333,7 +333,7 @@ class VercelWorkflowTests(VercelHTTPTests):
         item=json.loads(raw)['item'];self.assertEqual(item['status'],'blocked');self.assertFalse(item['proposals']);self.assertIsNone(item['report_totals']['rejected'])
     def test_workflow_response_limit_before_commit(self):
         with patch('api.index.MAX_RESPONSE_BYTES',100):self.assertEqual(self.request('/api/workflow/import',self.workflow_fixture())[0],409)
-        self.assertIsNone(self.database.state)
+        self.assertIsNone((self.database.state or (None,))[0])  # nothing saved (the sign-in lookup may create the empty row)
     def test_workflow_bad_cursor_and_hash(self):
         self.assertEqual(self.request('/api/workflow?before=invalid')[0],409)
         self.assertEqual(self.request('/api/workflow/version?hash=invalid')[0],409)
@@ -351,7 +351,7 @@ class VercelBatchTests(VercelHTTPTests):
         from test_report_workflow import fixture
         one=fixture();two=fixture();two['report']['totals']['inspected']=5
         code,raw,_=self.request('/api/workflow/batch',{'manifests':[one,two]})
-        self.assertEqual(code,409);self.assertIsNone(self.database.state)
+        self.assertEqual(code,409);self.assertIsNone((self.database.state or (None,))[0])  # nothing saved (the sign-in lookup may create the empty row)
 
 for name in list(VercelHTTPTests.__dict__):
     if name.startswith('test_') and name not in VercelBatchTests.__dict__:setattr(VercelBatchTests,name,None)

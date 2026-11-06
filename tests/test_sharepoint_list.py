@@ -95,3 +95,40 @@ class ListNameMatchTests(unittest.TestCase):
         self.assertEqual(_list_match('HANDS-HMMA-2219', 'Something', 'https://ppgquality.sharepoint.com/sites/Hyundai_Montgomery/Lists/Data%202219HANDSHMMA'), 2)
         self.assertEqual(_list_match('HANDS-HMMA-2219', 'Documents'), 0)
         self.assertEqual(_list_match('HANDS-HMMA-2219', '2219 Site Pages'), 0)
+
+
+class Discovery(unittest.TestCase):
+    """Every client site on SharePoint shows up, but tests and demos never do."""
+    SITES = [dict(id='s1', name='Hyundai_Montgomery', displayName='Hyundai Montgomery'),
+             dict(id='s2', name='Lear_Hammond', displayName='Lear Hammond'),
+             dict(id='s3', name='TestSite', displayName='Test site'),
+             dict(id='s4', name='Demo_Client', displayName='Demo client'),
+             dict(id='s5', name='PPGQualityHR', displayName='HR'),           # no job lists: not a client
+             dict(id='s6', name='Owens_Basco', displayName='Owens (training copy)')]
+
+    def setUp(self):
+        sharepoint._token.update(value=None, expires=0); sharepoint._site_ids.clear()
+        self.env = patch.dict(os.environ, {'MS_TENANT_ID': 't', 'MS_CLIENT_ID': 'c', 'MS_CLIENT_SECRET': 's', 'SHAREPOINT_SITES': ''}); self.env.start()
+
+    def tearDown(self):
+        self.env.stop(); sharepoint._token.update(value=None, expires=0)
+
+    def fake(self, request, timeout=None):
+        url = request.full_url
+        if 'login.microsoftonline.com' in url:
+            return io.BytesIO(json.dumps({'access_token': 't', 'expires_in': 3600}).encode())
+        if '/sites?search=' in url:
+            return io.BytesIO(json.dumps({'value': self.SITES}).encode())
+        if '/lists?' in url:
+            sid = url.split('/sites/')[1].split('/')[0]
+            lists = [] if sid == 's5' else [{'id': 'L' + sid, 'displayName': f'Data #JOB-{sid}-2219'}]
+            return io.BytesIO(json.dumps({'value': lists}).encode())
+        raise urllib.error.HTTPError(url, 404, 'nf', {}, io.BytesIO(b''))
+
+    def test_finds_clients_and_skips_tests_and_demos(self):
+        self.assertTrue(sharepoint._is_test('TestSite')); self.assertTrue(sharepoint._is_test('Demo_Client'))
+        self.assertFalse(sharepoint._is_test('Contest_Motors')); self.assertFalse(sharepoint._is_test('Hyundai_Montgomery'))
+        names = [n for n, _, _ in sharepoint.client_sites(self.fake, refresh=True)]
+        self.assertEqual(sorted(names), ['Hyundai_Montgomery', 'Lear_Hammond'])
+        keys = sorted(c['key'] for c in sharepoint.clients(self.fake, refresh=True))
+        self.assertEqual(keys, ['Hyundai', 'Lear'])
