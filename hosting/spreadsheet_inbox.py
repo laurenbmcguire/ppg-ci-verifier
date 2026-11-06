@@ -545,7 +545,11 @@ class SpreadsheetInbox:
         from hosting.fixes import proposals
         item = self.get(file_hash)
         _, raw = self.original_bytes(file_hash)
-        props = proposals(item, item['filename'], raw)
+        from hosting import suggest, sharepoint_jobs
+        from hosting.source_compare import identify
+        job, day = identify(item.get('filename'), item)
+        ctx = suggest.context(job, day, self.setting(sharepoint_jobs.KEY))
+        props = proposals(item, item['filename'], raw, context=ctx)
         taken = {(p['sheet'], p['cell']) for p in props}
         ai = item.get('ai_fixes') or {}
         for f in ai.get('fixes') or []:

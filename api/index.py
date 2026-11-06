@@ -1030,7 +1030,9 @@ class handler(BaseHTTPRequestHandler):
                         inbox = SpreadsheetInbox(directory)
                         if isinstance(payload.get('header'), dict):
                             inbox.set_setting(f'report_header|{job}', {k: ' '.join(str(payload['header'].get(k) or '').split())[:120] for k in ('customer', 'worksite', 'program', 'prepared_by')})
-                        return self.send(200, encode_json(dict(job=job, header=inbox.setting(f'report_header|{job}', {}) or {})))
+                        from hosting import suggest, sharepoint_jobs
+                        suggested = suggest.header(suggest.context(job, None, inbox.setting(sharepoint_jobs.KEY)))
+                        return self.send(200, encode_json(dict(job=job, header=inbox.setting(f'report_header|{job}', {}) or {}, suggested=suggested)))
                 try:
                     if route == '/api/build':
                         return self.send(200, encode_json(ops.op_build(self, payload.get('job'), payload.get('day'), payload.get('force') is True, payload.get('header'))))

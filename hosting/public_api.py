@@ -268,6 +268,9 @@ def op_build(h, job, day=None, force=False, header=None):
         if isinstance(header, dict):
             saved = inbox.set_setting(f'report_header|{job}', {k: ' '.join(str(header.get(k) or '').split())[:120] for k in ('customer', 'worksite', 'program', 'prepared_by')})
         windows = inbox.setting('nexus_windows', None)
+        from hosting import suggest, sharepoint_jobs
+        suggested = suggest.header(suggest.context(job, day, inbox.setting(sharepoint_jobs.KEY)))
+    saved = dict(suggested, **{k: v for k, v in (saved or {}).items() if v})   # blank header fields: the client, worksite and preparer most likely meant
     try:
         rows, info = builder.day_rows(job, day, schedule)        # network call outside any DB transaction
     except builder.BuildError as exc:

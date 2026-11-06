@@ -714,7 +714,8 @@
     const undecided = (state.fixes || []).filter(f => !edits[editId(f.sheet, f.cell)] && !dec[f.id]);
     const pending = undecided.filter(isSureFix), unsure = needsCheck();
     const revd = reviewedSet(), dupIssues = walkIssues().filter(i => isDupRow(i) && i.row && !revd.has(i.key) && !fixesFor(i).length);
-    if ((!pending.length && !unsure.total && !dupIssues.length) || r.approval || (r.sent || []).some(x => x.sent) || dismissed.includes(hash) || state.busy) { slot.replaceChildren(); return; }
+    const sugg = undecided.filter(f => f.source === 'Suggested');
+    if ((!pending.length && !unsure.total && !dupIssues.length && !sugg.length) || r.approval || (r.sent || []).some(x => x.sent) || dismissed.includes(hash) || state.busy) { slot.replaceChildren(); return; }
     const groups = new Map();
     // the same kind of fix for different values is one group: 95 part-number spellings are one line, not 95
     const kindOf = reason => String(reason || 'Other corrections').replace(/"[^"]*"|“[^”]*”/g, '"…"').replace(/\d+/g, '#');
@@ -745,8 +746,19 @@
             `: maybe ${show(f.before)} should be ${show(f.after)}. `, h('span', {class: f.only ? 'only-note' : ''}, f.only || f.reason || ''))),
           ...unsure.issues.map(i => h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => { const list = walkIssues(); state.groupWalk = null; focusIssue(list.indexOf(list.find(x => x.key === i.key))); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, where(i)),
             `: ${i.text || i.message || ''} `, i.only ? h('span', {class: 'only-note'}, i.only) : null))]))) : null;
+    const suggBox = sugg.length ? h('div', {class: 'suggest'},
+      h('div', {class: 'unsure-top'},
+        h('div', {}, h('h3', {}, `Suggestions for ${sugg.length === 1 ? 'a blank detail' : `${sugg.length} blank details`}`),
+          h('p', {}, 'These were left blank. Here is what they most likely should say; nothing changes unless you use them.')),
+        h('div', {class: 'btns'},
+          h('button', {type: 'button', class: 'btn', onclick: () => { const d = store.get(decisionsKey(), {}); for (const f of sugg) d[f.id] = {state: 'accepted', after: f.after}; store.set(decisionsKey(), d);
+            const c = readyChanges(); applyFixes(c.accepted, c.dec, c.edits, {download: false}); }}, sugg.length === 1 ? 'Use this suggestion' : 'Use these suggestions'),
+          h('button', {type: 'button', class: 'btn ghost', onclick: () => { const d = store.get(decisionsKey(), {}); for (const f of sugg) d[f.id] = {state: 'rejected'}; store.set(decisionsKey(), d); drawFixes(); drawCleanOffer(); drawSteps(); }}, 'No thanks'))),
+      h('ul', {class: 'sugglist'}, sugg.map(f => h('li', {},
+        h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`), ': ',
+        h('code', {}, f.after), ' ', h('span', {class: 'quiet'}, String(f.reason || '').replace(/^.*?Suggested: [^.]*\.\s*/, '')))))) : null;
     if (!pending.length && !dupIssues.length) {
-      slot.replaceChildren(h('section', {class: 'cleanoffer', 'aria-labelledby': 'clean-title'}, h('div', {class: 'cleanhead'}, h('h2', {id: 'clean-title'}, 'Before this can be approved')), checkList));
+      slot.replaceChildren(h('section', {class: 'cleanoffer', 'aria-labelledby': 'clean-title'}, h('div', {class: 'cleanhead'}, h('h2', {id: 'clean-title'}, unsure.total ? 'Before this can be approved' : 'A few suggestions')), checkList, suggBox));
       return;
     }
     const sureCount = pending.length + dupIssues.length, onlyFmt = fmt.length > 0 && !other.length && !dupIssues.length;
@@ -782,7 +794,7 @@
           h('span', {class: 'count'}, plural(dupIssues.length, 'row')),
           h('details', {}, h('summary', {}, dupIssues.length === 1 ? 'See the row' : `See all ${dupIssues.length} rows`),
             h('ul', {}, dupIssues.map(i => h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(i.sheet, `A${i.row}`)}, `${i.sheet} row ${i.row}`), `: ${i.text}`))))) : null),
-      checkList,
+      checkList, suggBox,
       h('ul', {class: 'cleanpromise'},
         h('li', {}, 'Only the cells listed under the sure changes change. Anything you have to check is left exactly as it is.'),
         h('li', {}, 'Your original file is never touched. The cleaned copy is saved as a new version and checked again.'),
@@ -804,7 +816,7 @@
     const bar = $('steps'), r = state.report; if (!bar || !r) return;
     const rv = r.review || {}, sent = (r.sent || []).some(x => x.sent), approved = !!r.approval;
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
-    const pending = state.fixes ? state.fixes.filter(f => !edits[editId(f.sheet, f.cell)] && !dec[f.id]).length : null;
+    const pending = state.fixes ? state.fixes.filter(f => f.source !== 'Suggested' && !edits[editId(f.sheet, f.cell)] && !dec[f.id]).length : null;
     const reviewed = reviewedSet();   // a must-fix issue a person has reviewed is handled; approving still asks to confirm if it is in the file
     const mustFix = walkIssues().filter(i => i.severity === 'high' && !reviewed.has(i.key)).length;
     const unsureLeft = state.fixes ? needsCheck().total : 0;
@@ -919,7 +931,7 @@
   function needsCheck() {
     if (!state.report) return {fixes: [], issues: [], total: 0};
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {}), done = reviewedSet();
-    const fixes = (state.fixes || []).filter(f => !isSureFix(f) && !edits[editId(f.sheet, f.cell)] && !dec[f.id]);
+    const fixes = (state.fixes || []).filter(f => !isSureFix(f) && f.source !== 'Suggested' && !edits[editId(f.sheet, f.cell)] && !dec[f.id]);   // suggestions for blanks are optional
     const issues = walkIssues().filter(i => i.sure === false && !done.has(i.key) && !(state.fixes || []).some(f => fixCovers(f, i)));
     return {fixes, issues, total: fixes.length + issues.length};
   }
@@ -1264,7 +1276,7 @@
   function progress() {
     const r = state.report; if (!r || state.fixes == null || state.aiFixing || state.reviewing || state.verifying) return null;
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
-    const undecided = state.fixes.filter(f => !dec[f.id]?.state && !edits[editId(f.sheet, f.cell)]).length;
+    const undecided = state.fixes.filter(f => f.source !== 'Suggested' && !dec[f.id]?.state && !edits[editId(f.sheet, f.cell)]).length;   // suggestions for blanks are optional
     const reviewed = new Set(store.get('rd-reviewed:' + r.file_hash, []));
     const changed = new Set([...state.fixes.filter(f => dec[f.id]?.state === 'accepted').map(f => editId(f.sheet, f.cell)), ...Object.keys(edits)]);
     const open = allIssues(r.review).filter(i => i.severity !== 'info' && !reviewed.has(i.key) && !(i.cell && changed.has(editId(i.sheet, String(i.cell).toUpperCase())))).length;
@@ -1560,12 +1572,14 @@
         h('button', {type: 'button', class: 'btn small', onclick: e => buildReport(rv.job, rv.day, true, e.target)}, 'Rebuild with the latest scans')));
   }
   async function headerForm(rv, bar) {
-    let cur = {};
-    try { cur = (await api('/api/settings/report-header', {job: rv.job})).header; } catch (e) { toast(e.message, true); return; }
+    let cur = {}, sug = {};
+    try { const d = await api('/api/settings/report-header', {job: rv.job}); cur = d.header || {}; sug = d.suggested || {}; } catch (e) { toast(e.message, true); return; }
     const fields = [['customer', 'Customer', 'e.g. SL Alabama, LLC'], ['worksite', 'Worksite', 'e.g. Hyundai Mobis Alabama, Montgomery'], ['program', 'Part / program', 'Optional'], ['prepared_by', 'Prepared by', 'PPG Quality']];
-    const inputs = Object.fromEntries(fields.map(([k, label, ph]) => [k, h('input', {type: 'text', value: cur[k] || '', placeholder: ph, 'aria-label': label})]));
-    const form = h('div', {class: 'hdrform'}, h('b', {}, `Report header for ${rv.job}`), h('span', {class: 'quiet'}, 'Printed on the Summary tab of every report built for this job.'),
-      ...fields.map(([k, label]) => h('label', {}, label, inputs[k])),
+    const inputs = Object.fromEntries(fields.map(([k, label, ph]) => [k, h('input', {type: 'text', value: cur[k] || sug[k] || '', placeholder: ph, 'aria-label': label,
+      class: !cur[k] && sug[k] ? 'suggested' : '', oninput: e => e.target.classList.remove('suggested')})]));
+    const anySug = fields.some(([k]) => !cur[k] && sug[k]);
+    const form = h('div', {class: 'hdrform'}, h('b', {}, `Report header for ${rv.job}`), h('span', {class: 'quiet'}, 'Printed on the Summary tab of every report built for this job.' + (anySug ? ' Blank fields are filled with suggestions (from the SharePoint job list); change anything that is wrong.' : '')),
+      ...fields.map(([k, label]) => h('label', {}, label, inputs[k], !cur[k] && sug[k] ? h('em', {class: 'sugnote'}, 'suggested') : null)),
       h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn ghost small', onclick: () => form.remove()}, 'Cancel'),
         h('button', {type: 'button', class: 'btn primary small', onclick: async e => {
           const header = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value]));

@@ -94,7 +94,7 @@ WRITTEN_ONLY = {   # fixes that only change how something is written, never what
 }
 
 
-def proposals(result, filename, raw, sharepoint_rows=None):
+def proposals(result, filename, raw, sharepoint_rows=None, context=None):
     """List of proposed fixes: {id, sheet, cell, before, after, kind, reason, source, confidence}."""
     sources, cached = _sources(filename, raw)
     sheets, records, _ = scan(sources, cached)
@@ -143,6 +143,14 @@ def proposals(result, filename, raw, sharepoint_rows=None):
             if f.get('field') in ('day', 'shift'):
                 continue
             add(f.get('sheet'), f['cell'], value, f'SharePoint shows {f["sharepoint_value"]} for this scan ({f.get("message", "")})', 'SharePoint')
+
+    # 1b. Blank details (paying client, worksite, date, shift, area...): suggest the most likely value; a person accepts it.
+    from hosting import suggest
+    try:
+        suggest.blank_details(sources, context or {}, add, col_letter)
+        suggest.blank_columns(detail, context or {}, add, text_cell)
+    except Exception:
+        pass   # a suggestion must never break the real fixes
 
     # 2. Text clean-up: hidden characters, stray / double spaces.
     for r in detail:

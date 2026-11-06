@@ -1084,3 +1084,12 @@ body[data-page=reports] .mnav .mup,body[data-page=reports] label.nav[for=file-in
 .spjob.warn .spjob-tag{color:#8a5a00}
 .spjob-recs{margin-left:auto;font-size:13px}
 .spjob-recs a{color:var(--green)}
+/* suggested values for blank details */
+.hdrform input.suggested{background:#fbf8ec;border-style:dashed}
+.hdrform .sugnote{font-style:normal;font-size:11px;color:#8a6a00;margin-left:6px}
+.cleanoffer .suggest{background:#fbf8ec;border:1px solid #efe2b8;border-radius:10px;padding:12px 16px;margin:12px 0}
+.cleanoffer .suggest h3{margin:0;font-size:15px}
+.cleanoffer .suggest p{margin:2px 0 0;font-size:13px;color:var(--muted)}
+.cleanoffer .sugglist{margin:8px 0 0;padding-left:18px;font-size:13px}
+.cleanoffer .sugglist code{background:#fff;border:1px solid var(--line);border-radius:6px;padding:1px 6px}
+.cleanoffer .sugglist .quiet{color:var(--muted)}
