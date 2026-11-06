@@ -758,7 +758,7 @@ body:not([data-page=reports]):not([data-page=today]) .clienttabs{display:none}
 .selbar.issel span{flex:1 1 200px;color:var(--ink)}
 .selbar.issel{position:sticky;top:-16px;z-index:5;box-shadow:0 4px 12px #1a373514}
 /* clients in the left menu (the tab strip is only for narrow screens, where the menu is hidden) */
-.rail-clients{margin-top:14px;padding-top:12px;border-top:1px solid #2a5552;overflow-y:auto;min-height:0;flex:0 1 auto}
+.rail-clients{margin-top:14px;padding-top:12px;border-top:1px solid #2a5552;flex:0 0 auto}
 .rail-head{font-size:10px;font-weight:750;letter-spacing:1.6px;color:#8fb3aa;padding:0 10px 6px}
 .nav.client{display:flex;align-items:center;gap:8px;padding:9px 10px}
 .nav.client span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
