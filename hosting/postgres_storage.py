@@ -38,6 +38,10 @@ class PostgresWorkspace:
             conn = self.connect(self.database_url)
         except DB_ERRORS as exc:
             raise StorageUnavailable(UNAVAILABLE) from exc
+        if isinstance(conn, psycopg.Connection) and os.environ.get('CI_NATIVE_TABLES', '1') != '0':
+            with self._native(conn) as root:
+                yield root
+            return
         committed = False
         try:
             with conn.cursor() as cur:
@@ -72,6 +76,64 @@ class PostgresWorkspace:
             # Never report success for a failed or unknown commit; caller's own errors pass through.
             raise StorageUnavailable(UNAVAILABLE) from exc
         finally:
+            if not committed:
+                try:
+                    conn.rollback()
+                except DB_ERRORS:
+                    pass
+            try:
+                conn.close()
+            except DB_ERRORS:
+                pass
+
+    @contextmanager
+    def _native(self, conn):
+        """Reports live in real tables (see pg_tables); only the older review features still use the packed snapshot,
+        which is now saved optimistically instead of being locked for the whole request."""
+        from hosting import pg_tables
+        committed = False
+        token = None
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET lock_timeout = '5s'")
+                cur.execute("SET statement_timeout = '120s'")
+                cur.execute("SET idle_in_transaction_session_timeout = '120s'")
+                cur.execute('INSERT INTO ci_verifier_state(namespace) VALUES (%s) ON CONFLICT DO NOTHING', (NAMESPACE,))
+                cur.execute('SELECT payload, revision FROM ci_verifier_state WHERE namespace=%s', (NAMESPACE,))
+                row = cur.fetchone()
+                if row is None:
+                    raise StorageUnavailable('Durable workspace is unavailable.')
+                old = bytes(row[0]) if row[0] is not None else None
+                revision = row[1]
+            conn.commit()
+            with tempfile.TemporaryDirectory(prefix='ci-verifier-pg-') as directory:
+                root = Path(directory)
+                restore(root, old)
+                legacy = root / 'spreadsheet_inbox.sqlite3'
+                if legacy.exists():   # first run on the tables: copy the reports over (the old copy stays frozen as a fallback)
+                    pg_tables.migrate_snapshot(conn, legacy)
+                originals = immutable_files(root)
+                token = pg_tables.current.set(pg_tables.PgSession(conn))
+                with conn.cursor() as cur, activate(PostgresFiles(cur)):
+                    yield root
+                    new = checked_pack(root)
+                    after = immutable_files(root)
+                    if any(after.get(name) != digest for name, digest in originals.items()):
+                        raise StorageUnavailable('Original uploads are immutable; nothing was saved.')
+                    if old != new:
+                        cur.execute('UPDATE ci_verifier_state SET payload=%s, revision=%s, updated_at=now() WHERE namespace=%s AND revision=%s',
+                                    (new, revision + 1, NAMESPACE, revision))
+                        if cur.rowcount != 1:
+                            raise StorageUnavailable('Someone else saved a change at the same moment. Reload and try again.')
+                conn.commit()
+                committed = True
+        except StorageUnavailable:
+            raise
+        except DB_ERRORS as exc:
+            raise StorageUnavailable(UNAVAILABLE) from exc
+        finally:
+            if token is not None:
+                pg_tables.current.reset(token)
             if not committed:
                 try:
                     conn.rollback()

@@ -18,6 +18,10 @@ class SpreadsheetInbox:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.database = self.root / 'spreadsheet_inbox.sqlite3'
+        from hosting import pg_tables
+        self.pg = pg_tables.current.get()   # on Vercel: real Supabase tables (created by migration); locally: SQLite
+        if self.pg is not None:
+            return
         with self.connect() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS spreadsheets (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +44,10 @@ class SpreadsheetInbox:
                 prefix TEXT NOT NULL, can_send INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_used TEXT, revoked_at TEXT)''')
     @contextmanager
     def connect(self):
+        if self.pg is not None:
+            with self.pg.transaction() as db:
+                yield db
+            return
         db = sqlite3.connect(str(self.database), timeout=10)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA synchronous=FULL')
@@ -315,12 +323,16 @@ class SpreadsheetInbox:
         rows = [(self.vin_key(r['labels'].get('identifier')), str(r['labels'].get('identifier')).strip(), file_hash, r['sheet'], r['row'])
                 for r in recs if self.vin_key((r.get('labels') or {}).get('identifier'))]
         with self.connect() as db:
+            if self.pg is not None:   # two requests indexing the same report at once: the second waits, then finds it done
+                db.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ('vin:' + file_hash,))
+                if db.execute('SELECT 1 FROM vin_indexed WHERE file_hash=?', (file_hash,)).fetchone():
+                    return
             db.execute('DELETE FROM vin_index WHERE file_hash=?', (file_hash,))
             db.executemany('INSERT INTO vin_index (ident, shown, file_hash, sheet, row) VALUES (?,?,?,?,?)', rows)
             db.execute('INSERT OR IGNORE INTO vin_indexed (file_hash) VALUES (?)', (file_hash,))
     def index_missing(self, budget=40, seconds=4.0):
         """Index reports uploaded before the index existed, a few at a time and never for more than `seconds`
-        (the whole workspace is locked while a request runs, so this must stay short). Returns how many are left."""
+        (so a request never runs long). Returns how many are left."""
         import time
         stop = time.monotonic() + seconds
         with self.connect() as db:
