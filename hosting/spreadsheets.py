@@ -171,7 +171,7 @@ def _xlsx_rows(raw, notes=None):
     except SpreadsheetError:
         raise
     except Exception as exc:
-        raise SpreadsheetError('Malformed or unsupported XLSX workbook.') from exc
+        raise SpreadsheetError('This file could not be opened as an Excel workbook. It may be damaged or saved in another format. Open it in Excel, save it as .xlsx, and upload it again.') from exc
 
 
 def _cached_rows(raw):

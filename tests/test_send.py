@@ -184,6 +184,16 @@ class SendRouteTests(unittest.TestCase):
         status, info = self.post('/api/spreadsheets/send-info', {'file_hash': h})
         self.assertEqual(info['recipients_from'], 'saved'); self.assertEqual(info['to'], ['buyer@client.com'])
 
+    def test_withdraw_and_approve_again(self):
+        status, data = self.post('/api/spreadsheets/import', {'filename': NAME, 'content_base64': base64.b64encode(build()).decode()})
+        h = data['item']['file_hash']
+        for _ in range(2):
+            status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Lauren', 'override': True})
+            self.assertEqual(status, 200, data); self.assertTrue(data['item'].get('approval'))
+            status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Lauren', 'withdraw': True})
+            self.assertEqual(status, 200, data); self.assertFalse(data['item'].get('approval'))
+            self.assertEqual(data['item']['approval_withdrawn']['by'], 'Lauren')
+
     def test_must_fix_needs_approve_anyway(self):
         from eos_fixture import ROWS
         rows = [list(r) for r in ROWS]; rows[1][0] = ''

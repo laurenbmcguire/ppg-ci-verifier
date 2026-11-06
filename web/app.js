@@ -128,7 +128,7 @@
     }
     const vh = state.vinHits;
     if (vh && vh.query === state.search) {
-      list.append(h('div', {class: 'vinhits'}, h('b', {}, vh.results.length ? `“${vh.query}” is in ${vh.results.length} report row${vh.results.length === 1 ? '' : 's'}` : `“${vh.query}” is not in any report`),
+      list.append(h('div', {class: 'vinhits'}, h('b', {}, vh.results.length ? `“${vh.query}” is in ${vh.results.length} report row${vh.results.length === 1 ? '' : 's'}` : `No report has the VIN “${vh.query}” (search looks at VINs and file names)`),
         ...vh.results.slice(0, 12).map(m => h('button', {type: 'button', class: 'vinhit', onclick: () => select(m.file_hash)},
           h('span', {}, h('b', {}, m.identifier), ` · ${m.job || 'Unknown job'} · ${shortDay(m.day) || 'no date'}`),
           h('span', {class: 'file'}, `${m.sheet}, row ${m.row} · ${m.filename}${m.corrected ? ' (corrected copy)' : ''}${m.sent ? ' · sent' : ''}`))),
@@ -157,9 +157,15 @@
         h('span', {class: 'file'}, `${r.filename} · v${r.version} · ${ago(r.received_at)}`)));
     }
   }
+  // Enter in a one-line add box (job to watch, rule, key name...) presses that box's button
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.isComposing || !e.target.matches('div.keyform input[type=text], div.keyform input:not([type])')) return;
+    const btn = [...e.target.closest('div.keyform').querySelectorAll('button')].find(b => !b.disabled && !b.classList.contains('ghost'));
+    if (btn) { e.preventDefault(); btn.click(); }
+  });
   // keyboard: J/K or ↓/↑ next and previous report, / search, U upload, Esc back to the list, ? help
   document.addEventListener('keydown', e => {
-    if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, textarea, select, [contenteditable], dialog')) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, textarea, select, [contenteditable], dialog') || document.querySelector('dialog[open]')) return;
     const onReports = document.body.dataset.page === 'reports';
     const move = step => {
       const items = [...document.querySelectorAll('#queue-list .item')]; if (!items.length) return;
@@ -170,13 +176,14 @@
     else if (onReports && e.key === 'k') { e.preventDefault(); move(-1); }
     else if (e.key === '/') { e.preventDefault(); if (!onReports || state.selected) location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; setTimeout(() => $('search')?.focus(), 50); }
     else if (e.key === 'u') { e.preventDefault(); $('file-input')?.click(); }
+    else if (e.key === 'Escape' && state.selected && state.issueNav != null && document.querySelector('.issuenav')) { state.issueNav = null; state.groupWalk = null; state.gridCell = null; drawGrid(); drawSide(); }
     else if (e.key === 'Escape' && state.selected) { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }
     else if (state.issueNav != null && document.querySelector('.issuenav') && ['a', 's', 'f', 'ArrowRight', 'ArrowLeft'].includes(e.key)) {
       const btn = t => [...document.querySelectorAll('.issuenav .choices button, .issuenav .in-nav button')].find(b => b.textContent.trim().startsWith(t) && !b.disabled);
       const target = {a: btn('Make this change') || btn('Take out'), s: btn('Skip'), f: btn('It\'s fine as is'), ArrowRight: btn('Next'), ArrowLeft: btn('‹ Previous')}[e.key];
       if (target) { e.preventDefault(); target.click(); }
     }
-    else if (e.key === '?') toast('Shortcuts: J or K next or previous report · / search · U upload · Esc back to the list · While checking: A make the change, S skip, F fine as is, ← → move');
+    else if (e.key === '?') toast('Shortcuts: J or K next or previous report · / search · U upload · Esc closes what is open, then back to the list · While checking: A make the change, S skip, F fine as is, ← → move');
   });
   let vinTimer;
   $('search').addEventListener('input', e => {
@@ -289,6 +296,7 @@
   window.addEventListener('hashchange', route);
   async function route() {
     document.body.classList.remove('reportmode');
+    document.querySelectorAll('dialog[open]:not(#signin-dialog)').forEach(d => d.close());   // a window left open must not cover the next page
     document.body.dataset.page = (location.hash.match(/^#(today|overview|kpis|periods|checks|api|users)$/) || [])[1] || 'reports';
     const cm = location.hash.match(/^#c=(.+)$/);
     if (cm) { state.client = decodeURIComponent(cm[1]); store.set('rd-client', state.client); drawClientTabs(); }
@@ -376,6 +384,7 @@
   }
 
   // ---------------- right-hand panel: Fixes (issues grouped by severity and type, suggested fixes), Facts, Ask Claude
+  const myName = () => store.get('rd-approver', '') || (state.me?.user && !state.me.user.virtual ? state.me.user.name || state.me.user.email || '' : '');
   const reviewedSet = () => new Set(store.get('rd-reviewed:' + state.report.file_hash, []));
   function showSide(tab) { if (state.sideTab !== tab) { state.sideTab = tab; drawSide(); } }
   function drawSideTabs() {
@@ -425,12 +434,17 @@
       const gw = state.groupWalk && state.groupWalk.keys.has(issue.key) ? state.groupWalk : null;
       const nav = gw ? list.filter(i => gw.keys.has(i.key)) : list, pos = nav.indexOf(issue);
       const go = k => focusIssue(list.indexOf(nav[k]));
-      const markNext = () => { done.add(issue.key); store.set('rd-reviewed:' + state.report.file_hash, [...done]); updateFinish(); drawSteps(); drawCleanOffer();
+      const markNext = () => { const done = reviewedSet(); done.add(issue.key); store.set('rd-reviewed:' + state.report.file_hash, [...done]);
+        if (!nav.some(x => !done.has(x.key)) && readyChanges().total) state.celebrate = {hash: null, n: readyChanges().total, items: nav.length};   // celebrate once the new version is saved
+        updateFinish(); drawSteps(); drawCleanOffer();
         const nextOpen = nav.findIndex((x, k) => k > pos && !done.has(x.key)), earlier = nav.findIndex(x => !done.has(x.key));
         const leftNow = nav.filter(x => !done.has(x.key)).length;
         if (leftNow === 1) toast('Nice! Just one more.'); else if (leftNow && leftNow === Math.ceil(nav.length / 2)) toast(`Halfway there: ${leftNow} left.`);
         if (nextOpen >= 0) go(nextOpen); else if (earlier >= 0) go(earlier);
-        else { state.issueNav = null; state.groupWalk = null; drawSide(); toast(gw ? `Done! ${gw.label === 'Not sure' ? 'Every item you had to check' : `All the ${gw.label.toLowerCase()}`} handled.` : 'Done! That was the last open issue.'); } };
+        else { state.issueNav = null; state.groupWalk = null; drawSide();
+          const c = readyChanges(), msg = gw ? `Done! ${gw.label === 'Not sure' ? 'Every item you had to check' : `All the ${gw.label.toLowerCase()}`} handled.` : 'Done! That was the last open issue.';
+          if (c.total) { toast(`${msg} Saving your ${c.total} change${c.total === 1 ? "" : "s"} into a new version and checking it again…`); applyFixes(c.accepted, c.dec, c.edits, {download: false}); }
+          else toast(msg); } };
       kids.push(h('div', {class: 'issuenav sev-' + issue.severity},
         h('div', {class: 'in-top'}, h('span', {class: 'sev ' + issue.severity}), h('b', {}, gw ? `${pos + 1} of ${nav.length} in ${gw.label}` : `Issue ${idx + 1} of ${list.length}`), gw ? null : h('span', {class: 'in-type'}, issueType(issue)),
           h('button', {type: 'button', class: 'btn ghost small', onclick: () => { state.issueNav = null; state.groupWalk = null; state.gridCell = null; drawGrid(); drawSide(); }}, 'Close')),
@@ -784,6 +798,7 @@
         changes.push({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: e.reason || 'Edited by reviewer', source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit', kind: numeric ? 'number' : 'text'});
       }
       const answer = await api('/api/spreadsheets/apply-fixes', {file_hash: state.report.file_hash, changes});
+      if (state.celebrate) state.celebrate.hash = answer.item.file_hash;
       const rejected = (state.fixes || []).filter(f => dec[f.id]?.state === 'rejected').map(f => ({sheet: f.sheet, cell: f.cell, after: f.after}));
       store.set('rd-carry:' + answer.item.file_hash, {reviewed: store.get('rd-reviewed:' + state.report.file_hash, []), rejected});
       store.set(decisionsKey(), {}); store.set(editsKey(), {});
@@ -794,7 +809,7 @@
       toast(`${opts.download !== false ? 'Saved and downloaded' : 'Saved'} "${answer.item.filename}" with ${changes.length} change${changes.length === 1 ? '' : 's'}. It has been checked again. The original is unchanged.`);
       if (opts.thenOpen !== false) { await loadList(); select(answer.item.file_hash); }
       return answer.item.file_hash;
-    } catch (e) { toast(e.message, true); return null; }
+    } catch (e) { state.celebrate = null; toast(e.message, true); return null; }
     finally { state.busy = false; if ($('fixes-block')) drawFixes(); }
   }
   // Take out extra copies of duplicate rows (new corrected version; original untouched). Accepted cell changes are saved first.
@@ -1127,6 +1142,8 @@
         h('span', {}, p.ready ? `${p.ready} change${p.ready === 1 ? '' : 's'} will go into the final copy. Your original stays as it is.` : 'No changes are needed. This file is the final report.')),
       h('button', {type: 'button', class: 'btn', onclick: downloadFinal}, 'Download final report'),
       h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, r.approval ? 'Send to client' : 'Send it to the client for me')));
+    if (state.celebrate && state.celebrate.hash === r.file_hash) { const c = state.celebrate; state.celebrate = null; store.set('rd-finish-offered:' + r.file_hash, true); offerFinish({...p, saved: c.n, items: c.items}); return; }
+    if (state.celebrate) return;
     if (was === false && !store.get('rd-finish-offered:' + r.file_hash, false)) { store.set('rd-finish-offered:' + r.file_hash, true); offerFinish(p); }
   }
   function confetti() {
@@ -1142,14 +1159,14 @@
     let dlg = $('finish-dialog');
     if (!dlg) { dlg = h('dialog', {id: 'finish-dialog', class: 'fixer finishdlg', 'aria-labelledby': 'finish-title'}); document.body.append(dlg);
       dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); }); }
-    const r = state.report, handled = (state.fixes || []).length + walkIssues().length;
+    const r = state.report, handled = p.items || (state.fixes || []).length + walkIssues().length;
     const nextRep = state.list.find(x => x.file_hash !== r.file_hash && x.review && x.review.status !== 'clear' && !x.review.sent_at && inClient(x.review.job));
     dlg.replaceChildren(h('div', {class: 'fixer-wait celebrate'},
       confetti(),
       h('div', {class: 'finish-mark'}, '✓'),
       h('h2', {id: 'finish-title'}, 'All clear!'),
       h('p', {class: 'wins'}, handled ? `You handled all ${handled} item${handled === 1 ? '' : 's'} on ${r.review.job || r.filename}.` : `${r.review.job || r.filename} is clean.`),
-      h('p', {}, (p.ready ? `${p.ready} change${p.ready === 1 ? '' : 's'} will go into the final report. ` : 'Nothing needs changing. ') + 'Next: approve it and send it to the client, or download it.'),
+      h('p', {}, (p.saved ? `${p.saved} change${p.saved === 1 ? ' is' : 's are'} saved in this version, and it has been checked again. ` : p.ready ? `${p.ready} change${p.ready === 1 ? '' : 's'} will go into the final report. ` : 'Nothing needs changing. ') + 'Next: approve it and send it to the client, or download it.'),
       h('div', {class: 'row'},
         nextRep ? h('button', {type: 'button', class: 'btn ghost', onclick: () => { dlg.close(); select(nextRep.file_hash); }}, 'Next report ›') : h('button', {type: 'button', class: 'btn ghost', onclick: () => dlg.close()}, 'Not now'),
         h('button', {type: 'button', class: 'btn', onclick: downloadFinal}, 'Download final report'),
@@ -1217,7 +1234,7 @@
   }
   function reviewForm(action) {
     const slot = $('reviewstate'); if (!slot) return;
-    const who = h('input', {type: 'text', placeholder: 'Your name', value: store.get('rd-approver', ''), 'aria-label': 'Your name'});
+    const who = h('input', {type: 'text', placeholder: 'Your name', value: myName(), 'aria-label': 'Your name'});
     const note = h('textarea', {rows: 2, placeholder: action === 'request' ? 'Note for the reviewer (optional), e.g. “Fixed the two duplicate VINs; please check the totals.”' : 'What needs changing?', 'aria-label': 'Note'});
     const go = async () => {
       try {
@@ -1734,7 +1751,7 @@
           h('div', {class: 'keyform'}, ruleText, ruleJob,
             h('button', {type: 'button', class: 'btn primary', onclick: () => save('/api/settings/rules', {text: ruleText.value, job: ruleJob.value || null}, () => 'Added. New AI reviews will look for it.')}, 'Add')),
           data.rules.length ? h('ul', {class: 'rules'}, data.rules.map(r => h('li', {}, h('span', {class: 'rjob'}, r.job || 'All jobs'), h('span', {class: 'rtext'}, r.text),
-            h('button', {type: 'button', class: 'btn ghost small', onclick: () => save('/api/settings/rules', {remove: r.id})}, 'Remove'))))
+            h('button', {type: 'button', class: 'btn ghost small', onclick: () => save('/api/settings/rules', {remove: r.id}, () => 'Removed. New AI reviews will not look for it.')}, 'Remove'))))
             : h('p', {class: 'note'}, 'Nothing added yet.'),
           h('p', {class: 'note'}, 'To use a new rule on a report that was already checked, open it and click Run AI review again.')),
         h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Shift times'),
@@ -1869,7 +1886,7 @@
     const sentBefore = (r.sent || []).filter(x => x.sent);
     // form values survive redraws while the dialog is open
     const f = state.sendForm ||= {to: info.to.join(', '), cc: info.cc.join(', '), subject: info.subject, body: info.body, name: info.attachment.name,
-      reply: info.previous ? 'reply' : 'new', again: false, override: false, approver: store.get('rd-approver', ''), note: ''};
+      reply: info.previous ? 'reply' : 'new', again: false, override: false, approver: myName(), note: ''};
     const bind = (key, attrs, tag = 'input') => { const el = h(tag, {...attrs, oninput: e => { f[key] = e.target.value; }}); el.value = f[key]; return el; };
     const check = (key, label) => h('label', {class: 'tick'}, h('input', {type: 'checkbox', checked: f[key], onchange: e => { f[key] = e.target.checked; drawSend(); }}), label);
     // step 1: approve
@@ -1940,7 +1957,7 @@
     try {
       if (!withdraw) store.set('rd-approver', f.approver.trim());
       const out = await api('/api/spreadsheets/approve', {file_hash: hash, approver: f.approver, note: f.note, override: !!f.override, withdraw});
-      state.report = {...state.report, ...out.item, review: state.report.review};
+      state.report = {...state.report, ...out.item, approval: out.item.approval || null, review: state.report.review};
       toast(withdraw ? 'Approval withdrawn.' : 'Approved as final. You can send it to the client now.');
       refreshHead(); loadList();
     } catch (e) { toast(e.message, true); }
@@ -1983,7 +2000,12 @@
   // Every error ends in a click: accept the change, take out the extra row, let Claude write a fix, or say it is fine.
   function fixChoices(issue, next) {
     const fx = fixesFor(issue).filter(f => f.state !== 'rejected');
-    const decideFix = (f, st) => { const d = store.get(decisionsKey(), {}); d[f.id] = {state: st, after: f.after}; store.set(decisionsKey(), d); drawFixes(); if (st === 'accepted' || st === 'rejected') next(); };
+    const decideFix = (f, st) => { const d = store.get(decisionsKey(), {}); d[f.id] = {state: st, after: f.after}; store.set(decisionsKey(), d);
+      if (st === 'accepted') {   // the change settles every issue on that cell (a typo is often flagged twice: wrong format and likely typo)
+        const done = reviewedSet(); const row = String(f.cell || '').replace(/^[A-Z]+/, ''), val = String(f.before ?? '').trim();
+        walkIssues().filter(i => i.key !== issue.key && i.sheet === f.sheet && (i.cell === f.cell || (val && String(i.row) === row && String(i.text || '').includes(val)))).forEach(i => done.add(i.key));
+        store.set('rd-reviewed:' + state.report.file_hash, [...done]); }
+      drawFixes(); if (st === 'accepted' || st === 'rejected') next(); };
     const show = v => v === '' || v == null ? '(blank)' : `“${v}”`;
     const kids = [];
     for (const f of fx) kids.push(h('div', {class: 'choice'},

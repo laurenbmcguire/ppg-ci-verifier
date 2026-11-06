@@ -190,7 +190,20 @@ def compare(report_rows, source_rows, meta=None):
 
 JOB = re.compile(r'(?<![A-Z0-9])((?=[A-Z0-9-]*\d)[A-Z0-9]{2,}(?:-[A-Z0-9]{2,}){2,})(?![A-Z0-9])')
 DATES = [(re.compile(r'(\d{4})-(\d{2})-(\d{2})'), lambda m: (int(m[1]), int(m[2]), int(m[3]))),
-         (re.compile(r'(?<!\d)(\d{1,2})[./](\d{1,2})[./](\d{2,4})(?!\d)'), lambda m: (int(m[3]) + (2000 if len(m[3]) == 2 else 0), int(m[1]), int(m[2])))]
+         (re.compile(r'(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?!\d)'), lambda m: (int(m[3]) + (2000 if len(m[3]) == 2 else 0), int(m[1]), int(m[2])))]
+
+
+JOB2 = re.compile(r'(?<![A-Z0-9])([A-Z][A-Z0-9]{1,}-\d{3,}|\d{3,}-[A-Z][A-Z0-9]{1,})(?![A-Z0-9-])')
+DATE_LIKE = re.compile(r'\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2}-\d{2,4}')
+
+
+def job_from_name(upper):
+    """A job number in a filename: three or more parts (LEAR-T1-2240), else two (GRAMMER-2250); never a date."""
+    for m in JOB.finditer(upper):
+        if not DATE_LIKE.fullmatch(m.group(1)):
+            return m.group(1)
+    m = JOB2.search(upper)
+    return m.group(1) if m else None
 
 
 def identify(filename, result):
@@ -200,8 +213,7 @@ def identify(filename, result):
     day = identity.get('report_date') or result.get('report_day')
     upper = (filename or '').upper()
     if not job:
-        m = JOB.search(upper)
-        job = m.group(1) if m else None
+        job = job_from_name(upper)
     if not day:
         for pattern, parts in DATES:
             m = pattern.search(filename or '')

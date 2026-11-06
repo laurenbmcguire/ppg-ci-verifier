@@ -68,3 +68,12 @@ class Endpoint(Autopilot):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class JobFromFilename(unittest.TestCase):
+    def test_two_part_job_and_never_a_date(self):
+        from hosting.source_compare import identify
+        self.assertEqual(identify('GRAMMER-2250 - EOS - 2026-10-09.xlsx', {}), ('GRAMMER-2250', '2026-10-09'))
+        self.assertEqual(identify('LEAR-T1-2240 - EOS - 2026-10-12.xlsx', {}), ('LEAR-T1-2240', '2026-10-12'))
+        self.assertEqual(identify('report 2026-10-09.xlsx', {}), (None, '2026-10-09'))
+        self.assertEqual(identify('GRAMMER 2250 EOS 10-09-2026.xlsx', {})[1], '2026-10-09')

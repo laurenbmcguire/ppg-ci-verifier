@@ -186,7 +186,11 @@ class SpreadsheetInbox:
         if withdraw:
             if any(x.get('sent') for x in item.get('sent') or []):
                 raise ValueError('This report was already sent to the client, so its approval stays on record.')
-            return self._update(file_hash, lambda r: r.pop('approval', None))
+            def undo(r):   # keep a record of the withdrawal (it also keeps this revision distinct from the pre-approval one)
+                was = r.pop('approval', None)
+                r['approval_withdrawn'] = dict(at=datetime.now(timezone.utc).isoformat(), by=' '.join(str(approver or '').split())[:80] or None,
+                                               version=(was or {}).get('version'))
+            return self._update(file_hash, undo)
         approver = ' '.join(str(approver or '').split())[:80]
         if not approver:
             raise ValueError('Type your name to approve the report.')
