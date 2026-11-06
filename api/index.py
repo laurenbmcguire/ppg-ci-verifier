@@ -645,7 +645,7 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(503, str(exc))
         except Exception:
             debug_log()
-            return self.fail(503, 'Durable storage is unavailable. No success was confirmed; reload before retrying.')
+            return self.fail(503, 'Something went wrong on the server, so nothing was saved. Reload and try again; if it keeps happening, tell your admin.')
 
     def do_POST(self):
         route = self.checked_route()
@@ -1446,4 +1446,4 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(503, str(exc))
         except Exception:
             debug_log()
-            return self.fail(503, 'Durable storage is unavailable. No success was confirmed; reload before retrying.')
+            return self.fail(503, 'Something went wrong on the server, so nothing was saved. Reload and try again; if it keeps happening, tell your admin.')
