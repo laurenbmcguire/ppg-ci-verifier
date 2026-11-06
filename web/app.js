@@ -84,7 +84,7 @@
       return h('button', {type: 'button', role: 'tab', class: state.client === key ? 'on' : '', 'aria-selected': String(state.client === key), title: title || null, onclick: () => go(key)},
         label, n ? h('i', {title: `${n} report${n === 1 ? '' : 's'} need attention`}, String(n)) : null); };
     if (rail) {
-      const onList = !location.hash.match(/^#(today|overview|periods|checks|api|users)$/);
+      const onList = !location.hash.match(/^#(today|overview|kpis|periods|checks|api|users)$/);
       const item = (key, label, title) => { const n = need(key), href = '#c=' + encodeURIComponent(key);
         return h('a', {class: 'nav client' + (onList && state.client === key ? ' active' : ''), href, title: title || null}, h('span', {}, label), n ? h('i', {title: `${n} need attention`}, String(n)) : null); };
       rail.replaceChildren(h('div', {class: 'rail-head'}, 'Clients'),
@@ -289,13 +289,14 @@
   window.addEventListener('hashchange', route);
   async function route() {
     document.body.classList.remove('reportmode');
-    document.body.dataset.page = (location.hash.match(/^#(today|overview|periods|checks|api|users)$/) || [])[1] || 'reports';
+    document.body.dataset.page = (location.hash.match(/^#(today|overview|kpis|periods|checks|api|users)$/) || [])[1] || 'reports';
     const cm = location.hash.match(/^#c=(.+)$/);
     if (cm) { state.client = decodeURIComponent(cm[1]); store.set('rd-client', state.client); drawClientTabs(); }
     else if (location.hash === '' || location.hash === '#') { if (state.client) { state.client = ''; store.set('rd-client', ''); drawClientTabs(); } }
-    const navOn = ['#api', '#checks', '#periods', '#today', '#overview', '#users'].includes(location.hash) ? location.hash : state.client ? '#c=' + encodeURIComponent(state.client) : '#';
+    const navOn = ['#api', '#checks', '#periods', '#today', '#overview', '#kpis', '#users'].includes(location.hash) ? location.hash : state.client ? '#c=' + encodeURIComponent(state.client) : '#';
     document.querySelectorAll('.rail .nav[href], .mnav a[href]').forEach(a => { const on = a.getAttribute('href') === navOn; a.classList.toggle('active', on); if (a.closest('.mnav')) a.setAttribute('aria-current', on ? 'page' : 'false'); });
     if (location.hash === '#overview') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showOverview(); return; }
+    if (location.hash === '#kpis') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showKpis(); return; }
     if (location.hash === '#today') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showToday(); return; }
     if (location.hash === '#periods') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showPeriods(); return; }
     if (location.hash === '#checks') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showChecks(); return; }
@@ -1267,6 +1268,113 @@
           h('tbody', {}, o.jobs.map(j => h('tr', {}, h('td', {}, h('b', {}, j.job)), h('td', {}, fmt(j.days)), h('td', {}, fmt(j.inspected)), h('td', {}, pct(j.rate)),
             h('td', {}, fmt(j.caught)), h('td', {}, fmt(j.corrected)), h('td', {}, `${fmt(j.sent)} of ${fmt(j.days)}`), h('td', {}, fmt(j.on_time)), h('td', {}, j.turnaround == null ? '—' : `${j.turnaround} h`),
             h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => { state.periodQuery = {kind: o.days > 7 ? 'month' : 'week', day: o.end, job: j.job}; location.hash = 'periods'; }}, 'Details')))))))),
+    ].filter(Boolean));
+  }
+
+  // ---------------- KPI dashboard: every client, drill down to a client, then a job
+  function kpiChart(points, opts) {
+    // one series, one axis; bars in the app green, hover any bar for its value
+    const W = 360, H = 140, pad = {l: 34, r: 6, t: 8, b: 20};
+    const vals = points.map(p => p.v == null ? 0 : p.v), raw = Math.max(...vals, 0);
+    const max = opts.pct ? Math.max(opts.min || 1, raw) : Math.max(1, Math.ceil(raw));
+    const step = (W - pad.l - pad.r) / Math.max(points.length, 1), bw = Math.max(1, Math.min(18, step - (step > 4 ? 2 : 0)));
+    const y = v => pad.t + (H - pad.t - pad.b) * (1 - v / max), NS = 'http://www.w3.org/2000/svg';
+    const el = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; };
+    const svg = el('svg', {viewBox: `0 0 ${W} ${H}`, class: 'kchart', role: 'img', 'aria-label': opts.label});
+    const ticks = opts.pct || max >= 4 ? [0, max / 2, max] : [0, max];
+    ticks.forEach(t => { svg.append(el('line', {x1: pad.l, x2: W - pad.r, y1: y(t), y2: y(t), class: 'grid'}), el('text', {x: pad.l - 6, y: y(t) + 3, class: 'ax', 'text-anchor': 'end'}, opts.fmt(t, true))); });
+    points.forEach((p, i) => {
+      const x = pad.l + i * step + (step - bw) / 2, v = p.v == null ? 0 : p.v, top = y(v), hgt = H - pad.b - top;
+      const g = el('g', {class: 'bar' + (opts.bad && v > 0 ? ' bad' : '')});
+      g.append(el('rect', {x: pad.l + i * step, y: pad.t, width: step, height: H - pad.t - pad.b, class: 'hit'}));
+      if (v > 0) g.append(el('path', {d: `M${x},${H - pad.b}V${top + Math.min(4, hgt / 2)}q0,-${Math.min(4, hgt / 2)} ${Math.min(4, bw / 2)},-${Math.min(4, hgt / 2)}h${Math.max(0, bw - 2 * Math.min(4, bw / 2))}q${Math.min(4, bw / 2)},0 ${Math.min(4, bw / 2)},${Math.min(4, hgt / 2)}V${H - pad.b}Z`}));
+      g.append(el('title', {}, `${p.label}: ${p.v == null ? 'no reports' : opts.fmt(p.v)}`));
+      svg.append(g);
+    });
+    const lbl = [0, Math.floor((points.length - 1) / 2), points.length - 1].filter((v, i, a) => a.indexOf(v) === i);
+    lbl.forEach(i => points[i] && svg.append(el('text', {x: pad.l + i * step + step / 2, y: H - 6, class: 'ax', 'text-anchor': i === 0 ? 'start' : i === points.length - 1 ? 'end' : 'middle'}, points[i].short)));
+    return svg;
+  }
+  function kpiSeries(trend, days) {
+    const md = d => { const [, m, dd] = d.split('-').map(Number); return `${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][m - 1]} ${dd}`; };
+    if (days <= 31) return trend.map(t => ({...t, label: md(t.day), short: md(t.day)}));
+    const out = [];   // weeks for longer ranges
+    for (let i = 0; i < trend.length; i += 7) {
+      const wk = trend.slice(i, i + 7), sum = k => wk.reduce((a, t) => a + (t[k] || 0), 0);
+      out.push({day: wk[0].day, label: `Week of ${md(wk[0].day)}`, short: md(wk[0].day), reports: sum('reports'), caught: sum('caught'), stopped: sum('stopped'), reached: sum('reached'),
+        inspected: sum('inspected'), rejected: sum('rejected'), rate: sum('inspected') ? sum('rejected') / sum('inspected') * 100 : null});
+    }
+    return out;
+  }
+  async function showKpis() {
+    const wrap = h('div', {class: 'sheetwrap apiwrap kpis'});
+    $('report').replaceChildren(wrap);
+    const q = state.kpi ||= {days: 30, client: '', job: ''};
+    wrap.replaceChildren(h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Adding up the numbers…'));
+    let k;
+    try { k = await api('/api/kpis', {days: q.days, client: q.client || null, job: q.job || null}); } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
+    if (location.hash !== '#kpis' || state.kpi !== q) return;
+    const t = k.totals, go = (c) => { Object.assign(q, c); showKpis(); };
+    const pct = v => v == null ? '—' : (v < 10 ? v.toFixed(1) : Math.round(v)) + '%';
+    const plural = (n, w) => `${fmt(n)} ${w}${n === 1 ? '' : 's'}`;
+    const clientName = k.client_name || (q.client === '_none' ? 'Other' : q.client);
+    const crumbs = [h('button', {type: 'button', class: 'crumb' + (!q.client ? ' on' : ''), onclick: () => go({client: '', job: ''})}, 'All clients')];
+    if (q.client) crumbs.push(h('span', {class: 'sep', 'aria-hidden': 'true'}, '›'), h('button', {type: 'button', class: 'crumb' + (!q.job ? ' on' : ''), onclick: () => go({job: ''})}, clientName));
+    if (q.job) crumbs.push(h('span', {class: 'sep', 'aria-hidden': 'true'}, '›'), h('span', {class: 'crumb on'}, q.job));
+    const opts = [...k.clients.map(c => [c.key, c.name])];
+    if (q.client && !opts.some(o => o[0] === q.client)) opts.push([q.client, clientName]);
+    const sel = h('select', {'aria-label': 'Client', onchange: e => go({client: e.target.value, job: ''})},
+      h('option', {value: ''}, 'All clients'), ...opts.map(([v, n]) => h('option', {value: v, selected: q.client === v ? '' : null}, n)));
+    const scope = q.job ? `job ${q.job}` : q.client ? clientName : 'every client';
+    const tile = (v, label, sub, cls) => h('div', {class: 'ktile' + (cls ? ' ' + cls : '')}, h('span', {}, label), h('b', {}, v), sub ? h('em', {}, sub) : null);
+    const s = kpiSeries(k.trend, k.days);
+    const chartBlock = (title, note, key, o) => h('div', {class: 'kcard'}, h('h3', {}, title), h('p', {}, note),
+      s.some(p => p[key]) ? kpiChart(s.map(p => ({v: p[key], label: p.label, short: p.short})), {label: title, ...o}) : h('div', {class: 'kzero'}, o.zero || 'None in this period'));
+    const n0 = v => fmt(Math.round(v));
+    const empty = !t.reports;
+    const top = Math.max(1, ...k.categories.map(c => c.count));
+    const tableRow = (cells, onclick, label) => h('tr', {class: onclick ? 'go' : '', tabindex: onclick ? '0' : null, title: label || null, onclick, onkeydown: onclick ? e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onclick(); } } : null}, cells.map((c, i) => h('td', {}, i === 0 ? h('b', {}, c) : c)));
+    const heads = ['Reports', 'Errors caught', 'Stopped before client', 'Reached client', 'Sent on time', 'Inspected', 'Rejected', 'Reject rate', 'On hold'];
+    const cellsOf = r => [fmt(r.reports), fmt(r.caught), fmt(r.stopped), r.reached ? h('span', {class: 'badn'}, fmt(r.reached)) : '0', pct(r.on_time_pct), fmt(r.inspected), fmt(r.rejected), pct(r.rate), r.hold ? h('span', {class: 'badn'}, fmt(r.hold)) : '0'];
+    const toPeriods = job => { state.periodQuery = {kind: k.days > 7 ? 'month' : 'week', day: k.end, job}; location.hash = 'periods'; };
+    wrap.replaceChildren(...[
+      h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'KPIs'), h('div', {class: 'meta'}, `Reporting numbers for ${scope}, ${k.label}.`))),
+      h('div', {class: 'kbar'},
+        h('nav', {class: 'crumbs', 'aria-label': 'Drill down'}, ...crumbs),
+        h('div', {class: 'kfilters'}, sel, h('div', {class: 'pseg'}, [[7, '7 days'], [30, '30 days'], [90, '90 days'], [365, '12 months']].map(([d, l]) => h('button', {type: 'button', class: q.days === d ? 'on' : '', 'aria-pressed': String(q.days === d), onclick: () => go({days: d})}, l))))),
+      empty ? h('section', {class: 'block'}, h('p', {class: 'note'}, `No daily reports for ${scope} in this period. Try a longer range${q.client ? ' or All clients' : ''}.`)) : null,
+      empty ? null : h('div', {class: 'khero'},
+        h('div', {}, h('b', {}, fmt(t.stopped)), h('span', {}, `errors stopped before they reached a client`), h('em', {}, !t.caught ? 'Nothing caught in this period.' : `${fmt(t.stopped)} of the ${fmt(t.caught)} errors caught were fixed before sending` + (t.stopped_must ? `, ${fmt(t.stopped_must)} of them must-fix.` : '.') + (t.waiting ? ` ${fmt(t.waiting)} ${t.waiting === 1 ? 'is' : 'are'} in reports not sent yet.` : ''))),
+        h('div', {class: t.reached ? 'warn' : 'good'}, h('b', {}, fmt(t.reached)), h('span', {}, t.reached === 1 ? 'error reached a client' : 'errors reached a client'), h('em', {}, t.reached ? `Still in reports that were sent. ${fmt(t.reached_must)} must-fix.` : 'Every report that went out was clean.'))),
+      empty ? null : h('div', {class: 'ktiles'},
+        tile(fmt(t.reports), 'Reports made', `${fmt(t.sent)} sent, ${fmt(t.unsent)} not sent yet`),
+        tile(pct(t.on_time_pct), 'Sent on time', t.sent ? `${fmt(t.on_time)} of ${fmt(t.sent)} by the next day` : 'None sent yet'),
+        tile(t.turnaround == null ? '—' : `${t.turnaround} h`, 'Upload to sent', 'Typical time from upload to sent'),
+        tile(fmt(t.jobs), q.job ? 'Job' : 'Jobs done', q.client ? null : plural(t.clients, 'client')),
+        tile(fmt(t.inspected), 'Parts inspected', null),
+        tile(fmt(t.certified), 'Accepted', null),
+        tile(fmt(t.rejected), 'Rejected', `Reject rate ${pct(t.rate)}`),
+        tile(fmt(t.hold), 'Still on hold', t.hold ? 'Not sent, needs a fix' : 'None', t.hold ? 'bad' : ''),
+        tile(fmt(t.corrected), 'Corrected before sending', `${fmt(t.uploads)} uploads in all`)),
+      empty ? null : h('div', {class: 'kcharts'},
+        chartBlock('Errors stopped before the client', k.days > 31 ? 'Per week' : 'Per day', 'stopped', {fmt: n0, zero: t.caught ? 'None fixed and sent yet' : 'Nothing caught in this period'}),
+        chartBlock('Errors that reached a client', 'Still in a report when it was sent', 'reached', {fmt: n0, bad: true, zero: 'None. Every report sent was clean.'}),
+        chartBlock('Reports made', k.days > 31 ? 'Per week' : 'Per day', 'reports', {fmt: n0}),
+        chartBlock('Parts inspected', k.days > 31 ? 'Per week' : 'Per day', 'inspected', {fmt: n0}),
+        chartBlock('Reject rate', 'Rejected out of inspected', 'rate', {pct: true, fmt: (v, ax) => ax ? (v < 10 ? v.toFixed(1) : Math.round(v)) + '%' : pct(v), min: 1})),
+      empty || !k.categories.length ? null : h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'What was caught'), h('p', {}, `By kind of error, from the first upload of each daily report for ${scope}.`)),
+        h('div', {class: 'ovbars'}, k.categories.map(c => h('div', {class: 'ovbar', title: `${c.kind}: ${fmt(c.count)}`}, h('span', {}, c.kind), h('div', {}, (() => { const i = h('i'); i.style.width = `${c.count / top * 100}%`; return i; })()), h('em', {}, fmt(c.count)))))),
+      !q.client && k.clients.length ? h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'By client'), h('p', {}, 'Click a client to see its jobs.')),
+        h('div', {class: 'tablewrap'}, h('table', {class: 'keys ktable'},
+          h('thead', {}, h('tr', {}, ['Client', 'Jobs', ...heads].map(x => h('th', {}, x)))),
+          h('tbody', {}, k.clients.map(c => tableRow([c.name, fmt(c.jobs), ...cellsOf(c)], () => go({client: c.key, job: ''}), `See ${c.name}`)))))) : null,
+      q.client && !q.job && k.jobs.length ? h('section', {class: 'block'}, h('header', {}, h('h2', {}, `${clientName} by job`), h('p', {}, 'Click a job to see its numbers.')),
+        h('div', {class: 'tablewrap'}, h('table', {class: 'keys ktable'},
+          h('thead', {}, h('tr', {}, ['Job', ...heads].map(x => h('th', {}, x)))),
+          h('tbody', {}, k.jobs.map(j => tableRow([j.job, ...cellsOf(j)], () => go({job: j.job}), `See ${j.job}`)))))) : null,
+      q.job ? h('section', {class: 'block'}, h('header', {}, h('h2', {}, `More on ${q.job}`)),
+        h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => toPeriods(q.job)}, `Open the ${k.days > 7 ? 'monthly' : 'weekly'} report`),
+          h('button', {type: 'button', class: 'btn small', onclick: () => go({job: ''})}, `Back to ${clientName}`))) : null,
     ].filter(Boolean));
   }
 

@@ -979,3 +979,53 @@ body{-webkit-font-smoothing:antialiased}
 .wins-bar b{font-size:20px;color:var(--ink);margin-right:2px;font-variant-numeric:tabular-nums}
 .wins-bar .allgood{color:var(--ok-ink);font-weight:600}
 @media (prefers-reduced-motion:reduce){.celebrate .finish-mark{animation:none}.steps-bar .meter i{transition:none}}
+
+/* ---------------- KPI dashboard */
+.kpis .kbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin:4px 0 18px}
+.kpis .crumbs{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:14px}
+.kpis .crumb{background:none;border:0;padding:4px 2px;font:inherit;color:var(--green);cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.kpis .crumb.on{color:var(--ink);font-weight:700;text-decoration:none;cursor:default}
+.kpis .crumbs .sep{color:var(--faint)}
+.kpis .kfilters{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.kpis .kfilters select{font:inherit;font-size:13px;padding:7px 10px;border:1px solid var(--btn-line);border-radius:8px;background:#fff;color:var(--ink);max-width:260px}
+.kpis .khero{display:grid;grid-template-columns:1.4fr 1fr;gap:14px;margin-bottom:14px}
+.kpis .khero > div{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px 22px;display:flex;flex-direction:column;gap:2px}
+.kpis .khero b{font-size:40px;line-height:1.1;color:var(--green-dark)}
+.kpis .khero span{font-size:15px;font-weight:600}
+.kpis .khero em{font-style:normal;font-size:13px;color:var(--muted);margin-top:4px}
+.kpis .khero .good b{color:var(--ok-ink)}
+.kpis .khero .warn{border-color:#efb7ad;background:var(--high-bg)}
+.kpis .khero .warn b{color:var(--high-ink)}
+.kpis .ktiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin-bottom:18px}
+.kpis .ktile{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:3px}
+.kpis .ktile span{font-size:12px;color:var(--muted);font-weight:600}
+.kpis .ktile b{font-size:22px;color:var(--ink)}
+.kpis .ktile em{font-style:normal;font-size:12px;color:var(--faint)}
+.kpis .ktile.bad b{color:var(--high-ink)}
+.kpis .kcharts{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;margin-bottom:18px}
+.kpis .kcard{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px 8px}
+.kpis .kcard h3{margin:0;font-size:14px}
+.kpis .kcard p{margin:2px 0 6px;font-size:12px;color:var(--faint)}
+.kchart{width:100%;height:auto;display:block}
+.kchart .grid{stroke:var(--line-2);stroke-width:1}
+.kchart .ax{font-size:10px;fill:var(--faint)}
+.kchart .bar path{fill:var(--green)}
+.kchart .bar.bad path{fill:var(--high)}
+.kchart .bar .hit{fill:transparent}
+.kchart .bar:hover path{fill:var(--green-dark)}
+.kchart .bar.bad:hover path{fill:var(--high-ink)}
+.kchart .bar:hover .hit{fill:rgba(32,89,77,.06)}
+.kpis table.ktable td,.kpis table.ktable th{white-space:nowrap}
+.kpis table.ktable tr.go{cursor:pointer}
+.kpis table.ktable tr.go:hover td,.kpis table.ktable tr.go:focus-visible td{background:var(--ok-bg)}
+.kpis table.ktable tr.go:focus-visible{outline:2px solid var(--green);outline-offset:-2px}
+.kpis .badn{color:var(--high-ink);font-weight:700}
+.kpis .btns{display:flex;gap:8px;flex-wrap:wrap}
+@media (max-width:700px){
+  .kpis .khero{grid-template-columns:1fr}
+  .kpis .khero b{font-size:32px}
+  .kpis .ktiles{grid-template-columns:repeat(2,1fr)}
+  .kpis .kcharts{grid-template-columns:1fr}
+}
+.kchart .ax{font-size:11px}
+.kpis .kzero{height:110px;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--faint);background:#f8faf9;border-radius:8px;margin-bottom:8px}
