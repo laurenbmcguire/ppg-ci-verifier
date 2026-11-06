@@ -4,7 +4,7 @@ from datetime import date
 
 sys.path.insert(0, os.path.dirname(__file__))
 from hosting import kpis
-from test_autopilot import Autopilot
+import test_autopilot
 from eos_fixture import build, ROWS
 
 
@@ -33,7 +33,7 @@ class Totals(unittest.TestCase):
         self.assertEqual((t['reports'], t['rate'], t['on_time_pct'], t['turnaround']), (0, None, None, None))
 
 
-class Endpoint(Autopilot):
+class Endpoint(test_autopilot.Autopilot):
     test_only_sure_fixes_and_never_sends = test_remove_duplicate_rows = None   # reuse the server setup only
     def upload(self, name, day, rows):
         st, out = self.call('/api/spreadsheets/import', {'filename': name, 'content_base64': base64.b64encode(build(rows, day=day)).decode()})

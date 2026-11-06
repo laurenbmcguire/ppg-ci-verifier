@@ -104,7 +104,7 @@
     drawQueue(); drawClientTabs();
   }
   // an upload the app cleaned automatically is shown once: as its cleaned copy (the original opens from that report)
-  const visibleList = () => { const cleaned = new Set(state.list.map(r => r.review?.auto_from).filter(Boolean)); return state.list.filter(r => !cleaned.has(r.file_hash)); };
+  const visibleList = () => { const cleaned = new Set(state.list.flatMap(r => r.review?.auto_hidden || [])); return state.list.filter(r => !cleaned.has(r.file_hash)); };
   function drawQueue() {
     const q = state.search.trim().toLowerCase(), shown = visibleList();
     let rows = shown.filter(r => inClient(r.review?.job) && (!q || [r.filename, r.review?.job, r.review?.day].some(v => (v || '').toLowerCase().includes(q))));
@@ -352,17 +352,51 @@
   }
   // a report read from a PDF or Word file: say where the data came from, what to expect from fixes, and show its text
   // formatting-only fixes the app made by itself on upload
+  // Fix with AI: Claude resolves the picked issues (any number, or all) and the changes go into a new version
+  async function aiFix(keys, btn) {
+    if (!keys.length) return toast('Pick at least one issue.', true);
+    const hash = state.report.file_hash, label = btn?.textContent;
+    if (btn) { btn.disabled = true; btn.textContent = `Claude is fixing ${keys.length === 1 ? 'it' : keys.length}…`; }
+    toast(`Claude is working on ${keys.length === 1 ? 'this issue' : `${keys.length} issues`}. This takes a moment.`);
+    try {
+      const out = await api('/api/spreadsheets/ai-fix', {file_hash: hash, keys});
+      const s = out.ai_fixed || {}, did = (s.changed || []).length + (s.removed || []).length + (s.moved || []).length, ok = (s.fine || []).length, left = (s.left || []).length;
+      toast(`Done. ${[did ? `${did} change${did === 1 ? '' : 's'} made` : '', ok ? `${ok} confirmed fine` : '', left ? `${left} left for you` : ''].filter(Boolean).join(', ')}. See what Claude did at the top.`, !!left && !did && !ok);
+      await loadList();
+      if (out.item.file_hash !== hash) select(out.item.file_hash); else if (state.selected === hash) openReport(hash);
+    } catch (e) { toast(e.message, true); if (btn) { btn.disabled = false; btn.textContent = label; } }
+  }
+  function aiFixedBanner(r) {
+    const s = r.ai_fixed; if (!s) return null;
+    const item = (title, rows, fmt) => rows.length ? h('div', {class: 'aifx-group'}, h('b', {}, title), h('ul', {}, rows.map(x => h('li', {class: x.check ? 'check' : ''}, fmt(x), x.check ? h('em', {class: 'checkme'}, ' please double-check') : null)))) : null;
+    const checks = [...(s.changed || []), ...(s.removed || []), ...(s.moved || [])].filter(x => x.check).length;
+    return h('div', {class: 'aifixed'},
+      h('div', {class: 'autofmt-top'}, h('span', {class: 'autofmt-mark ai', 'aria-hidden': 'true'}, 'AI'),
+        h('div', {}, h('b', {}, `Fixed with AI: ${s.asked} issue${s.asked === 1 ? '' : 's'} you picked`),
+          h('span', {}, `Done by Claude ${ago(s.made_at)}.` + (checks ? ` ${checks} of its changes are its best judgment: please double-check those.` : ''))),
+        s.from_hash && s.from_hash !== r.file_hash ? h('button', {type: 'button', class: 'linkish small', onclick: () => select(s.from_hash)}, 'Open the version before') : null),
+      item('Changed', s.changed || [], x => h('span', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(x.sheet, x.cell)}, `${x.sheet} ${x.cell}`), `: ${showWs(x.before)} → ${showWs(x.after)}. ${x.reason}`)),
+      item('Rows taken out', s.removed || [], x => `${x.sheet} row ${x.row}: ${x.reason}`),
+      item('Rows moved', s.moved || [], x => `${x.sheet} row ${x.row} → ${x.to_sheet}: ${x.reason}`),
+      item('Checked and fine as is', s.fine || [], x => `${x.text} ${x.reason}`),
+      item('Left for you', s.left || [], x => `${x.text} (${x.why})`));
+  }
   function autoFmtBanner(r) {
     const a = r.auto_formatting; if (!a || !a.count) return null;
     const kinds = Object.entries(a.kinds || {}).map(([k, n], i) => `${i ? k : k[0].toUpperCase() + k.slice(1)}: ${n}`).join(', ');
+    const onlyFmt = a.formatting === a.count || (a.formatting == null && !(a.removed_rows || []).length && Object.keys(a.kinds || {}).every(k => /capital|spaces|hidden|number stored/.test(k)));
+    const rows = a.removed_rows || [];
     return h('div', {class: 'autofmt'},
       h('div', {class: 'autofmt-top'}, h('span', {class: 'autofmt-mark', 'aria-hidden': 'true'}, '✓'),
-        h('div', {}, h('b', {}, `Fixed automatically: ${a.count} formatting issue${a.count === 1 ? '' : 's'}`),
-          h('span', {}, `${kinds}. Only how the values were typed changed; the values themselves are the same.`))),
-      h('ul', {class: 'fmtexamples'}, (a.examples || []).map(f => h('li', {},
+        h('div', {}, h('b', {}, onlyFmt ? `Fixed automatically: ${a.count} formatting issue${a.count === 1 ? '' : 's'}` : `Cleaned automatically: ${a.count} change${a.count === 1 ? '' : 's'} the app was sure about`),
+          h('span', {}, `${kinds}. ` + (onlyFmt ? 'Only how the values were typed changed; the values themselves are the same.' : 'Nothing the app was unsure about was changed; those are listed for a person below.')))),
+      (a.examples || []).length ? h('ul', {class: 'fmtexamples'}, a.examples.map(f => h('li', {},
         h('code', {}, showWs(f.before)), h('span', {class: 'arrow', 'aria-label': 'became'}, ' → '), h('code', {}, showWs(f.after)),
         h('span', {class: 'fmtkind'}, f.kind),
-        h('button', {type: 'button', class: 'linkish', title: 'Show this cell in the spreadsheet', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`)))),
+        h('button', {type: 'button', class: 'linkish', title: 'Show this cell in the spreadsheet', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`)))) : null,
+      rows.length ? h('p', {class: 'autofmt-rows'}, `Took out ${rows.length} exact duplicate row${rows.length === 1 ? '' : 's'}: `, rows.slice(0, 6).map(x => `${x.sheet} row ${x.row}`).join(', ') + (rows.length > 6 ? ` and ${rows.length - 6} more` : '') + '. Rows below moved up.') : null,
+      (a.changes || []).length > (a.examples || []).length ? h('details', {class: 'autofmt-all'}, h('summary', {}, `See all ${a.changes.length} cell changes`),
+        h('ul', {}, a.changes.map(f => h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`), `: ${showWs(f.before)} → ${showWs(f.after)} (${f.kind})`)))) : null,
       a.from_hash ? h('button', {type: 'button', class: 'linkish small', onclick: () => select(a.from_hash)}, 'Open the original upload') : null);
   }
   function docBanner(r) {
@@ -395,7 +429,7 @@
         h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download report'),
         h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
     const status = h('div', {class: 'rstatus'},
-      docBanner(r), autoFmtBanner(r),
+      docBanner(r), autoFmtBanner(r), aiFixedBanner(r),
       h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
       h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)),
       h('div', {id: 'cleanoffer'}));
@@ -2087,12 +2121,7 @@
       h('button', {type: 'button', class: 'btn small', onclick: () => removeRows([[issue.sheet, Number(issue.row)]], `Took out ${issue.sheet} row ${issue.row}`)}, 'Take out this row')));
     if (!fx.length && !isDupRow(issue) && state.aiOn) kids.push(h('div', {class: 'choice'},
       h('span', {}, 'No automatic fix for this one yet.'),
-      h('button', {type: 'button', class: 'btn small', onclick: async e => {
-        e.target.disabled = true; e.target.textContent = 'Claude is writing a fix…';
-        try { await api('/api/spreadsheets/ai-fixes', {file_hash: state.report.file_hash}); const d = await api('/api/spreadsheets/fixes', {file_hash: state.report.file_hash});
-          state.fixes = d.proposals || []; state.aiFix = d.ai || {}; drawFixes(); drawSide();
-          if (!fixesFor(issue).length) toast('Claude could not find a safe change for this one. If it looks right to you, choose "It\'s fine as is".', true);
-        } catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Let Claude write a fix'; } }}, 'Let Claude write a fix')));
+      state.aiOn ? h('button', {type: 'button', class: 'btn small', onclick: e => aiFix([issue.key], e.target)}, 'Fix with AI') : null));
     return h('div', {class: 'choices'}, h('b', {class: 'choices-h'}, 'How to fix it'), ...kids,
       h('div', {class: 'choice'}, h('span', {}, kids.length ? 'Or, if the value is actually right:' : 'If the value is actually right:'),
         h('button', {type: 'button', class: 'btn small', onclick: next}, 'It\'s fine as is')));
@@ -2249,20 +2278,21 @@
         h('p', {}, issues.length ? `${left} of ${issues.length} still open, grouped by severity and type. Click one to see it in the sheet.`
           + (rv.verify?.status === 'done' ? ' Double-checked by Claude.' : state.verifying ? ' Claude is double-checking…' : '')
           : dismissed.length ? 'Nothing left: Claude checked every flagged item and none are real problems.' : 'Nothing flagged by the checks, SharePoint, the usual-day comparison or AI.'),
-        left ? h('div', {class: 'right'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => focusIssue(Math.max(0, issues.findIndex(i => !done.has(i.key))))},
+        left ? h('div', {class: 'right'}, state.aiOn ? h('button', {type: 'button', class: 'btn small ai', title: 'Claude fixes every open issue and tells you what it did', onclick: e => aiFix(issues.filter(i => !done.has(i.key)).map(i => i.key), e.target)}, `Fix everything with AI`) : null,
+          h('button', {type: 'button', class: 'btn primary small', onclick: () => focusIssue(Math.max(0, issues.findIndex(i => !done.has(i.key))))},
           left < issues.length ? 'Next open issue' : 'Start with the first')) : null));
       const summary = errorSummary(issues, done);
       if (summary) block.append(summary);
       if (sel.size) {
         const picked = issues.filter(i => sel.has(i.key)), ready = picked.filter(i => fixesFor(i).some(f => f.state !== 'rejected') || isDupRow(i)).length;
         block.append(h('div', {class: 'selbar issel'},
-          h('span', {}, h('b', {}, `${picked.length} selected`), ` · ${ready} with a suggested fix` + (picked.length > ready ? (state.aiOn ? `, Claude will write the other ${picked.length - ready}` : `, ${picked.length - ready} without one`) : '')),
+          h('span', {}, h('b', {}, `${picked.length} selected`), ` · ${ready} with a suggested fix` + (state.aiOn ? '. AI can fix any of them.' : picked.length > ready ? `, ${picked.length - ready} without one` : '')),
           h('button', {type: 'button', class: 'btn ghost small', onclick: () => { sel.clear(); draw(); }}, 'Clear'),
           picked.some(i => done.has(i.key)) ? h('button', {type: 'button', class: 'btn small', onclick: () => { const k = picked.map(i => i.key); sel.clear(); setDone(k, false); drawSteps(); drawCleanOffer(); }}, 'Mark not reviewed') : null,
           picked.some(i => !done.has(i.key)) ? h('button', {type: 'button', class: 'btn small', onclick: () => { const k = picked.map(i => i.key); sel.clear(); setDone(k, true); toast(`${k.length} marked reviewed.`); drawSteps(); drawCleanOffer(); }},
             `Mark ${picked.length === 1 ? 'it' : picked.length} reviewed`) : null,
-          ready ? h('button', {type: 'button', class: 'btn primary small', onclick: e => fixSelected(e.target)}, `Fix ${picked.length === 1 ? 'it' : ready === picked.length ? `all ${ready}` : ready}`)
-            : state.aiOn ? h('button', {type: 'button', class: 'btn primary small', onclick: e => fixSelected(e.target)}, 'Ask Claude to fix') : null));
+          ready ? h('button', {type: 'button', class: 'btn small', onclick: e => fixSelected(e.target)}, `Make the ${ready === 1 ? 'suggested fix' : `${ready} suggested fixes`}`) : null,
+          state.aiOn ? h('button', {type: 'button', class: 'btn primary small ai', onclick: e => { const k = picked.map(i => i.key); sel.clear(); aiFix(k, e.target); }}, `Fix ${picked.length === 1 ? 'it' : picked.length} with AI`) : null));
       }
       for (const [sev, label] of SEVERITIES) {
         const ofSev = issues.filter(i => i.severity === sev); if (!ofSev.length) continue;

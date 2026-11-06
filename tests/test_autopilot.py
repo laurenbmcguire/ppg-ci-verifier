@@ -65,6 +65,7 @@ class Autopilot(unittest.TestCase):
         self.assertEqual(again['cleaned'], 0)                              # a report is cleaned once
 
     def test_remove_duplicate_rows(self):
+        os.environ['PPG_AUTOFORMAT'] = '0'; self.addCleanup(os.environ.pop, 'PPG_AUTOFORMAT', None)   # the manual way
         rows = [tuple(r) for r in ROWS]
         rows[4] = rows[2]
         st, up = self.call('/api/spreadsheets/import', {'filename': '2230-OWENS-BASCO - EOS - 2026-10-07.xlsx',

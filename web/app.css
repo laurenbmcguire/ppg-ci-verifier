@@ -1058,3 +1058,20 @@ body[data-page=reports] .mnav .mup,body[data-page=reports] label.nav[for=file-in
 .autofmt .fmtexamples{margin:8px 0 6px 32px}
 .autofmt .fmtkind{background:#fff}
 .autofmt > .linkish{margin-left:32px;font-size:13px}
+.autofmt-rows{margin:6px 0 4px 32px;color:var(--muted)}
+.autofmt-all{margin:4px 0 6px 32px}
+.autofmt-all summary{cursor:pointer;color:var(--green);font-weight:600;font-size:13px}
+.autofmt-all ul{margin:6px 0 0;padding-left:18px;font-size:13px;max-height:240px;overflow:auto}
+/* Fix with AI */
+.btn.ai{border-color:#7b61c9;color:#5b3fb0}
+.btn.primary.ai{background:#5b3fb0;border-color:#5b3fb0;color:#fff}
+.aifixed{background:#f6f3fd;border:1px solid #ddd3f5;border-radius:10px;padding:12px 16px;margin:0 0 12px;font-size:14px}
+.aifixed .autofmt-top{align-items:flex-start}
+.aifixed .autofmt-top > button{margin-left:auto;font-size:13px}
+.autofmt-mark.ai{background:#5b3fb0}
+.aifx-group{margin:8px 0 0 32px}
+.aifx-group b{font-size:13px}
+.aifx-group ul{margin:4px 0 0;padding-left:18px;font-size:13px;color:var(--ink)}
+.aifx-group li{margin:2px 0}
+.aifx-group .checkme{font-style:normal;color:#9a6a00;font-weight:600}
+.autofmt-mark.ai{font-size:10px;letter-spacing:.02em}

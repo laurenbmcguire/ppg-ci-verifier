@@ -121,6 +121,17 @@ def summarize(result, with_issues=True, use_verdicts=True):
                 x['verdict'], x['verdict_reason'], x['fixable'] = v.get('verdict'), v.get('reason'), v.get('fixable')
             (dismissed if v and v.get('verdict') == 'not_an_issue' else kept).append(x)
         issues = kept
+    # issues Claude (asked by the reviewer) confirmed are fine: shown under dismissed with the reason
+    accepted = result.get('accepted_issues') or []
+    if accepted:
+        keep = []
+        for x in issues:
+            hit = next((a for a in accepted if a.get('code') == x.get('code') and (a.get('text') == x.get('text') or (a.get('sheet') == x.get('sheet') and a.get('row') == x.get('row') and a.get('row') is not None))), None)
+            if hit:
+                dismissed.append(dict(x, verdict='not_an_issue', verdict_reason='Claude checked: ' + str(hit.get('reason') or '')))
+            else:
+                keep.append(x)
+        issues = keep
     issues.sort(key=lambda x: RANK.get(x['severity'], 1))
     counts = {k: sum(1 for x in issues if x['severity'] == k) for k in RANK}
     status = 'hold' if counts['high'] else 'check' if counts['medium'] or counts['low'] else 'clear'
@@ -134,7 +145,7 @@ def summarize(result, with_issues=True, use_verdicts=True):
                usual=dict(status=bl.get('status') or 'not_checked', message=bl.get('message')),
                ai=dict(status=ai.get('status') or 'not_run', summary=ai.get('summary'), message=ai.get('message')),
                fixed_from=(result.get('fixed_from') or {}).get('filename'), fixes_applied=len(result.get('fixes_applied') or []),
-               auto_from=(result.get('auto_formatting') or {}).get('from_hash'),
+               auto_hidden=(result.get('auto_formatting') or {}).get('hidden') or [x for x in [(result.get('auto_formatting') or {}).get('from_hash')] if x],
                verify=dict(status=verify.get('status') or 'not_run', dismissed=len(dismissed), message=verify.get('message')),
                approved=(result.get('approval') or {}).get('by'),
                review_state=(result.get('review_request') or {}).get('status'),

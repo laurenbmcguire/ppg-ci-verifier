@@ -590,6 +590,7 @@ class SpreadsheetInbox:
             fixed_result.pop('check_hash', None); fixed_result.pop('checked_at', None)
             fixed_result['fixed_from'] = dict(file_hash=file_hash, filename=item['filename'], version=item.get('version'), changes=record['changes'])
             if result.get('source_document'): fixed_result['source_document'] = result['source_document']   # still came from that PDF / Word file
+            if result.get('accepted_issues'): fixed_result['accepted_issues'] = result['accepted_issues']     # still confirmed fine
             new_item = self.save_check(db, fixed_result)
         return new_item
     def download(self, file_hash):
@@ -627,7 +628,7 @@ class SpreadsheetInbox:
             raw=files_for(self.root).get('uploads/'+file_hash+suffix)
             if hashlib.sha256(raw).hexdigest()!=file_hash:raise ValueError('Stored original integrity mismatch.')
             previous=result.get('sharepoint') or {}
-            keep={k:result[k] for k in ('approval','sent','fixes_applied','fixed_from','review_request','source_document') if result.get(k)}
+            keep={k:result[k] for k in ('approval','sent','fixes_applied','fixed_from','review_request','source_document','accepted_issues','auto_formatting','ai_fixed') if result.get(k)}
             fresh=self.ingest(result['filename'],raw)
             if keep:
                 fresh=self._update(file_hash,lambda r:r.update(keep))
