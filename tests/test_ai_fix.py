@@ -59,6 +59,21 @@ class AIFix(test_autopilot.Autopilot):
             self.assertTrue(s['removed']); self.assertEqual(s['left'], [])
             self.assertEqual(self.issues(out['item']['file_hash']), [])                   # nothing left: fixed or confirmed fine
 
+    def test_automatic_batches_keep_one_record(self):
+        keys = [i['key'] for i in self.issues(self.h)]
+        self.assertGreater(len(keys), 1)
+        with patch.object(ai_review, '_post', fake_post):
+            st, out = self.call('/api/spreadsheets/ai-fix', {'file_hash': self.h, 'keys': keys[:1], 'auto': True})
+            self.assertEqual(st, 200, out); first = out['ai_fixed']; self.assertTrue(first['auto'])
+            h2 = out['item']['file_hash']
+            rest = [i['key'] for i in self.issues(h2)]
+            st, out = self.call('/api/spreadsheets/ai-fix', {'file_hash': h2, 'keys': rest, 'auto': True})
+            self.assertEqual(st, 200, out); s = out['ai_fixed']
+            self.assertTrue(s['auto']); self.assertEqual(s['rounds'], 2)
+            self.assertEqual(s['asked'], 1 + len(rest)); self.assertEqual(s['from_hash'], self.h)
+            self.assertEqual(s['changed'][:len(first['changed'])], first['changed'])   # round one is still listed
+            self.assertEqual(self.issues(out['item']['file_hash']), [])
+
     def test_nothing_picked_and_ai_off(self):
         st, out = self.call('/api/spreadsheets/ai-fix', {'file_hash': self.h, 'keys': []})
         self.assertEqual(st, 409); self.assertIn('Pick', out['error'])

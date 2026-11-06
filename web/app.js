@@ -372,7 +372,7 @@
     const checks = [...(s.changed || []), ...(s.removed || []), ...(s.moved || [])].filter(x => x.check).length;
     return h('div', {class: 'aifixed'},
       h('div', {class: 'autofmt-top'}, h('span', {class: 'autofmt-mark ai', 'aria-hidden': 'true'}, 'AI'),
-        h('div', {}, h('b', {}, `Fixed with AI: ${s.asked} issue${s.asked === 1 ? '' : 's'} you picked`),
+        h('div', {}, h('b', {}, s.auto ? `Fixed automatically by Claude: ${s.asked} issue${s.asked === 1 ? '' : 's'} looked at` : `Fixed with AI: ${s.asked} issue${s.asked === 1 ? '' : 's'} you picked`),
           h('span', {}, `Done by Claude ${ago(s.made_at)}.` + (checks ? ` ${checks} of its changes are its best judgment: please double-check those.` : ''))),
         s.from_hash && s.from_hash !== r.file_hash ? h('button', {type: 'button', class: 'linkish small', onclick: () => select(s.from_hash)}, 'Open the version before') : null),
       item('Changed', s.changed || [], x => h('span', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(x.sheet, x.cell)}, `${x.sheet} ${x.cell}`), `: ${showWs(x.before)} → ${showWs(x.after)}. ${x.reason}`)),
@@ -2490,7 +2490,36 @@
   async function upload(files) {
     let last = null;
     for (const file of files) last = (await uploadOne(file)) || last;
-    if (last) { await loadList(); select(last.file_hash); showResult(last.file_hash); }
+    if (!last) return;
+    await loadList(); select(last.file_hash);
+    const before = last.file_hash, after = await autoFixAll(before);
+    if (after !== before) { await loadList(); select(after); } else if (state.aiOn && state.selected === after) await openReport(after);   // same version, new notes on it
+    showResult(after, true);
+  }
+  // After an upload the app fixes everything it can by itself: the sure cleanups already ran on the server, then Claude
+  // works through every open issue (in batches, so a report with hundreds of errors is still covered). The person only
+  // sees what is left, one at a time.
+  async function autoFixAll(hash) {
+    if (!state.aiOn) return hash;
+    const row = h('div', {class: 'uploading'}), say = t => row.replaceChildren(h('span', {class: 'spin'}), h('span', {}, ' ' + t));
+    $('uploads').prepend(row);
+    const asked = new Set();
+    let cur = hash;
+    try {
+      for (let round = 1; round <= 8; round++) {
+        const data = await api('/api/spreadsheet?id=' + cur);
+        const open = (data.review?.issues || []).filter(i => i.severity !== 'info' && !asked.has(i.key) && !asked.has(i.text));
+        if (!open.length) break;
+        const batch = open.slice(0, 100);
+        batch.forEach(i => { asked.add(i.key); asked.add(i.text); });
+        say(open.length > 100 ? `Fixing everything it can: part ${round}, ${fmt(open.length)} issues to go…` : `Fixing everything it can: ${open.length === 1 ? '1 issue' : `${fmt(open.length)} issues`}…`);
+        let out;
+        try { out = await api('/api/spreadsheets/ai-fix', {file_hash: cur, keys: batch.map(i => i.key), auto: true}); }
+        catch (e) { if (round === 1) toast(`Claude could not fix the issues this time (${e.message}). The sure cleanups were still made; the rest are listed for you.`, true); break; }
+        cur = out.item.file_hash;
+      }
+    } finally { row.remove(); }
+    return cur;
   }
   async function uploadOne(file) {
     const meter = h('b'), text = h('span', {}, `Preparing ${file.name}…`);
@@ -2525,24 +2554,37 @@
   window.addEventListener('drop', e => { e.preventDefault(); dragDepth = 0; $('drop').hidden = true; const files = [...(e.dataTransfer?.files || [])]; if (files.length) upload(files); });
 
   // ---------------- after-upload summary
-  async function showResult(hash) {
+  async function showResult(hash, fresh) {
     let data;
-    try { data = state.report?.file_hash === hash ? state.report : await api('/api/spreadsheet?id=' + hash); } catch (e) { return; }
-    const rv = data.review, dialog = $('result-dialog');
-    const top = (rv.issues || []).filter(i => i.severity === 'high' || i.severity === 'medium').slice(0, 5);
-    const title = rv.status === 'hold' ? `${rv.counts.high} thing${rv.counts.high === 1 ? '' : 's'} must be fixed before this goes out`
-      : rv.status === 'check' ? 'A few things to look at' : 'Nothing flagged';
+    try { data = !fresh && state.report?.file_hash === hash ? state.report : await api('/api/spreadsheet?id=' + hash); } catch (e) { return; }
+    const rv = data.review, dialog = $('result-dialog'), plural = (n, w) => `${fmt(n)} ${w}${n === 1 ? '' : 's'}`;
+    const a = data.auto_formatting || {}, s = data.ai_fixed || {};
+    const aiDid = (s.changed || []).length + (s.removed || []).length + (s.moved || []).length, aiFine = (s.fine || []).length;
+    const checks = [...(s.changed || []), ...(s.removed || []), ...(s.moved || [])].filter(x => x.check).length;
+    const left = (rv.issues || []).filter(i => i.severity !== 'info'), must = left.filter(i => i.severity === 'high').length;
+    const fixedLines = [
+      a.count ? `Cleaned up ${plural(a.count, 'value')} the app was sure about (capitals, spaces, duplicates and the like).` : null,
+      aiDid ? `Claude fixed ${plural(aiDid, 'problem')}` + ((s.removed || []).length || (s.moved || []).length ? `, including ${[(s.removed || []).length ? plural(s.removed.length, 'row') + ' taken out' : '', (s.moved || []).length ? plural(s.moved.length, 'row') + ' moved to the right shift' : ''].filter(Boolean).join(' and ')}` : '') + '.' : null,
+      aiFine ? `Claude checked ${plural(aiFine, 'flag')} and found ${aiFine === 1 ? 'it is' : 'they are'} fine as is.` : null,
+    ].filter(Boolean);
+    const walk = async () => { dialog.close();
+      for (let i = 0; i < 40 && !(state.report?.file_hash === hash && state.fixes); i++) await new Promise(r => setTimeout(r, 250));
+      if (state.report?.file_hash === hash) { const done = reviewedSet(); await focusIssue(Math.max(0, walkIssues().findIndex(i => !done.has(i.key)))); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); } };
+    const title = left.length ? (fixedLines.length ? `Fixed what I could. ${plural(left.length, 'thing')} need${left.length === 1 ? 's' : ''} you` : `${plural(left.length, 'thing')} to look at`)
+      : fixedLines.length ? 'All fixed. Nothing left for you' : 'Nothing flagged';
     dialog.replaceChildren(h('div', {class: 'inner'},
       h('div', {class: `tag tag-big tag-${rv.status}`}, STATUS[rv.status], h('small', {}, statusNote(rv))),
       h('h2', {id: 'result-title'}, title),
       h('p', {class: 'note'}, `${rv.job || data.filename}, ${shortDay(rv.day)}. ${fmt(rv.scans)} rows, ${fmt(rv.inspected)} inspected, ${fmt(rv.rejected)} rejected.`),
-      top.length ? h('ul', {}, top.map(i => h('li', {}, h('span', {class: 'sev ' + i.severity}), h('span', {}, i.text)))) : null),
-      h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dialog.close()}, 'Close'),
-        h('button', {type: 'button', class: 'btn primary', onclick: async () => { dialog.close();
-          if (rv.status === 'clear') return;
-          for (let i = 0; i < 40 && !(state.report?.file_hash === hash && state.fixes); i++) await new Promise(r => setTimeout(r, 250));
-          if (state.report?.file_hash === hash) focusIssue(0); }},
-          rv.status === 'clear' ? 'Open report' : 'Go through the issues')));
+      fixedLines.length ? h('div', {class: 'res-fixed'}, h('b', {}, 'What was fixed'), h('ul', {}, fixedLines.map(t => h('li', {}, t))),
+        h('p', {class: 'quiet'}, 'Every change is listed at the top of the report, with a link to the version before.' + (checks ? ` ${plural(checks, 'change')} ${checks === 1 ? 'is' : 'are'} Claude's best judgment and marked "please double-check".` : ''))) : null,
+      left.length ? h('div', {class: 'res-left'}, h('b', {}, 'What needs you'),
+        h('p', {}, (must ? `${plural(must, 'must-fix item')} before it goes out. ` : '') + `I'll show each one in the spreadsheet, tell you what's wrong and give you the choices: make the suggested change, type the right value, or say it's fine as is.`),
+        h('ul', {}, left.slice(0, 4).map(i => h('li', {}, h('span', {class: 'sev ' + i.severity}), h('span', {}, i.text)))),
+        left.length > 4 ? h('p', {class: 'quiet'}, `and ${fmt(left.length - 4)} more.`) : null)
+        : h('p', {}, 'Check the totals, then approve and send when you are ready.')),
+      h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dialog.close()}, left.length ? 'Later' : 'Open report'),
+        left.length ? h('button', {type: 'button', class: 'btn primary', onclick: walk}, `Walk me through ${left.length === 1 ? 'it' : `the ${fmt(left.length)}`}`) : null));
     dialog.showModal();
   }
   $('result-dialog').addEventListener('click', e => { if (e.target === $('result-dialog')) $('result-dialog').close(); });

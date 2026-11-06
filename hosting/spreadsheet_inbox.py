@@ -595,6 +595,8 @@ class SpreadsheetInbox:
             fixed_result['fixed_from'] = dict(file_hash=file_hash, filename=item['filename'], version=item.get('version'), changes=record['changes'])
             if result.get('source_document'): fixed_result['source_document'] = result['source_document']   # still came from that PDF / Word file
             if result.get('accepted_issues'): fixed_result['accepted_issues'] = result['accepted_issues']     # still confirmed fine
+            for k in ('auto_formatting', 'ai_fixed'):   # what was already fixed stays on the report as it moves on
+                if result.get(k) and k not in fixed_result: fixed_result[k] = result[k]
             new_item = self.save_check(db, fixed_result)
         return new_item
     def download(self, file_hash):

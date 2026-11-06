@@ -818,7 +818,7 @@ class handler(BaseHTTPRequestHandler):
                     return self.fail(404, 'Report not found.')
                 from hosting import ai_fix
                 try:
-                    fixed, summary = ai_fix.run(self, file_hash, keys)
+                    fixed, summary = ai_fix.run(self, file_hash, keys, auto=payload.get('auto') is True)
                 except ai_fix.AIFixError as exc:
                     raise Conflict(str(exc))
                 return self.send(200, encode_json({'item': fixed, 'ai_fixed': summary}))

@@ -11,7 +11,7 @@ class AIFixError(ValueError):
     pass
 
 
-def run(h, file_hash, keys=None, opener=None):
+def run(h, file_hash, keys=None, opener=None, auto=False):
     from hosting import ai_review
     from hosting.spreadsheet_inbox import SpreadsheetInbox, validate_changes
     from hosting.fixes import relocate_rows, FixError
@@ -65,6 +65,17 @@ def run(h, file_hash, keys=None, opener=None):
                    removed=[dict(sheet=r['sheet'], row=r['row'], reason=r['reason'], check=r['confidence'] == 'check') for r in rows if not r.get('to_sheet')],
                    moved=[dict(sheet=r['sheet'], row=r['row'], to_sheet=r['to_sheet'], reason=r['reason'], check=r['confidence'] == 'check') for r in rows if r.get('to_sheet')],
                    fine=[dict(text=f['text'], reason=f['reason']) for f in fine], left=left)
+    prev = item.get('ai_fixed')
+    if prev:   # several rounds (a big report is fixed in batches): one running record of everything Claude did
+        asked_now = {i.get('text') for i in issues}
+        for k in ('changed', 'removed', 'moved', 'fine'):
+            summary[k] = (prev.get(k) or []) + summary[k]
+        summary['left'] = summary['left'] + [x for x in prev.get('left') or [] if x.get('text') not in asked_now]
+        summary['asked'] = (prev.get('asked') or 0) + summary['asked']
+        summary['from_hash'] = prev.get('from_hash') or file_hash
+        summary['rounds'] = (prev.get('rounds') or 1) + 1
+        auto = auto and prev.get('auto', False)
+    summary['auto'] = bool(auto)
     def mark(r):
         r['accepted_issues'] = (r.get('accepted_issues') or []) + fine
         r['ai_fixed'] = summary
