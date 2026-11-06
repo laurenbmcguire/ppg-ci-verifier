@@ -509,7 +509,11 @@
     const pending = (state.fixes || []).filter(f => !edits[editId(f.sheet, f.cell)] && !dec[f.id]);
     if (!pending.length || r.approval || (r.sent || []).some(x => x.sent) || dismissed.includes(hash) || state.busy) { slot.replaceChildren(); return; }
     const groups = new Map();
-    for (const f of pending) { const k = f.reason || 'Other corrections'; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(f); }
+    // the same kind of fix for different values is one group: 95 part-number spellings are one line, not 95
+    const kindOf = reason => String(reason || 'Other corrections').replace(/"[^"]*"|“[^”]*”/g, '"…"').replace(/\d+/g, '#');
+    const LABELS = [[/same part, different capitals/i, 'Part numbers typed with different capitals: each one is changed to match the other rows for the same part.']];
+    const labelOf = (key, items) => items.length === 1 ? items[0].reason || key : (LABELS.find(([re]) => re.test(key)) || [])[1] || key.replace(/"…"/g, 'a value').replace(/#/g, 'some');
+    for (const f of pending) { const k = kindOf(f.reason); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(f); }
     const show = v => v === '' || v == null ? '(blank)' : `“${v}”`;
     const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
     const sheetCount = new Set(pending.map(f => f.sheet)).size;
@@ -517,8 +521,8 @@
       h('div', {class: 'cleanhead'},
         h('h2', {id: 'clean-title'}, 'Want me to clean this data for you?'),
         h('p', {}, `I can make ${plural(pending.length, 'change')} across ${plural(sheetCount, 'sheet')}. Here is exactly what cleaning means for this report:`)),
-      h('ul', {class: 'cleanlist'}, [...groups].map(([reason, items]) => h('li', {},
-        h('b', {}, reason), h('span', {class: 'count'}, plural(items.length, 'cell')),
+      h('ul', {class: 'cleanlist'}, [...groups].map(([key, items]) => h('li', {},
+        h('b', {}, labelOf(key, items)), h('span', {class: 'count'}, plural(items.length, 'cell')),
         h('details', {}, h('summary', {}, items.length === 1 ? 'See the change' : `See all ${items.length} changes`),
           h('ul', {}, items.map(f => h('li', {},
             h('button', {type: 'button', class: 'linkish', title: 'Show this cell in the spreadsheet', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`),
