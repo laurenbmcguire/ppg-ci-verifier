@@ -765,11 +765,26 @@
           const rows = dupIssues.map(i => [i.sheet, Number(i.row)]); const k = readyChanges();
           if (rows.length) removeRows(rows); else applyFixes(k.accepted, k.dec, k.edits, {download: false}); }], skippable: true});
     }
-    if (sugg.length) steps.push({id: 'suggest', title: `Fill in ${plural(sugg.length, 'blank detail')}`, say: 'These were left blank. This is what they most likely should say:',
-      body: [h('ul', {class: 'sugglist'}, sugg.map(f => h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`), ': ', h('code', {}, f.after), ' ',
-        h('span', {class: 'quiet'}, String(f.reason || '').replace(/^.*?Suggested: [^.]*\.\s*/, '')))))],
-      go: [sugg.length === 1 ? 'Use it' : 'Use them', () => { const d = store.get(decisionsKey(), {}); for (const f of sugg) d[f.id] = {state: 'accepted', after: f.after}; store.set(decisionsKey(), d);
-        toast('Step done: blank details filled in. Saving and moving to the next step…'); const k = readyChanges(); applyFixes(k.accepted, k.dec, k.edits, {download: false}); }], skippable: true});
+    if (sugg.length) {
+      state.suggOff ||= new Set();
+      const off = state.suggOff, on = sugg.filter(f => !off.has(f.id));
+      const labelOf = f => (String(f.reason || '').match(/^"?(.+?)"? is blank/) || [])[1] || 'This detail';
+      const whyOf = f => { const t = String(f.reason || '').replace(/^.*?Suggested: /, '').slice(String(f.after).length).replace(/^[.\s]*\(?|\)?\.?\s*$/g, ''); return t ? t[0].toUpperCase() + t.slice(1) + '.' : ''; };
+      const fill = on.length === sugg.length ? (sugg.length === 1 ? 'Fill in this blank' : sugg.length === 2 ? 'Fill in both blanks' : `Fill in all ${sugg.length} blanks`) : on.length ? `Fill in the ${on.length === 1 ? 'one' : on.length} ticked` : 'Fill in the ticked ones';
+      steps.push({id: 'suggest', title: `Fill in ${plural(sugg.length, 'blank detail')}`,
+        say: sugg.length === 1 ? 'This cell was left empty. Here is what I would put in it:' : 'These cells were left empty. Here is what I would put in each one. Untick any you want to leave blank:',
+        body: [h('ul', {class: 'sugglist'}, sugg.map(f => h('li', {},
+          sugg.length > 1 ? h('input', {type: 'checkbox', checked: !off.has(f.id), 'aria-label': `Fill in ${labelOf(f)}`, onchange: e => { e.target.checked ? off.delete(f.id) : off.add(f.id); drawCleanOffer(); }}) : null,
+          h('b', {}, labelOf(f)), ' ', h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `(${f.sheet} ${f.cell})`),
+          h('span', {class: 'arrow', 'aria-label': 'becomes'}, ' empty → '), h('code', {}, f.after),
+          whyOf(f) ? h('span', {class: 'quiet'}, ' ' + whyOf(f)) : null)))],
+        go: [fill, () => {
+          if (!on.length) return toast('Tick at least one, or choose Skip this step.', true);
+          const d = store.get(decisionsKey(), {}); for (const f of sugg) d[f.id] = off.has(f.id) ? {state: 'rejected'} : {state: 'accepted', after: f.after}; store.set(decisionsKey(), d);
+          toast(`Step done: ${plural(on.length, 'blank')} filled in${off.size ? `, ${plural(sugg.length - on.length, 'one')} left empty` : ''}. Saving and moving to the next step…`);
+          const k = readyChanges(); applyFixes(k.accepted, k.dec, k.edits, {download: false}); }],
+        skipLabel: sugg.length === 1 ? 'Leave it blank' : 'Leave them all blank', skippable: true});
+    }
     const walkOpen = open.filter(i => !dupIssues.includes(i) || skipped.includes('sure'));
     if (walkOpen.length) {
       const first = walkOpen[0], list = walkIssues(), cur = walking ? list[state.issueNav] : null;
@@ -802,7 +817,7 @@
           current.say ? h('p', {}, current.say) : null),
           h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn primary', onclick: current.go[1]}, current.go[0]),
             current.alt ? h('button', {type: 'button', class: 'btn', onclick: current.alt[1]}, current.alt[0]) : null,
-            current.skippable ? h('button', {type: 'button', class: 'btn ghost', onclick: () => skip(current.id)}, 'Skip this step') : null)),
+            current.skippable ? h('button', {type: 'button', class: 'btn ghost', onclick: () => skip(current.id)}, current.skipLabel || 'Skip this step') : null)),
         ...(current.body || []).filter(Boolean)) : null));
   }
   // ---------------- Check → Clean → Approve → Send: where the report stands and the one next thing to do

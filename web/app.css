@@ -1119,3 +1119,7 @@ body[data-page=reports] .mnav .mup,body[data-page=reports] label.nav[for=file-in
 .guide .btns{display:flex;gap:8px;flex-wrap:wrap}
 .walk-note{margin:0 0 10px;padding:8px 10px;border-radius:8px;background:#eaf5ef;color:#1d5c40;font-size:13px;line-height:1.4}
 #issues .typesel,#issues .iitem > input[type=checkbox],#issues .selbar{display:none}
+.guide .sugglist{list-style:none;padding:0;margin:0;display:grid;gap:8px;font-size:14px}
+.guide .sugglist li{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
+.guide .sugglist input{margin:0 4px 0 0;transform:translateY(2px)}
+.guide .sugglist .arrow{color:var(--muted)}
