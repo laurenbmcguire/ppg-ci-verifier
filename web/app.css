@@ -1103,3 +1103,19 @@ body[data-page=reports] .mnav .mup,body[data-page=reports] label.nav[for=file-in
 #result-dialog .res-fixed li, #result-dialog .res-left li { border: 0; background: none; padding: 2px 0; box-shadow: none; }
 .cleanhead-yes{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
 .cleanhead-yes > .btn{flex:none}
+/* the step-by-step guide: the one place to accept changes */
+.guide{gap:12px}
+.guide-steps{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px;color:var(--muted)}
+.guide-steps li{display:flex;align-items:center;gap:6px}
+.guide-steps .gs-dot{width:20px;height:20px;border-radius:50%;display:inline-grid;place-items:center;font-size:11px;font-weight:700;border:1.5px solid var(--line);background:#fff}
+.guide-steps li.done{color:var(--green)}
+.guide-steps li.done .gs-dot{background:var(--green);border-color:var(--green);color:#fff}
+.guide-steps li.now{color:var(--ink,#1d2b28);font-weight:600}
+.guide-steps li.now .gs-dot{border-color:var(--green);color:var(--green)}
+.guide-steps li.skipped{text-decoration:line-through;text-decoration-color:#bbb}
+.guide-steps li.skipped button{text-decoration:none}
+.guide-now{border-top:1px solid var(--line);padding-top:12px;display:grid;gap:10px}
+.guide-kicker{margin:0 0 2px;font-size:12px;font-weight:600;color:var(--green)}
+.guide .btns{display:flex;gap:8px;flex-wrap:wrap}
+.walk-note{margin:0 0 10px;padding:8px 10px;border-radius:8px;background:#eaf5ef;color:#1d5c40;font-size:13px;line-height:1.4}
+#issues .typesel,#issues .iitem > input[type=checkbox],#issues .selbar{display:none}
