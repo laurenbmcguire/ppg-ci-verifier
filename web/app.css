@@ -1141,3 +1141,6 @@ table.plan tr.needs-you td{background:#fdf7ea}
 table.plan details.plan-more summary{cursor:pointer;color:var(--green);font-weight:600;list-style:none}
 table.plan details.plan-more[open]{text-align:left}
 table.plan details.plan-more .bulk-list{min-width:280px}
+table.plan .tk{width:28px;padding-right:0}
+table.plan .tk input{margin:2px 0 0;width:16px;height:16px;accent-color:var(--green)}
+table.plan tr.off td:not(.tk){opacity:.45}
