@@ -10,6 +10,16 @@ from hosting import sharepoint
 
 
 class McpTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ['PPG_AUTOFORMAT'] = '0'   # these tests walk through the manual fix steps
+        sup = super(); getattr(sup, 'setUpClass', lambda: None)()
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop('PPG_AUTOFORMAT', None)
+        sup = super(); getattr(sup, 'tearDownClass', lambda: None)()
+
     def setUp(self):
         from api.index import handler
         from legacy_storage_fake import PostgresWorkspace

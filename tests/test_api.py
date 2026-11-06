@@ -68,17 +68,18 @@ class ApiTests(unittest.TestCase):
         status, rep = self.call('POST', '/api/v1/reports', upload, key)
         self.assertEqual(status, 201, rep); rid = rep['id']
         self.assertEqual(rep['job'], '2230-OWENS-BASCO'); self.assertIn(rep['status'], ('hold', 'check', 'clear'))
+        # formatting-only fixes are made on upload: the report that comes back is the cleaned copy
+        self.assertTrue(rep['auto_formatting']['count']); self.assertTrue(rep['corrected_from'])
+        oid = rep['corrected_from']['id']
         status, again = self.call('POST', '/api/v1/reports', upload, key)
-        self.assertEqual(status, 200); self.assertTrue(again['already_uploaded'])
+        self.assertEqual(status, 200); self.assertTrue(again['already_uploaded']); self.assertEqual(again['id'], rid)
         status, lst = self.call('GET', '/api/v1/reports?job=2230-OWENS-BASCO', key=key)
         self.assertEqual(lst['reports'][0]['id'], rid)
-        # fixes → corrected copy
+        status, orig = self.call('GET', f'/api/v1/reports/{oid}', key=key)
+        self.assertEqual(orig['corrected_copy']['id'], rid)
         status, fx = self.call('GET', f'/api/v1/reports/{rid}/fixes', key=key)
-        self.assertEqual(status, 200); self.assertTrue(fx['fixes'])
-        status, fixed = self.call('POST', f'/api/v1/reports/{rid}/fixes', {'accept': 'all'}, key)
-        self.assertEqual(status, 201, fixed); self.assertEqual(fixed['corrected_from']['id'], rid)
-        status, orig = self.call('GET', f'/api/v1/reports/{rid}', key=key)
-        self.assertEqual(orig['corrected_copy']['id'], fixed['id'])
+        self.assertEqual(status, 200); self.assertFalse([f for f in fx['fixes'] if f.get('sure')])   # nothing sure left to do
+        fixed = rep
         status, body = self.call('GET', f'/api/v1/reports/{fixed["id"]}/download', key=key, raw=True)
         self.assertEqual(status, 200); self.assertTrue(body.startswith(b'PK'))
         # approve, preview, send

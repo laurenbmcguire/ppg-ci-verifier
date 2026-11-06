@@ -134,6 +134,7 @@ def summarize(result, with_issues=True, use_verdicts=True):
                usual=dict(status=bl.get('status') or 'not_checked', message=bl.get('message')),
                ai=dict(status=ai.get('status') or 'not_run', summary=ai.get('summary'), message=ai.get('message')),
                fixed_from=(result.get('fixed_from') or {}).get('filename'), fixes_applied=len(result.get('fixes_applied') or []),
+               auto_from=(result.get('auto_formatting') or {}).get('from_hash'),
                verify=dict(status=verify.get('status') or 'not_run', dismissed=len(dismissed), message=verify.get('message')),
                approved=(result.get('approval') or {}).get('by'),
                review_state=(result.get('review_request') or {}).get('status'),

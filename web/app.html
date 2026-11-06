@@ -35,9 +35,9 @@
     <div>
       <p class="eyebrow">PPG Verifier</p>
       <h1>End-of-shift reports</h1>
-      <p>Upload a report, let the app clean it, then approve and send. Your original file is never changed.</p>
+      <p>Upload a report (Excel, CSV, PDF or Word), let the app clean it, then approve and send. Your original file is never changed.</p>
     </div>
-    <label class="upload-button primary" for="file-input">Upload report<input id="file-input" type="file" accept=".xlsx,.csv" multiple></label>
+    <label class="upload-button primary" for="file-input">Upload report<input id="file-input" type="file" accept=".xlsx,.csv,.pdf,.docx" multiple></label>
   </header>
 
   <nav class="clienttabs" id="clienttabs" role="tablist" aria-label="Clients" hidden></nav>
@@ -66,7 +66,7 @@
   <footer>PPG Verifier · Nothing is sent to a client until someone approves it · Original files are never changed</footer>
 </main>
 
-<div class="drop" id="drop" hidden><div><strong>Drop to check</strong><span>Excel (.xlsx) or CSV</span></div></div>
+<div class="drop" id="drop" hidden><div><strong>Drop to check</strong><span>Excel (.xlsx), CSV, PDF or Word (.docx)</span></div></div>
 <div class="toast" id="toast" role="status" hidden></div>
 <dialog id="result-dialog" class="sheet" aria-labelledby="result-title"></dialog>
 <script src="/app.js"></script>

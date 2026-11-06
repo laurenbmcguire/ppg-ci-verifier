@@ -40,9 +40,11 @@ class Autopilot(unittest.TestCase):
                                                         'content_base64': base64.b64encode(build(rows)).decode()})
         self.assertEqual(st, 200, up)
         h = up['item']['file_hash']
+        self.assertEqual(up['item']['auto_formatting']['count'], 1)       # formatting is fixed on upload already
+        self.assertEqual(up['item']['auto_formatting']['examples'][0]['kind'], 'extra spaces')
         st, props = self.call('/api/spreadsheets/fixes', {'file_hash': h})
         self.assertTrue(all('sure' in p for p in props['proposals']))
-        self.assertTrue(any(p['sure'] for p in props['proposals']))
+        self.assertFalse(any(p['sure'] for p in props['proposals']))
         st, off = self.call('/api/autopilot', {'run': True})
         self.assertEqual((st, off['ran']), (200, False))                  # off by default: nothing happens
         self.assertTrue(self.call('/api/autopilot', {'on': True})[1]['on'])
@@ -53,11 +55,8 @@ class Autopilot(unittest.TestCase):
             st, out = self.call('/api/autopilot', {'run': True, 'force': True})
         self.assertEqual(st, 200, out)
         last = out['last']
-        self.assertEqual(last['cleaned'], 1, last)
-        cleaned = next(a for a in last['actions'] if a['did'] == 'cleaned')
-        st, items = 200, self.call('/api/spreadsheets/fixes', {'file_hash': cleaned['file_hash']})[1]
-        self.assertFalse(any(p['sure'] for p in items['proposals']))       # every sure fix is in the corrected copy
-        with urllib.request.urlopen(self.base + '/api/spreadsheet?id=' + cleaned['file_hash'], timeout=30) as r:
+        self.assertEqual(last['cleaned'], 0, last)                         # nothing sure left after the upload cleanup
+        with urllib.request.urlopen(self.base + '/api/spreadsheet?id=' + h, timeout=30) as r:
             item = json.loads(r.read())
         self.assertFalse(item.get('approval')); self.assertFalse(any(x.get('sent') for x in item.get('sent') or []))
         with patch.object(idx, 'datetime', wraps=idx.datetime) as fake:

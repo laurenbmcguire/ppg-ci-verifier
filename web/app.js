@@ -78,7 +78,7 @@
     const cl = state.clients || [];
     bar.hidden = !cl.length; if (rail) rail.hidden = !cl.length; if (!cl.length) return;
     const ofKey = (r, key) => key === '' || (key === '_none' ? !clientOf(r.review?.job) : clientOf(r.review?.job) === key);
-    const need = key => state.list.filter(r => ofKey(r, key) && r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
+    const need = key => visibleList().filter(r => ofKey(r, key) && r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
     const go = key => { location.hash = key ? 'c=' + encodeURIComponent(key) : ''; };
     const tab = (key, label, title) => { const n = need(key);
       return h('button', {type: 'button', role: 'tab', class: state.client === key ? 'on' : '', 'aria-selected': String(state.client === key), title: title || null, onclick: () => go(key)},
@@ -103,18 +103,20 @@
     state.list = data.spreadsheets || [];
     drawQueue(); drawClientTabs();
   }
+  // an upload the app cleaned automatically is shown once: as its cleaned copy (the original opens from that report)
+  const visibleList = () => { const cleaned = new Set(state.list.map(r => r.review?.auto_from).filter(Boolean)); return state.list.filter(r => !cleaned.has(r.file_hash)); };
   function drawQueue() {
-    const q = state.search.trim().toLowerCase();
-    let rows = state.list.filter(r => inClient(r.review?.job) && (!q || [r.filename, r.review?.job, r.review?.day].some(v => (v || '').toLowerCase().includes(q))));
+    const q = state.search.trim().toLowerCase(), shown = visibleList();
+    let rows = shown.filter(r => inClient(r.review?.job) && (!q || [r.filename, r.review?.job, r.review?.day].some(v => (v || '').toLowerCase().includes(q))));
     if (state.filter === 'attention') rows = rows.filter(r => !r.review || r.review.status !== 'clear');
     if (state.filter === 'review') rows = rows.filter(r => r.review?.review_state === 'waiting');
     document.querySelectorAll('.segmented button').forEach(b => b.classList.toggle('on', b.dataset.filter === state.filter));
-    const mine = state.list.filter(r => inClient(r.review?.job));
+    const mine = shown.filter(r => inClient(r.review?.job));
     const attention = mine.filter(r => !r.review || r.review.status !== 'clear' && !r.review.sent_at).length, waiting = mine.filter(r => r.review?.review_state === 'waiting').length;
     const label = {attention: 'To do', all: 'All', review: 'For review'};
     document.querySelectorAll('.segmented button').forEach(b => { const n = b.dataset.filter === 'attention' ? attention : b.dataset.filter === 'review' ? waiting : 0;
       b.replaceChildren(label[b.dataset.filter] || b.textContent, n ? h('i', {class: 'segn'}, String(n)) : null); });
-    const todo = state.list.filter(r => r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
+    const todo = shown.filter(r => r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
     document.title = (todo ? `(${todo}) ` : '') + 'PPG Verifier';
     const list = $('queue-list'); list.replaceChildren();
     const client = (state.clients || []).find(c => c.key === state.client);
@@ -348,6 +350,31 @@
     try { await navigator.clipboard.writeText(text); toast('Client summary copied: totals only, with no scan times, inspector names or internal checks.'); }
     catch (e) { toast('Your browser blocked copying. Try again, or allow clipboard access for this site.', true); }
   }
+  // a report read from a PDF or Word file: say where the data came from, what to expect from fixes, and show its text
+  // formatting-only fixes the app made by itself on upload
+  function autoFmtBanner(r) {
+    const a = r.auto_formatting; if (!a || !a.count) return null;
+    const kinds = Object.entries(a.kinds || {}).map(([k, n], i) => `${i ? k : k[0].toUpperCase() + k.slice(1)}: ${n}`).join(', ');
+    return h('div', {class: 'autofmt'},
+      h('div', {class: 'autofmt-top'}, h('span', {class: 'autofmt-mark', 'aria-hidden': 'true'}, '✓'),
+        h('div', {}, h('b', {}, `Fixed automatically: ${a.count} formatting issue${a.count === 1 ? '' : 's'}`),
+          h('span', {}, `${kinds}. Only how the values were typed changed; the values themselves are the same.`))),
+      h('ul', {class: 'fmtexamples'}, (a.examples || []).map(f => h('li', {},
+        h('code', {}, showWs(f.before)), h('span', {class: 'arrow', 'aria-label': 'became'}, ' → '), h('code', {}, showWs(f.after)),
+        h('span', {class: 'fmtkind'}, f.kind),
+        h('button', {type: 'button', class: 'linkish', title: 'Show this cell in the spreadsheet', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`)))),
+      a.from_hash ? h('button', {type: 'button', class: 'linkish small', onclick: () => select(a.from_hash)}, 'Open the original upload') : null);
+  }
+  function docBanner(r) {
+    const d = r.source_document; if (!d) return null;
+    const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+    const found = d.tables ? `${plural(d.tables, 'table')} with ${plural(d.rows, 'row')}` : 'no tables, only text';
+    return h('div', {class: 'docbanner'},
+      h('div', {}, h('b', {}, `Read from a ${d.type} file: ${d.filename}`),
+        h('span', {}, `Found ${found}${d.pages ? ` on ${plural(d.pages, 'page')}` : ''}. ` +
+          (d.tables ? `They are checked like any report. Fixes come back as an Excel copy; your ${d.type} file is not changed.` : 'There is nothing to check as a table, but you can read the text below or ask Claude about it.'))),
+      d.text ? h('details', {}, h('summary', {}, `Show the ${d.type} text`), h('pre', {class: 'doctext'}, d.text + (d.text_truncated ? '\n…' : ''))) : null);
+  }
   function drawReport() {
     const r = state.report, rv = r.review;
     document.body.classList.add('reportmode');
@@ -368,6 +395,7 @@
         h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download report'),
         h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
     const status = h('div', {class: 'rstatus'},
+      docBanner(r), autoFmtBanner(r),
       h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
       h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)),
       h('div', {id: 'cleanoffer'}));
@@ -1199,7 +1227,7 @@
     if (!dlg) { dlg = h('dialog', {id: 'finish-dialog', class: 'fixer finishdlg', 'aria-labelledby': 'finish-title'}); document.body.append(dlg);
       dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); }); }
     const r = state.report, handled = p.items || (state.fixes || []).length + walkIssues().length;
-    const nextRep = state.list.find(x => x.file_hash !== r.file_hash && x.review && x.review.status !== 'clear' && !x.review.sent_at && inClient(x.review.job));
+    const nextRep = visibleList().find(x => x.file_hash !== r.file_hash && x.review && x.review.status !== 'clear' && !x.review.sent_at && inClient(x.review.job));
     dlg.replaceChildren(h('div', {class: 'fixer-wait celebrate'},
       confetti(),
       h('div', {class: 'finish-mark'}, '✓'),
@@ -2369,7 +2397,8 @@
     const row = h('div', {class: 'uploading'}, text, h('div', {class: 'meter'}, meter));
     $('uploads').prepend(row);
     const problem = /\.(xls|xlsm|xlsb)$/i.test(file.name) ? `${file.name} is an older or macro Excel file. In Excel choose File, Save As, Excel Workbook (.xlsx), then upload that copy.`
-      : !/\.(csv|xlsx)$/i.test(file.name) ? `${file.name} is not an Excel (.xlsx) or CSV file.` : file.size < 1 ? `${file.name} is empty.` : null;
+      : /\.doc$/i.test(file.name) ? `${file.name} is an older Word file. In Word choose File, Save As, Word Document (.docx), then upload that copy.`
+      : !/\.(csv|xlsx|pdf|docx)$/i.test(file.name) ? `${file.name} is not a file the app can check. Upload Excel (.xlsx), CSV, PDF or Word (.docx).` : file.size < 1 ? `${file.name} is empty.` : null;
     if (problem) { row.classList.add('failed'); text.textContent = problem; return null; }
     try {
       const hash = await sha256(file);
@@ -2436,7 +2465,7 @@
     const local = iso => iso ? new Date(iso).toLocaleDateString('en-CA', {timeZone: 'America/Chicago'}) : '';
     const cleaned = state.list.filter(r => r.review?.fixed_from && local(r.received_at) === today).length;
     const sent = state.list.filter(r => local(r.review?.sent_at) === today).length;
-    const waiting = state.list.filter(r => r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
+    const waiting = visibleList().filter(r => r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
     return h('div', {class: 'wins-bar'},
       h('span', {}, h('b', {}, String(cleaned)), ` report${cleaned === 1 ? '' : 's'} cleaned today`),
       h('span', {}, h('b', {}, String(sent)), ` sent today`),

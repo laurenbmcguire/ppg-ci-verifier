@@ -1342,6 +1342,19 @@ class handler(BaseHTTPRequestHandler):
                         body = encode_json({'item': updated})
                 except Exception:
                     debug_log()  # the upload itself was saved; the comparison can be re-run from the UI
+            if route in ('/api/spreadsheets/upload/finish', '/api/spreadsheets/import'):
+                try:   # formatting-only fixes are made automatically; the cleaned copy is what opens
+                    item = json.loads(body)['item']
+                    if item.get('idempotent') and item.get('auto_formatted_to'):   # the same file again: open its cleaned copy
+                        with self.store().session() as directory:
+                            body = encode_json({'item': dict(SpreadsheetInbox(directory).get(item['auto_formatted_to']), idempotent=True)})
+                    elif not item.get('idempotent') and not item.get('fixed_from'):
+                        from hosting import autoformat
+                        cleaned = autoformat.run(self, item['file_hash'])
+                        if cleaned:
+                            body = encode_json({'item': cleaned})
+                except Exception:
+                    debug_log()  # the upload itself was saved; the formatting can still be fixed from the report
             if route in ('/api/spreadsheets/upload/finish', '/api/spreadsheets/import') and ai_review_configured():
                 try:
                     item = json.loads(body)['item']

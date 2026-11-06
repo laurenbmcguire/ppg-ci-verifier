@@ -71,6 +71,7 @@ def report(item):
         corrected_copy=applied[0] and dict(id=applied[0]['fixed_file_hash'], filename=applied[0]['fixed_filename']),
         corrected_from=item.get('fixed_from') and dict(id=item['fixed_from']['file_hash'], filename=item['fixed_from']['filename'],
                                                        changes=item['fixed_from'].get('changes')),
+        auto_formatting=item.get('auto_formatting') and {k: item['auto_formatting'][k] for k in ('count', 'kinds', 'examples')},
         download=f'/api/v1/reports/{item["file_hash"]}/download')
 
 
@@ -153,8 +154,18 @@ def op_upload(h, name, content):
         raise ApiError(413, 'Reports up to 4 MB can be uploaded here.')
     with h.store().session() as directory:
         item = SpreadsheetInbox(directory).ingest(name, raw)
+    if item.get('idempotent') and item.get('auto_formatted_to'):   # the same file again: point at its cleaned copy
+        item = dict(_get(h, item['auto_formatted_to']), idempotent=True)
     if not item.get('idempotent'):
-        _after_change(h, item['file_hash'], ('sharepoint', 'baseline', 'ai'))
+        _after_change(h, item['file_hash'], ('sharepoint', 'baseline'))
+        from hosting import autoformat
+        try:
+            cleaned = autoformat.run(h, item['file_hash'])   # formatting-only fixes are made automatically
+        except Exception:
+            cleaned = None
+        if cleaned:
+            item = cleaned
+        _after_change(h, item['file_hash'], ('ai',))
     return bool(item.get('idempotent')), dict(report(_get(h, item['file_hash'])), already_uploaded=bool(item.get('idempotent')))
 
 
