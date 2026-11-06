@@ -361,6 +361,101 @@ def run(sources, cached, sheets, detail, finding, hidden=None):
                         message=f'Part number "{shortest}" is "{longest}" without its leading zero(s). Excel drops leading zeros from numbers; enter part numbers as text.')
 
 
+    _copied_count_blocks(detail, finding)
+    _blank_totals(sources, sheet_rows, detail_cells, finding)
+    _defect_without_reject(detail, finding)
+
+
+NO_DEFECT_WORDS = {'', 'none', 'n a', 'na', 'no', 'nil', 'nothing', 'no defect', 'no defects', 'no reject', 'no rejects', 'no issue',
+                   'no issues', 'not applicable', 'ok', 'good', 'pass', 'passed', '0'}
+
+
+def _copied_count_blocks(detail, finding):
+    """13. Six or more rows in a row with exactly the same counts, inside a report whose other rows differ.
+    That is what copying a row down looks like. A report where every row (or most rows) has the same count
+    is a fixed lot size, and zero rejects on every row proves nothing, so neither is flagged."""
+    tables = defaultdict(list)
+    for r in detail:
+        tables[(r['sheet'], r['table'])].append(r)
+    for rows in tables.values():
+        sig = [tuple(r['values'].get(f) for f in ('inspected', 'certified', 'rejected', 'reworked')) for r in rows]
+        if len(rows) < 8 or len(set(sig)) < 4:
+            continue
+        i = 0
+        while i < len(sig):
+            j = i
+            while j + 1 < len(sig) and sig[j + 1] == sig[i]:
+                j += 1
+            n, (ins, _, nok, _) = j - i + 1, sig[i]
+            if n >= 6 and n <= 0.6 * len(rows) and ins is not None and nok is not None and nok >= 2:
+                first, last = rows[i], rows[j]
+                finding('duplicate_count_block', first['sheet'], first['row'], first['columns'].get('rejected'),
+                        message=f'Rows {first["row"]} to {last["row"]} ({n} in a row) all show Inspected {ins} and Rejected {nok}. '
+                                f'Check they were counted and not copied down.')
+            i = j + 1
+
+
+def _total_label_field(value):
+    """Which quantity a 'Total ...' label cell is about (inspected / rejected / certified), or None."""
+    if not isinstance(value, str) or value.startswith('='):
+        return None
+    words = re.sub(r'[^a-z ]+', ' ', value.lower()).split()
+    if 'total' not in words or any(w in words for w in ('rate', 'percent', 'hours', 'hour', 'cost', 'labor', 'productivity', 'per')) and 'inspected' not in words:
+        return None
+    return ('inspected' if 'inspected' in words or 'sorted' in words else
+            'rejected' if {'suspect', 'rejected', 'reject', 'rejects', 'nok', 'ng', 'defects', 'defective'} & set(words) else
+            'certified' if {'ok', 'good', 'certified', 'accepted', 'passed'} & set(words) else None)
+
+
+def _filled(value):
+    """A number, a formula, or text that is a number."""
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        return value.strip().startswith('=') or bool(re.fullmatch(r'\s*-?[\d,]+(?:\.\d+)?\s*', value))
+    return True
+
+
+def _blank_totals(sources, sheet_rows, detail_cells, finding):
+    """14. A 'Total ...' label on a sheet with inspection rows, but nothing beside it or in the two rows under it."""
+    for title, rows in sources:
+        mine = sheet_rows.get(title)
+        if not mine:
+            continue
+        for rn, row in enumerate(rows, 1):
+            if (title, rn) in detail_cells:
+                continue
+            for c, value in enumerate(row):
+                field = _total_label_field(value)
+                known = [x['values'][field] for x in mine if x['values'].get(field) is not None] if field else []
+                if not known:
+                    continue
+                beside = False
+                for k in range(c + 1, min(len(row), c + 12)):
+                    if _filled(row[k]):
+                        beside = True
+                        break
+                    if isinstance(row[k], str) and row[k].strip():
+                        break   # the next label starts here
+                below = any(rn + d < len(rows) and c < len(rows[rn + d]) and _filled(rows[rn + d][c]) for d in (0, 1))
+                if not beside and not below:
+                    finding('total_row_blank', title, rn, _col(c),
+                            message=f'"{value.strip()}" in {_col(c)}{rn} has no number beside or under it, but the {len(known)} rows add up to {sum(known, Decimal(0))}.')
+
+
+def _defect_without_reject(detail, finding):
+    """15. A defect reason written on a row whose reject quantity is 0."""
+    zero = [r for r in detail if 'defect' in r['labels'] and r['values'].get('rejected') == 0]
+    given = [r for r in zero if (r['labels'].get('defect') or '').strip()
+             and re.sub(r'[^a-z0-9]+', ' ', r['labels']['defect'].lower()).strip() not in NO_DEFECT_WORDS
+             and r['labels']['defect'].strip().lower() not in PLACEHOLDERS]
+    if len(zero) >= 4 and len(given) >= 0.9 * len(zero):
+        return   # the column is filled on every row whatever the quantity, so it is not a reject reason
+    for r in given[:40]:
+        finding('defect_reject_mismatch', r['sheet'], r['row'], r['label_columns'].get('defect'),
+                message=f'Defect reason "{_clip(r["labels"]["defect"])}" is given but Rejected is 0. Was a reject left out?')
+
+
 def _col(index):
     letters, n = '', index + 1
     while n:

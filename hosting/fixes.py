@@ -85,6 +85,9 @@ def _num(text):
         return None
 
 
+SURE_SOURCES = ('SharePoint', 'Clean-up', 'Number as text')
+
+
 def proposals(result, filename, raw, sharepoint_rows=None):
     """List of proposed fixes: {id, sheet, cell, before, after, kind, reason, source, confidence}."""
     sources, cached = _sources(filename, raw)
@@ -92,7 +95,7 @@ def proposals(result, filename, raw, sharepoint_rows=None):
     detail = [r for r in records if r['table_kind'] == 'detail' and not r['is_total']]
     out, seen = [], set()
 
-    def add(sheet, cell, after, reason, source, confidence='high'):
+    def add(sheet, cell, after, reason, source, confidence='high', sure=None):
         if not sheet or not cell or len(out) >= MAX_PROPOSALS:
             return
         try:
@@ -106,8 +109,10 @@ def proposals(result, filename, raw, sharepoint_rows=None):
             return
         seen.add((sheet, cell))
         after_text = (str(Decimal(after).normalize()) if Decimal(after) != Decimal(after).to_integral_value() else str(int(Decimal(after)))) if kind == 'number' else str(after)
+        if sure is None:   # owner's rule: only certain, mechanical corrections are "sure"; guesses always go to a person
+            sure = confidence == 'high' and source in SURE_SOURCES
         out.append(dict(id=_pid(sheet, cell, after_text), sheet=sheet, cell=cell, before=_show(before), after=after_text,
-                        kind=kind, reason=reason, source=source, confidence=confidence))
+                        kind=kind, reason=reason, source=source, confidence=confidence, sure=bool(sure)))
 
     def text_cell(r, kind):
         letter = r['label_columns'].get(kind)
@@ -183,7 +188,7 @@ def proposals(result, filename, raw, sharepoint_rows=None):
             continue
         best = max(spellings.items(), key=lambda kv: (kv[1], kv[0] == kv[0].upper()))[0]
         if v != best:
-            add(r['sheet'], text_cell(r, 'part'), best, f'Part number written as "{best}" on {spellings[best]} other row(s); same part, different capitals.', 'Spelling')
+            add(r['sheet'], text_cell(r, 'part'), best, f'Part number written as "{best}" on {spellings[best]} other row(s); same part, different capitals.', 'Spelling', sure=True)   # only the capitals differ
 
     # 5. Numbers typed as text in quantity columns.
     for r in detail:

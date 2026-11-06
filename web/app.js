@@ -109,6 +109,13 @@
     if (state.filter === 'attention') rows = rows.filter(r => !r.review || r.review.status !== 'clear');
     if (state.filter === 'review') rows = rows.filter(r => r.review?.review_state === 'waiting');
     document.querySelectorAll('.segmented button').forEach(b => b.classList.toggle('on', b.dataset.filter === state.filter));
+    const mine = state.list.filter(r => inClient(r.review?.job));
+    const attention = mine.filter(r => !r.review || r.review.status !== 'clear' && !r.review.sent_at).length, waiting = mine.filter(r => r.review?.review_state === 'waiting').length;
+    const label = {attention: 'To do', all: 'All', review: 'For review'};
+    document.querySelectorAll('.segmented button').forEach(b => { const n = b.dataset.filter === 'attention' ? attention : b.dataset.filter === 'review' ? waiting : 0;
+      b.replaceChildren(label[b.dataset.filter] || b.textContent, n ? h('i', {class: 'segn'}, String(n)) : null); });
+    const todo = state.list.filter(r => r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
+    document.title = (todo ? `(${todo}) ` : '') + 'PPG Verifier';
     const list = $('queue-list'); list.replaceChildren();
     const client = (state.clients || []).find(c => c.key === state.client);
     if (client) {
@@ -316,6 +323,17 @@
     }
   }
 
+  // Totals only, ready to paste into the client email. Never scan times, inspector names or internal check results.
+  async function copyClientSummary() {
+    const r = state.report, rv = r.review || {}, n = v => v == null ? '—' : Number(v).toLocaleString('en-US');
+    const client = (state.clients || []).find(c => c.key === clientOf(rv.job))?.client;
+    const rate = rv.inspected ? ` (${(rv.rejected / rv.inspected * 100).toFixed(1)}%)` : '';
+    const text = [`${client ? client + ' · ' : ''}${rv.job || r.filename}`, `End-of-shift summary for ${dayLabel(rv.day)}`, '',
+      `Parts inspected: ${n(rv.inspected)}`, rv.certified != null ? `Accepted: ${n(rv.certified)}` : null, `Rejected: ${n(rv.rejected)}${rate}`, '',
+      'The full end-of-shift report is attached.'].filter(x => x !== null).join('\n');
+    try { await navigator.clipboard.writeText(text); toast('Client summary copied: totals only, with no scan times, inspector names or internal checks.'); }
+    catch (e) { toast('Your browser blocked copying. Try again, or allow clipboard access for this site.', true); }
+  }
   function drawReport() {
     const r = state.report, rv = r.review;
     document.body.classList.add('reportmode');
@@ -324,6 +342,7 @@
     const more = h('details', {class: 'more-menu'}, h('summary', {class: 'btn'}, 'More'),
       h('div', {class: 'menu'},
         !r.approval && (r.review_request || {}).status !== 'waiting' ? h('button', {type: 'button', onclick: e => { close(e); reviewForm('request'); }}, 'Send for review') : null,
+        h('button', {type: 'button', onclick: e => { close(e); copyClientSummary(); }}, 'Copy client summary for an email'),
         h('a', {href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename, onclick: close}, 'Download the original file')));
     const head = h('div', {class: 'rhead'},
       h('button', {type: 'button', class: 'back', onclick: () => { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }}, state.client ? `‹ ${clientName()} reports` : '‹ All reports'),
@@ -397,12 +416,15 @@
     const kids = [];
     if (issue) {
       const done = reviewedSet();
-      const markNext = () => { done.add(issue.key); store.set('rd-reviewed:' + state.report.file_hash, [...done]); updateFinish();
+      const markNext = () => { done.add(issue.key); store.set('rd-reviewed:' + state.report.file_hash, [...done]); updateFinish(); drawSteps(); drawCleanOffer();
         const nextOpen = list.findIndex((x, k) => k > idx && !done.has(x.key)); if (nextOpen >= 0) focusIssue(nextOpen); else { state.issueNav = null; drawSide(); toast('That was the last open issue.'); } };
       kids.push(h('div', {class: 'issuenav sev-' + issue.severity},
         h('div', {class: 'in-top'}, h('span', {class: 'sev ' + issue.severity}), h('b', {}, `Issue ${idx + 1} of ${list.length}`), h('span', {class: 'in-type'}, issueType(issue)),
           h('button', {type: 'button', class: 'btn ghost small', onclick: () => { state.issueNav = null; state.gridCell = null; drawGrid(); drawSide(); }}, 'Close')),
         h('p', {class: 'in-text'}, issue.text),
+        issue.sure === false ? h('p', {class: 'in-unsure'}, 'The app is not sure about this one, so a person has to look at it before the report can be approved.') : null,
+        issue.why ? h('p', {class: 'in-why'}, h('b', {}, 'Why it matters: '), issue.why) : null,
+        issue.fix && issue.fix !== issue.check ? h('p', {class: 'in-why'}, h('b', {}, 'What to do: '), issue.fix) : null,
         issue.check ? h('p', {class: 'hint'}, 'Check: ' + issue.check) : null,
         issue.verdict_reason ? h('p', {class: 'hint'}, 'Claude: ' + issue.verdict_reason) : null,
         !issue.sheet && !issue.row ? h('p', {class: 'hint'}, 'This one is about the report as a whole, not one cell.') : null,
@@ -529,8 +551,9 @@
     const slot = $('cleanoffer'); if (!slot || !state.report) return;
     const r = state.report, hash = r.file_hash, dismissed = store.get('rd-clean-no', []);
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
-    const pending = (state.fixes || []).filter(f => !edits[editId(f.sheet, f.cell)] && !dec[f.id]);
-    if (!pending.length || r.approval || (r.sent || []).some(x => x.sent) || dismissed.includes(hash) || state.busy) { slot.replaceChildren(); return; }
+    const undecided = (state.fixes || []).filter(f => !edits[editId(f.sheet, f.cell)] && !dec[f.id]);
+    const pending = undecided.filter(isSureFix), unsure = needsCheck();
+    if ((!pending.length && !unsure.total) || r.approval || (r.sent || []).some(x => x.sent) || dismissed.includes(hash) || state.busy) { slot.replaceChildren(); return; }
     const groups = new Map();
     // the same kind of fix for different values is one group: 95 part-number spellings are one line, not 95
     const kindOf = reason => String(reason || 'Other corrections').replace(/"[^"]*"|“[^”]*”/g, '"…"').replace(/\d+/g, '#');
@@ -540,25 +563,38 @@
     const show = v => v === '' || v == null ? '(blank)' : `“${v}”`;
     const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
     const sheetCount = new Set(pending.map(f => f.sheet)).size;
+    const checkList = unsure.total ? h('div', {class: 'unsure'},
+      h('h3', {}, `${plural(unsure.total, 'thing')} I'm not sure about: a person has to check ${unsure.total === 1 ? 'it' : 'these'}`),
+      h('p', {}, 'These are never changed automatically, and the report cannot be approved until each one is accepted, skipped or marked reviewed.'),
+      h('ul', {}, [...unsure.fixes.slice(0, 6).map(f => h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`),
+          `: maybe ${show(f.before)} should be ${show(f.after)}. ${f.reason || ''}`)),
+        ...unsure.issues.slice(0, Math.max(0, 6 - unsure.fixes.length)).map(i => h('li', {}, i.sheet ? h('b', {}, `${i.sheet}${i.cell ? ' ' + i.cell : i.row ? ' row ' + i.row : ''}: `) : null, i.message))]),
+      unsure.total > 6 ? h('p', {class: 'more'}, `and ${unsure.total - 6} more on the right.`) : null,
+      h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); const list = walkIssues(), at = list.findIndex(i => unsure.issues.includes(i)); if (at >= 0) focusIssue(at); else if (unsure.fixes[0]) showCell(unsure.fixes[0].sheet, unsure.fixes[0].cell); $('side')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, 'Check them now')) : null;
+    if (!pending.length) {
+      slot.replaceChildren(h('section', {class: 'cleanoffer', 'aria-labelledby': 'clean-title'}, h('div', {class: 'cleanhead'}, h('h2', {id: 'clean-title'}, 'Before this can be approved')), checkList));
+      return;
+    }
     slot.replaceChildren(h('section', {class: 'cleanoffer', 'aria-labelledby': 'clean-title'},
       h('div', {class: 'cleanhead'},
         h('h2', {id: 'clean-title'}, 'Want me to clean this data for you?'),
-        h('p', {}, `I can make ${plural(pending.length, 'change')} across ${plural(sheetCount, 'sheet')}. Here is exactly what cleaning means for this report:`)),
+        h('p', {}, `I'm sure about ${plural(pending.length, 'change')} across ${plural(sheetCount, 'sheet')}. Here is exactly what cleaning means for this report:`)),
       h('ul', {class: 'cleanlist'}, [...groups].map(([key, items]) => h('li', {},
         h('b', {}, labelOf(key, items)), h('span', {class: 'count'}, plural(items.length, 'cell')),
         h('details', {}, h('summary', {}, items.length === 1 ? 'See the change' : `See all ${items.length} changes`),
           h('ul', {}, items.map(f => h('li', {},
             h('button', {type: 'button', class: 'linkish', title: 'Show this cell in the spreadsheet', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`),
             `: ${show(f.before)} becomes ${show(f.after)}`, f.source === 'AI fix' ? h('em', {}, ' suggested by AI, check it') : null))))))),
+      checkList,
       h('ul', {class: 'cleanpromise'},
-        h('li', {}, 'Only the cells listed above change. Anything else flagged on the right still needs your eyes.'),
+        h('li', {}, 'Only the cells listed under the sure changes change. Anything you have to check is left exactly as it is.'),
         h('li', {}, 'Your original file is never touched. The cleaned copy is saved as a new version and checked again.'),
         h('li', {}, 'Nothing goes to the client until you approve and send it.')),
       h('div', {class: 'cleanbtns'},
         h('button', {type: 'button', class: 'btn primary', onclick: () => {
           const c = readyChanges(), all = [...c.accepted, ...pending];
           applyFixes(all, c.dec, c.edits, {download: false});
-        }}, `Yes, clean it (${pending.length})`),
+        }}, `Yes, make the ${plural(pending.length, 'sure change')}`),
         h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); $('side')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, 'Let me choose'),
         h('button', {type: 'button', class: 'btn ghost', onclick: () => { store.set('rd-clean-no', [...dismissed, hash].slice(-200)); slot.replaceChildren(); }}, 'Not now'))));
   }
@@ -569,15 +605,18 @@
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
     const pending = state.fixes ? state.fixes.filter(f => !edits[editId(f.sheet, f.cell)] && !dec[f.id]).length : null;
     const mustFix = (rv.counts || {}).high || 0;
-    const cleanDone = sent || approved || (pending === 0 && !mustFix);
+    const unsureLeft = state.fixes ? needsCheck().total : 0;
+    const sureN = state.fixes ? state.fixes.filter(f => isSureFix(f) && !edits[editId(f.sheet, f.cell)] && !dec[f.id]).length : 0;
+    const cleanDone = sent || approved || (pending === 0 && !mustFix && !unsureLeft);
     const list = [
       ['Check', true, rv.status === 'clear' ? 'Nothing flagged' : `${STATUS[rv.status] || 'Check'}: ${statusNote(rv)}`],
-      ['Clean', cleanDone, cleanDone ? 'Done' : pending ? `${pending} fix${pending === 1 ? '' : 'es'} ready` : mustFix ? `${mustFix} must-fix left` : 'Loading fixes…'],
+      ['Clean', cleanDone, cleanDone ? 'Done' : [sureN ? `${sureN} sure fix${sureN === 1 ? '' : 'es'} ready` : '', unsureLeft ? `${unsureLeft} for a person to check` : '',
+        !sureN && !unsureLeft && mustFix ? `${mustFix} must-fix left` : ''].filter(Boolean).join(', ') || 'Loading fixes…'],
       ['Approve', approved || sent, approved || sent ? 'Approved' : 'Not yet'],
       ['Send', sent, sent ? 'Sent to client' : 'Not sent'],
     ];
     const current = list.findIndex(x => !x[1]);
-    const next = current === 1 ? (pending ? 'Next: clean the data (see the box below), or pick fixes one by one on the right.' : 'Next: fix the must-fix issues on the right.')
+    const next = current === 1 ? (sureN ? 'Next: clean the data (see the box below), or pick fixes one by one on the right.' : unsureLeft ? 'Next: check the items the app is not sure about.' : 'Next: fix the must-fix issues on the right.')
       : current === 2 ? 'Next: approve the final copy with Approve and send.' : current === 3 ? 'Next: send it to the client.' : 'All done. This report has been sent.';
     bar.replaceChildren(...list.map(([name, done, note], i) => h('li', {class: done ? 'done' : i === current ? 'now' : '', 'aria-current': i === current ? 'step' : null},
       h('span', {class: 'dot', 'aria-hidden': 'true'}, done ? '✓' : String(i + 1)), h('b', {}, name), h('small', {}, note))),
@@ -659,6 +698,16 @@
     if (!state.chatBusy) drawChat();
     updateFinish();
     drawSideTabs();
+  }
+  // Owner's rule: anything the app is not sure about is checked by a person before the report can be approved.
+  const isSureFix = f => f.sure !== undefined ? f.sure === true : (f.confidence || 'high') === 'high' && f.source !== 'AI fix';
+  function needsCheck() {
+    if (!state.report) return {fixes: [], issues: [], total: 0};
+    const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {}), done = reviewedSet();
+    const fixes = (state.fixes || []).filter(f => !isSureFix(f) && !edits[editId(f.sheet, f.cell)] && !dec[f.id]);
+    const fixCells = new Set((state.fixes || []).map(f => `${f.sheet}!${String(f.cell).toUpperCase()}`));
+    const issues = walkIssues().filter(i => i.sure === false && !done.has(i.key) && !(i.cell && fixCells.has(`${i.sheet}!${String(i.cell).toUpperCase()}`)));
+    return {fixes, issues, total: fixes.length + issues.length};
   }
   function readyChanges() {
     if (!state.report) return {accepted: [], dec: {}, edits: {}, total: 0};
@@ -1251,6 +1300,7 @@
       const addBox = h('input', {type: 'text', placeholder: 'Add a job to watch, e.g. HANDS-HMMA-2219', 'aria-label': 'Job number'});
       wrap.replaceChildren(
         h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Today'), h('div', {class: 'meta'}, 'Every job’s day at a glance: scans on SharePoint so far, and where each daily report stands.'))),
+        autopilotPanel(),
         h('div', {class: 'periodbar'}, h('div', {class: 'pnav'}, h('button', {type: 'button', class: 'btn small', 'aria-label': 'Previous day', onclick: () => shift(-1)}, '‹'),
           h('b', {}, label), h('button', {type: 'button', class: 'btn small', 'aria-label': 'Next day', onclick: () => shift(1)}, '›')),
           readyJobs.length ? h('button', {type: 'button', class: 'btn primary', onclick: async e => {
@@ -1653,6 +1703,9 @@
       const warns = [];
       if (pending) warns.push(h('div', {class: 'swarn'}, h('p', {}, `${pending} change${pending === 1 ? ' is' : 's are'} ready but not in a corrected copy yet. Approve the corrected copy, not this one.`),
         h('button', {type: 'button', class: 'btn small', disabled: state.busy, onclick: () => { state.openSendFor = 'next'; dlg.close(); downloadWithChanges(); }}, `Apply ${pending} change${pending === 1 ? '' : 's'} and continue`)));
+      const unsure = needsCheck().total;
+      if (unsure) warns.push(h('div', {class: 'swarn'}, h('p', {}, `${unsure} item${unsure === 1 ? '' : 's'} the app is not sure about ${unsure === 1 ? 'has' : 'have'} not been checked yet. A person has to accept, skip or mark ${unsure === 1 ? 'it' : 'each one'} reviewed first.`),
+        h('button', {type: 'button', class: 'btn small', onclick: () => { dlg.close(); showSide('fixes'); }}, 'Check them now')));
       if (newer) warns.push(h('div', {class: 'swarn'}, h('p', {}, `A corrected copy of this report exists: "${newer.fixed_filename}".`),
         h('button', {type: 'button', class: 'btn small', onclick: () => { state.openSendFor = newer.fixed_file_hash; dlg.close(); select(newer.fixed_file_hash); }}, 'Open the corrected copy')));
       if (must) warns.push(h('div', {class: 'swarn high'}, h('p', {}, `${must} must-fix issue${must === 1 ? ' is' : 's are'} still open on this report.`), check('override', 'Approve anyway')));
@@ -1661,7 +1714,7 @@
         ...warns,
         h('div', {class: 'sgrid'}, h('label', {}, 'Approved by', bind('approver', {type: 'text', placeholder: 'Your name', autocomplete: 'name'})),
           h('label', {}, 'Note (optional)', bind('note', {type: 'text', placeholder: 'For example: checked against the app, 144 = 144'}))),
-        h('button', {type: 'button', class: 'btn primary', disabled: !!state.sending || (must > 0 && !f.override) || (!!newer && !f.override) || pending > 0, onclick: () => approve(false)}, 'Approve as final'));
+        h('button', {type: 'button', class: 'btn primary', disabled: !!state.sending || (must > 0 && !f.override) || (!!newer && !f.override) || pending > 0 || needsCheck().total > 0, onclick: () => approve(false)}, 'Approve as final'));
     }
     // step 2: send
     const prev = info.previous;
@@ -2043,6 +2096,52 @@
     if (!state.me.user || hm) { showSignIn(hm ? decodeURIComponent(hm[1]) : ''); if (!state.me.user) return; history.replaceState(null, '', location.pathname); }
     drawMe();
     loadClients();
-    loadList().then(route).catch(e => toast(e.message, true));
+    loadList().then(route).then(autopilotTick).catch(e => toast(e.message, true));
+  }
+
+  // ---------------------------------------------------------------- autopilot: the daily work, done when the app is opened
+  async function autopilotTick() {
+    let out;
+    try { out = await api('/api/autopilot', {run: true}); } catch (e) { return; }
+    state.autopilot = out;
+    const l = out.ran && out.last;
+    if (!l || !(l.built || l.cleaned)) return;
+    toast(`Autopilot: ${autopilotLine(l)}`);
+    await loadList();
+    if (location.hash === '#today') showToday();
+  }
+  const autopilotLine = l => [l.built ? `built ${l.built} report${l.built === 1 ? '' : 's'}` : '', l.cleaned ? `cleaned ${l.cleaned} (${l.fixed} sure fix${l.fixed === 1 ? '' : 'es'})` : '',
+    l.to_check ? `${l.to_check} thing${l.to_check === 1 ? '' : 's'} for a person to check` : '', l.waiting ? `${l.waiting} shift${l.waiting === 1 ? '' : 's'} still running` : '',
+    l.errors ? `${l.errors} could not be built` : ''].filter(Boolean).join(', ') || 'nothing new to do';
+  function autopilotPanel() {
+    const box = h('section', {class: 'autopilot'});
+    const draw = () => {
+      const a = state.autopilot || {}, l = a.last;
+      const toggle = on => async e => { e.target.disabled = true;
+        try { state.autopilot = await api('/api/autopilot', {on}); if (on) { state.autopilot = await api('/api/autopilot', {run: true, force: true}); await loadList(); } } catch (err) { toast(err.message, true); }
+        draw(); if (on && state.autopilot?.last) showToday(); };
+      const runNow = async e => { e.target.disabled = true; e.target.textContent = 'Working…';
+        try { state.autopilot = await api('/api/autopilot', {run: true, force: true}); await loadList(); toast(`Autopilot: ${autopilotLine(state.autopilot.last)}`); } catch (err) { toast(err.message, true); }
+        showToday(); };
+      const goto = x => x.file_hash ? h('button', {type: 'button', class: 'linkish', onclick: () => select(x.file_hash)}, 'Open') : null;
+      const word = {built: 'Built from SharePoint', cleaned: 'Cleaned', to_check: 'Needs a person', waiting: 'Shift still running', error: 'Could not build'};
+      box.className = 'autopilot ' + (a.on ? 'on' : 'off');
+      box.replaceChildren(
+        h('div', {class: 'aphead'},
+          h('div', {}, h('h2', {}, a.on ? 'Autopilot is on' : 'Let the app do the daily work'),
+            h('p', {}, a.on ? 'When anyone opens the app (at most every 15 minutes), it builds each finished shift’s report from SharePoint and makes the sure fixes. Anything it is not sure about waits for a person. Nothing is approved or sent automatically.'
+              : 'Turn on autopilot and the app builds each finished shift’s report from SharePoint, makes only the fixes it is sure about, and leaves everything uncertain for a person to check. Nothing is approved or sent automatically.')),
+          h('div', {class: 'apbtns'},
+            a.on ? h('button', {type: 'button', class: 'btn primary', onclick: runNow}, 'Run now') : null,
+            a.can_change ? h('button', {type: 'button', class: a.on ? 'btn ghost' : 'btn primary', onclick: toggle(!a.on)}, a.on ? 'Turn off' : 'Turn on autopilot') : (a.on ? null : h('span', {class: 'quiet'}, 'An admin can turn this on.')))),
+        a.on && !a.sharepoint_on ? h('p', {class: 'note'}, 'SharePoint is not connected here, so autopilot can clean uploaded reports but cannot build new ones.') : null,
+        l ? h('div', {class: 'aplast'}, h('p', {}, h('b', {}, `Last run ${ago(l.at)}: `), autopilotLine(l) + '.'),
+          l.actions?.length ? h('ul', {}, l.actions.slice(0, 12).map(x => h('li', {class: 'ap-' + x.did}, h('span', {class: 'apwhat'}, word[x.did] || x.did), ` ${x.job} · ${shortDay(x.day)}`,
+            x.did === 'cleaned' ? ` · ${x.fixed} sure fix${x.fixed === 1 ? '' : 'es'}${x.to_check ? `, ${x.to_check} to check` : ''}` : x.did === 'to_check' ? ` · ${x.to_check} to check` : '',
+            x.why && x.did === 'error' ? h('small', {}, ` ${x.why}`) : null, ' ', goto(x)))) : null) : null);
+    };
+    draw();
+    if (!state.autopilot) api('/api/autopilot', {}).then(out => { state.autopilot = out; draw(); }).catch(() => {});
+    return box;
   }
 })();

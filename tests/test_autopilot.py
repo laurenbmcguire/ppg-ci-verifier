@@ -1,0 +1,70 @@
+"""Autopilot makes only the sure fixes, never approves or sends, and leaves uncertain items for a person."""
+import base64, json, os, sys, threading, unittest, urllib.error, urllib.request
+from datetime import date
+from http.server import ThreadingHTTPServer
+from unittest.mock import patch
+
+sys.path.insert(0, os.path.dirname(__file__))
+from eos_fixture import build, ROWS
+
+
+class Autopilot(unittest.TestCase):
+    def setUp(self):
+        from api.index import handler
+        from legacy_storage_fake import PostgresWorkspace
+        from test_vercel import FakeDatabase
+        self.env = patch.dict(os.environ, {'CI_LOCAL_DEV': '1', 'VERCEL': '0'}); self.env.start()
+        for k in ('MS_TENANT_ID', 'MS_CLIENT_ID', 'MS_CLIENT_SECRET', 'ANTHROPIC_API_KEY'):
+            os.environ.pop(k, None)
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        self.server.workspace_store = PostgresWorkspace('postgresql://test.invalid/x', FakeDatabase().connect)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f'http://127.0.0.1:{self.server.server_port}'
+
+    def tearDown(self):
+        self.server.shutdown(); self.server.server_close(); self.env.stop()
+
+    def call(self, path, body):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={'Content-Type': 'application/json', 'Origin': self.base, 'X-Review-Token': 'same-origin'})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def test_only_sure_fixes_and_never_sends(self):
+        rows = [tuple(r) for r in ROWS]
+        rows[1] = (rows[1][0], ' 80139189 ') + rows[1][2:]              # stray spaces: a sure fix
+        st, up = self.call('/api/spreadsheets/import', {'filename': '2230-OWENS-BASCO - EOS - 2026-10-07.xlsx',
+                                                        'content_base64': base64.b64encode(build(rows)).decode()})
+        self.assertEqual(st, 200, up)
+        h = up['item']['file_hash']
+        st, props = self.call('/api/spreadsheets/fixes', {'file_hash': h})
+        self.assertTrue(all('sure' in p for p in props['proposals']))
+        self.assertTrue(any(p['sure'] for p in props['proposals']))
+        st, off = self.call('/api/autopilot', {'run': True})
+        self.assertEqual((st, off['ran']), (200, False))                  # off by default: nothing happens
+        self.assertTrue(self.call('/api/autopilot', {'on': True})[1]['on'])
+        # run for the report's day (the app normally uses today's date at PPG)
+        import api.index as idx
+        with patch.object(idx, 'datetime', wraps=idx.datetime) as fake:
+            fake.now.return_value = __import__('datetime').datetime(2026, 10, 8, 9, 0)
+            st, out = self.call('/api/autopilot', {'run': True, 'force': True})
+        self.assertEqual(st, 200, out)
+        last = out['last']
+        self.assertEqual(last['cleaned'], 1, last)
+        cleaned = next(a for a in last['actions'] if a['did'] == 'cleaned')
+        st, items = 200, self.call('/api/spreadsheets/fixes', {'file_hash': cleaned['file_hash']})[1]
+        self.assertFalse(any(p['sure'] for p in items['proposals']))       # every sure fix is in the corrected copy
+        with urllib.request.urlopen(self.base + '/api/spreadsheet?id=' + cleaned['file_hash'], timeout=30) as r:
+            item = json.loads(r.read())
+        self.assertFalse(item.get('approval')); self.assertFalse(any(x.get('sent') for x in item.get('sent') or []))
+        with patch.object(idx, 'datetime', wraps=idx.datetime) as fake:
+            fake.now.return_value = __import__('datetime').datetime(2026, 10, 8, 9, 0)
+            again = self.call('/api/autopilot', {'run': True, 'force': True})[1]['last']
+        self.assertEqual(again['cleaned'], 0)                              # a report is cleaned once
+
+
+if __name__ == '__main__':
+    unittest.main()

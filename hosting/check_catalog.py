@@ -31,6 +31,9 @@ GROUPS = [
         'Invisible problems: non-breaking spaces, zero-width characters, garbled text from a bad copy and paste, extra spaces.',
         'Structure: duplicate column headers, data rows below the totals row, and hidden sheets, rows or columns that still hold data.',
         'Broken formulas: Excel error values (#REF!, #DIV/0!, #N/A) and totals that do not match the rows they add up.',
+        'Copied-down rows: six or more rows in a row with exactly the same inspected and rejected counts, in a report where the other rows differ.',
+        'Blank totals: a "Total ..." label with no number beside or under it, on a sheet whose rows have counts.',
+        'Reasons with no rejects: a defect reason filled in on a row where Rejected is 0.',
     ]),
     ('Against your other reports', 'Every report saved in the verifier for the same job.', [
         'VINs that are also in the job\'s report for a different day: an old file sent again, or a car inspected and billed twice.',

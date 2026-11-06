@@ -5,8 +5,12 @@ so every screen shows the same severities. Read-only: computed from the saved re
 """
 import re
 
+from hosting.explain import explain
+
 INFO = {'hyperlink_formula', 'external_hyperlink', 'known_template_layout_differs', 'formula_results_used',
         'quantity_formulas_not_evaluated', 'no_data_rows', 'no_quantity_columns_detected'}
+# New checks that are worth a look but should not stop a report on their own.
+MEDIUM = {'duplicate_count_block', 'total_row_blank', 'defect_reject_mismatch'}
 LOW = {'labeled_total_unit_differs', 'date_stored_as_text', 'zero_inspected', 'hidden_columns_with_data',
        'extra_spaces', 'number_stored_as_text'}
 HIGH = re.compile(r'duplicate|total|differs|missing_from_report|not_on_sharepoint|typo|mismatch|exceeds|future|invalid|'
@@ -41,7 +45,21 @@ def severity(code):
         return 'info'
     if code in LOW:
         return 'low'
+    if code in MEDIUM:
+        return 'medium'
     return 'high' if HIGH.search(code) else 'medium'
+
+
+def _annotate(issue):
+    """Add why / fix / sure from the explanation catalog. AI findings keep their own why and check, and are never sure."""
+    e = explain(issue.get('code'))
+    if issue.get('source') == 'AI review':
+        issue['why'] = issue.get('why') or e['why']
+        issue['fix'] = issue.get('check') or e['fix']
+        issue['sure'] = False
+    else:
+        issue['why'], issue['fix'], issue['sure'] = e['why'], e['fix'], e['sure']
+    return issue
 
 
 def _cell(f):
@@ -89,6 +107,8 @@ def summarize(result, with_issues=True, use_verdicts=True):
     if not result.get('record_count'):
         issues.append(dict(key='none:rows', source='Checks', severity='high', code='no_rows_found', where='Whole file',
                            text='No inspection rows were found in this file, so nothing could be checked. Check that this is the end-of-shift report.'))
+    for x in issues:
+        _annotate(x)
     # Claude's double-check: drop false alarms (kept in 'dismissed' with the reason), mark confirmed ones
     verify = result.get('ai_verify') or {}
     dismissed = []

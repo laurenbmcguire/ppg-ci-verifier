@@ -15,7 +15,7 @@ CATEGORIES = [
     ('Duplicate VINs or rows', re.compile(r'duplicate')),
     ('Typos in VINs or part numbers', re.compile(r'typo|vin_|identifier_unusual|fill_series|leading_zeros')),
     ('Already reported on another day', re.compile(r'other_day')),
-    ('Totals that did not add up', re.compile(r'total|summary|mismatch|exceeds|reject_log')),
+    ('Totals that did not add up', re.compile(r'total|summary|mismatch|exceeds|reject_log|defect_reject')),
     ('Blank or missing values', re.compile(r'missing|blank|placeholder')),
     ('Numbers stored as text or bad values', re.compile(r'text|numeric|spaces|fraction|negative|scientific|excel_error')),
     ('Wrong or future dates', re.compile(r'date')),

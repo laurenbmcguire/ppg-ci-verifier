@@ -298,7 +298,8 @@ class SpreadsheetInbox:
             rv = c['review']
             out[d] = dict(file_hash=c['file_hash'], filename=c['filename'], version=c['version'], status=rv['status'], counts=rv['counts'],
                           scans=float(rv['scans']) if rv.get('scans') is not None else None, inspected=rv.get('inspected'), rejected=rv.get('rejected'),
-                          approved=rv.get('approved'), sent_at=rv.get('sent_at'), uploads=len(cands))
+                          approved=rv.get('approved'), sent_at=rv.get('sent_at'), uploads=len(cands),
+                          fixed_from=rv.get('fixed_from'), fixes_applied=rv.get('fixes_applied') or 0)
         return out
     def all_results(self):
         with self.connect() as db:
@@ -541,7 +542,7 @@ class SpreadsheetInbox:
             if (f['sheet'], f['cell']) in taken:
                 continue
             props.append(dict(id=f['id'], sheet=f['sheet'], cell=f['cell'], before=f['before'], after=f['after'], kind='auto',
-                              reason=f['reason'], source='AI fix', confidence=f.get('confidence') or 'medium'))
+                              reason=f['reason'], source='AI fix', confidence=f.get('confidence') or 'medium', sure=False))
         return dict(file_hash=file_hash, filename=item['filename'], proposals=props, applied=item.get('fixes_applied') or [],
                     ai=dict(status=ai.get('status') or 'not_run', made_at=ai.get('made_at'), count=len(ai.get('fixes') or []),
                             skipped=ai.get('skipped') or [], dropped=ai.get('dropped') or 0, message=ai.get('message')))
