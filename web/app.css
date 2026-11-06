@@ -920,3 +920,6 @@ body{-webkit-font-smoothing:antialiased}
 }
 .cleanoffer{scroll-margin-top:8px}
 .gactions{display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px 4px}
+.iitem.picked{background:#f1eefc;border-radius:6px}
+.iitem .irev{color:var(--ok-ink);font-style:normal}
+.iitem input{width:16px;height:16px;accent-color:#5b4fc4}

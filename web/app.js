@@ -1923,7 +1923,11 @@
         block.append(h('div', {class: 'selbar issel'},
           h('span', {}, h('b', {}, `${picked.length} selected`), ` · ${ready} with a suggested fix` + (picked.length > ready ? (state.aiOn ? `, Claude will write the other ${picked.length - ready}` : `, ${picked.length - ready} without one`) : '')),
           h('button', {type: 'button', class: 'btn ghost small', onclick: () => { sel.clear(); draw(); }}, 'Clear'),
-          h('button', {type: 'button', class: 'btn primary small', onclick: e => fixSelected(e.target)}, `Fix ${picked.length === 1 ? 'it' : `all ${picked.length}`}`)));
+          picked.some(i => done.has(i.key)) ? h('button', {type: 'button', class: 'btn small', onclick: () => { const k = picked.map(i => i.key); sel.clear(); setDone(k, false); drawSteps(); drawCleanOffer(); }}, 'Mark not reviewed') : null,
+          picked.some(i => !done.has(i.key)) ? h('button', {type: 'button', class: 'btn small', onclick: () => { const k = picked.map(i => i.key); sel.clear(); setDone(k, true); toast(`${k.length} marked reviewed.`); drawSteps(); drawCleanOffer(); }},
+            `Mark ${picked.length === 1 ? 'it' : picked.length} reviewed`) : null,
+          ready ? h('button', {type: 'button', class: 'btn primary small', onclick: e => fixSelected(e.target)}, `Fix ${picked.length === 1 ? 'it' : ready === picked.length ? `all ${ready}` : ready}`)
+            : state.aiOn ? h('button', {type: 'button', class: 'btn primary small', onclick: e => fixSelected(e.target)}, 'Ask Claude to fix') : null));
       }
       for (const [sev, label] of SEVERITIES) {
         const ofSev = issues.filter(i => i.severity === sev); if (!ofSev.length) continue;
@@ -1935,9 +1939,9 @@
         for (const [type, list] of Object.entries(groups).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
           const gk = state.report.file_hash + '|' + sev + '|' + type, openT = list.filter(i => !done.has(i.key)).length;
           const isOpen = state.openGroups[gk] ?? (openT > 0 && (sev === 'high' || list.some(i => i.key === cur) || Object.keys(groups).length === 1));
-          const openKeys = list.filter(i => !done.has(i.key)).map(i => i.key), allSel = openKeys.length > 0 && openKeys.every(k => sel.has(k));
-          const pick = h('input', {type: 'checkbox', class: 'typesel', checked: allSel, title: `Select all ${openKeys.length} open ${type.toLowerCase()} issues to fix`, 'aria-label': `Select all ${type} issues to fix`, disabled: !openKeys.length,
-            onclick: e => e.stopPropagation(), onchange: e => { openKeys.forEach(k => e.target.checked ? sel.add(k) : sel.delete(k)); draw(); }});
+          const openKeys = (list.some(i => !done.has(i.key)) ? list.filter(i => !done.has(i.key)) : list).map(i => i.key), allSel = openKeys.length > 0 && openKeys.every(k => sel.has(k));
+          const pick = h('input', {type: 'checkbox', class: 'typesel', checked: allSel, title: `Select all ${openKeys.length} in ${type}`, 'aria-label': `Select all ${type}`,
+            onclick: e => e.stopPropagation(), onchange: e => { openKeys.forEach(k => e.target.checked ? sel.add(k) : sel.delete(k)); state.openGroups[gk] = true; draw(); }});
           if (!allSel && openKeys.some(k => sel.has(k))) pick.indeterminate = true;
           const det = h('details', {class: 'itype', open: isOpen || list.some(i => i.key === cur)},
             h('summary', {}, pick, h('b', {}, type), h('span', {class: 'cnt' + (openT ? '' : ' ok')}, openT ? `${openT} open` : '✓ reviewed'), h('span', {class: 'tot'}, String(list.length))));
@@ -1947,23 +1951,25 @@
           for (const i of list.slice(0, limit)) {
             const fx = fixesFor(i).filter(f => f.state !== 'rejected');
             const badge = i.restored ? 'Put back by you' : i.verdict === 'valid' ? '✓ Claude confirmed' : i.verdict === 'unsure' ? 'Claude unsure' : null;
-            ul.append(h('li', {class: 'iitem' + (done.has(i.key) ? ' done' : '') + (i.key === cur ? ' cur' : '')},
-              h('input', {type: 'checkbox', checked: done.has(i.key), 'aria-label': 'Mark reviewed', title: 'Reviewed', onchange: e => setDone([i.key], e.target.checked)}),
+            ul.append(h('li', {class: 'iitem' + (done.has(i.key) ? ' done' : '') + (i.key === cur ? ' cur' : '') + (sel.has(i.key) ? ' picked' : '')},
+              h('input', {type: 'checkbox', checked: sel.has(i.key), 'aria-label': 'Select this error', title: 'Select this error',
+                onchange: e => { e.target.checked ? sel.add(i.key) : sel.delete(i.key); draw(); }}),
               h('button', {type: 'button', class: 'iopen', onclick: () => focusIssue(issues.indexOf(i))},
                 h('span', {class: 'itext'}, i.text),
                 h('span', {class: 'iwhere'}, [i.where, i.source].filter(Boolean).join(' · '),
                   badge ? h('em', {}, badge) : null,
+                  done.has(i.key) ? h('em', {class: 'irev'}, '✓ reviewed') : null,
                   fx.length ? h('em', {class: 'ifix'}, fx.some(f => f.state === 'accepted') ? '✓ fix accepted' : `${fx.length} fix ready`) : null))));
           }
           if (list.length > limit) ul.append(h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => { state.openGroups[gk + '|all'] = true; draw(); }}, `Show all ${list.length}`)));
-          if (openT) {
-            const openList = list.filter(i => !done.has(i.key)), withFix = openList.filter(i => fixesFor(i).some(f => f.state !== 'rejected' && f.state !== 'accepted')).length;
+          {
+            const openList = list.filter(i => !done.has(i.key));
             det.append(h('div', {class: 'gactions'},
-              h('button', {type: 'button', class: 'btn primary small', onclick: () => {
+              h('button', {type: 'button', class: 'btn small', onclick: () => { allSel ? openKeys.forEach(k => sel.delete(k)) : openKeys.forEach(k => sel.add(k)); draw(); }},
+                allSel ? 'Unselect all' : `Select all ${openKeys.length}`),
+              openT ? h('button', {type: 'button', class: 'btn small', onclick: () => {
                 state.groupWalk = {keys: new Set(openList.map(i => i.key)), label: type};
-                focusIssue(issues.indexOf(openList[0])); }}, openT === 1 ? 'Check it' : `Check one at a time (${openT})`),
-              withFix ? h('button', {type: 'button', class: 'btn small', onclick: e => { openList.forEach(i => sel.add(i.key)); fixSelected(e.target); }}, `Fix all ${withFix}`) : null,
-              openT > 1 ? h('button', {type: 'button', class: 'btn small', onclick: () => { setDone(openList.map(i => i.key), true); toast(`All ${openT} ${type.toLowerCase()} marked reviewed.`); drawSteps(); drawCleanOffer(); }}, `Mark all ${openT} reviewed`) : null));
+                focusIssue(issues.indexOf(openList[0])); }}, openT === 1 ? 'Check it' : `Check one at a time (${openT})`) : null));
           }
           det.append(ul);
           sec.append(det);
