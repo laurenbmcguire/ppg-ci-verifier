@@ -86,6 +86,12 @@ def _num(text):
 
 
 SURE_SOURCES = ('SharePoint', 'Clean-up', 'Number as text')
+WRITTEN_ONLY = {   # fixes that only change how something is written, never what it means
+    'Clean-up': 'Only extra spaces or invisible characters. The value is right; nothing else is wrong.',
+    'Number as text': 'Only the way the number is stored. The number is right; nothing else is wrong.',
+    'Spelling': 'Only the spelling is different from the other rows. Same value; nothing else is wrong.',
+    'Typo': 'Looks like the same value typed with a letter for a digit (like O for 0). If that is all, nothing else is wrong.',
+}
 
 
 def proposals(result, filename, raw, sharepoint_rows=None):
@@ -111,8 +117,11 @@ def proposals(result, filename, raw, sharepoint_rows=None):
         after_text = (str(Decimal(after).normalize()) if Decimal(after) != Decimal(after).to_integral_value() else str(int(Decimal(after)))) if kind == 'number' else str(after)
         if sure is None:   # owner's rule: only certain, mechanical corrections are "sure"; guesses always go to a person
             sure = confidence == 'high' and source in SURE_SOURCES
+        only = WRITTEN_ONLY.get(source)
+        if source == 'Spelling' and 'different capitals' in reason:
+            only = 'Only the capital letters are different. Same part; nothing else is wrong.'
         out.append(dict(id=_pid(sheet, cell, after_text), sheet=sheet, cell=cell, before=_show(before), after=after_text,
-                        kind=kind, reason=reason, source=source, confidence=confidence, sure=bool(sure)))
+                        kind=kind, reason=reason, source=source, confidence=confidence, sure=bool(sure), only=only))
 
     def text_cell(r, kind):
         letter = r['label_columns'].get(kind)

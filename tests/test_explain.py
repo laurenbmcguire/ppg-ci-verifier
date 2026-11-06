@@ -218,3 +218,11 @@ class NewCheckTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WrittenDifferently(unittest.TestCase):
+    def test_writing_only_codes_say_so(self):
+        from hosting.explain import explain, WRITTEN, CATALOG
+        self.assertTrue(all(code in CATALOG for code in WRITTEN))
+        self.assertIn('nothing else is wrong', explain('inconsistent_spelling')['only'])
+        self.assertIsNone(explain('total_mismatch')['only'])                      # a wrong total is more than the writing

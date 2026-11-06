@@ -302,6 +302,29 @@ GENERIC = dict(
     sure=False)
 
 
+# Codes where the only problem is how something is written. Shown as "Only the writing is different" so nobody
+# goes looking for a bigger problem. Wording stays honest where the app is guessing ("looks like").
+WRITTEN = {
+    'inconsistent_spelling': 'Only the spelling is different from the other rows. It means the same thing; nothing else is wrong.',
+    'duplicate_identifier_variant': 'Only the way this ID is written is different (capitals, spaces or dashes). It is the same ID; nothing else is wrong.',
+    'extra_spaces': 'Only extra spaces. The value itself is right; nothing else is wrong.',
+    'header_whitespace': 'Only extra spaces in the heading. Nothing else is wrong.',
+    'hidden_characters': 'Only invisible characters. The value you see is right; nothing else is wrong.',
+    'number_stored_as_text': 'Only the way the number is stored. The number itself is right, but Excel leaves it out of totals until it is fixed.',
+    'date_stored_as_text': 'Only the way the date is stored. The date itself is right; nothing else is wrong.',
+    'leading_zeros_lost': 'Only the leading zero that Excel dropped. It is the same code; nothing else is wrong.',
+    'possible_identifier_typo': 'Looks like the same value written a little differently (for example the letter O typed for a zero). If that is all, nothing else is wrong.',
+    'possible_part_number_typo': 'Looks like the same part number written a little differently (for example the letter O typed for a zero). If that is all, nothing else is wrong.',
+    'possible_defect_typo': 'Looks like the same defect written a little differently. If that is all, nothing else is wrong.',
+    'possible_condition_typo': 'Looks like the same condition written a little differently. If that is all, nothing else is wrong.',
+    'possible_auditor_typo': 'Looks like the same name written a little differently. If that is all, nothing else is wrong.',
+    'identifier_typo_vs_sharepoint': 'Looks like the same ID as on SharePoint, written a little differently. If that is all, nothing else is wrong.',
+    'identifier_format_differs': 'Often the same ID typed a little differently (like the letter O for a zero). Check it; if that is all, nothing else is wrong.',
+    'part_format_differs': 'Often the same part number typed a little differently (like the letter O for a zero). Check it; if that is all, nothing else is wrong.',
+    'vin_has_i_o_q': 'Most likely the letter I, O or Q typed for a 1 or a 0. If that is all, the rest of the VIN is right.',
+}
+
+
 def lookup(code):
     """The catalog entry for a code, or None when it is not listed."""
     return CATALOG.get(code or '')
@@ -309,4 +332,4 @@ def lookup(code):
 
 def explain(code):
     """{'why', 'fix', 'sure'} for a code; unknown codes get the generic explanation and are never sure."""
-    return dict(lookup(code) or GENERIC)
+    return dict(lookup(code) or GENERIC, only=WRITTEN.get(code or ''))

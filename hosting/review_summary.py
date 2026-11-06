@@ -59,6 +59,7 @@ def _annotate(issue):
         issue['sure'] = False
     else:
         issue['why'], issue['fix'], issue['sure'] = e['why'], e['fix'], e['sure']
+    issue['only'] = e.get('only')   # set when the only problem is how something is written
     return issue
 
 

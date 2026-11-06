@@ -923,3 +923,9 @@ body{-webkit-font-smoothing:antialiased}
 .iitem.picked{background:#f1eefc;border-radius:6px}
 .iitem .irev{color:var(--ok-ink);font-style:normal}
 .iitem input{width:16px;height:16px;accent-color:#5b4fc4}
+/* "only the writing is different" */
+.only-note{display:block;font-size:13px;color:var(--ok-ink);margin:2px 0 0}
+.only-note.big{background:var(--ok-bg);border-radius:6px;padding:6px 9px;font-weight:600;margin:4px 0}
+.cleanlist .only-note{grid-column:1/-1}
+.unsure .only-note{display:inline;color:var(--ok-ink)}
+.iitem .ionly{color:var(--ok-ink);font-style:normal}

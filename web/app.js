@@ -427,6 +427,7 @@
         h('div', {class: 'in-top'}, h('span', {class: 'sev ' + issue.severity}), h('b', {}, gw ? `${pos + 1} of ${nav.length} in ${gw.label}` : `Issue ${idx + 1} of ${list.length}`), gw ? null : h('span', {class: 'in-type'}, issueType(issue)),
           h('button', {type: 'button', class: 'btn ghost small', onclick: () => { state.issueNav = null; state.groupWalk = null; state.gridCell = null; drawGrid(); drawSide(); }}, 'Close')),
         h('p', {class: 'in-text'}, issue.text),
+        issue.only ? h('p', {class: 'only-note big'}, issue.only) : null,
         issue.sure === false ? h('p', {class: 'in-unsure'}, 'The app is not sure about this one, so a person has to look at it before the report can be approved.') : null,
         issue.why ? h('p', {class: 'in-why'}, h('b', {}, 'Why it matters: '), issue.why) : null,
         issue.fix && issue.fix !== issue.check ? h('p', {class: 'in-why'}, h('b', {}, 'What to do: '), issue.fix) : null,
@@ -573,8 +574,9 @@
       h('h3', {}, `${plural(unsure.total, 'thing')} I'm not sure about: a person has to check ${unsure.total === 1 ? 'it' : 'these'}`),
       h('p', {}, 'These are never changed automatically, and the report cannot be approved until each one is accepted, skipped or marked reviewed.'),
       h('ul', {}, [...unsure.fixes.slice(0, 3).map(f => h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`),
-          `: maybe ${show(f.before)} should be ${show(f.after)}. ${f.reason || ''}`)),
-        ...unsure.issues.slice(0, Math.max(0, 3 - unsure.fixes.length)).map(i => h('li', {}, i.sheet ? h('b', {}, `${i.sheet}${i.cell ? ' ' + i.cell : i.row ? ' row ' + i.row : ''}: `) : null, i.text || i.message || ''))]),
+          `: maybe ${show(f.before)} should be ${show(f.after)}. ${f.only || f.reason || ''}`)),
+        ...unsure.issues.slice(0, Math.max(0, 3 - unsure.fixes.length)).map(i => h('li', {}, i.sheet ? h('b', {}, `${i.sheet}${i.cell ? ' ' + i.cell : i.row ? ' row ' + i.row : ''}: `) : null, i.text || i.message || '',
+          i.only ? h('span', {class: 'only-note'}, ' ' + i.only) : null))]),
       unsure.total > 3 ? h('p', {class: 'more'}, `and ${unsure.total - 3} more on the right.`) : null,
       h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); const keys = new Set(unsure.issues.map(i => i.key)), list = walkIssues(), at = list.findIndex(i => keys.has(i.key)); if (at >= 0) focusIssue(at); else if (unsure.fixes[0]) showCell(unsure.fixes[0].sheet, unsure.fixes[0].cell); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, 'Check them now')) : null;
     if (!pending.length) {
@@ -586,7 +588,8 @@
         h('h2', {id: 'clean-title'}, 'Want me to clean this data for you?'),
         h('p', {}, `I'm sure about ${plural(pending.length, 'change')} across ${plural(sheetCount, 'sheet')}. Here is exactly what cleaning means for this report:`)),
       h('ul', {class: 'cleanlist'}, [...groups].map(([key, items]) => h('li', {},
-        h('b', {}, labelOf(key, items)), h('span', {class: 'count'}, plural(items.length, 'cell')),
+        h('b', {}, labelOf(key, items)),
+        items.every(f => f.only) ? h('span', {class: 'only-note'}, items[0].only) : null, h('span', {class: 'count'}, plural(items.length, 'cell')),
         h('details', {}, h('summary', {}, items.length === 1 ? 'See the change' : `See all ${items.length} changes`),
           h('ul', {}, items.map(f => h('li', {},
             h('button', {type: 'button', class: 'linkish', title: 'Show this cell in the spreadsheet', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`),
@@ -682,7 +685,8 @@
           h('button', {type: 'button', class: 'btn small' + (d.state === 'accepted' ? ' on-accept' : ''), 'aria-pressed': String(d.state === 'accepted'), onclick: () => set('accepted')}, d.state === 'accepted' ? '✓ Accepted' : 'Accept'),
           h('button', {type: 'button', class: 'btn small' + (d.state === 'rejected' ? ' on-reject' : ''), 'aria-pressed': String(d.state === 'rejected'), onclick: () => set('rejected')}, d.state === 'rejected' ? 'Rejected' : 'Reject')),
         h('div', {class: 'change'}, h('span', {class: 'before'}, before), h('span', {'aria-hidden': 'true'}, '→'), input),
-        h('p', {class: 'why'}, f.reason)));
+        h('p', {class: 'why'}, f.reason),
+        f.only ? h('p', {class: 'only-note'}, f.only) : null));
     }
     // your own edits
     for (const [id, e] of editList) {
@@ -1959,6 +1963,7 @@
                 h('span', {class: 'iwhere'}, [i.where, i.source].filter(Boolean).join(' · '),
                   badge ? h('em', {}, badge) : null,
                   done.has(i.key) ? h('em', {class: 'irev'}, '✓ reviewed') : null,
+                  i.only ? h('em', {class: 'ionly', title: i.only}, 'only written differently') : null,
                   fx.length ? h('em', {class: 'ifix'}, fx.some(f => f.state === 'accepted') ? '✓ fix accepted' : `${fx.length} fix ready`) : null))));
           }
           if (list.length > limit) ul.append(h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => { state.openGroups[gk + '|all'] = true; draw(); }}, `Show all ${list.length}`)));
