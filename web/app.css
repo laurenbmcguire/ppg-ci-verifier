@@ -919,3 +919,4 @@ body{-webkit-font-smoothing:antialiased}
   .workspace{flex:0 0 auto;height:calc(100vh - 24px);min-height:520px;scroll-margin-top:8px}
 }
 .cleanoffer{scroll-margin-top:8px}
+.gactions{display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px 4px}

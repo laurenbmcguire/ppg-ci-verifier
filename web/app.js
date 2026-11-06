@@ -416,11 +416,16 @@
     const kids = [];
     if (issue) {
       const done = reviewedSet();
+      const gw = state.groupWalk && state.groupWalk.keys.has(issue.key) ? state.groupWalk : null;
+      const nav = gw ? list.filter(i => gw.keys.has(i.key)) : list, pos = nav.indexOf(issue);
+      const go = k => focusIssue(list.indexOf(nav[k]));
       const markNext = () => { done.add(issue.key); store.set('rd-reviewed:' + state.report.file_hash, [...done]); updateFinish(); drawSteps(); drawCleanOffer();
-        const nextOpen = list.findIndex((x, k) => k > idx && !done.has(x.key)); if (nextOpen >= 0) focusIssue(nextOpen); else { state.issueNav = null; drawSide(); toast('That was the last open issue.'); } };
+        const nextOpen = nav.findIndex((x, k) => k > pos && !done.has(x.key)), earlier = nav.findIndex(x => !done.has(x.key));
+        if (nextOpen >= 0) go(nextOpen); else if (earlier >= 0) go(earlier);
+        else { state.issueNav = null; state.groupWalk = null; drawSide(); toast(gw ? `All ${gw.label.toLowerCase()} checked.` : 'That was the last open issue.'); } };
       kids.push(h('div', {class: 'issuenav sev-' + issue.severity},
-        h('div', {class: 'in-top'}, h('span', {class: 'sev ' + issue.severity}), h('b', {}, `Issue ${idx + 1} of ${list.length}`), h('span', {class: 'in-type'}, issueType(issue)),
-          h('button', {type: 'button', class: 'btn ghost small', onclick: () => { state.issueNav = null; state.gridCell = null; drawGrid(); drawSide(); }}, 'Close')),
+        h('div', {class: 'in-top'}, h('span', {class: 'sev ' + issue.severity}), h('b', {}, gw ? `${pos + 1} of ${nav.length} in ${gw.label}` : `Issue ${idx + 1} of ${list.length}`), gw ? null : h('span', {class: 'in-type'}, issueType(issue)),
+          h('button', {type: 'button', class: 'btn ghost small', onclick: () => { state.issueNav = null; state.groupWalk = null; state.gridCell = null; drawGrid(); drawSide(); }}, 'Close')),
         h('p', {class: 'in-text'}, issue.text),
         issue.sure === false ? h('p', {class: 'in-unsure'}, 'The app is not sure about this one, so a person has to look at it before the report can be approved.') : null,
         issue.why ? h('p', {class: 'in-why'}, h('b', {}, 'Why it matters: '), issue.why) : null,
@@ -429,8 +434,8 @@
         issue.verdict_reason ? h('p', {class: 'hint'}, 'Claude: ' + issue.verdict_reason) : null,
         !issue.sheet && !issue.row ? h('p', {class: 'hint'}, 'This one is about the report as a whole, not one cell.') : null,
         h('div', {class: 'in-nav'},
-          h('button', {type: 'button', class: 'btn small', disabled: idx === 0, onclick: () => focusIssue(idx - 1)}, '‹ Previous'),
-          h('button', {type: 'button', class: 'btn small', disabled: idx >= list.length - 1, onclick: () => focusIssue(idx + 1)}, 'Next ›'),
+          h('button', {type: 'button', class: 'btn small', disabled: pos === 0, onclick: () => go(pos - 1)}, '‹ Previous'),
+          h('button', {type: 'button', class: 'btn small', disabled: pos >= nav.length - 1, onclick: () => go(pos + 1)}, 'Next ›'),
           h('button', {type: 'button', class: 'btn primary small', onclick: markNext}, done.has(issue.key) ? 'Reviewed · next open' : 'Mark reviewed and next'))));
     }
     if (state.grid && state.gridCell) { const p = cellPanel(marks(), !!issue); if (p) kids.push(p); }
@@ -440,6 +445,7 @@
     const list = walkIssues(); if (!list.length || !state.report) return;
     index = Math.max(0, Math.min(index, list.length - 1));
     const i = list[index];
+    if (state.groupWalk && !state.groupWalk.keys.has(i.key)) state.groupWalk = null;
     state.issueNav = index; state.sideTab = 'fixes';
     const sheet = i.sheet || state.gridSheet;
     const cell = i.cell && splitCell(i.cell) ? String(i.cell).toUpperCase() : i.row ? `A${Number(i.row)}` : null;
@@ -595,7 +601,9 @@
           const c = readyChanges(), all = [...c.accepted, ...pending];
           applyFixes(all, c.dec, c.edits, {download: false});
         }}, `Yes, make the ${plural(pending.length, 'sure change')}`),
-        h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, 'Let me choose'),
+        h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); state.issueNav = null; drawSide();
+          document.querySelector('.workspace')?.scrollIntoView({block: 'start'});
+          requestAnimationFrame(() => $('fixes-block')?.scrollIntoView({behavior: 'smooth', block: 'nearest'})); }}, 'Let me choose'),
         h('button', {type: 'button', class: 'btn ghost', onclick: () => { store.set('rd-clean-no', [...dismissed, hash].slice(-200)); slot.replaceChildren(); }}, 'Not now'))));
   }
   // ---------------- Check → Clean → Approve → Send: where the report stands and the one next thing to do
@@ -604,7 +612,8 @@
     const rv = r.review || {}, sent = (r.sent || []).some(x => x.sent), approved = !!r.approval;
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
     const pending = state.fixes ? state.fixes.filter(f => !edits[editId(f.sheet, f.cell)] && !dec[f.id]).length : null;
-    const mustFix = (rv.counts || {}).high || 0;
+    const reviewed = reviewedSet();   // a must-fix issue a person has reviewed is handled; approving still asks to confirm if it is in the file
+    const mustFix = walkIssues().filter(i => i.severity === 'high' && !reviewed.has(i.key)).length;
     const unsureLeft = state.fixes ? needsCheck().total : 0;
     const sureN = state.fixes ? state.fixes.filter(f => isSureFix(f) && !edits[editId(f.sheet, f.cell)] && !dec[f.id]).length : 0;
     const cleanDone = sent || approved || (pending === 0 && !mustFix && !unsureLeft);
@@ -1565,7 +1574,7 @@
             shiftEditor(data.shifts.jobs[job], rows => save('/api/settings/shifts', {job, shifts: rows}, moved),
               h('button', {type: 'button', class: 'btn ghost small', onclick: () => save('/api/settings/shifts', {job, remove: true}, moved)}, 'Use the all-jobs times')))),
           h('div', {class: 'keyform addjob'}, newJob, h('datalist', {id: 'job-list'}, data.jobs.filter(j => !jobsWithOwn.includes(j)).map(j => h('option', {value: j}))),
-            h('button', {type: 'button', class: 'btn', onclick: () => { const j = newJob.value.trim().toUpperCase(); if (!j) { newJob.focus(); return; }
+            h('button', {type: 'button', class: 'btn', onclick: () => { const j = newJob.value.trim().toUpperCase(); if (!j) { newJob.focus(); toast('Type or pick a job first, then click Set different times for a job.'); return; }
               data.shifts.jobs = {...data.shifts.jobs, [j]: data.shifts.default.map(x => ({...x}))}; draw(); toast(`Set ${j}'s times below, then save.`); }}, 'Set different times for a job'))));
     };
     draw();
@@ -1947,8 +1956,16 @@
                   fx.length ? h('em', {class: 'ifix'}, fx.some(f => f.state === 'accepted') ? '✓ fix accepted' : `${fx.length} fix ready`) : null))));
           }
           if (list.length > limit) ul.append(h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => { state.openGroups[gk + '|all'] = true; draw(); }}, `Show all ${list.length}`)));
+          if (openT) {
+            const openList = list.filter(i => !done.has(i.key)), withFix = openList.filter(i => fixesFor(i).some(f => f.state !== 'rejected' && f.state !== 'accepted')).length;
+            det.append(h('div', {class: 'gactions'},
+              h('button', {type: 'button', class: 'btn primary small', onclick: () => {
+                state.groupWalk = {keys: new Set(openList.map(i => i.key)), label: type};
+                focusIssue(issues.indexOf(openList[0])); }}, openT === 1 ? 'Check it' : `Check one at a time (${openT})`),
+              withFix ? h('button', {type: 'button', class: 'btn small', onclick: e => { openList.forEach(i => sel.add(i.key)); fixSelected(e.target); }}, `Fix all ${withFix}`) : null,
+              openT > 1 ? h('button', {type: 'button', class: 'btn small', onclick: () => { setDone(openList.map(i => i.key), true); toast(`All ${openT} ${type.toLowerCase()} marked reviewed.`); drawSteps(); drawCleanOffer(); }}, `Mark all ${openT} reviewed`) : null));
+          }
           det.append(ul);
-          if (openT > 1) det.append(h('button', {type: 'button', class: 'linkish markall', onclick: () => setDone(list.map(i => i.key), true)}, `Mark all ${openT} reviewed`));
           sec.append(det);
         }
         block.append(sec);
