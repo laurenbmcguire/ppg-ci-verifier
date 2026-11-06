@@ -131,7 +131,9 @@ def summarize(result, with_issues=True, use_verdicts=True):
                     return False
                 if a.get('by_person'):   # a person's "fine as is" is about that one row: the same message on another row is still open
                     return a.get('text') == x.get('text') and (a.get('row') is None or (a.get('sheet') == x.get('sheet') and str(a.get('row')) == str(x.get('row'))))
-                return a.get('text') == x.get('text') or (a.get('sheet') == x.get('sheet') and a.get('row') == x.get('row') and a.get('row') is not None)
+                if a.get('row') is not None:   # Claude's "fine" is about that row: the same message on another row is still checked
+                    return a.get('sheet') == x.get('sheet') and str(a.get('row')) == str(x.get('row'))
+                return a.get('text') == x.get('text')
             hit = next((a for a in accepted if same(a)), None)
             if hit:
                 dismissed.append(dict(x, verdict='not_an_issue', verdict_reason=(str(hit.get('reason') or '') if hit.get('by_person') else 'Claude checked: ' + str(hit.get('reason') or ''))))
