@@ -929,3 +929,12 @@ body{-webkit-font-smoothing:antialiased}
 .cleanlist .only-note{grid-column:1/-1}
 .unsure .only-note{display:inline;color:var(--ok-ink)}
 .iitem .ionly{color:var(--ok-ink);font-style:normal}
+/* summary of errors */
+.errsum{border:1px solid var(--line);border-radius:10px;background:var(--page);padding:12px 14px;margin:10px 0 6px}
+.errsum-head{display:flex;align-items:center;justify-content:space-between}
+.errsum h3{font-size:15px;margin:0}
+.errsum-lines{margin:6px 0 8px;padding-left:18px;font-size:13px;color:var(--ink);display:grid;gap:3px}
+.errsum-table{width:100%;border-collapse:collapse;font-size:13px}
+.errsum-table td{padding:4px 6px;border-top:1px solid var(--line-2)}
+.errsum-table td.n{text-align:right;font-variant-numeric:tabular-nums;font-weight:700;width:48px}
+.errsum-table td.note{color:var(--muted);font-size:12px}

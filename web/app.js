@@ -1869,6 +1869,36 @@
     return i.source === 'Usual day' ? 'Different from the usual day' : 'Other checks';
   }
   // Issues grouped by severity, then by type; click one to see it in the sheet.
+  // A short summary when a report has several errors: what kind they are, how many matter, where they are.
+  function errorSummary(issues, done) {
+    const open = issues.filter(i => !done.has(i.key));
+    const types = new Set(open.map(issueType));
+    if (open.length < 4 && types.size < 3) return null;
+    const plural = (n, w, ws) => `${n} ${n === 1 ? w : ws || w + 's'}`;
+    const writing = open.filter(i => i.only), real = open.filter(i => !i.only);
+    const realSure = real.filter(i => i.sure !== false), realUnsure = real.filter(i => i.sure === false);
+    const sheets = {}; for (const i of open) if (i.sheet) sheets[i.sheet] = (sheets[i.sheet] || 0) + 1;
+    const topSheet = Object.entries(sheets).sort((a, b) => b[1] - a[1])[0];
+    const byType = {}; for (const i of open) { const t = issueType(i); (byType[t] ||= {n: 0, only: 0, high: 0}); byType[t].n++; if (i.only) byType[t].only++; if (i.severity === 'high') byType[t].high++; }
+    const clip = t => (t || '').length > 110 ? t.slice(0, 107) + '…' : t || '';
+    const lines = [
+      `${plural(open.length, 'open item')} on this report${done.size ? ` (${done.size} already reviewed)` : ''}.`,
+      writing.length ? `${writing.length} ${writing.length === 1 ? 'is' : 'are'} only how something is written (spaces, capitals, a letter typed for a digit). The values themselves are right.` : '',
+      realSure.length ? `${plural(realSure.length, 'is a real problem', 'are real problems')} that change${realSure.length === 1 ? 's' : ''} the numbers, for example: ${clip(realSure[0].text)}` : '',
+      realUnsure.length ? `${realUnsure.length} need${realUnsure.length === 1 ? 's' : ''} a person to decide, for example: ${clip(realUnsure[0].text)}` : '',
+      topSheet && Object.keys(sheets).length > 1 ? `Most are on the ${topSheet[0]} sheet (${topSheet[1]}).` : '',
+    ].filter(Boolean);
+    const rows = Object.entries(byType).sort((a, b) => b[1].high - a[1].high || b[1].n - a[1].n);
+    const text = ['Summary of errors', ...lines, '', ...rows.map(([t, c]) => `${t}: ${c.n}${c.only === c.n ? ' (only written differently)' : c.only ? ` (${c.only} only written differently)` : ''}`)].join('\n');
+    return h('div', {class: 'errsum'},
+      h('div', {class: 'errsum-head'}, h('h3', {}, 'Summary of errors'),
+        h('button', {type: 'button', class: 'btn ghost small', onclick: async () => {
+          try { await navigator.clipboard.writeText(text); toast('Summary copied.'); } catch (e) { toast('Your browser blocked copying.', true); } }}, 'Copy')),
+      h('ul', {class: 'errsum-lines'}, lines.map(l => h('li', {}, l))),
+      h('table', {class: 'errsum-table'}, h('tbody', {}, rows.map(([t, c]) => h('tr', {},
+        h('td', {}, t), h('td', {class: 'n'}, String(c.n)),
+        h('td', {class: 'note'}, c.only === c.n ? 'only written differently' : c.only ? `${c.only} only written differently` : c.high ? 'must fix' : ''))))));
+  }
   function issuesBlock(rv) {
     const reviewedKey = 'rd-reviewed:' + state.report.file_hash;
     const done = reviewedSet();
@@ -1922,6 +1952,8 @@
           : dismissed.length ? 'Nothing left: Claude checked every flagged item and none are real problems.' : 'Nothing flagged by the checks, SharePoint, the usual-day comparison or AI.'),
         left ? h('div', {class: 'right'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => focusIssue(Math.max(0, issues.findIndex(i => !done.has(i.key))))},
           left < issues.length ? 'Next open issue' : 'Start with the first')) : null));
+      const summary = errorSummary(issues, done);
+      if (summary) block.append(summary);
       if (sel.size) {
         const picked = issues.filter(i => sel.has(i.key)), ready = picked.filter(i => fixesFor(i).some(f => f.state !== 'rejected')).length;
         block.append(h('div', {class: 'selbar issel'},
