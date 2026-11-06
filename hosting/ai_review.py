@@ -146,6 +146,24 @@ TOOL = {
 
 
 def _post(body, opener=None, timeout=None):
+    """Call Claude. Some models refuse a forced tool (tool_choice "tool" / "any"), so the request always lets Claude
+    choose, says which tool to answer with, and asks once more if the first reply came back without calling it."""
+    choice = body.get('tool_choice') or {}
+    if choice.get('type') in ('tool', 'any') and body.get('tools'):
+        name = choice.get('name') or body['tools'][0]['name']
+        body = dict(body, tool_choice={'type': 'auto'},
+                    system=(body.get('system') or '') + f'\n\nAnswer only by calling the {name} tool, once, with your complete answer.')
+        data = _send(body, opener, timeout)
+        if any(b.get('type') == 'tool_use' for b in data.get('content') or []):
+            return data
+        again = dict(body, messages=list(body.get('messages') or []) + [
+            {'role': 'assistant', 'content': [b for b in data.get('content') or [] if b.get('type') == 'text'] or [{'type': 'text', 'text': '(no answer)'}]},
+            {'role': 'user', 'content': f'Please give your answer now by calling the {name} tool.'}])
+        return _send(again, opener, timeout)
+    return _send(body, opener, timeout)
+
+
+def _send(body, opener=None, timeout=None):
     key = os.environ.get('ANTHROPIC_API_KEY')
     if not key:
         raise AIReviewNotConfigured('AI review is not set up yet (ANTHROPIC_API_KEY missing in Vercel).')
