@@ -171,7 +171,12 @@
     else if (e.key === '/') { e.preventDefault(); if (!onReports || state.selected) location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; setTimeout(() => $('search')?.focus(), 50); }
     else if (e.key === 'u') { e.preventDefault(); $('file-input')?.click(); }
     else if (e.key === 'Escape' && state.selected) { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }
-    else if (e.key === '?') toast('Shortcuts: J or K next or previous report · / search · U upload · Esc back to the list');
+    else if (state.issueNav != null && document.querySelector('.issuenav') && ['a', 's', 'f', 'ArrowRight', 'ArrowLeft'].includes(e.key)) {
+      const btn = t => [...document.querySelectorAll('.issuenav .choices button, .issuenav .in-nav button')].find(b => b.textContent.trim().startsWith(t) && !b.disabled);
+      const target = {a: btn('Make this change') || btn('Take out'), s: btn('Skip'), f: btn('It\'s fine as is'), ArrowRight: btn('Next'), ArrowLeft: btn('‹ Previous')}[e.key];
+      if (target) { e.preventDefault(); target.click(); }
+    }
+    else if (e.key === '?') toast('Shortcuts: J or K next or previous report · / search · U upload · Esc back to the list · While checking: A make the change, S skip, F fine as is, ← → move');
   });
   let vinTimer;
   $('search').addEventListener('input', e => {
@@ -421,8 +426,10 @@
       const go = k => focusIssue(list.indexOf(nav[k]));
       const markNext = () => { done.add(issue.key); store.set('rd-reviewed:' + state.report.file_hash, [...done]); updateFinish(); drawSteps(); drawCleanOffer();
         const nextOpen = nav.findIndex((x, k) => k > pos && !done.has(x.key)), earlier = nav.findIndex(x => !done.has(x.key));
+        const leftNow = nav.filter(x => !done.has(x.key)).length;
+        if (leftNow === 1) toast('Nice! Just one more.'); else if (leftNow && leftNow === Math.ceil(nav.length / 2)) toast(`Halfway there: ${leftNow} left.`);
         if (nextOpen >= 0) go(nextOpen); else if (earlier >= 0) go(earlier);
-        else { state.issueNav = null; state.groupWalk = null; drawSide(); toast(gw ? `All ${gw.label.toLowerCase()} checked.` : 'That was the last open issue.'); } };
+        else { state.issueNav = null; state.groupWalk = null; drawSide(); toast(gw ? `Done! ${gw.label === 'Not sure' ? 'Every item you had to check' : `All the ${gw.label.toLowerCase()}`} handled.` : 'Done! That was the last open issue.'); } };
       kids.push(h('div', {class: 'issuenav sev-' + issue.severity},
         h('div', {class: 'in-top'}, h('span', {class: 'sev ' + issue.severity}), h('b', {}, gw ? `${pos + 1} of ${nav.length} in ${gw.label}` : `Issue ${idx + 1} of ${list.length}`), gw ? null : h('span', {class: 'in-type'}, issueType(issue)),
           h('button', {type: 'button', class: 'btn ghost small', onclick: () => { state.issueNav = null; state.groupWalk = null; state.gridCell = null; drawGrid(); drawSide(); }}, 'Close')),
@@ -434,6 +441,7 @@
         issue.fix && issue.fix !== issue.check ? h('p', {class: 'in-why'}, h('b', {}, 'What to do: '), issue.fix) : null,
         issue.check ? h('p', {class: 'hint'}, 'Check: ' + issue.check) : null,
         fixChoices(issue, markNext),
+        h('p', {class: 'keys-hint'}, 'Keys: A make the change · S skip · F fine as is · ← → move'),
         issue.verdict_reason ? h('p', {class: 'hint'}, 'Claude: ' + issue.verdict_reason) : null,
         !issue.sheet && !issue.row ? h('p', {class: 'hint'}, 'This one is about the report as a whole, not one cell.') : null,
         h('div', {class: 'in-nav'},
@@ -650,8 +658,12 @@
     const current = list.findIndex(x => !x[1]);
     const next = current === 1 ? (sureN ? 'Next: clean the data (see the box below), or pick fixes one by one on the right.' : unsureLeft ? 'Next: check the items the app is not sure about.' : 'Next: fix the must-fix issues on the right.')
       : current === 2 ? 'Next: approve the final copy with Approve and send.' : current === 3 ? 'Next: send it to the client.' : 'All done. This report has been sent.';
+    const pr = progress(), total = (state.fixes || []).length + walkIssues().length, left = pr ? pr.undecided + pr.open : null;
+    const meter = (i, done) => i === 1 && !done && pr && total ? (() => { const f = h('i'); f.style.width = `${Math.round((total - left) / total * 100)}%`;
+      return h('span', {class: 'meter', title: `${total - left} of ${total} handled`, role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': String(total), 'aria-valuenow': String(total - left)}, f); })() : null;
     bar.replaceChildren(...list.map(([name, done, note], i) => h('li', {class: done ? 'done' : i === current ? 'now' : '', 'aria-current': i === current ? 'step' : null},
-      h('span', {class: 'dot', 'aria-hidden': 'true'}, done ? '✓' : String(i + 1)), h('b', {}, name), h('small', {}, note))),
+      h('span', {class: 'dot', 'aria-hidden': 'true'}, done ? '✓' : String(i + 1)), h('b', {}, name),
+      h('small', {}, i === 1 && !done && pr && total ? `${total - left} of ${total} done` : note), meter(i, done))),
       h('li', {class: 'next'}, next));
   }
   function drawFixes() {
@@ -1097,6 +1109,7 @@
     applyFixes(c.accepted, c.dec, c.edits, {download: false});
   }
   function updateFinish() {
+    drawSteps();
     const slot = $('finish'), r = state.report; if (!slot || !r) return;
     const p = progress(), sent = (r.sent || []).some(x => x.sent);
     state.finishSeen ||= {};
@@ -1115,21 +1128,31 @@
       h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, r.approval ? 'Send to client' : 'Send it to the client for me')));
     if (was === false && !store.get('rd-finish-offered:' + r.file_hash, false)) { store.set('rd-finish-offered:' + r.file_hash, true); offerFinish(p); }
   }
+  function confetti() {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return null;
+    const box = h('div', {class: 'confetti', 'aria-hidden': 'true'}), colors = ['#20594d', '#8fd3b8', '#d68910', '#5b7fa8', '#c0392b', '#f2c94c'];
+    for (let i = 0; i < 36; i++) { const c = h('i'); c.style.left = `${Math.random() * 100}%`; c.style.background = colors[i % colors.length];
+      c.style.animationDelay = `${Math.random() * 0.4}s`; c.style.animationDuration = `${1.4 + Math.random() * 1.2}s`; c.style.transform = `rotate(${Math.random() * 360}deg)`; box.append(c); }
+    setTimeout(() => box.remove(), 3200);
+    return box;
+  }
   function offerFinish(p) {
     if (document.querySelector('dialog[open]:not(#finish-dialog)')) { setTimeout(() => offerFinish(p), 1500); return; }
     let dlg = $('finish-dialog');
     if (!dlg) { dlg = h('dialog', {id: 'finish-dialog', class: 'fixer finishdlg', 'aria-labelledby': 'finish-title'}); document.body.append(dlg);
       dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); }); }
-    const r = state.report;
-    dlg.replaceChildren(h('div', {class: 'fixer-wait'},
+    const r = state.report, handled = (state.fixes || []).length + walkIssues().length;
+    const nextRep = state.list.find(x => x.file_hash !== r.file_hash && x.review && x.review.status !== 'clear' && !x.review.sent_at && inClient(x.review.job));
+    dlg.replaceChildren(h('div', {class: 'fixer-wait celebrate'},
+      confetti(),
       h('div', {class: 'finish-mark'}, '✓'),
-      h('h2', {id: 'finish-title'}, 'All fixes are handled'),
-      h('p', {}, `${r.review.job || r.filename}: ` + (p.ready ? `${p.ready} change${p.ready === 1 ? '' : 's'} will go into the final report.` : 'nothing needs changing.')
-        + ' Download it, or approve it and send it to the client from data@ppgquality.com.'),
+      h('h2', {id: 'finish-title'}, 'All clear!'),
+      h('p', {class: 'wins'}, handled ? `You handled all ${handled} item${handled === 1 ? '' : 's'} on ${r.review.job || r.filename}.` : `${r.review.job || r.filename} is clean.`),
+      h('p', {}, (p.ready ? `${p.ready} change${p.ready === 1 ? '' : 's'} will go into the final report. ` : 'Nothing needs changing. ') + 'Next: approve it and send it to the client, or download it.'),
       h('div', {class: 'row'},
-        h('button', {type: 'button', class: 'btn ghost', onclick: () => dlg.close()}, 'Not now'),
+        nextRep ? h('button', {type: 'button', class: 'btn ghost', onclick: () => { dlg.close(); select(nextRep.file_hash); }}, 'Next report ›') : h('button', {type: 'button', class: 'btn ghost', onclick: () => dlg.close()}, 'Not now'),
         h('button', {type: 'button', class: 'btn', onclick: downloadFinal}, 'Download final report'),
-        h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, 'Send it to the client for me'))));
+        h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, 'Approve and send'))));
     if (!dlg.open) dlg.showModal();
   }
 
@@ -1348,6 +1371,7 @@
       const addBox = h('input', {type: 'text', placeholder: 'Add a job to watch, e.g. HANDS-HMMA-2219', 'aria-label': 'Job number'});
       wrap.replaceChildren(
         h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Today'), h('div', {class: 'meta'}, 'Every job’s day at a glance: scans on SharePoint so far, and where each daily report stands.'))),
+        todaysWins(),
         autopilotPanel(),
         h('div', {class: 'periodbar'}, h('div', {class: 'pnav'}, h('button', {type: 'button', class: 'btn small', 'aria-label': 'Previous day', onclick: () => shift(-1)}, '‹'),
           h('b', {}, label), h('button', {type: 'button', class: 'btn small', 'aria-label': 'Next day', onclick: () => shift(1)}, '›')),
@@ -2239,6 +2263,17 @@
   }
 
   // ---------------------------------------------------------------- autopilot: the daily work, done when the app is opened
+  function todaysWins() {
+    const today = new Date().toLocaleDateString('en-CA', {timeZone: 'America/Chicago'});
+    const local = iso => iso ? new Date(iso).toLocaleDateString('en-CA', {timeZone: 'America/Chicago'}) : '';
+    const cleaned = state.list.filter(r => r.review?.fixed_from && local(r.received_at) === today).length;
+    const sent = state.list.filter(r => local(r.review?.sent_at) === today).length;
+    const waiting = state.list.filter(r => r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
+    return h('div', {class: 'wins-bar'},
+      h('span', {}, h('b', {}, String(cleaned)), ` report${cleaned === 1 ? '' : 's'} cleaned today`),
+      h('span', {}, h('b', {}, String(sent)), ` sent today`),
+      h('span', {class: waiting ? '' : 'allgood'}, waiting ? [h('b', {}, String(waiting)), ` waiting for you`] : 'Nothing waiting. Nice work!'));
+  }
   async function autopilotTick() {
     let out;
     try { out = await api('/api/autopilot', {run: true}); } catch (e) { return; }

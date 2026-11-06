@@ -961,3 +961,21 @@ body{-webkit-font-smoothing:antialiased}
 .choices-h{font-size:13px;color:var(--ink)}
 .choice{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 10px;font-size:13px}
 .choice .cbtns{display:flex;gap:6px}
+/* progress meter in the Clean step */
+.steps-bar .meter{display:inline-block;width:90px;height:6px;border-radius:3px;background:var(--line-2);overflow:hidden;vertical-align:middle}
+.steps-bar .meter i{display:block;height:100%;background:var(--ok);border-radius:3px;transition:width .35s ease}
+/* celebration */
+.celebrate{position:relative;overflow:hidden}
+.celebrate .finish-mark{animation:pop .45s cubic-bezier(.2,1.6,.4,1) both}
+.celebrate h2{font-size:26px}
+.celebrate .wins{font-weight:600;color:var(--ok-ink)}
+@keyframes pop{0%{transform:scale(.3);opacity:0}100%{transform:scale(1);opacity:1}}
+.confetti{position:absolute;inset:0;pointer-events:none}
+.confetti i{position:absolute;top:-12px;width:8px;height:12px;border-radius:2px;animation:fall linear forwards}
+@keyframes fall{to{top:110%;transform:translateX(30px) rotate(540deg)}}
+.keys-hint{font-size:11px;color:var(--faint);margin:2px 0 0}
+/* today's wins */
+.wins-bar{display:flex;flex-wrap:wrap;gap:8px 22px;align-items:center;margin:0 0 12px;padding:10px 16px;background:#fff;border:1px solid var(--line);border-radius:10px;font-size:14px;color:var(--muted)}
+.wins-bar b{font-size:20px;color:var(--ink);margin-right:2px;font-variant-numeric:tabular-nums}
+.wins-bar .allgood{color:var(--ok-ink);font-weight:600}
+@media (prefers-reduced-motion:reduce){.celebrate .finish-mark{animation:none}.steps-bar .meter i{transition:none}}
