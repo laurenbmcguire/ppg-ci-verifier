@@ -51,7 +51,7 @@ def run(h, file_hash, keys=None, opener=None):
                 _, data = inbox.original_bytes(current)
                 changes = relocate_rows(now['filename'], data, [(r['sheet'], r['row'], (r.get('to_sheet') or None)) for r in rows])
                 for c in changes:
-                    c.setdefault('reason', 'Row taken out or moved by Claude'); c.setdefault('source', 'AI fix (asked)')
+                    c['reason'], c['source'] = 'Rows taken out or moved by Claude', 'Row taken out or moved (AI fix)'
                 current = inbox.apply_fixes(current, changes)['file_hash']
     except FixError as exc:
         raise AIFixError(f'Claude\'s changes could not be applied: {exc}') from None

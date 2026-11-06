@@ -381,6 +381,58 @@
       item('Checked and fine as is', s.fine || [], x => `${x.text} ${x.reason}`),
       item('Left for you', s.left || [], x => `${x.text} (${x.why})`));
   }
+  // ---------------- SharePoint job check, change summary PDFs and the record of them
+  function spJobLine(r) {
+    const j = r.sp_job; if (!j || j.status === 'no_list' && state.me?.user?.role !== 'admin') return null;
+    const ok = j.status === 'found' && !j.inactive;
+    const recs = r.change_summaries || [];
+    return h('div', {class: 'spjob ' + (ok ? 'ok' : j.status === 'no_list' ? 'none' : 'warn')},
+      h('span', {class: 'spjob-tag'}, ok ? 'SharePoint ✓' : 'SharePoint'),
+      h('span', {}, j.status === 'no_list' ? 'Load the SharePoint job list on Checks & shifts so every report is matched to its SharePoint job.' : j.message),
+      recs.length ? h('span', {class: 'spjob-recs'}, 'Change summary: ', ...recs.slice(0, 3).map((x, i) => h('a', {href: '/api/change-summary?id=' + x.id + '&view=1', target: '_blank', rel: 'noopener'}, i ? `, ${ago(x.made_at)}` : `PDF ${ago(x.made_at)}`))) : null);
+  }
+  async function makeChangeSummary() {
+    const hash = state.report.file_hash;
+    toast('Making the change summary…');
+    try {
+      const {record} = await api('/api/change-summary', {file_hash: hash, by: myName() || null});
+      state.report.change_summaries = [{id: record.id, made_at: record.made_at, by: record.by, reason: 'requested'}, ...(state.report.change_summaries || [])];
+      refreshHead();
+      const a = h('a', {href: '/api/change-summary?id=' + record.id, download: record.filename}); document.body.append(a); a.click(); a.remove();
+      toast(record.differed ? `Change summary saved on record: ${record.changes} cell change${record.changes === 1 ? '' : 's'}` + (record.rows ? `, ${record.rows} row${record.rows === 1 ? '' : 's'} taken out or moved` : '') + `, ${record.differences} difference${record.differences === 1 ? '' : 's'} from SharePoint, ${record.open} still open.` : 'Change summary saved on record: this report matched SharePoint and needed no changes.');
+    } catch (e) { toast(e.message, true); }
+  }
+  function changeRecords() {
+    const box = h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Change summaries on record'),
+      h('p', {}, 'A PDF is saved when a report that differed from SharePoint or was changed is approved, or when someone makes one from a report (More, Change summary). Internal only.')),
+      h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Loading…'));
+    api('/api/change-summaries', {}).then(({records}) => {
+      box.lastChild.replaceWith(records.length ? h('div', {class: 'tablewrap'}, h('table', {class: 'keys'},
+        h('thead', {}, h('tr', {}, ['Job', 'Report day', 'Made', 'By', 'Why', 'SharePoint job', 'Differences', 'Cells changed', 'Rows', 'Open', ''].map(x => h('th', {}, x)))),
+        h('tbody', {}, records.slice(0, 200).map(x => h('tr', {},
+          h('td', {}, h('b', {}, x.job || '—')), h('td', {}, x.day ? dayLabel(x.day) : '—'), h('td', {}, ago(x.made_at)), h('td', {}, x.by || '—'),
+          h('td', {}, x.reason === 'approved' ? 'Approved' : 'Asked for'), h('td', {}, {found: 'Found', differs: 'Written differently', not_found: 'Not found', ambiguous: 'On more than one site', no_list: 'No list loaded', no_job: 'No job number'}[x.job_check] || '—'),
+          h('td', {}, fmt(x.differences)), h('td', {}, fmt(x.changes)), h('td', {}, fmt(x.rows || 0)), h('td', {}, x.open ? h('span', {class: 'badn'}, fmt(x.open)) : '0'),
+          h('td', {}, h('a', {class: 'btn small', href: '/api/change-summary?id=' + x.id + '&view=1', target: '_blank', rel: 'noopener'}, 'Open PDF'), ' ',
+            h('button', {type: 'button', class: 'btn ghost small', onclick: () => select(x.file_hash)}, 'Report'))))))) : h('p', {class: 'note'}, 'None yet. They appear here as reports are approved.'));
+    }).catch(e => box.lastChild.replaceWith(h('p', {class: 'note'}, e.message)));
+    return box;
+  }
+  function spJobsSection() {
+    const box = h('section', {class: 'block'});
+    const file = h('input', {type: 'file', accept: '.xlsx', hidden: true, onchange: async e => {
+      const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+      try { const b64 = await new Promise((ok, no) => { const rd = new FileReader(); rd.onload = () => ok(String(rd.result).split(',')[1]); rd.onerror = no; rd.readAsDataURL(f); });
+        paint(await api('/api/settings/sharepoint-jobs', {content_base64: b64, filename: f.name})); toast('SharePoint job list loaded. Every report is now matched to it.');
+      } catch (err) { toast(err.message, true); } }});
+    const paint = info => box.replaceChildren(h('header', {}, h('h2', {}, 'SharePoint job list'),
+        h('p', {}, 'Every report is checked against this list: its job must be in SharePoint, written the same way, on the right client site and active. Upload the "PPG SharePoint — Clients & Jobs" Excel file whenever it changes.')),
+      info.jobs ? h('p', {class: 'ssource'}, `Loaded: ${info.real} jobs (${info.active} active) as of ${info.as_of || 'unknown'}` + (info.filename ? `, from ${info.filename}` : '') + (info.uploaded_at ? `, uploaded ${ago(info.uploaded_at)}.` : '.'))
+        : h('p', {class: 'ssource warn'}, 'No list loaded yet.'),
+      state.me?.user?.role === 'admin' ? h('div', {class: 'btns'}, file, h('button', {type: 'button', class: 'btn', onclick: () => file.click()}, info.jobs ? 'Upload a newer list' : 'Upload the job list')) : null);
+    paint({}); api('/api/settings/sharepoint-jobs', {}).then(paint).catch(() => {});
+    return box;
+  }
   function autoFmtBanner(r) {
     const a = r.auto_formatting; if (!a || !a.count) return null;
     const kinds = Object.entries(a.kinds || {}).map(([k, n], i) => `${i ? k : k[0].toUpperCase() + k.slice(1)}: ${n}`).join(', ');
@@ -418,6 +470,7 @@
       h('div', {class: 'menu'},
         !r.approval && (r.review_request || {}).status !== 'waiting' ? h('button', {type: 'button', onclick: e => { close(e); reviewForm('request'); }}, 'Send for review') : null,
         h('button', {type: 'button', onclick: e => { close(e); copyClientSummary(); }}, 'Copy client summary for an email'),
+        h('button', {type: 'button', onclick: e => { close(e); makeChangeSummary(); }}, 'Change summary (PDF)'),
         h('a', {href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename, onclick: close}, 'Download the original file')));
     const head = h('div', {class: 'rhead'},
       h('button', {type: 'button', class: 'back', onclick: () => { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }}, state.client ? `‹ ${clientName()} reports` : '‹ All reports'),
@@ -429,7 +482,7 @@
         h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download report'),
         h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
     const status = h('div', {class: 'rstatus'},
-      docBanner(r), autoFmtBanner(r), aiFixedBanner(r),
+      spJobLine(r), docBanner(r), autoFmtBanner(r), aiFixedBanner(r),
       h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
       h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)),
       h('div', {id: 'cleanoffer'}));
@@ -1386,6 +1439,7 @@
           h('tbody', {}, o.jobs.map(j => h('tr', {}, h('td', {}, h('b', {}, j.job)), h('td', {}, fmt(j.days)), h('td', {}, fmt(j.inspected)), h('td', {}, pct(j.rate)),
             h('td', {}, fmt(j.caught)), h('td', {}, fmt(j.corrected)), h('td', {}, `${fmt(j.sent)} of ${fmt(j.days)}`), h('td', {}, fmt(j.on_time)), h('td', {}, j.turnaround == null ? '—' : `${j.turnaround} h`),
             h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => { state.periodQuery = {kind: o.days > 7 ? 'month' : 'week', day: o.end, job: j.job}; location.hash = 'periods'; }}, 'Details')))))))),
+      changeRecords(),
     ].filter(Boolean));
   }
 
@@ -1835,6 +1889,7 @@
       return box;
     };
     const moved = d => `Saved. ${d.rechecked ? `${d.rechecked} report${d.rechecked === 1 ? '' : 's'} checked again with the new times` : 'New uploads use the new times'}${d.moved ? `; ${d.moved} row${d.moved === 1 ? ' is' : 's are'} on a different shift than in the report. Open the report to move them.` : '.'}`;
+    const spSlot = spJobsSection();
     const draw = () => {
       const ruleText = h('input', {type: 'text', placeholder: 'e.g. Flag any VIN that does not start with HZA', 'aria-label': 'What Claude should look for', maxlength: '400'});
       const ruleJob = h('select', {'aria-label': 'Which jobs'}, h('option', {value: ''}, 'All jobs'), data.jobs.map(j => h('option', {value: j}, j)));
@@ -1865,6 +1920,7 @@
           h('div', {class: 'keyform addjob'}, newJob, h('datalist', {id: 'job-list'}, data.jobs.filter(j => !jobsWithOwn.includes(j)).map(j => h('option', {value: j}))),
             h('button', {type: 'button', class: 'btn', onclick: () => { const j = newJob.value.trim().toUpperCase(); if (!j) { newJob.focus(); toast('Type or pick a job first, then click Set different times for a job.'); return; }
               data.shifts.jobs = {...data.shifts.jobs, [j]: data.shifts.default.map(x => ({...x}))}; draw(); toast(`Set ${j}'s times below, then save.`); }}, 'Set different times for a job'))));
+      wrap.append(spSlot);
     };
     draw();
   }
@@ -2059,7 +2115,8 @@
       if (!withdraw) store.set('rd-approver', f.approver.trim());
       const out = await api('/api/spreadsheets/approve', {file_hash: hash, approver: f.approver, note: f.note, override: !!f.override, withdraw});
       state.report = {...state.report, ...out.item, approval: out.item.approval || null, review: state.report.review};
-      toast(withdraw ? 'Approval withdrawn.' : 'Approved as final. You can send it to the client now.');
+      toast(withdraw ? 'Approval withdrawn.' : 'Approved as final. You can send it to the client now.' + (out.change_summary ? ' It differed from SharePoint or was changed, so a change summary PDF was saved on record.' : ''));
+      if (out.change_summary) state.report.change_summaries = [{id: out.change_summary.id, made_at: out.change_summary.made_at, by: out.change_summary.by, reason: 'approved'}, ...(state.report.change_summaries || [])];
       refreshHead(); loadList();
     } catch (e) { toast(e.message, true); }
     finally { state.sending = false; drawSend(); }

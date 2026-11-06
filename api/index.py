@@ -563,6 +563,17 @@ class handler(BaseHTTPRequestHandler):
                     from hosting.dashboard import file_name
                     headers['Content-Disposition'] = f'attachment; filename="{file_name(item)}"'
                 return self.send(200, dash['html'].encode('utf-8'), 'text/html; charset=utf-8', headers)
+            if route == '/api/change-summary':
+                rid = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
+                if not re.fullmatch(r'[0-9a-f]{20}', rid):
+                    raise Conflict('Valid change summary ID required.')
+                from hosting import change_summary
+                rec, pdf = change_summary.pdf_for(self, rid)
+                if not self.can_job(rec.get('job')):
+                    return self.fail(404, 'Change summary not found.')
+                safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', rec.get('filename') or 'Change summary.pdf')[:180]
+                disp = 'inline' if parse_qs(urlsplit(self.path).query).get('view') == ['1'] else 'attachment'
+                return self.send(200, pdf, 'application/pdf', {'Content-Disposition': f'{disp}; filename="{safe}"'})
             if route == '/api/spreadsheets/download':
                 file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
                 if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
@@ -619,7 +630,10 @@ class handler(BaseHTTPRequestHandler):
                         repeats = inbox.repeats_elsewhere(file_hash, index_old=False)   # never slow down opening a report
                     except Exception:
                         debug_log(); repeats = []
-                    data = dict(data, review=summarize(data), other_days=repeats, built=inbox.setting(f'built|{file_hash}', None))
+                    from hosting import sharepoint_jobs
+                    rv = summarize(data)
+                    data = dict(data, review=rv, other_days=repeats, built=inbox.setting(f'built|{file_hash}', None),
+                                sp_job=sharepoint_jobs.lookup(rv.get('job'), inbox.setting(sharepoint_jobs.KEY)))
                 else:
                     data = {'status': 'ready', 'storage': getattr(self.store(), 'storage_label', 'unconfigured'), 'live_connectors_enabled': False, 'sharepoint_configured': sharepoint_configured(), 'ai_review_configured': ai_review_configured(), 'spreadsheet_scope': 'internal_checks_only', 'send_enabled': mail_configured(), 'reviewer_identity_available': False, 'prototype': True, 'local_only': not hosted_preview(), 'development_demo': self.demo_enabled()}
                 body = encode_json(data)
@@ -648,11 +662,11 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix', '/api/change-summary', '/api/change-summaries', '/api/settings/sharepoint-jobs', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload', '/api/periods/check-file') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
-            if not route.startswith('/api/workflow/') and route not in ('/api/periods/check-file', '/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/ai-fixes','/api/spreadsheets/ai-fix','/api/spreadsheets/ai-verify','/api/spreadsheets/ai-summary','/api/spreadsheets/chat','/api/spreadsheets/baseline','/api/spreadsheets/fixes','/api/spreadsheets/cells','/api/spreadsheets/sheet','/api/spreadsheets/apply-fixes','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
+            if not route.startswith('/api/workflow/') and route not in ('/api/periods/check-file', '/api/settings/sharepoint-jobs', '/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/ai-fixes','/api/spreadsheets/ai-fix','/api/spreadsheets/ai-verify','/api/spreadsheets/ai-summary','/api/spreadsheets/chat','/api/spreadsheets/baseline','/api/spreadsheets/fixes','/api/spreadsheets/cells','/api/spreadsheets/sheet','/api/spreadsheets/apply-fixes','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= limit:
                 return self.fail(413, 'Request size is invalid.')
@@ -757,6 +771,41 @@ class handler(BaseHTTPRequestHandler):
                 if out.get('status') != 'done':
                     raise Conflict(out.get('message') or 'Claude could not answer.')
                 return self.send(200, encode_json(out))
+            if route == '/api/change-summary':   # make a PDF change summary now (kept on record)
+                payload = json.loads(raw)
+                file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
+                from hosting import change_summary
+                u = self.current_user() or {}
+                who = None if u.get('virtual') else (u.get('name') or u.get('email'))
+                return self.send(200, encode_json({'record': change_summary.make(self, file_hash, payload.get('by') or who, 'requested')}))
+            if route == '/api/change-summaries':
+                payload = json.loads(raw) or {}
+                from hosting import change_summary
+                with self.store().session() as directory:
+                    recs = SpreadsheetInbox(directory).setting(change_summary.RECORDS, []) or []
+                recs = [r for r in recs if self.can_job(r.get('job'))]
+                fh = payload.get('file_hash') if isinstance(payload, dict) else None
+                if isinstance(fh, str):
+                    recs = [r for r in recs if fh in (r.get('file_hash'), r.get('first_hash'))]
+                return self.send(200, encode_json({'records': recs[:500]}))
+            if route == '/api/settings/sharepoint-jobs':   # the "PPG SharePoint — Clients & Jobs" workbook
+                payload = json.loads(raw) or {}
+                from hosting import sharepoint_jobs
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    if payload.get('content_base64'):
+                        if not self.is_admin():
+                            return self.fail(403, 'Only admins can change the SharePoint job list.')
+                        cat = sharepoint_jobs.parse(base64.b64decode(payload['content_base64'], validate=True))
+                        cat.update(filename=str(payload.get('filename') or '')[:200], uploaded_at=datetime.now(timezone.utc).isoformat())
+                        inbox.set_setting(sharepoint_jobs.KEY, cat)
+                    cat = inbox.setting(sharepoint_jobs.KEY) or {}
+                return self.send(200, encode_json({k: cat.get(k) for k in ('as_of', 'filename', 'uploaded_at')} | dict(jobs=len(cat.get('jobs') or []),
+                                 real=sum(1 for j in cat.get('jobs') or [] if (j.get('type') or 'Job') == 'Job'), active=sum(1 for j in cat.get('jobs') or [] if (j.get('status') or '').lower() == 'active'))))
             if route == '/api/spreadsheets/ai-fix':   # Fix with AI: Claude resolves the picked issues (or all) and the changes are made
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
@@ -1235,7 +1284,14 @@ class handler(BaseHTTPRequestHandler):
                 from hosting import delivery
                 if route.endswith('/approve'):
                     item = delivery.approve(self.store(), file_hash, payload.get('approver'), payload.get('note'), payload.get('override'), payload.get('withdraw'))
-                    return self.send(200, encode_json({'item': item}))
+                    summary = None
+                    if not payload.get('withdraw'):   # at the end: a PDF change summary on record when the report differed from SharePoint or was changed
+                        try:
+                            from hosting import change_summary
+                            summary = change_summary.make(self, file_hash, payload.get('approver'), 'approved', only_if_differs=True)
+                        except Exception:
+                            debug_log()
+                    return self.send(200, encode_json({'item': item, 'change_summary': summary}))
                 if route.endswith('/send-info'):
                     return self.send(200, encode_json(delivery.info(self.store(), file_hash)))
                 item, record = delivery.send(self.store(), file_hash, payload)

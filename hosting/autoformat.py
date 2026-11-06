@@ -86,7 +86,7 @@ def run(h, file_hash):
             steps.append(current)
             moves = relocate_rows(item['filename'], data, [(s_, r, None) for s_, r, _t in dups])
             for c in moves:
-                c.setdefault('reason', 'Extra copy of a duplicate row taken out'); c.setdefault('source', 'Duplicate rows (automatic cleanup)')
+                c['reason'], c['source'] = 'Extra copy of a duplicate row taken out', 'Row taken out (automatic cleanup)'
             current = inbox.apply_fixes(current, moves)['file_hash']
             removed = [dict(sheet=s_, row=r, text=t) for s_, r, t in dups]
         if current == file_hash:

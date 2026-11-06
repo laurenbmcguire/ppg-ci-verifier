@@ -338,8 +338,7 @@ def remove_rows(h, file_hash, rows):
     try:
         changes = relocate_rows(item['filename'], data, [(s_, r, None) for s_, r in rows])
         for c in changes:
-            c.setdefault('reason', 'Extra copy of a duplicate row taken out')
-            c.setdefault('source', 'Duplicate rows')
+            c['reason'], c['source'] = 'Extra copy of a duplicate row taken out', 'Row taken out'
         with h.store().session() as directory:
             fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, changes)
     except FixError as exc:

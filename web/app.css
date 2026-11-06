@@ -1075,3 +1075,12 @@ body[data-page=reports] .mnav .mup,body[data-page=reports] label.nav[for=file-in
 .aifx-group li{margin:2px 0}
 .aifx-group .checkme{font-style:normal;color:#9a6a00;font-weight:600}
 .autofmt-mark.ai{font-size:10px;letter-spacing:.02em}
+/* SharePoint job check on a report */
+.spjob{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;border-radius:10px;padding:9px 14px;margin:0 0 12px;font-size:14px;border:1px solid var(--line);background:#fff}
+.spjob.ok{background:var(--ok-bg);border-color:#bfe3d3}
+.spjob.warn{background:#fff8e8;border-color:#f0d9a6}
+.spjob.none{background:#f6f7f7}
+.spjob-tag{font-weight:700;font-size:12px;color:var(--green-dark)}
+.spjob.warn .spjob-tag{color:#8a5a00}
+.spjob-recs{margin-left:auto;font-size:13px}
+.spjob-recs a{color:var(--green)}
