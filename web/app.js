@@ -333,12 +333,26 @@
       drawReport();
       if (keepScroll) report.scrollTop = top;
       loadFixes(hash);
+      autoCleanOlder(data);
       if (state.openSendFor && (state.openSendFor === hash || state.openSendFor === 'next' && data.fixed_from)) { state.openSendFor = null; openSend(); }
     } catch (e) {
       report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note'}, e.message)));
     }
   }
 
+  // Reports uploaded before the automatic cleanup: make the sure fixes the first time one is opened, then say what changed
+  async function autoCleanOlder(r) {
+    const tried = store.get('rd-autoclean', []);
+    if (r.auto_formatting || r.approval || (r.sent || []).some(x => x.sent) || tried.includes(r.file_hash)) return;
+    store.set('rd-autoclean', [...tried, r.file_hash].slice(-500));
+    try {
+      const out = await api('/api/spreadsheets/auto-clean', {file_hash: r.file_hash});
+      if (!out.changed || state.selected !== r.file_hash) return;
+      const a = out.item.auto_formatting || {};
+      toast(`Fixed ${a.count} formatting issue${a.count === 1 ? '' : 's'} automatically. What changed is listed at the top.`);
+      await loadList(); select(out.item.file_hash);
+    } catch (e) { /* the offer box still lets the person do it */ }
+  }
   // Totals only, ready to paste into the client email. Never scan times, inspector names or internal check results.
   async function copyClientSummary() {
     const r = state.report, rv = r.review || {}, n = v => v == null ? '—' : Number(v).toLocaleString('en-US');
@@ -769,11 +783,18 @@
       h('code', {}, showWs(f.before)), h('span', {class: 'arrow', 'aria-label': 'becomes'}, ' → '), h('code', {}, showWs(f.after)),
       h('span', {class: 'fmtkind'}, fmtKind(f)),
       h('button', {type: 'button', class: 'linkish', title: 'Show this cell in the spreadsheet', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`))));
+    const yes = () => {
+      const c = readyChanges(), all = [...c.accepted, ...pending], rows = dupIssues.map(i => [i.sheet, Number(i.row)]);
+      if (!rows.length) applyFixes(all, c.dec, c.edits, {download: false});
+      else if (!all.length && !Object.keys(c.edits).length) removeRows(rows);
+      else (async () => { const d = store.get(decisionsKey(), {}); for (const f of pending) d[f.id] = {state: 'accepted', after: f.after}; store.set(decisionsKey(), d); await removeRows(rows); })();
+    };
+    const yesBtn = () => h('button', {type: 'button', class: 'btn primary', onclick: yes}, onlyFmt ? `Yes, fix ${fmt.length === 1 ? 'it' : `all ${fmt.length}`}` : `Yes, make the ${plural(sureCount, 'sure change')}`);
     slot.replaceChildren(h('section', {class: 'cleanoffer', 'aria-labelledby': 'clean-title'},
-      h('div', {class: 'cleanhead'},
+      h('div', {class: 'cleanhead cleanhead-yes'}, h('div', {},
         h('h2', {id: 'clean-title'}, onlyFmt ? (fmt.length === 1 ? 'Would you like me to fix this formatting issue?' : `Would you like me to fix all ${fmt.length} formatting issues, like these?`) : 'Want me to clean this data for you?'),
         onlyFmt ? h('p', {}, fmt.length === 1 ? 'It is only written differently. The value stays the same; only how it is typed changes:' : 'They are only written differently. The values stay the same; only how they are typed changes. For example:')
-          : h('p', {}, `I'm sure about ${plural(sureCount, 'change')}. Here is exactly what cleaning means for this report:`)),
+          : h('p', {}, `I'm sure about ${plural(sureCount, 'change')}. Here is exactly what cleaning means for this report:`)), yesBtn()),
       onlyFmt ? fmtExamples : null,
       h('ul', {class: 'cleanlist'}, fmt.length ? h('li', {class: 'fmtline'},
           h('b', {}, onlyFmt ? 'All the formatting fixes' : 'Formatting only: the values stay the same, only how they are typed changes'),
@@ -800,12 +821,7 @@
         h('li', {}, 'Your original file is never touched. The cleaned copy is saved as a new version and checked again.'),
         h('li', {}, 'Nothing goes to the client until you approve and send it.')),
       h('div', {class: 'cleanbtns'},
-        h('button', {type: 'button', class: 'btn primary', onclick: () => {
-          const c = readyChanges(), all = [...c.accepted, ...pending], rows = dupIssues.map(i => [i.sheet, Number(i.row)]);
-          if (!rows.length) applyFixes(all, c.dec, c.edits, {download: false});
-          else if (!all.length && !Object.keys(c.edits).length) removeRows(rows);
-          else (async () => { const d = store.get(decisionsKey(), {}); for (const f of pending) d[f.id] = {state: 'accepted', after: f.after}; store.set(decisionsKey(), d); await removeRows(rows); })();
-        }}, onlyFmt ? `Yes, fix ${fmt.length === 1 ? 'it' : `all ${fmt.length}`}` : `Yes, make the ${plural(sureCount, 'sure change')}`),
+        yesBtn(),
         h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); state.issueNav = null; drawSide();
           document.querySelector('.workspace')?.scrollIntoView({block: 'start'});
           requestAnimationFrame(() => $('fixes-block')?.scrollIntoView({behavior: 'smooth', block: 'nearest'})); }}, 'Let me choose'),

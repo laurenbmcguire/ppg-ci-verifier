@@ -74,6 +74,14 @@ class AIFix(test_autopilot.Autopilot):
             self.assertEqual(s['changed'][:len(first['changed'])], first['changed'])   # round one is still listed
             self.assertEqual(self.issues(out['item']['file_hash']), [])
 
+    def test_older_report_cleans_itself_when_opened(self):
+        os.environ.pop('PPG_AUTOFORMAT', None)                              # this upload was made with the cleanup off, like an older report
+        st, out = self.call('/api/spreadsheets/auto-clean', {'file_hash': self.h})
+        self.assertEqual(st, 200, out); self.assertTrue(out['changed'])
+        self.assertTrue(out['item']['auto_formatting']['count']); self.assertNotEqual(out['item']['file_hash'], self.h)
+        st, again = self.call('/api/spreadsheets/auto-clean', {'file_hash': out['item']['file_hash']})
+        self.assertEqual(st, 200, again); self.assertFalse(again['changed'])   # nothing left to clean
+
     def test_nothing_picked_and_ai_off(self):
         st, out = self.call('/api/spreadsheets/ai-fix', {'file_hash': self.h, 'keys': []})
         self.assertEqual(st, 409); self.assertIn('Pick', out['error'])

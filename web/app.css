@@ -1101,3 +1101,5 @@ body[data-page=reports] .mnav .mup,body[data-page=reports] label.nav[for=file-in
 #result-dialog .res-left li { display: flex; gap: 8px; align-items: baseline; list-style: none; margin-left: -18px; }
 #result-dialog .quiet { font-size: .88em; opacity: .8; margin: 4px 0 0; }
 #result-dialog .res-fixed li, #result-dialog .res-left li { border: 0; background: none; padding: 2px 0; box-shadow: none; }
+.cleanhead-yes{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+.cleanhead-yes > .btn{flex:none}
