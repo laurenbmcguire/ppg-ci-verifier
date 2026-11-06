@@ -918,19 +918,26 @@
       const item = (key, label, change, showIt) => h('li', {class: sel.has(key) ? 'on' : ''},
         h('label', {}, box(key, label), h('span', {class: 'pi-text'}, h('span', {class: 'pi-where'}, label), h('span', {class: 'pi-change'}, change))),
         h('button', {type: 'button', class: 'linkish small', onclick: showIt}, 'Show'));
-      const typeBlock = (id, title, sub, list, kids) => { const isOpen = state.planOpen.has(id), n = list.filter(isOn).length;
+      const typeBlock = (id, title, sub, list, kids, example) => { const isOpen = state.planOpen.has(id), n = list.filter(isOn).length;
         return h('div', {class: 'pg' + (isOpen ? ' open' : '') + (n ? ' some' : '')},
           h('div', {class: 'pg-head'}, tick(list, title),
             h('button', {type: 'button', class: 'pg-toggle', 'aria-expanded': String(isOpen), onclick: () => { isOpen ? state.planOpen.delete(id) : state.planOpen.add(id); drawCleanOffer(); }},
               h('span', {class: 'pg-title'}, title, h('span', {class: 'pg-count'}, n ? `${n} of ${list.length} selected` : `${list.length} item${list.length === 1 ? '' : 's'}`)),
               h('span', {class: 'pg-sub'}, sub), h('span', {class: 'pg-chev', 'aria-hidden': 'true'}, isOpen ? '▴' : '▾'))),
-          isOpen ? h('ul', {class: 'pg-items'}, kids()) : null); };
+          example && !isOpen ? h('div', {class: 'pg-ex'}, example) : null,
+          isOpen ? h('ul', {class: 'pg-items'}, kids()) : list.length > 1 ? h('button', {type: 'button', class: 'pg-more linkish small', onclick: () => { state.planOpen.add(id); drawCleanOffer(); }}, `See all ${list.length}`) : null); };
+      const exampleOf = (label, what, change, showIt) => [h('span', {class: 'pg-ex-k'}, 'Example'), h('button', {type: 'button', class: 'linkish small pg-ex-where', onclick: showIt}, label),
+        what ? h('span', {class: 'pg-ex-what'}, what) : null, change ? h('span', {class: 'pg-ex-change'}, change) : null];
       const blocks = [
-        ...fixRows.map(r => typeBlock(r.id, r.label, r.plan, r.fixes, () => r.fixes.slice(0, 500).map(f =>
-          item(f.id, `${f.sheet} ${f.cell}`, [show(f.before), ' → ', h('b', {}, showWs(f.after))], () => showCell(f.sheet, f.cell))))),
+        ...fixRows.map(r => { const f0 = r.fixes[0]; return typeBlock(r.id, r.label, r.plan, r.fixes, () => r.fixes.slice(0, 500).map(f =>
+          item(f.id, `${f.sheet} ${f.cell}`, [show(f.before), ' → ', h('b', {}, showWs(f.after))], () => showCell(f.sheet, f.cell))),
+          exampleOf(`${f0.sheet} ${f0.cell}`, f0.reason || '', ['Now ', show(f0.before), ' → becomes ', h('b', {}, showWs(f0.after))], () => showCell(f0.sheet, f0.cell))); }),
         ...groups.map(g => typeBlock(g.id, g.label, g.plan.replace(/^Change to the suggested value, e\.g\. /, 'Suggested change, e.g. '), g.items, () => g.items.slice(0, 500).map(x => { const f = fixesFor(x).find(isFix);
           return item(x.key, where(x), f ? [show(f.before), ' → ', h('b', {}, showWs(f.after))] : isDupRow(x) ? 'Extra copy: take it out' : state.aiOn ? h('em', {}, 'No suggested change: Claude can fix it') : h('em', {}, 'No suggested change'),
-            () => { state.walkNote = null; focusIssue(walkIssues().indexOf(x)); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }); })))];
+            () => { state.walkNote = null; focusIssue(walkIssues().indexOf(x)); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }); }),
+          (() => { const x = g.items[0], f = fixesFor(x).find(isFix);
+            return exampleOf(where(x), x.text, f ? ['Now ', show(f.before), ' → becomes ', h('b', {}, showWs(f.after))] : isDupRow(x) ? 'Fix: take out the extra copy' : state.aiOn ? 'No suggested change: Fix with AI lets Claude decide' : 'No suggested change: fix it by hand or Ignore',
+              () => { state.walkNote = null; focusIssue(walkIssues().indexOf(x)); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }); })()))];
       const none = !nOn, approveN = nChanges + nClaude;
       const bar = h('div', {class: 'pbar'},
         h('p', {class: 'pbar-count'}, none ? 'Tick the items you want to handle.' : `${plural(nOn, 'item')} selected`),
