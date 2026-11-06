@@ -568,7 +568,7 @@
       h('p', {}, 'These are never changed automatically, and the report cannot be approved until each one is accepted, skipped or marked reviewed.'),
       h('ul', {}, [...unsure.fixes.slice(0, 6).map(f => h('li', {}, h('button', {type: 'button', class: 'linkish', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`),
           `: maybe ${show(f.before)} should be ${show(f.after)}. ${f.reason || ''}`)),
-        ...unsure.issues.slice(0, Math.max(0, 6 - unsure.fixes.length)).map(i => h('li', {}, i.sheet ? h('b', {}, `${i.sheet}${i.cell ? ' ' + i.cell : i.row ? ' row ' + i.row : ''}: `) : null, i.message))]),
+        ...unsure.issues.slice(0, Math.max(0, 6 - unsure.fixes.length)).map(i => h('li', {}, i.sheet ? h('b', {}, `${i.sheet}${i.cell ? ' ' + i.cell : i.row ? ' row ' + i.row : ''}: `) : null, i.text || i.message || ''))]),
       unsure.total > 6 ? h('p', {class: 'more'}, `and ${unsure.total - 6} more on the right.`) : null,
       h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); const list = walkIssues(), at = list.findIndex(i => unsure.issues.includes(i)); if (at >= 0) focusIssue(at); else if (unsure.fixes[0]) showCell(unsure.fixes[0].sheet, unsure.fixes[0].cell); $('side')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, 'Check them now')) : null;
     if (!pending.length) {
