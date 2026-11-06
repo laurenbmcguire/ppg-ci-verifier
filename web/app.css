@@ -1144,3 +1144,12 @@ table.plan details.plan-more .bulk-list{min-width:280px}
 table.plan .tk{width:28px;padding-right:0}
 table.plan .tk input{margin:2px 0 0;width:16px;height:16px;accent-color:var(--green)}
 table.plan tr.off td:not(.tk){opacity:.45}
+table.plan tr.plan-items td{padding-top:0;border-bottom:1px solid var(--line)}
+table.plan tr.plan-items .bulk-list{max-height:320px;background:#f8faf9;border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+table.plan tr.plan-items li{display:grid;grid-template-columns:minmax(160px,1fr) minmax(0,1.4fr) auto;gap:10px;align-items:center;padding:3px 0;border-bottom:1px dashed #e4ebe8}
+table.plan tr.plan-items li:last-child{border-bottom:0}
+table.plan tr.plan-items li.off{opacity:.5}
+table.plan .plan-change{color:var(--muted);font-size:12.5px}
+table.plan tr.plan-items td{text-align:left !important}
+table.plan tr.plan-items li{grid-template-columns:minmax(200px,1.2fr) minmax(0,1fr) auto}
+table.plan tr.plan-items label{display:flex;gap:6px;align-items:center}
