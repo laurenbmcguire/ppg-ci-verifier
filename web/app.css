@@ -938,3 +938,13 @@ body{-webkit-font-smoothing:antialiased}
 .errsum-table td{padding:4px 6px;border-top:1px solid var(--line-2)}
 .errsum-table td.n{text-align:right;font-variant-numeric:tabular-nums;font-weight:700;width:48px}
 .errsum-table td.note{color:var(--muted);font-size:12px}
+.errsum-head{gap:10px}
+.errsum-head .quiet{flex:1;font-size:12px;color:var(--muted)}
+.errsum-lines{list-style:none;padding-left:0}
+.errsum-go{all:unset;box-sizing:border-box;display:block;width:100%;padding:5px 8px;border-radius:6px;cursor:pointer;font-size:13px;line-height:1.45;color:var(--ink)}
+.errsum-go:hover,.errsum-go:focus-visible{background:#fff;outline:1px solid var(--line)}
+.errsum-ex{color:#1a6654;text-decoration:underline;cursor:pointer}
+.errsum-arrow{color:var(--green);font-weight:700}
+.errsum-row{cursor:pointer}
+.errsum-row:hover td,.errsum-row:focus-visible td{background:#fff}
+.errsum-table td.go{color:var(--green);font-weight:700;width:14px}

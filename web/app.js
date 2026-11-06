@@ -1881,23 +1881,36 @@
     const topSheet = Object.entries(sheets).sort((a, b) => b[1] - a[1])[0];
     const byType = {}; for (const i of open) { const t = issueType(i); (byType[t] ||= {n: 0, only: 0, high: 0}); byType[t].n++; if (i.only) byType[t].only++; if (i.severity === 'high') byType[t].high++; }
     const clip = t => (t || '').length > 110 ? t.slice(0, 107) + '…' : t || '';
+    // each line knows which errors it is about, so clicking it walks through exactly those in the spreadsheet
+    const walk = (items, label) => () => {
+      if (!items.length) return;
+      state.groupWalk = {keys: new Set(items.map(i => i.key)), label};
+      focusIssue(issues.indexOf(items[0]));
+      document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'});
+    };
+    const jump = i => e => { e.stopPropagation(); state.groupWalk = null; focusIssue(issues.indexOf(i)); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); };
     const lines = [
-      `${plural(open.length, 'open item')} on this report${done.size ? ` (${done.size} already reviewed)` : ''}.`,
-      writing.length ? `${writing.length} ${writing.length === 1 ? 'is' : 'are'} only how something is written (spaces, capitals, a letter typed for a digit). The values themselves are right.` : '',
-      realSure.length ? `${plural(realSure.length, 'is a real problem', 'are real problems')} that change${realSure.length === 1 ? 's' : ''} the numbers, for example: ${clip(realSure[0].text)}` : '',
-      realUnsure.length ? `${realUnsure.length} need${realUnsure.length === 1 ? 's' : ''} a person to decide, for example: ${clip(realUnsure[0].text)}` : '',
-      topSheet && Object.keys(sheets).length > 1 ? `Most are on the ${topSheet[0]} sheet (${topSheet[1]}).` : '',
+      {text: `${plural(open.length, 'open item')} on this report${done.size ? ` (${done.size} already reviewed)` : ''}.`, items: open, label: 'Open items'},
+      writing.length ? {text: `${writing.length} ${writing.length === 1 ? 'is' : 'are'} only how something is written (spaces, capitals, a letter typed for a digit). The values themselves are right.`, items: writing, label: 'Written differently'} : null,
+      realSure.length ? {text: `${plural(realSure.length, 'is a real problem', 'are real problems')} that change${realSure.length === 1 ? 's' : ''} the numbers, for example: `, example: realSure[0], items: realSure, label: 'Real problems'} : null,
+      realUnsure.length ? {text: `${realUnsure.length} need${realUnsure.length === 1 ? 's' : ''} a person to decide, for example: `, example: realUnsure[0], items: realUnsure, label: 'To decide'} : null,
+      topSheet && Object.keys(sheets).length > 1 ? {text: `Most are on the ${topSheet[0]} sheet (${topSheet[1]}).`, items: open.filter(i => i.sheet === topSheet[0]), label: `on ${topSheet[0]}`} : null,
     ].filter(Boolean);
     const rows = Object.entries(byType).sort((a, b) => b[1].high - a[1].high || b[1].n - a[1].n);
-    const text = ['Summary of errors', ...lines, '', ...rows.map(([t, c]) => `${t}: ${c.n}${c.only === c.n ? ' (only written differently)' : c.only ? ` (${c.only} only written differently)` : ''}`)].join('\n');
+    const text = ['Summary of errors', ...lines.map(l => l.text + (l.example ? clip(l.example.text) : '')), '',
+      ...rows.map(([t, c]) => `${t}: ${c.n}${c.only === c.n ? ' (only written differently)' : c.only ? ` (${c.only} only written differently)` : ''}`)].join('\n');
     return h('div', {class: 'errsum'},
-      h('div', {class: 'errsum-head'}, h('h3', {}, 'Summary of errors'),
+      h('div', {class: 'errsum-head'}, h('h3', {}, 'Summary of errors'), h('span', {class: 'quiet'}, 'Click a line to see those errors in the spreadsheet'),
         h('button', {type: 'button', class: 'btn ghost small', onclick: async () => {
           try { await navigator.clipboard.writeText(text); toast('Summary copied.'); } catch (e) { toast('Your browser blocked copying.', true); } }}, 'Copy')),
-      h('ul', {class: 'errsum-lines'}, lines.map(l => h('li', {}, l))),
-      h('table', {class: 'errsum-table'}, h('tbody', {}, rows.map(([t, c]) => h('tr', {},
+      h('ul', {class: 'errsum-lines'}, lines.map(l => h('li', {},
+        h('button', {type: 'button', class: 'errsum-go', title: `Show ${plural(l.items.length, 'error')} in the spreadsheet, one at a time`, onclick: walk(l.items, l.label)},
+          l.text, l.example ? h('span', {class: 'errsum-ex', role: 'link', tabindex: '0', title: 'Show this one in the spreadsheet', onclick: jump(l.example)}, clip(l.example.text)) : null,
+          h('span', {class: 'errsum-arrow', 'aria-hidden': 'true'}, ' ›'))))),
+      h('table', {class: 'errsum-table'}, h('tbody', {}, rows.map(([t, c]) => h('tr', {class: 'errsum-row', tabindex: '0', title: `Show the ${t.toLowerCase()} in the spreadsheet, one at a time`,
+          onclick: walk(open.filter(i => issueType(i) === t), t), onkeydown: e => { if (e.key === 'Enter') walk(open.filter(i => issueType(i) === t), t)(); }},
         h('td', {}, t), h('td', {class: 'n'}, String(c.n)),
-        h('td', {class: 'note'}, c.only === c.n ? 'only written differently' : c.only ? `${c.only} only written differently` : c.high ? 'must fix' : ''))))));
+        h('td', {class: 'note'}, c.only === c.n ? 'only written differently' : c.only ? `${c.only} only written differently` : c.high ? 'must fix' : ''), h('td', {class: 'go'}, '›'))))));
   }
   function issuesBlock(rv) {
     const reviewedKey = 'rd-reviewed:' + state.report.file_hash;
