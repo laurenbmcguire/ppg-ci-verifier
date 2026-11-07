@@ -136,7 +136,8 @@ class VersionLineage(unittest.TestCase):
 
     def test_revisions_count_up_and_repeating_the_same_changes_adds_nothing(self):
         _, box = inbox()
-        v1 = box.ingest(NAME, sl_daily())
+        raw = sl_daily()   # built once: the workbook carries a save time
+        v1 = box.ingest(NAME, raw)
         change = [dict(sheet='Inspection Detail', cell='B4', before=box.sheet_grid(v1['file_hash'], 'Inspection Detail')['rows'][3][1], after='CHANGED-1', source='Your edit', kind='text')]
         v2 = box.apply_fixes(v1['file_hash'], change)
         self.assertEqual(v2['revision'], 2)
@@ -148,7 +149,7 @@ class VersionLineage(unittest.TestCase):
         self.assertEqual(len(box.get(v1['file_hash'])['fixes_applied']), 1)  # recorded once
         v3 = box.apply_fixes(v2['file_hash'], [dict(change[0], before='CHANGED-1', after='CHANGED-2')])
         self.assertEqual((v3['revision'], v3['root_hash']), (3, v1['file_hash']))
-        self.assertEqual(box.download(v1['file_hash'])[1], sl_daily())       # the original is untouched
+        self.assertEqual(box.download(v1['file_hash'])[1], raw)              # the original is untouched
 
 
 class Decisions(unittest.TestCase):
