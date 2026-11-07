@@ -494,7 +494,8 @@
       rv.rejected == null ? 'rejects not recorded' : rv.rejected_partial ? `${n(rv.rejected)} rejects recorded (some records blank)` : `${n(rv.rejected)} rejected`,
       shifts.length ? `${shifts.length} shift${shifts.length === 1 ? '' : 's'} (${shifts.join(', ')})` : null, `${photos} photo${photos === 1 ? '' : 's'}`].filter(Boolean);
     const state = (r.sent || []).some(x => x.sent) ? ['Sent', 'ok'] : r.approval ? ['Approved, not sent', 'ok']
-      : block ? [`${block} blocker${block === 1 ? '' : 's'}`, 'bad'] : review ? [`${review} to review`, 'warn'] : ['Ready to approve', 'ok'];
+      : block ? [`${block} blocker${block === 1 ? '' : 's'}`, 'bad'] : a.needs_person ? ['Client not settled', 'bad'] : review ? [`${review} to review`, 'warn']
+      : sp.status !== 'match' ? ['Not verified against SharePoint yet', 'warn'] : ['Ready to approve', 'ok'];
     return h('section', {class: 'reviewcard', 'aria-label': 'Report summary'},
       h('div', {class: 'rc-top'},
         h('span', {class: 'rc-state ' + state[1]}, state[1] === 'ok' ? '✓ ' : state[1] === 'bad' ? '✕ ' : '! ', state[0]),
@@ -670,7 +671,6 @@
     const head = h('div', {class: 'rhead'},
       h('button', {type: 'button', class: 'back', onclick: () => { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }}, state.client ? `‹ ${clientName()} reports` : '‹ All reports'),
       h('div', {class: 'rtitle'},
-        h('span', {class: `tag tag-${rv.status}`, title: statusNote(rv)}, STATUS[rv.status], h('small', {}, statusNote(rv))),
         h('h1', {}, rv.job || r.filename),
         h('span', {class: 'meta'}, `${dayLabel(rv.day)} · ${r.filename} · version ${r.version} · uploaded ${ago(r.received_at)}`)),
       h('div', {class: 'ractions'}, more,
@@ -2543,7 +2543,7 @@
     updateFinish();
   }
   // Internal approval and sending to the client are separate steps; a report with blockers never looks ready.
-  const blockers = r => (r.review?.counts?.high || 0) + (r.holds || []).filter(x => x.hard).length;
+  const blockers = r => (r.review?.counts?.high || 0) + (r.holds || []).filter(x => x.hard).length + (r.assignment?.needs_person && !(r.holds || []).some(x => x.hard) ? 1 : 0);
   const sendLabel = r => (r.sent || []).some(x => x.sent) ? 'Sent to client' : r.approval ? 'Send to client…'
     : blockers(r) ? `${blockers(r)} blocker${blockers(r) === 1 ? '' : 's'} to resolve` : 'Approve…';
 
