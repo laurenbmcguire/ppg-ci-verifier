@@ -156,8 +156,7 @@ class BrandedTests(unittest.TestCase):
             with inbox.connect() as db:
                 old=dict(original);old.pop('checker_version');old.pop('check_hash');old.pop('checked_at');db.execute('DELETE FROM spreadsheet_checks');db.execute('UPDATE spreadsheets SET result_json=?',(json.dumps(old),))
             self.assertEqual(inbox.list()['spreadsheets'][0]['internal_check_status'],'outdated_checks_require_recheck')
-            self.assertTrue(inbox.get(original['file_hash'])['recheck']['available'])
-            current=inbox.apply_recheck(original['file_hash'],'Chris');self.assertEqual(current['numeric_cells_checked'],2);self.assertEqual(current['recheck_applied'][0]['by'],'Chris')
+            current=inbox.get(original['file_hash']);self.assertEqual(current['numeric_cells_checked'],2);self.assertEqual(current['recheck_applied'][0]['by'],'Automatic update')
             from pathlib import Path
             self.assertEqual((Path(directory)/original['original_path']).read_bytes(),data)
 

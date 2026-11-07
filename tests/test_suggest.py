@@ -15,7 +15,7 @@ class Suggest(unittest.TestCase):
 
     def props(self, overrides):
         r = self.inbox.ingest('2230-OWENS-BASCO - EOS - 2026-10-07.xlsx', build([tuple(x) for x in ROWS], overrides=overrides))
-        return [p for p in self.inbox.fix_proposals(r['file_hash'])['proposals'] if p['source'] == 'Suggested']
+        return [p for p in self.inbox.fix_proposals(r['file_hash'])['proposals'] if p['source'] in ('Suggested', 'Known detail')]
 
     def test_paying_client_worksite_and_area(self):
         over = {('Summary', 'B5'): 'Paying Client', ('Summary', 'B6'): 'Worksite'}
@@ -32,6 +32,7 @@ class Suggest(unittest.TestCase):
     def test_twin_label_wins(self):
         got = {(p['sheet'], p['cell']): p for p in self.props({('Summary', 'B5'): 'Client', ('Summary', 'D5'): 'Owens Corning', ('Summary', 'B6'): 'Paying client'})}
         self.assertEqual(got[('Summary', 'D6')]['after'], 'Owens Corning')
+        self.assertTrue(got[('Summary', 'D6')]['sure'])   # the report already says it: filled in, not just suggested
 
     def test_header(self):
         self.assertEqual(suggest.header(suggest.context('2230-OWENS-BASCO', None, sharepoint_jobs.parse(job_list()))),

@@ -106,6 +106,21 @@ def summarize(result, with_issues=True, use_verdicts=True):
     for i, f in enumerate(sp.get('findings') or []):
         issues.append(dict(key=f'sp:{f.get("code")}:{f.get("row")}:{f.get("field")}:{i}', source='SharePoint', severity='high',
                            code=f.get('code'), where=_where(f), sheet=f.get('sheet'), row=f.get('row'), cell=_cell(f), text=f.get('message')))
+    rec = result.get('source_reconciliation') or {}
+    if not rec.get('stale'):   # each difference from the live SharePoint list is its own issue, with the cell when there is one
+        cells = {(c.get('item'), c.get('field')): f'{_col_letter(int(c["column"]))}{c["row"]}' for c in rec.get('proposed_corrections') or [] if c.get('column') and c.get('row')}
+        words = {'value_differs': 'differs from SharePoint', 'missing_from_report': 'is on SharePoint but not in the report',
+                 'not_on_sharepoint': 'is not on SharePoint', 'not_on_sharepoint_for_day': 'is on SharePoint for another day',
+                 'item_listed_twice': 'is listed twice', 'report_row_without_item_id': 'has no SharePoint item ID',
+                 'changed_since_export': 'was edited on SharePoint after the export', 'export_value_differs': 'differs between the export tab and SharePoint',
+                 'export_item_not_on_sharepoint': 'is on the export tab but no longer on SharePoint'}
+        for i, d in enumerate(rec.get('rows') or []):
+            what = f'SharePoint item {d["item"]}' if d.get('item') else 'This row'
+            detail = f': {d["field"]} is {d.get("report")} in the report, {d.get("sharepoint")} on SharePoint' if d.get('field') and d['status'] in ('value_differs', 'export_value_differs') else ''
+            issues.append(dict(key=f'rec:{d["status"]}:{d.get("item")}:{d.get("field")}:{i}', source='SharePoint', severity='high' if d['status'] in ('value_differs', 'missing_from_report', 'not_on_sharepoint', 'item_listed_twice') else 'medium',
+                               code='sharepoint_' + d['status'], where=f'{d["sheet"]} row {d["row"]}' if d.get('sheet') else 'SharePoint',
+                               sheet=d.get('sheet'), row=d.get('row'), cell=cells.get((d.get('item'), d.get('field'))),
+                               text=f'{what} {words.get(d["status"], d["status"])}{detail}.' + (f' {d["note"]}' if d.get('note') and not detail else ''), url=d.get('url')))
     bl = result.get('baseline') or {}
     for i, f in enumerate(bl.get('findings') or []):
         issues.append(dict(key=f'usual:{f.get("code")}:{i}', source='Usual day', severity=f.get('severity') or 'medium',

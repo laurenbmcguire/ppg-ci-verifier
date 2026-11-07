@@ -85,7 +85,7 @@ def _num(text):
         return None
 
 
-SURE_SOURCES = ('SharePoint', 'Clean-up', 'Number as text')
+SURE_SOURCES = ('SharePoint', 'Clean-up', 'Number as text', 'Known detail')
 WRITTEN_ONLY = {   # fixes that only change how something is written, never what it means
     'Clean-up': 'Only extra spaces or invisible characters. The value is right; nothing else is wrong.',
     'Number as text': 'Only the way the number is stored. The number is right; nothing else is wrong.',
@@ -144,7 +144,36 @@ def proposals(result, filename, raw, sharepoint_rows=None, context=None):
                 continue
             add(f.get('sheet'), f['cell'], value, f'SharePoint shows {f["sharepoint_value"]} for this scan ({f.get("message", "")})', 'SharePoint')
 
-    # 1b. Blank details (paying client, worksite, date, shift, area...): suggest the most likely value; a person accepts it.
+    # 1a. The live SharePoint reconciliation: each value that differs takes the SharePoint value (SharePoint is the record).
+    rec = result.get('source_reconciliation') or {}
+    if not rec.get('stale'):
+        for c in rec.get('proposed_corrections') or []:
+            if c.get('sheet') and c.get('column') and c.get('row') and c.get('after') not in (None, 'blank'):
+                v = _num(c['after']) if _num(c['after']) is not None else c['after']
+                add(c['sheet'], f'{col_letter(int(c["column"]) - 1)}{c["row"]}', v,
+                    f'SharePoint item {c.get("item")} shows {c["after"]} for {c.get("field")}; the report shows {c.get("before")}.', 'SharePoint')
+
+    # 1c. Blanks on record rows that the report's own SharePoint export fills (matched by SharePoint item ID).
+    try:
+        from hosting.spreadsheets import report_and_export_records
+        recs, exports = report_and_export_records(filename, raw)
+        by_item = {(e.get('source') or {}).get('item'): e for e in exports if (e.get('source') or {}).get('item')}
+        for r in recs:
+            e = by_item.get((r.get('source') or {}).get('item'))
+            if not e:
+                continue
+            for field in ('inspected', 'certified', 'rejected', 'reworked'):
+                if field in r['values'] and r['values'][field] is None and e['values'].get(field) is not None:
+                    add(r['sheet'], qty_cell(r, field), e['values'][field],
+                        f'{field.title()} is blank here; SharePoint item {e["source"]["item"]} has {e["values"][field]}.', 'SharePoint')
+            for kind in ('identifier', 'part', 'defect', 'condition', 'area', 'shift'):
+                if kind in r['labels'] and not r['labels'][kind] and e['labels'].get(kind):
+                    add(r['sheet'], text_cell(r, kind), e['labels'][kind],
+                        f'{kind.title()} is blank here; SharePoint item {e["source"]["item"]} has "{e["labels"][kind]}".', 'SharePoint')
+    except Exception:
+        pass   # filling from the export must never break the other fixes
+
+    # 1b. Blank details (paying client, worksite, date, shift, area...): fill what is known; suggest the rest.
     from hosting import suggest
     try:
         suggest.blank_details(sources, context or {}, add, col_letter)

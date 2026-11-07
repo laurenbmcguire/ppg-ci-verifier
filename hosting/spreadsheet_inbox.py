@@ -13,6 +13,32 @@ from hosting.branded_reports import fingerprint
 from hosting.reconcile_spreadsheet import reconcile_result
 from hosting.report_workflow import stamp,canonical
 
+def _known_details(filename, raw):
+    """Job type and description from the report's own record rows (the value used on most rows of 'Service performed'
+    / 'Inspected for' style columns), to fill those header blanks."""
+    from collections import Counter
+    try:
+        from hosting.spreadsheets import _xlsx_rows
+        out = {}
+        for title, it in _xlsx_rows(raw, []):
+            rows = list(it)
+            for r_i, row in enumerate(rows[:15]):
+                heads = {i: str(v).strip().lower() for i, v in enumerate(row) if isinstance(v, str)}
+                for i, h in heads.items():
+                    what = 'job_type' if h in ('service performed', 'service', 'job type', 'service type') else \
+                           'description' if h in ('inspected for', 'inspection for', 'description') and 'description' not in out else None
+                    if not what or what in out:
+                        continue
+                    vals = Counter(str(x[i]).strip() for x in rows[r_i + 1:] if i < len(x) and isinstance(x[i], str) and x[i].strip() and not x[i].startswith('='))
+                    if vals:
+                        v, n = vals.most_common(1)[0]
+                        if n >= 0.6 * sum(vals.values()):
+                            out[what] = v
+        return out
+    except Exception:
+        return {}
+
+
 class SpreadsheetInbox:
     def __init__(self, root):
         self.root = Path(root)
@@ -174,16 +200,12 @@ class SpreadsheetInbox:
                 out.append(dict(code='client_unmatched', hard=False, text='No client list matches this report. ' + ' '.join(a.get('evidence') or [])))
         except Exception:
             out.append(dict(code='client_unmatched', hard=False, text='The client and job could not be worked out.'))
-        if (item.get('recheck') or {}).get('available'):
-            out.append(dict(code='checks_outdated', hard=False, text='These results come from an earlier checker. Preview the new checks and apply them before approving.'))
         sel = item.get('dataset_selection') or {}
         if sel.get('status') == 'ambiguous':
             out.append(dict(code='record_set_ambiguous', hard=False, text='It is not certain which sheet holds the records. ' + ' '.join(sel.get('notes') or [])))
         rec = item.get('source_reconciliation') or {}
         if rec.get('status') == 'incomplete':
             out.append(dict(code='source_coverage_incomplete', hard=False, text='The SharePoint snapshot was incomplete: ' + ' '.join((rec.get('coverage') or {}).get('notes') or [])))
-        elif rec.get('status') == 'discrepancies':
-            out.append(dict(code='source_discrepancies', hard=False, text=f'{len(rec.get("rows") or [])} difference(s) from SharePoint are open.'))
         return out
     def record_lookup(self, file_hash, status, message, job=None, day=None):
         self.get(file_hash)
@@ -615,7 +637,12 @@ class SpreadsheetInbox:
         from hosting import suggest, sharepoint_jobs
         from hosting.source_compare import identify
         job, day = identify(item.get('filename'), item)
-        ctx = suggest.context(job, day, self.setting(sharepoint_jobs.KEY))
+        from hosting.review_summary import summarize
+        try:
+            assignment = self.assignment_for(item, summarize(item, with_issues=False))
+        except Exception:
+            assignment = None
+        ctx = suggest.context(job, day, self.setting(sharepoint_jobs.KEY), assignment=assignment, known=_known_details(item['filename'], raw))
         props = proposals(item, item['filename'], raw, context=ctx)
         taken = {(p['sheet'], p['cell']) for p in props}
         ai = item.get('ai_fixes') or {}
@@ -714,8 +741,13 @@ class SpreadsheetInbox:
             if not found: raise ValueError('Spreadsheet version not found.')
             result=self.latest(db,file_hash,json.loads(found['result_json']))
         if result.get('checker_version')!=CHECKER_VERSION:
-            result=dict(result, internal_check_status='outdated_checks_require_recheck',
-                        recheck=dict(available=True, checked_with=result.get('checker_version'), current=CHECKER_VERSION))
+            # brought up to date automatically: approvals, sends, fixes and accepted issues are kept, the earlier result is kept
+            # as a revision, and the original upload is never touched
+            try:
+                return self.apply_recheck(file_hash, 'Automatic update')
+            except Exception:
+                result=dict(result, internal_check_status='outdated_checks_require_recheck',
+                            recheck=dict(available=True, checked_with=result.get('checker_version'), current=CHECKER_VERSION))
         return result
     RECHECK_KEEP = ('approval','sent','fixes_applied','fixed_from','review_request','source_document','accepted_issues','auto_formatting','ai_fixed',
                     'source_reconciliation','approval_withdrawn','recheck_applied')

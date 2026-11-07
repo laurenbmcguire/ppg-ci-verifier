@@ -13,18 +13,26 @@ DETAIL_LABELS = [   # label text (lower case, no punctuation) -> what goes in th
     (re.compile(r'^(project|job)( number| no| #)?$|^project id$'), 'job'),
     (re.compile(r'^(report )?date$|^inspection date$|^date of report$'), 'day'),
     (re.compile(r'^prepared by( ppg)?$|^inspection company$|^vendor$'), 'prepared_by'),
+    (re.compile(r'^(job|service|inspection|work) type$|^type of (job|service|work|inspection)$'), 'job_type'),
+    (re.compile(r'^(job |project |work )?description$|^scope( of work)?$'), 'description'),
 ]
 
 
-def context(job, day, catalog=None, client_name=None):
-    """What is known about the report: job, day, client and where the work is."""
+def context(job, day, catalog=None, client_name=None, assignment=None, known=None):
+    """What is known about the report: job, day, client and where the work is. assignment = the settled client/job
+    (registry, source links or a person); known = values found elsewhere in the report (job type, description)."""
     from hosting import sharepoint_jobs
     found = sharepoint_jobs.lookup(job, catalog) if job else {}
     m = found.get('match') or {}
-    client = client_name or m.get('client') or None
+    a = assignment or {}
+    settled = a.get('status') in ('manual', 'verified', 'matched', 'source')
+    client = client_name or (a.get('client') if settled else None) or m.get('client') or None
     loc = m.get('location') if m.get('location') not in (None, '', '—') else None
-    return dict(job=(m.get('job') if found.get('status') in ('found', 'differs') else None) or job, day=day, client=client,
-                worksite=', '.join(x for x in (client, loc) if x) or m.get('site') or None, prepared_by='PPG Quality')
+    known = known or {}
+    return dict(job=(a.get('job') if settled else None) or (m.get('job') if found.get('status') in ('found', 'differs') else None) or job,
+                day=day, client=client, worksite=', '.join(x for x in (client, loc) if x) or m.get('site') or None, prepared_by='PPG Quality',
+                job_type=known.get('job_type') or m.get('type') if (m.get('type') or 'Job') != 'Job' else known.get('job_type'),
+                description=known.get('description') or m.get('notes') or None, verified=settled)
 
 
 def header(ctx):
@@ -63,12 +71,16 @@ def blank_details(sources, ctx, add, col_letter):
         guess = twin or (ctx.get('day') if what == 'day' else ctx.get(what))
         if not guess:
             continue
-        why = {'client': f"Most likely the client this job belongs to{' (the other client field says so)' if twin else ''}.",
-               'worksite': 'Most likely where the client is.', 'job': 'The job this report is for.', 'day': 'The report day.',
-               'prepared_by': 'Reports are prepared by PPG Quality.'}[what]
+        why = {'client': f"The client this job belongs to{' (the other client field says so)' if twin else ''}.",
+               'worksite': 'Where the client is.', 'job': 'The job this report is for.', 'day': 'The report day.',
+               'prepared_by': 'Reports are prepared by PPG Quality.', 'job_type': 'The service recorded on this report\'s rows.',
+               'description': 'What this job inspects, from the report\'s rows.'}[what]
+        known = bool(twin) or what in ('day', 'prepared_by') or (ctx.get('verified') and what in ('client', 'job', 'worksite')) or what in ('job_type', 'description')
         for s in spots:
             if not s['filled']:
-                add(s['sheet'], f"{col_letter(s['col'] - 1)}{s['row']}", guess, f'"{s["label"]}" is blank. Suggested: {guess}. {why}', 'Suggested', 'medium')
+                # data the app already has (the settled client and job, the report's own rows) is filled in, not just suggested
+                add(s['sheet'], f"{col_letter(s['col'] - 1)}{s['row']}", guess, f'"{s["label"]}" is blank. Filled in: {guess}. {why}',
+                    'Known detail' if known else 'Suggested', 'high' if known else 'medium', sure=True if known else None)
 
 
 def blank_columns(detail, ctx, add, text_cell):

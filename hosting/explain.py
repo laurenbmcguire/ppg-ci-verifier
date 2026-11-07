@@ -172,6 +172,16 @@ _add('photo_missing',
      'A picture in the report points to an image that is not inside the file, so it shows as blank.',
      'Insert the photo again from SharePoint; never use a sample picture.', True)
 
+_add('sharepoint_value_differs sharepoint_export_value_differs',
+     'The report shows a different number than SharePoint for this record, so the client could be billed or told the wrong count.',
+     'Accept the SharePoint value (SharePoint is the record of what was scanned), or correct SharePoint if the report is right.', True)
+_add('sharepoint_missing_from_report sharepoint_not_on_sharepoint sharepoint_not_on_sharepoint_for_day sharepoint_item_listed_twice',
+     'The report and SharePoint do not list the same records for this day.',
+     'Add the missing record, take out the extra one, or move it to the right day.', True)
+_add('sharepoint_report_row_without_item_id sharepoint_changed_since_export sharepoint_export_item_not_on_sharepoint',
+     'This record cannot be matched to SharePoint one to one, or SharePoint changed after the export was made.',
+     'Check the record on SharePoint and update the report to match.', False)
+
 # ---------------------------------------------------------------- typos and formats
 _add('possible_identifier_typo possible_part_number_typo possible_defect_typo possible_condition_typo possible_auditor_typo',
      'This value looks almost the same as a more common one, so it may be a typing mistake that splits or hides a count.',

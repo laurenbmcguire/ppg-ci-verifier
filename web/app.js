@@ -499,7 +499,7 @@
       h('b', {}, REC[x.status] || x.status),
       h('span', {}, `${x.list?.name || x.site} · ${x.sharepoint_items_for_day} SharePoint item(s) for ${x.day}, ${x.report_rows} report row(s) · ${c.pages || 0} page(s) read · captured ${ago(x.captured_at)}` + (c.notes?.length ? ' · ' + c.notes.join(' ') : '')),
       btn,
-      rows.length ? h('details', {class: 'recrows'}, h('summary', {}, `${rows.length} difference${rows.length === 1 ? '' : 's'}` + (x.proposed_corrections?.length ? ` · ${x.proposed_corrections.length} proposed correction(s), not applied` : '')),
+      rows.length ? h('details', {class: 'recrows', open: ''}, h('summary', {}, `${rows.length} difference${rows.length === 1 ? '' : 's'} from SharePoint` + (x.proposed_corrections?.length ? ' · the fixes are in the issues below' : '')),
         h('table', {}, h('thead', {}, h('tr', {}, ...['What', 'Item', 'Where', 'Field', 'Report', 'SharePoint'].map(t => h('th', {}, t)))),
           h('tbody', {}, ...rows.slice(0, 300).map(d => h('tr', {},
             h('td', {}, REC_ROW[d.status] || d.status, d.note ? h('small', {}, ' ' + d.note) : null),
@@ -644,7 +644,7 @@
         h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, r.fixed_from ? 'Download fixed version' : 'Download report'),
         h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
     const status = h('div', {class: 'rstatus'},
-      recheckLine(r), assignmentLine(r), holdLine(r), reconcileLine(r), spJobLine(r), docBanner(r), fixedLog(r),
+      reconcileLine(r), docBanner(r), fixedLog(r),
       h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
       h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
     const steps = h('ol', {class: 'steps-bar', id: 'steps', 'aria-label': 'Where this report stands'});
@@ -1068,8 +1068,7 @@
       else { state.planOpen.add(k.id); drawCleanOffer(); const f = k.entries.find(isOn) || k.entries[0]; showCell(f.sheet, f.cell); toast('Click a cell in the list to go to it, then type the right value.'); }
     };
     const changeOf = (f, x) => f ? ['Now ', show(f.before), ' → becomes ', h('b', {}, showWs(f.after))] : x && isDupRow(x) ? 'Fix: take out the extra copy'
-      : x && state.aiOn && claudeLeft(x) ? 'Claude looked at this and was not sure, so it needs you: fix it yourself, or Ignore if it is fine'
-      : state.aiOn ? 'No suggested change: Fix with AI lets Claude decide, or fix it yourself' : 'No suggested change: fix it yourself, or Ignore';
+      : state.aiOn ? 'Fix with AI lets Claude work it out, or fix it yourself' : 'No suggested change: fix it yourself, or Ignore';
     const firstOf = k => { if (k.row) { const f = k.entries[0]; return {where: `${f.sheet} ${f.cell}`, what: f.reason || '', change: changeOf(f), go: () => showCell(f.sheet, f.cell)}; }
       const x = k.entries[0]; return {where: where(x), what: x.text, change: changeOf(fixesFor(x).find(isFix), x), go: () => goTo(x)}; };
     const card = k => {
@@ -1080,20 +1079,20 @@
       const listItem = e => { const f = k.row ? e : fixesFor(e).find(isFix);
         return h('li', {class: isOn(e) ? '' : 'out'}, h('label', {}, box(e), h('span', {class: 'pi-text'}, h('span', {class: 'pi-where'}, k.row ? `${e.sheet} ${e.cell}` : where(e)),
           h('span', {class: 'pi-change'}, f ? [show(f.before), ' → ', h('b', {}, showWs(f.after))] : !k.row && isDupRow(e) ? 'Extra copy: take it out' : h('em', {}, 'No suggested change')))),
+          k.group && state.aiOn ? h('button', {type: 'button', class: 'linkish small', onclick: ev => aiFix({issues: [e], fixes: [], dups: [], none: [e], n: 1}, ev.target)}, 'Fix with AI') : null,
           h('button', {type: 'button', class: 'linkish small', onclick: () => k.row ? showCell(e.sheet, e.cell) : goTo(e)}, 'Show')); };
       return h('section', {class: `kind sev-${k.sev}`, id: 'kind-' + k.id.replace(/[^\w-]/g, '_')},
-        h('div', {class: 'kind-head'}, h('h3', {}, titleOf(k)), k.sev === 'high' ? h('span', {class: 'kind-pill'}, 'Must fix') : k.unsure ? h('span', {class: 'kind-pill unsure'}, 'Needs you') : null),
+        h('div', {class: 'kind-head'}, h('h3', {}, `Review ${titleOf(k)}?`), k.sev === 'high' ? h('span', {class: 'kind-pill'}, 'Must fix') : null),
         h('div', {class: 'kind-ex'}, h('span', {class: 'kind-ex-k'}, n > 1 ? 'The first one' : 'The issue'),
           h('button', {type: 'button', class: 'linkish small kind-ex-where', onclick: ex.go}, ex.where), ex.what ? h('span', {class: 'kind-ex-what'}, ex.what) : null, h('span', {class: 'kind-ex-change'}, ex.change)),
         h('div', {class: 'kind-btns'},
-          k.hasSugg ? h('button', {type: 'button', class: 'btn primary', disabled: !on, onclick: e => approve(p, e.target)}, `Approve${cnt}`) : null,
-          k.ai && !k.unsure ? h('button', {type: 'button', class: 'btn ai', disabled: !on, onclick: e => aiFix(p, e.target)}, `Fix${cnt} with AI`) : null,
+          k.hasSugg ? h('button', {type: 'button', class: 'btn primary', disabled: !on, onclick: e => approve(p, e.target)}, n > 1 ? `Change${cnt}` : 'Change it') : null,
+          k.ai ? h('button', {type: 'button', class: 'btn ai', disabled: !on, onclick: e => aiFix(k.unsure ? partsOf([k], {includeLeft: true}) : p, e.target)}, n > 1 ? `Fix${cnt} with AI` : 'Fix with AI') : null,
           h('button', {type: 'button', class: 'btn', disabled: !on, onclick: () => fixMyself(k)}, 'Fix myself'),
           h('button', {type: 'button', class: 'btn ghost', disabled: !on, onclick: () => ignore(p, k)}, `Ignore${cnt}`)),
         some ? h('p', {class: 'kind-note'}, `${fmt(n - on)} unticked ${n - on === 1 ? 'is' : 'are'} left out of these buttons.`) : null,
-        k.unsure ? h('button', {type: 'button', class: 'linkish small kind-again', onclick: e => aiFix(partsOf([k], {includeLeft: true}), e.target)}, 'Ask Claude to look again') : null,
         n > 1 ? h('button', {type: 'button', class: 'kind-more', 'aria-expanded': String(isOpen), onclick: () => { isOpen ? state.planOpen.delete(k.id) : state.planOpen.add(k.id); drawCleanOffer(); }},
-          isOpen ? 'Hide the list ▴' : `Review all ${fmt(n)} ▾`) : null,
+          isOpen ? 'Hide the list ▴' : `See all ${fmt(n)} ▾`) : null,
         isOpen ? h('div', {class: 'kind-listwrap'},
           h('label', {class: 'kind-all'}, (() => { const a = h('input', {type: 'checkbox', checked: on === n, onchange: e => { k.entries.forEach(x => e.target.checked ? off.delete(kOf(x)) : off.add(kOf(x))); drawCleanOffer(); }}); a.indeterminate = on > 0 && on < n; return a; })(),
             h('span', {}, on === n ? `All ${fmt(n)} included` : `${fmt(on)} of ${fmt(n)} included`)),
@@ -1103,17 +1102,17 @@
     if (kinds.length) {
       const all = partsOf(kinds), total = kinds.reduce((t, k) => t + k.entries.length, 0);
       const acceptAll = btn => { if (btn) { btn.disabled = true; btn.textContent = 'Fixing everything…'; } return fixEverythingLoop(); };
+      const unsureAny = kinds.some(k => k.unsure);
       state.fixEverything = {hash, parts: opt => partsOf(kinds, opt), approve, run: () => acceptAll(document.querySelector('#cleanoffer .sum-accept'))};
-      const canAll = all.fixes.length || all.dups.length || (state.aiOn && all.none.length);
+      const canAll = all.fixes.length || all.dups.length || (state.aiOn && (all.none.length || unsureAny));
       const unsureN = kinds.filter(k => k.unsure).reduce((t, k) => t + k.entries.length, 0);
       const summary = h('div', {class: 'sum'},
         h('h2', {id: 'clean-title', class: 'sum-title'}, 'Issue summary'),
         h('p', {class: 'sum-line'}, `${plural(total, 'issue')} in ${plural(kinds.length, 'kind')}.` + (r.fixed_from ? ' Nothing below has been changed yet.' : ' Nothing has been changed yet.')),
         h('ul', {class: 'sum-list'}, kinds.map(k => h('li', {}, h('span', {class: 'sev ' + k.sev}),
           h('button', {type: 'button', class: 'linkish', onclick: () => document.getElementById('kind-' + k.id.replace(/[^\w-]/g, '_'))?.scrollIntoView({behavior: 'smooth', block: 'start'})}, titleOf(k))))),
-        canAll ? h('button', {type: 'button', class: 'btn primary sum-accept', onclick: e => acceptAll(e.target)}, 'Accept all fixes') : null,
-        h('p', {class: 'sum-note'}, canAll ? (state.aiOn ? 'One click: makes every suggested change, and Claude fixes the rest. ' : 'Makes every suggested change. ') + 'Or handle each kind below.'
-          : unsureN ? `Claude already checked ${unsureN === 1 ? 'this one' : `these ${fmt(unsureN)}`} and was not sure, so ${unsureN === 1 ? 'it needs' : 'they need'} you: use Fix myself, or Ignore if ${unsureN === 1 ? 'it is' : 'they are'} fine.` : 'Handle each kind below.'));
+        canAll ? h('button', {type: 'button', class: 'btn primary sum-accept', onclick: e => acceptAll(e.target)}, state.aiOn ? 'Fix everything with AI' : 'Accept all fixes') : null,
+        h('p', {class: 'sum-note'}, canAll ? (state.aiOn ? 'One click: every suggested change is made and Claude fixes the rest. ' : 'Makes every suggested change. ') + 'Or review each kind below.' : 'Review each kind below.'));
       steps.push({id: 'review', title: `${plural(total, 'issue')} to review`, panel: h('div', {class: 'plan2'}, summary, h('div', {class: 'kinds'}, kinds.map(card)))});
     }
     const walkOpen = openIssues;
