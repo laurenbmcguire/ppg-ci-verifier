@@ -65,6 +65,15 @@
     for (const c of state.clients || []) for (const j of c.jobs) if (j.job.toUpperCase() === up || nums.some(n => j.numbers.includes(n))) return c.key;
     return null;
   }
+  // A report's client comes from its saved assignment (registry, source URLs, or a person's choice), never from the job number alone:
+  // the same job label can be a list on two client sites. Unsettled reports go under "Needs client".
+  const SETTLED = ['manual', 'verified', 'matched', 'source'];
+  function clientOfReport(r) {
+    const a = r && r.assignment;
+    if (a) return SETTLED.includes(a.status) ? a.client_key : null;
+    return clientOf(r?.review?.job);
+  }
+  const inClientR = r => !state.client || (state.client === '_none' ? !clientOfReport(r) : clientOfReport(r) === state.client);
   const inClient = job => !state.client || (state.client === '_none' ? !clientOf(job) : clientOf(job) === state.client);
   const clientName = () => (state.clients || []).find(c => c.key === state.client)?.client || (state.client === '_none' ? 'other' : '');
   async function loadClients(refresh) {
@@ -77,7 +86,7 @@
     const bar = $('clienttabs'), rail = $('railclients'); if (!bar) return;
     const cl = state.clients || [];
     bar.hidden = !cl.length; if (rail) rail.hidden = !cl.length; if (!cl.length) return;
-    const ofKey = (r, key) => key === '' || (key === '_none' ? !clientOf(r.review?.job) : clientOf(r.review?.job) === key);
+    const ofKey = (r, key) => key === '' || (key === '_none' ? !clientOfReport(r) : clientOfReport(r) === key);
     const need = key => visibleList().filter(r => ofKey(r, key) && r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
     const go = key => { location.hash = key ? 'c=' + encodeURIComponent(key) : ''; };
     const tab = (key, label, title) => { const n = need(key);
@@ -89,12 +98,12 @@
         return h('a', {class: 'nav client' + (onList && state.client === key ? ' active' : ''), href, title: title || null}, h('span', {}, label), n ? h('i', {title: `${n} need attention`}, String(n)) : null); };
       rail.replaceChildren(h('div', {class: 'rail-head'}, 'Clients'),
         ...[...cl.map(c => item(c.key, c.client, `${c.sites.map(x => x.location || x.site).join(', ')}: ${c.jobs.length} job${c.jobs.length === 1 ? '' : 's'} on SharePoint`)),
-          state.list.some(r => r.review?.job && !clientOf(r.review.job)) ? item('_none', 'Other', 'Reports whose job is not on a client site') : null].filter(Boolean));
+          state.list.some(r => !clientOfReport(r)) ? item('_none', 'Needs client', 'Reports whose client or job is not settled yet') : null].filter(Boolean));
     }
-    const unmatched = state.list.some(r => r.review?.job && !clientOf(r.review.job));
+    const unmatched = state.list.some(r => !clientOfReport(r));
     bar.replaceChildren(...[tab('', 'All clients'),
       ...cl.map(c => tab(c.key, c.client, `${c.sites.map(x => x.location || x.site).join(', ')}: ${c.jobs.length} job${c.jobs.length === 1 ? '' : 's'} on SharePoint`)),
-      unmatched ? tab('_none', 'Other', 'Reports whose job is not on a client site') : null].filter(Boolean));
+      unmatched ? tab('_none', 'Needs client', 'Reports whose client or job is not settled yet') : null].filter(Boolean));
   }
 
   // ---------------------------------------------------------------- queue
@@ -107,11 +116,11 @@
   const visibleList = () => { const cleaned = new Set(state.list.flatMap(r => r.review?.auto_hidden || [])); return state.list.filter(r => !cleaned.has(r.file_hash)); };
   function drawQueue() {
     const q = state.search.trim().toLowerCase(), shown = visibleList();
-    let rows = shown.filter(r => inClient(r.review?.job) && (!q || [r.filename, r.review?.job, r.review?.day].some(v => (v || '').toLowerCase().includes(q))));
+    let rows = shown.filter(r => inClientR(r) && (!q || [r.filename, r.review?.job, r.review?.day].some(v => (v || '').toLowerCase().includes(q))));
     if (state.filter === 'attention') rows = rows.filter(r => !r.review || r.review.status !== 'clear');
     if (state.filter === 'review') rows = rows.filter(r => r.review?.review_state === 'waiting');
     document.querySelectorAll('.segmented button').forEach(b => b.classList.toggle('on', b.dataset.filter === state.filter));
-    const mine = shown.filter(r => inClient(r.review?.job));
+    const mine = shown.filter(r => inClientR(r));
     const attention = mine.filter(r => !r.review || r.review.status !== 'clear' && !r.review.sent_at).length, waiting = mine.filter(r => r.review?.review_state === 'waiting').length;
     const label = {attention: 'To do', all: 'All', review: 'For review'};
     document.querySelectorAll('.segmented button').forEach(b => { const n = b.dataset.filter === 'attention' ? attention : b.dataset.filter === 'review' ? waiting : 0;
@@ -138,7 +147,7 @@
     }
     if (!rows.length) {
       list.append(h('p', {class: 'queue-empty'}, state.list.length
-        ? (state.client && !q && !state.list.some(r => inClient(r.review?.job)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'Nothing is waiting for review.' : state.filter === 'attention' && !q ? h('span', {}, 'Nothing needs your attention. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
+        ? (state.client && !q && !state.list.some(r => inClientR(r)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'Nothing is waiting for review.' : state.filter === 'attention' && !q ? h('span', {}, 'Nothing needs your attention. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
         : 'No reports yet. Upload an end-of-shift report to start.'));
       return;
     }
@@ -156,7 +165,7 @@
         h('span', {class: 'tag tag-' + rv.status}, STATUS[rv.status] || 'Check'),
         h('span', {class: 'job', title: rv.job ? null : 'No job number was found in this file. The file name is shown instead.'}, (rv.job || r.filename.replace(/\.(xlsx|xlsm|xls|csv)$/i, '').replace(/\s*\(fixed\)/g, ''))), rv.fixed_from ? h('span', {class: 'vtag', title: 'A corrected copy; the original upload is kept too'}, 'corrected') : null,
         h('span', {class: 'count'}, rv.sent_at ? 'Sent' : rv.approved ? 'Approved' : rv.review_state === 'waiting' ? 'For review' : rv.review_state === 'sent_back' ? 'Sent back' : count),
-        h('span', {class: 'file'}, `${r.filename} · v${r.version} · ${ago(r.received_at)}`)));
+        h('span', {class: 'file'}, (r.assignment ? (SETTLED.includes(r.assignment.status) ? `${r.assignment.client} → ` : 'Needs client · ') : '') + `${r.filename} · v${r.version} · ${ago(r.received_at)}`)));
     }
   }
   // Enter in a one-line add box (job to watch, rule, key name...) presses that box's button
@@ -355,7 +364,7 @@
   // Totals only, ready to paste into the client email. Never scan times, inspector names or internal check results.
   async function copyClientSummary() {
     const r = state.report, rv = r.review || {}, n = v => v == null ? '—' : Number(v).toLocaleString('en-US');
-    const client = (state.clients || []).find(c => c.key === clientOf(rv.job))?.client;
+    const client = (r.assignment && SETTLED.includes(r.assignment.status)) ? r.assignment.client : null;
     const rate = rv.inspected ? ` (${(rv.rejected / rv.inspected * 100).toFixed(1)}%)` : '';
     const text = [`${client ? client + ' · ' : ''}${rv.job || r.filename}`, `End-of-shift summary for ${dayLabel(rv.day)}`, '',
       `Parts inspected: ${n(rv.inspected)}`, rv.certified != null ? `Accepted: ${n(rv.certified)}` : null, `Rejected: ${n(rv.rejected)}${rate}`, '',
@@ -414,6 +423,48 @@
         item('Left for you', left, x => `${x.text} (${x.why})`)) : null);
   }
   // ---------------- SharePoint job check, change summary PDFs and the record of them
+  // Client → Job → Business date, how it was decided, and a way to correct it (kept with who, when and why).
+  const HOW = {manual: 'Chosen by a person', verified: 'Verified SharePoint list', matched: 'Matched to its SharePoint list', source: 'Pratt & Whitney source (no job number)',
+               ambiguous: 'Needs a person: more than one client fits', conflict: 'Needs a person: the evidence disagrees', unmatched: 'Needs a person: no client list matches'};
+  function assignmentLine(r) {
+    const a = r.assignment; if (!a) return null;
+    const ok = SETTLED.includes(a.status);
+    const last = (a.history || []).slice(-1)[0];
+    return h('div', {class: 'spjob assign ' + (ok ? 'ok' : 'warn'), id: 'assignline'},
+      h('span', {class: 'spjob-tag'}, ok ? 'Client ✓' : 'Client'),
+      h('b', {}, a.label),
+      h('span', {}, HOW[a.status] || a.status, a.evidence?.length ? ': ' + a.evidence.join(' ') : ''),
+      last ? h('span', {class: 'spjob-recs'}, `Changed by ${last.by} ${ago(last.at)}${last.reason ? ` (“${last.reason}”)` : ''}`) : null,
+      h('button', {type: 'button', class: 'btn small', onclick: e => assignForm(r, e.target)}, ok ? 'Change' : 'Choose client and job'));
+  }
+  function assignForm(r, btn) {
+    if ($('assignform')) { $('assignform').remove(); return; }
+    const a = r.assignment || {};
+    const opts = [];
+    for (const c of a.candidates || []) opts.push({client_key: c.client_key, client: c.client, job: c.job, site: c.site, list_id: c.list_id, label: `${c.client} → ${c.job} (${c.site}${c.verified ? ', verified' : ''})`});
+    for (const c of state.clients || []) for (const j of c.jobs) if (!opts.some(o => o.client_key === c.key && o.site === j.site && o.job === j.job))
+      opts.push({client_key: c.key, client: c.client, job: j.job, site: j.site, list_id: j.list_id, label: `${c.client} → ${j.job} (${j.site})`});
+    const pick = h('select', {'aria-label': 'Client and job'}, h('option', {value: ''}, 'Choose the client and job…'), ...opts.map((o, i) => h('option', {value: String(i), selected: a.client_key === o.client_key && a.site === o.site && a.job === o.job ? '' : null}, o.label)));
+    const why = h('input', {type: 'text', placeholder: 'Why (for example: the tablets at Alexander City wrote these records)', maxlength: '300'});
+    const remember = h('input', {type: 'checkbox'});
+    const form = h('div', {class: 'assignform', id: 'assignform'},
+      h('label', {}, 'Client and job ', pick),
+      h('label', {}, 'Reason ', why),
+      h('label', {class: 'check'}, remember, ' Remember this list for this job at this site (adds it to the verified registry)'),
+      h('div', {}, h('button', {type: 'button', class: 'btn primary', onclick: async () => {
+        const o = opts[Number(pick.value)]; if (!o) { toast('Choose the client and job.', true); return; }
+        try {
+          const out = await api('/api/spreadsheets/assign', {file_hash: r.file_hash, choice: o, reason: why.value, remember: remember.checked});
+          form.remove();
+          const fresh = await api('/api/spreadsheet?id=' + r.file_hash);   // read back from the server, not from what was typed
+          state.report.assignment = fresh.assignment;
+          $('assignline')?.replaceWith(assignmentLine(state.report) || '');
+          await loadList();
+          toast(`Saved: ${fresh.assignment?.label || out.assignment?.label}. The report is still on hold until it is approved.`);
+        } catch (e) { toast(e.message, true); } }}, 'Save'),
+        h('button', {type: 'button', class: 'btn', onclick: () => form.remove()}, 'Cancel')));
+    $('assignline').after(form);
+  }
   function spJobLine(r) {
     const j = r.sp_job; if (!j || j.status === 'no_list' && state.me?.user?.role !== 'admin') return null;
     const ok = j.status === 'found' && !j.inactive;
@@ -523,7 +574,7 @@
         h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, r.fixed_from ? 'Download fixed version' : 'Download report'),
         h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
     const status = h('div', {class: 'rstatus'},
-      spJobLine(r), docBanner(r), fixedLog(r),
+      assignmentLine(r), spJobLine(r), docBanner(r), fixedLog(r),
       h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
       h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
     const steps = h('ol', {class: 'steps-bar', id: 'steps', 'aria-label': 'Where this report stands'});
@@ -1538,7 +1589,7 @@
     if (!dlg) { dlg = h('dialog', {id: 'finish-dialog', class: 'fixer finishdlg', 'aria-labelledby': 'finish-title'}); document.body.append(dlg);
       dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); }); }
     const r = state.report, handled = p.items || (state.fixes || []).length + walkIssues().length;
-    const nextRep = visibleList().find(x => x.file_hash !== r.file_hash && x.review && x.review.status !== 'clear' && !x.review.sent_at && inClient(x.review.job));
+    const nextRep = visibleList().find(x => x.file_hash !== r.file_hash && x.review && x.review.status !== 'clear' && !x.review.sent_at && inClientR(x));
     dlg.replaceChildren(h('div', {class: 'fixer-wait celebrate'},
       confetti(),
       h('div', {class: 'finish-mark'}, '✓'),

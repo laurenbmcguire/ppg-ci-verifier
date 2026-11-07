@@ -130,6 +130,25 @@ _add('fill_series_identifiers',
      'Several VINs count up by one, which is what Excel does when a cell is dragged down, so they may not be real scans.',
      'Check these VINs against the scanner list.', False)
 
+_add('duplicate_presentation',
+     'This sheet repeats records that are already on the record sheet, so it was compared, not added; counting it would double production.',
+     'Nothing to fix unless the two sheets should differ; the totals use the record sheet only.', True)
+_add('ambiguous_record_sheets record_identity_incomplete',
+     'It is not certain which rows are the real record set, so production could be over- or under-counted.',
+     'Confirm which sheet holds the records (or add the SharePoint item IDs) before approving; the report stays on hold.', False)
+_add('duplicate_source_record',
+     'The same SharePoint item is listed more than once in the record rows, so it may be counted twice.',
+     'Check SharePoint and remove the extra row unless it is really a separate record.', True)
+_add('source_record_not_in_report report_record_not_in_source_sheet',
+     'The record rows and the SharePoint export in the same file list different items, so one of them is incomplete.',
+     'Compare the two lists and add or remove the record that does not belong.', True)
+_add('source_sheet_value_mismatch source_sheet_total_mismatch',
+     'The record rows and the SharePoint export in the same file disagree on a count.',
+     'Check the record in SharePoint and correct the row that is wrong.', True)
+_add('summary_part_mismatch summary_part_not_in_records summary_value_without_records',
+     'The summary sheet does not agree with the record rows it is meant to summarize.',
+     'Recalculate the summary in Excel or correct the record rows; the totals use the record rows.', True)
+
 # ---------------------------------------------------------------- typos and formats
 _add('possible_identifier_typo possible_part_number_typo possible_defect_typo possible_condition_typo possible_auditor_typo',
      'This value looks almost the same as a more common one, so it may be a typing mistake that splits or hides a count.',

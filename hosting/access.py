@@ -193,6 +193,10 @@ def client_of(job, clients):
     if not job:
         return None
     up = str(job).upper()
+    from hosting import registry
+    pinned = [e for e in registry.SEED if e.get('job') and e.get('verified') and not e.get('separate') and registry._same_job(up, e['job'])]
+    if len(pinned) == 1:   # a verified registry pin wins over "most recently modified" (2207 is a list on two client sites)
+        return pinned[0]['client_key']
     nums = set(re.findall(r'\d{3,}', up))
     hits = [(j.get('job', '').upper() == up, j.get('modified') or '', c['key']) for c in clients or [] for j in c.get('jobs', [])
             if j.get('job', '').upper() == up or nums & set(j.get('numbers') or [])]

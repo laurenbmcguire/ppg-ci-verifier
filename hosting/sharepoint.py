@@ -500,7 +500,7 @@ def clients(opener=None, refresh=False):
                 continue
             job = title[6:].strip()
             numbers = sorted({t for t in re.split(r'[^0-9]+', job) if len(t) >= 3})
-            c['jobs'].append(dict(job=job, numbers=numbers, site=name, url=lst.get('webUrl'), modified=lst.get('lastModifiedDateTime')))
+            c['jobs'].append(dict(job=job, numbers=numbers, site=name, site_id=site_id, list_id=lst.get('id'), url=lst.get('webUrl'), modified=lst.get('lastModifiedDateTime')))
     value = sorted(out.values(), key=lambda c: c['client'].lower())
     for c in value:
         c['jobs'].sort(key=lambda j: j['job'])

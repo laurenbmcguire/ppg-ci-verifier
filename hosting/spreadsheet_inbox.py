@@ -426,6 +426,23 @@ class SpreadsheetInbox:
         with self.connect() as db:
             row = db.execute('SELECT value_json FROM settings WHERE key=?', (key,)).fetchone()
         return json.loads(row['value_json']) if row else default
+    def settings_with_prefix(self, prefix):
+        with self.connect() as db:
+            rows = db.execute('SELECT key, value_json FROM settings WHERE key LIKE ?', (prefix.replace('%', '') + '%',)).fetchall()
+        return {r['key'][len(prefix):]: json.loads(r['value_json']) for r in rows}
+    def assignment_context(self):
+        from hosting import registry
+        return dict(registry=registry.entries(self.setting(registry.REGISTRY_KEY, [])), snapshot=self.setting(registry.SNAPSHOT_KEY, []) or [],
+                    manual=self.settings_with_prefix('assignment|'))
+    def assignment_for(self, result, review, ctx=None):
+        from hosting import registry
+        ctx = ctx or self.assignment_context()
+        rv = review or {}
+        a = registry.resolve(result, result.get('filename'), rv.get('job'), rv.get('day'), ctx['registry'], ctx['snapshot'],
+                             ctx['manual'].get(result.get('file_hash')))
+        a['label'] = registry.label(a)
+        a['needs_person'] = a['status'] in registry.NEEDS_PERSON
+        return a
     def set_setting(self, key, value):
         with self.connect() as db:
             db.execute('INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json',
@@ -614,12 +631,21 @@ class SpreadsheetInbox:
         # List endpoint is bounded; detailed results remain available by hash.
         fields = ('file_hash','filename','version','received_at','format','status','internal_check_status','verification_scope','release_status','finding_count','findings_truncated','sheet_count','row_count')
         from hosting.review_summary import summarize
+        try:
+            ctx = self.assignment_context()
+        except Exception:
+            ctx = None
         def row(result):
             item = {key: result[key] for key in fields if key in result}
             try:
                 item['review'] = summarize(result, with_issues=False)
             except Exception:
                 item['review'] = None
+            if ctx is not None:
+                try:
+                    item['assignment'] = self.assignment_for(result, item['review'], ctx)
+                except Exception:
+                    item['assignment'] = None
             return item
         return {'spreadsheets': [row(result) for result in results],
                 'count': count, 'limit':100, 'has_more': count > 100,

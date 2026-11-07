@@ -463,8 +463,12 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
     else:
         result['layout_source'] = 'keywords'
     finding = Checker(result)
+    from hosting import sheet_roles
+    result['dataset_selection'] = sheet_roles.select(sources, sheets, records, finding)
 
     for sheet in sheets:
+        if sheet.get('role') == 'photos':
+            continue
         if sheet['mapping_status'] != 'adaptive':
             finding('no_quantity_columns_detected', sheet['name'], message='No Inspected / Certified / Rejected style headers on this sheet, so it was not quantity-checked.')
         elif sheet['data_row_count'] == 0 and any(t['kind'] == 'detail' for t in sheet['tables']):
@@ -536,7 +540,7 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
     # ---- duplicates
     seen_exact, seen_id = {}, defaultdict(list)
     for r in detail:
-        key = (r['sheet'], r['table'], tuple(sorted((k, v) for k, v in r['labels'].items() if v)), tuple(sorted((k, str(v)) for k, v in r['values'].items())))
+        key = (r['sheet'], r['table'], tuple(sorted((k, v) for k, v in r['labels'].items() if v)), tuple(sorted((k, str(v)) for k, v in r['values'].items())), str(r.get('source')) if r.get('source') else None)
         if key in seen_exact and any(r['labels'].values()):
             first = seen_exact[key]
             finding('duplicate_row', r['sheet'], r['row'], message=f'Same as row {first["row"]} (every field identical).')
@@ -717,6 +721,6 @@ def _detail_count(records):
 
 def export_record(r):
     part = r['labels'].get('part')
-    return dict(sheet=r['sheet'], row=r['row'], part=part, identifier=r['labels'].get('identifier'),
+    return dict(sheet=r['sheet'], row=r['row'], part=part, identifier=r['labels'].get('identifier'), source=r.get('source'),
                 day=r['day'].isoformat() if r['day'] else None, shift=r['labels'].get('shift'),
                 values={f: (str(v) if v is not None else None) for f, v in r['values'].items()})

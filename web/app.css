@@ -1305,3 +1305,10 @@ details.fixedlog .checkme{color:#9a6a00;font-weight:600}
 .kind-again{align-self:flex-start}
 .btn.dl-fixed{align-self:stretch;justify-content:center;border-color:var(--green);color:var(--green);font-weight:600;text-decoration:none;margin:2px 0 6px}
 #result-dialog .btn.dl-fixed{display:flex;margin:10px 0 0}
+
+.spjob.assign b{font-weight:700}
+.spjob.assign .btn.small{margin-left:auto;padding:3px 10px;font-size:13px}
+.assignform{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:-4px 0 12px;background:#fff;font-size:14px}
+.assignform select,.assignform input[type=text]{min-width:260px;max-width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;font:inherit}
+.assignform .check{display:flex;gap:6px;align-items:center}
+@media (max-width:600px){.assignform select,.assignform input[type=text]{min-width:0;width:100%}}
