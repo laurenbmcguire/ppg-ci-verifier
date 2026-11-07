@@ -152,6 +152,9 @@ _add('summary_part_mismatch summary_part_not_in_records summary_value_without_re
 _add('client_not_settled client_unmatched',
      'The report is not tied to one client and job for certain, so it could be filed or sent under the wrong client.',
      'Choose the client and job on the report (Client line, Choose client and job); the choice is kept with your name and reason.', False)
+_add('checks_outdated',
+     'The numbers on this report were made by an earlier version of the checker and may be wrong (for example counted twice).',
+     'Preview the new checks, review the differences, and apply them before approving.', False)
 _add('record_set_ambiguous',
      'It is not certain which sheet holds the records, so production could be over- or under-counted.',
      'Confirm which sheet is the record set before approving.', False)

@@ -85,6 +85,7 @@ class ProposedRecheck(unittest.TestCase):
             seen = inbox.get(item['file_hash'])
             self.assertEqual(seen['record_count'], 12)            # nothing changed by opening it
             self.assertTrue(seen['recheck']['available'])
+            self.assertIn('checks_outdated', [h['code'] for h in inbox.holds(seen)])
             proposal = inbox.propose_recheck(item['file_hash'])
             changes = {c['field']: (c['before'], c['after']) for c in proposal['changes']}
             self.assertEqual(changes['record_count'], (12, 5))

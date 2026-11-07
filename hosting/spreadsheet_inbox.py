@@ -174,6 +174,8 @@ class SpreadsheetInbox:
                 out.append(dict(code='client_unmatched', hard=False, text='No client list matches this report. ' + ' '.join(a.get('evidence') or [])))
         except Exception:
             out.append(dict(code='client_unmatched', hard=False, text='The client and job could not be worked out.'))
+        if (item.get('recheck') or {}).get('available'):
+            out.append(dict(code='checks_outdated', hard=False, text='These results come from an earlier checker. Preview the new checks and apply them before approving.'))
         sel = item.get('dataset_selection') or {}
         if sel.get('status') == 'ambiguous':
             out.append(dict(code='record_set_ambiguous', hard=False, text='It is not certain which sheet holds the records. ' + ' '.join(sel.get('notes') or [])))
