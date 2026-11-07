@@ -54,3 +54,23 @@ class ReportTitles(unittest.TestCase):
 
     def test_a_year_is_never_a_job(self):
         self.assertNotIn('project_number', header_identity([('Summary', [['Job 2026 results'], ['November 6, 2026']])]))
+
+
+class RecordedRejects(unittest.TestCase):
+    def test_recorded_rejects_column_counts_rejects(self):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(provisional()))
+        d = wb['Shift 1']
+        d['E5'] = 'Recorded rejects'
+        d['D7'] = 27; d['E7'] = 3; d['G5'] = 'Reject reason'; d['G7'] = 'Scratches'
+        out = io.BytesIO(); wb.save(out)
+        r = inspect_spreadsheet('PPG_2200_Nov06_Provisional.xlsx', out.getvalue())
+        self.assertEqual(r['totals']['rejected']['known_sum'], '3')
+
+    def test_no_reject_column_is_unknown_not_zero(self):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(provisional()))
+        wb['Shift 1']['E5'] = None
+        out = io.BytesIO(); wb.save(out)
+        r = inspect_spreadsheet('PPG_2207_Nov06_Provisional.xlsx', out.getvalue())
+        self.assertIsNone((r.get('totals') or {}).get('rejected', {}).get('known_sum'))

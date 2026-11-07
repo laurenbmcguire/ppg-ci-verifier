@@ -20,7 +20,8 @@ MAX_FINDINGS = 300
 MAX_RECORDS_RETURNED = 500
 
 _FILLER = {'total', 'totals', 'qty', 'quantity', 'quantities', 'pcs', 'pc', 'pieces', 'piece', 'parts', 'part',
-           'count', 'counts', 'no', 'number', 'of', 'num', 'units', 'unit', 'amount', 'daily', 'sum', 'ea'}
+           'count', 'counts', 'no', 'number', 'of', 'num', 'units', 'unit', 'amount', 'daily', 'sum', 'ea',
+           'recorded', 'reported', 'logged', 'entered'}   # "Recorded rejects", "Reported NG" are the reject column
 FIELDS = {
     'inspected': {'inspected', 'sorted', 'checked', 'inspect', 'audited', 'reviewed', 'sort', 'actual', 'counted', 'actual count'},
     'rejected': {'rejected', 'rejects', 'reject', 'ng', 'nok', 'no good', 'defects', 'defective', 'nonconforming',
@@ -681,7 +682,10 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
     numeric = stats['number'] + stats['number_as_text'] + stats['formula_result']
     info = {'no_quantity_columns_detected', 'no_data_rows', 'quantity_formulas_not_evaluated', 'formula_results_used', 'known_template_layout_differs', 'labeled_total_unit_differs'}
     issues = {c for c in finding.counts if c not in info}
-    totals = {f: dict(total=str(grand[f][0]) if grand[f][1] else None, known_sum=str(grand[f][0])) for f in ('inspected', 'certified', 'rejected')} if sheet_sums else {}
+    mapped = {f for s_ in sheets for t in s_['tables'] if t['kind'] == 'detail' for f in t['columns']}
+    # a quantity the report has no column for is unknown, never 0
+    totals = {f: dict(total=str(grand[f][0]) if grand[f][1] and f in mapped else None, known_sum=str(grand[f][0]) if f in mapped else None)
+              for f in ('inspected', 'certified', 'rejected')} if sheet_sums else {}
     # Pass/Fail reports (packing audits) have no reject quantity column: count the failed rows instead.
     has_qty = any(f in t['columns'] for s in sheets for t in s['tables'] if t['kind'] == 'detail' for f in ('rejected', 'certified'))
     results = [norm(r['labels'].get('condition') or '') for r in detail if r['labels'].get('condition')]

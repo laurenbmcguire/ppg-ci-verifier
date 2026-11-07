@@ -383,6 +383,10 @@ class handler(BaseHTTPRequestHandler):
             item = inbox.get(file_hash)
             job, day = identify(item.get('filename'), item)
             schedule = inbox.shift_schedule(job)
+        if not job or not day:   # say why instead of leaving "Not checked yet"
+            with self.store().session() as directory:
+                return SpreadsheetInbox(directory).record_lookup(file_hash, 'not_found',
+                    'Could not tell this report\'s ' + ' and '.join(x for x, v in (('job number', job), ('date', day)) if not v) + ', so SharePoint was not checked. Use Check again after fixing the report title.', job, day)
         try:
             filename, content, meta = fetch_export(job, day, schedule=schedule)
         except SharePointNotConfigured as exc:
@@ -391,6 +395,9 @@ class handler(BaseHTTPRequestHandler):
             status, message = 'not_found', str(exc)
         except SharePointError as exc:
             status, message = 'error', str(exc)
+        except Exception as exc:   # never leave the report silently "Not checked yet"
+            debug_log()
+            status, message = 'error', f'SharePoint check failed: {exc}'
         else:
             try:
                 with self.store().session() as directory:
