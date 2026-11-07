@@ -128,6 +128,9 @@ def inventory(raw, sources, dataset_selection=None):
                     links.append(entry)
                     if not text.lower().startswith('https://'):
                         broken.append(entry)
-    return dict(images=pics, image_count=len(pics), linked_to_records=sum(1 for p in pics if p.get('item')),
+    from hosting.sheet_roles import PHOTO_WORDS
+    is_photo = lambda p: bool(p.get('item')) or any(w in PHOTO_WORDS for w in _norm(p['sheet']).split())
+    photos = [p for p in pics if is_photo(p)]   # logos and banner images are not inspection photos
+    return dict(images=photos, image_count=len(photos), other_images=len(pics) - len(photos), linked_to_records=sum(1 for p in photos if p.get('item')),
                 links=links[:500], inaccessible_links=broken[:500], production=False,
                 note='Photos are evidence, never production. Original image bytes are kept unchanged in the stored file.')
