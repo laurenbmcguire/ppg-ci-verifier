@@ -367,8 +367,10 @@ def _inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) 
                   numeric_columns_checked=sum(len(s['numeric_columns_checked']) for s in result['sheets']),
                   internal_check_status='unverified' if not any(s['numeric_columns_checked'] for s in result['sheets']) else ('findings' if counts else 'no_findings_in_checks_performed'))
     result['record_count'] = sum(s['data_row_count'] for s in result['sheets'] if s['numeric_columns_checked'])
-    if result['internal_check_status'] == 'unverified' or not result['record_count']:
-        # No first-row quantity headers (or no rows under them): look for the tables anywhere, in any layout.
+    multi = fmt == 'xlsx' and len(result['sheets']) > 1
+    if result['internal_check_status'] == 'unverified' or not result['record_count'] or multi:
+        # No first-row quantity headers (or no rows under them), or several sheets that may repeat the same records
+        # (summary, detail, raw export): find the tables anywhere and count one authoritative record set.
         from hosting.adaptive_reports import inspect_adaptive
         rows = sources if fmt == 'xlsx' else [('CSV', list(csv.reader(io.StringIO(decoded, newline=''), strict=True)))]
         adaptive = inspect_adaptive(rows, pristine, cached=_cached_rows(raw) if fmt == 'xlsx' else None, hidden=_hidden(raw) if fmt == 'xlsx' else None)

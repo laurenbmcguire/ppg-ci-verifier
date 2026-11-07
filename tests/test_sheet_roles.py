@@ -54,6 +54,16 @@ class The2214Case(unittest.TestCase):
         self.assertEqual((r['record_count'], inspected(r)), (5, '400'))
         self.assertIn('duplicate_presentation', r['finding_counts'])
 
+    def test_a_first_row_quantity_header_on_the_export_does_not_take_over(self):
+        # 2169: the raw export's first row had a plain "Quantity" header, so the simple first-row path counted
+        # only the export (83 rows, no totals). Several sheets always go through role selection.
+        wb = load_workbook(io.BytesIO(sl_daily()))
+        wb['Source Records']['M1'] = 'Quantity'
+        buf = io.BytesIO(); wb.save(buf)
+        r = check(buf.getvalue())
+        self.assertEqual((r['record_count'], inspected(r)), (5, '400'))
+        self.assertEqual(r['dataset_selection']['authoritative'], ['Inspection Detail'])
+
     def test_record_identity_is_site_list_item(self):
         r = check(sl_daily())
         src = r['records'][0]['source']
