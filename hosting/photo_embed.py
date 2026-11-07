@@ -40,9 +40,13 @@ def _token(opener=None):
     from hosting import sharepoint as sp
     if _sp_token['value'] and _sp_token['expires'] > time.time() + 60:
         return _sp_token['value']
-    body = urllib.parse.urlencode({'client_id': os.environ['MS_CLIENT_ID'], 'client_secret': os.environ['MS_CLIENT_SECRET'],
-                                   'grant_type': 'client_credentials', 'scope': f'https://{_host()}/.default'}).encode()
     url = f'https://login.microsoftonline.com/{urllib.parse.quote(os.environ["MS_TENANT_ID"])}/oauth2/v2.0/token'
+    form = {'client_id': os.environ['MS_CLIENT_ID'], 'grant_type': 'client_credentials', 'scope': f'https://{_host()}/.default'}
+    if certificate_ready():   # SharePoint only accepts app sign-in with a certificate, not with a client secret
+        form.update(client_assertion_type='urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion=client_assertion(url))
+    else:
+        form['client_secret'] = os.environ['MS_CLIENT_SECRET']
+    body = urllib.parse.urlencode(form).encode()
     try:
         with sp._open(urllib.request.Request(url, data=body, method='POST'), opener) as r:
             data = json.loads(r.read())
@@ -50,6 +54,70 @@ def _token(opener=None):
         raise PhotoError(f'Microsoft sign-in for SharePoint photos failed (HTTP {exc.code}).') from None
     _sp_token.update(value=data['access_token'], expires=time.time() + int(data.get('expires_in', 3000)))
     return _sp_token['value']
+
+
+_server_cert = {'key': None, 'thumb': None}
+CERT_KEY = 'sharepoint_photo_cert'
+
+
+def certificate_ready():
+    return bool((os.environ.get('MS_SP_CERT_KEY') and os.environ.get('MS_SP_CERT_THUMBPRINT')) or (_server_cert['key'] and _server_cert['thumb']))
+
+
+def _cipher():
+    import base64
+    from cryptography.fernet import Fernet
+    # the stored private key is only readable with the app's own client secret, which lives in Vercel, not in the database
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(('ppg-verifier-cert|' + os.environ['MS_CLIENT_SECRET']).encode()).digest()))
+
+
+def use_stored_certificate(stored):
+    """Load a certificate made by make_certificate() (as kept in settings). Returns True when usable."""
+    if not stored:
+        return False
+    try:
+        _server_cert.update(key=_cipher().decrypt(stored['key_enc'].encode()).decode(), thumb=stored['thumbprint'])
+        return True
+    except Exception:
+        return False
+
+
+def make_certificate(days=730):
+    """A new self-signed certificate. Returns (stored dict with the encrypted private key, public .cer PEM bytes).
+    The private key is never returned or shown; only the public certificate leaves the server."""
+    from datetime import datetime, timedelta, timezone
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'PPG Verifier SharePoint photos')])
+    now = datetime.now(timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=days)).sign(key, hashes.SHA256()))
+    pem = cert.public_bytes(serialization.Encoding.PEM)
+    key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+    stored = dict(key_enc=_cipher().encrypt(key_pem.encode()).decode(), thumbprint=cert.fingerprint(hashes.SHA1()).hex().upper(),
+                  cert_pem=pem.decode(), created=now.isoformat(), expires=cert.not_valid_after_utc.isoformat())
+    return stored, pem
+
+
+def client_assertion(audience, now=None):
+    """A signed JWT proving the app holds the certificate's private key (RS256, x5t = SHA-1 thumbprint)."""
+    import base64, uuid
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b'=').decode()
+    key_pem = os.environ.get('MS_SP_CERT_KEY') or _server_cert['key']
+    thumb = bytes.fromhex((os.environ.get('MS_SP_CERT_THUMBPRINT') or _server_cert['thumb']).replace(':', '').strip())
+    now = int(now or time.time())
+    head = {'alg': 'RS256', 'typ': 'JWT', 'x5t': b64(thumb)}
+    claims = {'aud': audience, 'iss': os.environ['MS_CLIENT_ID'], 'sub': os.environ['MS_CLIENT_ID'], 'jti': str(uuid.uuid4()),
+              'nbf': now - 60, 'exp': now + 600}
+    signing = b64(json.dumps(head, separators=(',', ':')).encode()) + '.' + b64(json.dumps(claims, separators=(',', ':')).encode())
+    key = serialization.load_pem_private_key(key_pem.replace('\\n', '\n').encode(), password=None)
+    return signing + '.' + b64(key.sign(signing.encode(), padding.PKCS1v15(), hashes.SHA256()))
 
 
 def _get(url, opener=None, raw=False):
@@ -110,10 +178,12 @@ def fetch_photos(site, list_id, items, opener=None):
 
 def _permission_hint(detail):
     text = str(detail or '')
-    if 'Unsupported app only token' in text or 'app only' in text.lower():
-        return ('SharePoint only accepts certificate sign-in for app photo downloads; an admin needs to add a certificate to the '
-                'PPG verifier app registration (Entra ID > App registrations > Certificates & secrets).')
-    return 'The app registration needs SharePoint read permission (Sites.Read.All for SharePoint).'
+    if not certificate_ready() or 'Unsupported app only token' in text or 'app only' in text.lower():
+        return ('SharePoint only lets the app download photos when it signs in with a certificate. An admin needs to download the '
+                'verifier certificate (/api/settings/sharepoint-cert), upload it to the app registration in Entra ID, and grant '
+                'SharePoint "Sites.Read.All" (application) with admin consent.')
+    return ('The app registration needs the SharePoint "Sites.Read.All" application permission (under SharePoint, not Microsoft Graph) '
+            'with admin consent.')
 
 
 # ---------------------------------------------------------------- building the copy (no existing part is rewritten except to register the new tab)

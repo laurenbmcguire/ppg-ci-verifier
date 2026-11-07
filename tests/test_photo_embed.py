@@ -79,3 +79,35 @@ class WithPhotos(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CertificateSignIn(unittest.TestCase):
+    def test_client_assertion_is_signed_with_the_certificate_key(self):
+        import base64, os
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+        env = {'MS_SP_CERT_KEY': pem, 'MS_SP_CERT_THUMBPRINT': 'AB' * 20, 'MS_CLIENT_ID': 'app-1'}
+        with patch.dict(os.environ, env):
+            self.assertTrue(photo_embed.certificate_ready())
+            jwt = photo_embed.client_assertion('https://login/token', now=1000)
+        head, body, sig = jwt.split('.')
+        pad = lambda s: s + '=' * (-len(s) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(pad(body)))
+        self.assertEqual((claims['iss'], claims['aud'], claims['exp']), ('app-1', 'https://login/token', 1600))
+        key.public_key().verify(base64.urlsafe_b64decode(pad(sig)), f'{head}.{body}'.encode(), padding.PKCS1v15(), hashes.SHA256())
+
+    def test_server_made_certificate_keeps_its_key_encrypted_and_signs(self):
+        import os
+        with patch.dict(os.environ, {'MS_CLIENT_SECRET': 'app-secret', 'MS_CLIENT_ID': 'app-1'}):
+            for k in ('MS_SP_CERT_KEY', 'MS_SP_CERT_THUMBPRINT'):
+                os.environ.pop(k, None)
+            stored, pem = photo_embed.make_certificate()
+            self.assertTrue(pem.startswith(b'-----BEGIN CERTIFICATE-----'))
+            self.assertNotIn('PRIVATE KEY', json.dumps(stored))            # only the encrypted form is stored
+            self.assertTrue(photo_embed.use_stored_certificate(stored))
+            self.assertEqual(len(photo_embed.client_assertion('https://login/token').split('.')), 3)
+        with patch.dict(os.environ, {'MS_CLIENT_SECRET': 'a-different-secret'}):
+            photo_embed._server_cert.update(key=None, thumb=None)
+            self.assertFalse(photo_embed.use_stored_certificate(stored))   # unreadable without the app's own secret

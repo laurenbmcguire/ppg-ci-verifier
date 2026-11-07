@@ -581,6 +581,19 @@ class handler(BaseHTTPRequestHandler):
                 safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', rec.get('filename') or 'Change summary.pdf')[:180]
                 disp = 'inline' if parse_qs(urlsplit(self.path).query).get('view') == ['1'] else 'attachment'
                 return self.send(200, pdf, 'application/pdf', {'Content-Disposition': f'{disp}; filename="{safe}"'})
+            if route == '/api/settings/sharepoint-cert':   # admins: the public certificate to upload in Entra ID (the private key never leaves the server)
+                if not self.is_admin():
+                    return self.fail(403, 'Only admins can get the SharePoint certificate.')
+                from hosting import photo_embed
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    stored = inbox.setting(photo_embed.CERT_KEY, None)
+                    if not stored or not photo_embed.use_stored_certificate(stored):
+                        stored, _ = photo_embed.make_certificate()
+                        inbox.set_setting(photo_embed.CERT_KEY, stored)
+                return self.send(200, stored['cert_pem'].encode(), 'application/x-x509-ca-cert',
+                                 {'Content-Disposition': 'attachment; filename="PPG Verifier SharePoint photos.cer"',
+                                  'X-Cert-Thumbprint': stored['thumbprint'], 'X-Cert-Expires': stored['expires']})
             if route == '/api/spreadsheets/download-photos':   # a copy with each record's SharePoint photos; the original is unchanged
                 file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
                 if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
@@ -600,6 +613,8 @@ class handler(BaseHTTPRequestHandler):
                     raise Conflict('Photos can only be added to Excel (.xlsx) reports.')
                 if a['status'] not in registry.RESOLVED or not a.get('site') or not a.get('list_id'):
                     raise Conflict('Choose the client and job first, so the photos come from the right SharePoint list.')
+                with self.store().session() as directory:
+                    photo_embed.use_stored_certificate(SpreadsheetInbox(directory).setting(photo_embed.CERT_KEY, None))
                 try:
                     name, data, info = photo_embed.build(filename, raw, a['site'], a['list_id'])
                 except photo_embed.PhotoError as exc:
