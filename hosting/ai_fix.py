@@ -32,7 +32,25 @@ def run(h, file_hash, keys=None, opener=None, auto=False):
     except ai_review.AIReviewError as exc:
         raise AIFixError(str(exc)) from None
     by_ref = {i['key']: i for i in issues}
+    # a value SharePoint has may only become SharePoint's value; a must-fix issue is never "fine" on Claude's word
+    guarded = []
+    for c in plan['cells']:
+        src = (by_ref.get(c.get('ref')) or {}).get('source_value')
+        if src is not None and str(c.get('after')) != str(src):
+            guarded.append(dict(c, why='SharePoint has a different value'))
+            continue
+        guarded.append(c)
+    plan['cells'] = [c for c in guarded if 'why' not in c]
+    # a must-fix issue counts as settled only when one of these changes is on its row (the same typo fixed once);
+    # Claude's word alone ("the value is right") leaves it for a person
+    touched = {(c.get('sheet'), str(c.get('cell') or '').lstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz')) for c in plan['cells']} | \
+              {(r.get('sheet'), str(r.get('row'))) for r in plan['removes'] + plan['moves']}
+    def _fine_ok(f):
+        i = by_ref.get(f.get('ref')) or {}
+        return i.get('severity') != 'high' or (i.get('sheet'), str(i.get('row'))) in touched
+    plan['fine'] = [f for f in plan['fine'] if _fine_ok(f)]
     cells, dropped = validate_changes(item, raw, plan['cells'])
+    dropped += [c for c in guarded if 'why' in c]
     sheets = {s.get('name') for s in item.get('sheets') or []}
     rows, seen_rows, bad_rows = [], set(), []
     for r in plan['removes'] + plan['moves']:

@@ -182,3 +182,65 @@ class BlankIsNotZero(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AutoFix(unittest.TestCase):
+    """The app fixes everything it safely can into a new version, then each fix can be reverted on its own."""
+
+    def setUp(self):
+        import contextlib, os
+        from unittest.mock import patch
+        self.env = patch.dict(os.environ, {}, clear=False); self.env.start()
+        os.environ.pop('ANTHROPIC_API_KEY', None)
+        self.root, self.box = inbox()
+        root = self.root
+
+        class H:   # the handler surface autofix needs, over a local inbox
+            def store(self):
+                class S:
+                    def session(self_inner):
+                        return contextlib.nullcontext(root)
+                return S()
+            def baseline_check(self, file_hash):
+                return None
+        self.h = H()
+        wb = load_workbook(io.BytesIO(sl_daily(nok_blank=False)))
+        d = wb['Inspection Detail']; d['H6'] = '  ' + str(d['H6'].value) + ' '; d['J5'] = 72
+        buf = io.BytesIO(); wb.save(buf)
+        self.raw = buf.getvalue()
+        item = self.box.ingest(NAME, self.raw)
+        self.v1 = reconciled(self.box, item, status='discrepancies', rows=[dict(status='value_differs', item='433', field='inspected', report='72', sharepoint='80', sheet='Inspection Detail', row=5)])
+        self.box._update(self.v1['file_hash'], lambda r: r['source_reconciliation'].update(
+            proposed_corrections=[dict(item='433', sheet='Inspection Detail', row=5, column=10, field='inspected', before='72', after='80')]))
+        self.addCleanup(self.env.stop)
+
+    def cell(self, file_hash, sheet, cell):
+        from hosting.fixes import _cell_value, _sources, _show
+        _, raw = self.box.original_bytes(file_hash)
+        return _show(_cell_value(_sources(NAME, raw)[0], sheet, cell))
+
+    def test_fixes_go_into_a_new_version_and_each_can_be_reverted(self):
+        from hosting import autofix
+        v2, summary = autofix.run(self.h, self.v1['file_hash'])
+        self.assertNotEqual(v2['file_hash'], self.v1['file_hash'])
+        self.assertEqual(self.box.download(self.v1['file_hash'])[1], self.raw)          # the original is unchanged
+        self.assertEqual(self.cell(v2['file_hash'], 'Inspection Detail', 'J5'), '80')    # SharePoint's value
+        changed = {(c['sheet'], c['cell']): c for c in summary['changed']}
+        self.assertIn(('Inspection Detail', 'J5'), changed)
+        self.assertIn(('Inspection Detail', 'H6'), changed)                              # spacing cleaned
+        with self.assertRaises(autofix.AutoFixError):                                    # never twice
+            autofix.run(self.h, self.v1['file_hash'])
+        v3 = autofix.revert(self.h, v2['file_hash'], cells=[dict(sheet='Inspection Detail', cell='J5')], by='Reviewer')
+        self.assertEqual(self.cell(v3['file_hash'], 'Inspection Detail', 'J5'), '72')    # back to the report's value
+        self.assertEqual(self.cell(v3['file_hash'], 'Inspection Detail', 'H6'), self.cell(v2['file_hash'], 'Inspection Detail', 'H6'))
+        rev = {(c['sheet'], c['cell']): c for c in v3['auto_fixed']['changed']}
+        self.assertTrue(rev[('Inspection Detail', 'J5')]['reverted'])
+        self.assertFalse(rev[('Inspection Detail', 'H6')].get('reverted'))
+        self.assertIsNotNone(autofix.eligible(v3))                                       # a reverted version is not re-fixed
+        self.assertEqual(v3['release_status'], 'held')                                   # nothing approved or sent
+
+    def test_an_approved_report_is_left_alone(self):
+        from hosting import autofix
+        self.box.approve(self.v1['file_hash'], 'Reviewer', note='x', override=True)
+        with self.assertRaises(autofix.AutoFixError):
+            autofix.run(self.h, self.v1['file_hash'])

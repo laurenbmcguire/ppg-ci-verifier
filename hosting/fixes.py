@@ -87,7 +87,7 @@ def _num(text):
 
 SURE_SOURCES = ('SharePoint', 'Clean-up', 'Number as text', 'Known detail')
 # values that came from the app or from Claude rather than being typed by a person: re-checked for type when applied
-MACHINE_SOURCES = SURE_SOURCES + ('Suggested', 'AI fix', 'Spelling', 'Typo', 'Claude (chat)', 'SharePoint export')
+MACHINE_SOURCES = SURE_SOURCES + ('Suggested', 'AI fix', 'AI fix (asked)', 'Spelling', 'Typo', 'Claude (chat)', 'SharePoint export')
 WRITTEN_ONLY = {   # fixes that only change how something is written, never what it means
     'Clean-up': 'Only extra spaces or invisible characters. The value is right; nothing else is wrong.',
     'Number as text': 'Only the way the number is stored. The number is right; nothing else is wrong.',
@@ -239,6 +239,17 @@ def proposals(result, filename, raw, sharepoint_rows=None, context=None):
             cleaned = re.sub(r'[ \t]{2,}', ' ', HIDDEN.sub(lambda m: ' ' if m.group(0) == ' ' else '', raw_value)).strip()
             if cleaned and cleaned != raw_value:
                 add(r['sheet'], cell, cleaned, 'Removes hidden characters or extra spaces so matching and totals work.', 'Clean-up')
+
+    # 2b. The same clean-up on every other text cell of a record row (part names, areas, auditors, comments...).
+    by_sheet = dict(sources)
+    for r in detail:
+        row_vals = (by_sheet.get(r['sheet']) or [])[r['row'] - 1] if r['row'] - 1 < len(by_sheet.get(r['sheet']) or []) else []
+        for c_i, raw_value in enumerate(row_vals or []):
+            if not isinstance(raw_value, str) or raw_value.startswith('='):
+                continue
+            cleaned = re.sub(r'[ \t]{2,}', ' ', HIDDEN.sub(lambda m: ' ' if m.group(0) == ' ' else '', raw_value)).strip()
+            if cleaned and cleaned != raw_value:
+                add(r['sheet'], f'{col_letter(c_i)}{r["row"]}', cleaned, 'Removes hidden characters or extra spaces so matching and totals work.', 'Clean-up')
 
     # 3. Look-alike characters in identifiers / part numbers that are otherwise all digits.
     for kind in ('identifier', 'part'):

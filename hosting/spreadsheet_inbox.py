@@ -253,7 +253,8 @@ class SpreadsheetInbox:
         item = self.get(file_hash)
         _, raw = self.original_bytes(file_hash)
         out = summarize(item, use_verdicts=not include_dismissed)
-        return item, raw, [i for i in out['issues'] if i['severity'] != 'info']
+        decided = item.get('review_decisions') or {}   # what a person already decided is never re-decided by Claude
+        return item, raw, [i for i in out['issues'] if i['severity'] != 'info' and i['key'] not in decided]
     def _update(self, file_hash, change):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -750,7 +751,7 @@ class SpreadsheetInbox:
             fixed_result['root_hash'] = item.get('root_hash') or file_hash
             if result.get('source_document'): fixed_result['source_document'] = result['source_document']   # still came from that PDF / Word file
             if result.get('accepted_issues'): fixed_result['accepted_issues'] = result['accepted_issues']     # still confirmed fine
-            for k in ('auto_formatting', 'ai_fixed'):   # what was already fixed stays on the report as it moves on
+            for k in ('auto_formatting', 'ai_fixed', 'review_decisions'):   # what was already fixed or decided stays on the report as it moves on
                 if result.get(k) and k not in fixed_result: fixed_result[k] = result[k]
             new_item = self.save_check(db, fixed_result)
         return new_item

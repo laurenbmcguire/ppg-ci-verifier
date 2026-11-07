@@ -186,6 +186,8 @@ def as_day(raw, cached=None):
         text = value.strip().strip('"').strip()
         if re.fullmatch(r'\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})?', text):
             text = text[:10]  # ISO timestamp from a SharePoint export
+        elif re.fullmatch(r'\d{4}-\d{2}-\d{2}[ T]00:00(:00(\.0+)?)?', text):
+            text = text[:10]  # a date Excel wrote out as text with a midnight time: still that business date
         for fmt in ('%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y', '%m-%d-%Y', '%m.%d.%y', '%m.%d.%Y', '%B %d, %Y', '%b %d, %Y'):
             try:
                 return datetime.strptime(text, fmt).date()

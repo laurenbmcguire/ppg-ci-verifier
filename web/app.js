@@ -854,6 +854,7 @@
     const step = c.selected ? 2 : 1;
     body.append(h('ol', {class: 'fd-steps', 'aria-label': 'Steps'}, ['Compare', 'Preview', 'Recheck'].map((t, n) => h('li', {class: n + 1 === step ? 'on' : n + 1 < step ? 'done' : '', 'aria-current': n + 1 === step ? 'step' : null}, `${n + 1} ${t}`))));
     // a report that is not ready says why, with one clear next step
+    const auto = fdAutoSummary(r); if (auto) body.append(auto);
     const nextStep = fdNextStep(r, st);
     if (nextStep) body.append(nextStep);
     if (!items.length) { body.append(fdClean(r, st)); return; }
@@ -879,6 +880,58 @@
           `Keep all ${g.open} as recorded`) : null);
     })));
     if (tier === 'blocker' && (r.holds || []).some(x => x.hard)) body.append(h('div', {class: 'fd-hold'}, icon('lock', 16), h('span', {}, 'Internal approval blocked', h('small', {}, (r.holds || []).filter(x => x.hard).map(x => x.text).join(' ')))));
+  }
+  // ---------- the app fixes what it can by itself (new version, original kept), then shows only what needs a person
+  function fdAutoEligible(r) {
+    if (!r || r.approval || (r.sent || []).some(x => x.sent) || r.auto_fix_tried || r.auto_fixed || (r.fixes_applied || []).length) return false;
+    if ((r.fixed_from?.changes || []).some(c => String(c.source || '').startsWith('Reverted'))) return false;
+    const open = allIssues(r.review).filter(i => i.severity !== 'info').length;
+    return open > 0 || (state.fixes || []).some(f => f.sure);
+  }
+  async function fdMaybeAutoFix(hash) {
+    const r = state.report; if (!r || r.file_hash !== hash || !fdAutoEligible(r)) return;
+    (state.autoTried ||= new Set()); if (state.autoTried.has(hash)) return; state.autoTried.add(hash);
+    state.autoFixing = hash; if (state.sideTab === 'fixes') drawSide();
+    try {
+      const out = await api('/api/spreadsheets/auto-fix', {file_hash: hash});
+      const s = out.auto_fixed || {}, n = (s.changed || []).length + (s.removed || []).length + (s.moved || []).length, fine = (s.fine || []).length;
+      state.autoFixing = null;
+      if (state.selected !== hash) return;
+      toast(n || fine ? `Fixed ${plural(n, 'thing')}${fine ? ` and confirmed ${fine} fine` : ''} automatically. Every fix can be reverted.` : 'Nothing could be fixed automatically; what is left needs a person.');
+      await loadList();
+      if (out.item.file_hash !== hash) select(out.item.file_hash); else openReport(hash, true);
+    } catch (e) { state.autoFixing = null; if (state.selected === hash) { toast(e.message, true); if (state.sideTab === 'fixes') drawSide(); } }
+  }
+  function fdAutoSummary(r) {
+    if (state.autoFixing === r.file_hash) return h('div', {class: 'fd-auto working', role: 'status'}, h('span', {class: 'spin'}), h('div', {}, h('b', {}, 'Fixing what can be fixed…'),
+      h('p', {}, 'SharePoint values and spacing first, then Claude works through the rest. Your original stays as it is.')));
+    const s = r.auto_fixed; if (!s) return null;
+    const changed = (s.changed || []).filter(c => !c.reverted), fine = (s.fine || []).filter(f => !f.reverted), rows = [...(s.removed || []), ...(s.moved || [])];
+    const left = fdCounts(), todo = (left.blockers || 0) + (left.review || 0);
+    const total = changed.length + fine.length + rows.length;
+    const revert = async (cells, fineTexts, label) => {
+      toast(`Reverting ${label}…`);
+      try { const out = await api('/api/spreadsheets/revert-fix', {file_hash: r.file_hash, cells, fine: fineTexts, by: myName()});
+        toast(`Reverted ${label}.${cells.length ? ' Saved as a new version; the checks ran again.' : ' It is back on your list.'}`);
+        await loadList(); if (out.item.file_hash !== r.file_hash) select(out.item.file_hash); else openReport(r.file_hash, true);
+      } catch (e) { toast(e.message, true); }
+    };
+    const line = (what, why, by, act) => h('li', {}, h('div', {}, h('b', {}, what), h('small', {}, [by, why].filter(Boolean).join(' · '))), act);
+    return h('section', {class: 'fd-auto', 'aria-label': 'Fixed for you'},
+      h('div', {class: 'fd-autohead'}, icon('ok', 18), h('div', {},
+        h('b', {}, total ? `Fixed for you: ${plural(total, 'item')}` : 'Nothing was changed automatically'),
+        h('p', {}, todo ? `${plural(todo, 'item')} left that only a person can decide.` : 'Nothing is left that needs a person.'))),
+      total ? h('details', {class: 'fd-autolist', open: total <= 6 ? true : null}, h('summary', {}, 'What was done'),
+        h('ul', {},
+          changed.map(c => line(`${c.sheet}!${c.cell}: ${showWs(c.before)} → ${showWs(c.after)}`, c.reason, c.by === 'Claude' ? 'Claude' : c.source,
+            h('button', {type: 'button', class: 'btn small', onclick: () => revert([{sheet: c.sheet, cell: c.cell}], [], `${c.sheet}!${c.cell}`)}, 'Revert'))),
+          fine.map(f => line(`Confirmed fine: ${f.text}`, f.reason, 'Claude',
+            h('button', {type: 'button', class: 'btn small', onclick: () => revert([], [f.text], 'that decision')}, 'Revert'))),
+          rows.map(x => line(x.to_sheet ? `${x.sheet} row ${x.row} moved to ${x.to_sheet}` : `${x.sheet} row ${x.row} taken out`, x.reason, 'Claude', null))),
+        h('div', {class: 'fd-autoacts'},
+          changed.length + fine.length > 1 ? h('button', {type: 'button', class: 'btn small', onclick: () => revert(changed.map(c => ({sheet: c.sheet, cell: c.cell})), fine.map(f => f.text), 'all automatic fixes')}, 'Revert all') : null,
+          s.from_hash ? h('a', {href: '#r=' + s.from_hash}, 'Open the version before these fixes') : null)) : null,
+      (s.notes || []).length ? h('p', {class: 'fd-hint'}, s.notes.join(' ')) : null);
   }
   function fdNextStep(r, st) {
     const box = (title, text, button) => h('div', {class: 'fd-next ' + st.tone}, h('b', {}, title), text ? h('p', {}, text) : null, button);
@@ -1317,6 +1370,7 @@
     // Opening a report never runs Claude by itself: its read, its double-check (which can set issues aside) and its draft
     // fixes all change what the report shows, so each is a person's choice (Ask Claude tab, or Facts → AI review).
     void open; maybeBrief(hash, false);
+    fdMaybeAutoFix(hash);
   }
   async function runReview(hash) {
     (state.reviewTried ||= new Set()).add(hash);
