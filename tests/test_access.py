@@ -122,7 +122,11 @@ class Access(unittest.TestCase):
                 def __exit__(s, *a): return False
                 def read(s): return json.dumps({'id_token': f'x.{body}.y'}).encode()
             return lambda req, timeout=None: R()
-        good = dict(aud='client-1', tid='tenant-1', preferred_username='Lauren.McGuire@ppgquality.com', name='Lauren McGuire')
+        import time
+        from hosting.access import nonce_for
+        self.assertEqual(urllib.parse.parse_qs(loc.query)['nonce'][0], nonce_for(state))
+        good = dict(aud='client-1', tid='tenant-1', preferred_username='Lauren.McGuire@ppgquality.com', name='Lauren McGuire',
+                    iss='https://login.microsoftonline.com/tenant-1/v2.0', exp=time.time() + 3600, nonce=nonce_for(state))
         with patch('urllib.request.urlopen', token(good)):
             st, _, h = self.call(f'/auth/microsoft/callback?code=abc&state={state}', cookie=state_cookie)
         self.assertEqual((st, h['Location']), (302, '/app'))
@@ -135,6 +139,10 @@ class Access(unittest.TestCase):
         with patch('urllib.request.urlopen', token(dict(good, tid='other-tenant'))):
             st, _, h = self.call(f'/auth/microsoft/callback?code=abc&state={state}', cookie=state_cookie)
         self.assertIn('not%20a%20PPG%20account', h['Location'])
+        for bad in (dict(good, nonce='replayed'), dict(good, exp=time.time() - 3600), dict(good, iss='https://evil.example/v2.0')):
+            with patch('urllib.request.urlopen', token(bad)):
+                st, _, h = self.call(f'/auth/microsoft/callback?code=abc&state={state}', cookie=state_cookie)
+            self.assertNotEqual(h['Location'], '/app')
         st, _, h = self.call(f'/auth/microsoft/callback?code=abc&state=forged', cookie=state_cookie)
         self.assertIn('signin=', h['Location'])
 

@@ -51,7 +51,7 @@ def _key(value):
 
 def _fmt(value):
     if isinstance(value, Decimal):
-        return str(value.normalize()) if value == value.to_integral_value() else str(value)
+        return str(int(value)) if value == value.to_integral_value() else format(value.normalize(), "f")
     return '' if value is None else str(value)
 
 

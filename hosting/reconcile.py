@@ -89,6 +89,8 @@ def item_day(fields, columns, schedule=None):
             fmt = ((col.get('dateTime') or {}).get('format') or '').lower()
             if fmt == 'dateonly' or (not fmt and is_local_midnight(fields[name])):
                 return business_day(fields[name], True), 'business_date'
+            if fmt == 'datetime' or not fmt:   # the list's Date column, stored with a time: still the business date, read in Chicago
+                return business_day(fields[name]), 'business_date_with_time'
     for name in SUBMISSION_FIELDS:
         stamp = fields.get(name)
         if stamp:
@@ -104,7 +106,8 @@ def item_day(fields, columns, schedule=None):
 # ---------------------------------------------------------------- reading the list (read-only)
 class Coverage(dict):
     def incomplete(self):
-        return bool(self['denied'] or self['throttled'] or self['failed_pages'] or self['truncated'] or self['unknown_schema'] or not self['complete'])
+        return bool(self.get('denied') or self.get('throttled') or self.get('failed_pages') or self.get('truncated') or self.get('unknown_schema')
+                    or self.get('undated') or not self.get('complete'))
 
 
 def _fetch(url, opener=None, retries=2):
@@ -144,7 +147,7 @@ def snapshot(site_name, list_id, opener=None, schedule=None):
     """Every item of one SharePoint list, with coverage. Never writes to SharePoint."""
     from hosting.adaptive_reports import field_for_header, header_text
     cov = Coverage(pages=0, items=0, complete=False, denied=False, throttled=False, failed_pages=0, truncated=False,
-                   unknown_schema=False, notes=[])
+                   unknown_schema=False, undated=0, notes=[])
     snap = dict(site=site_name, list_id=list_id, captured_at=now(), coverage=cov, items=[], list=None)
     site_id = site_id_for(site_name, opener)
     if not site_id:
@@ -198,16 +201,13 @@ def snapshot(site_name, list_id, opener=None, schedule=None):
         url = page.get('@odata.nextLink')
     if url is None and not (cov['denied'] or cov['throttled'] or cov['failed_pages'] or cov['truncated']):
         cov['complete'] = True
-    qty_cols = {}
-    for f, cols in candidates.items():   # the candidate filled on the most items (the first one on a tie)
-        qty_cols[f] = max(cols, key=lambda col: (sum(1 for it in snap['items'] if it['raw'].get(col) not in (None, '')), -cols.index(col)))
-    for it in snap['items']:
-        raw = it.pop('raw')
-        it['values'] = {q: _num(raw.get(col)) for q, col in qty_cols.items()}
-        it['blank'] = {q: raw.get(col) in (None, '') for q, col in qty_cols.items()}
-    snap['quantity_columns'] = qty_cols
     snap['quantity_candidates'] = candidates
-    if 'inspected' not in qty_cols:
+    undated = [it['item'] for it in snap['items'] if not it.get('day')]
+    cov['undated'] = len(undated)
+    if undated:
+        cov['notes'].append(f'{len(undated)} SharePoint item(s) have no business date, so it is unknown which day they belong to '
+                            f'(items {", ".join(undated[:10])}{"…" if len(undated) > 10 else ""}).')
+    if 'inspected' not in candidates:
         cov['unknown_schema'] = True
         cov['notes'].append('No inspected-quantity column was recognized in this list.')
     return snap
@@ -232,18 +232,69 @@ def _show(v):
 
 
 # ---------------------------------------------------------------- comparing
-def compare(day, records, export_records, snap):
-    """Item-level comparison. Returns the reconciliation dict saved on the report (no file is changed)."""
+def choose_columns(snap, day_items, confirmed=None):
+    """Which SharePoint column holds each quantity. Never decided by which column is fuller in general:
+    one candidate -> used; a person's confirmed mapping -> used; several candidates -> the one filled for this day's
+    items is shown as needing confirmation, and several filled ones that disagree are a conflict.
+    Returns (columns {field: name}, mapping {field: dict(status, column, candidates, evidence)})."""
+    cols, mapping = {}, {}
+    for field, cands in (snap.get('quantity_candidates') or {}).items():
+        pick = (confirmed or {}).get(field)
+        if pick in cands:
+            cols[field] = pick
+            mapping[field] = dict(status='confirmed', column=pick, candidates=cands, evidence=f'{pick} was confirmed for this list.')
+            continue
+        if len(cands) == 1:
+            cols[field] = cands[0]
+            mapping[field] = dict(status='single', column=cands[0], candidates=cands, evidence=f'{cands[0]} is the only {field} column.')
+            continue
+        filled = [c for c in cands if any(it['raw'].get(c) not in (None, '') for it in day_items)]
+        if len(filled) == 1:
+            cols[field] = filled[0]
+            others = ', '.join(c for c in cands if c != filled[0])
+            mapping[field] = dict(status='needs_confirmation', column=filled[0], candidates=cands,
+                                  evidence=f'{filled[0]} is filled for this day; {others} {"is" if len(cands) == 2 else "are"} empty. Confirm {filled[0]} is the {field} column.')
+        elif len(filled) > 1:
+            agree = all(len({_num(it['raw'].get(c)) for c in filled if it['raw'].get(c) not in (None, '')}) <= 1 for it in day_items)
+            cols[field] = filled[0]
+            mapping[field] = dict(status='needs_confirmation' if agree else 'conflict', column=filled[0], candidates=cands,
+                                  evidence=f'{", ".join(filled)} are all filled for this day' + ('' if agree else ' and disagree') + '. Confirm which is the real one.')
+        else:
+            cols[field] = cands[0]
+            mapping[field] = dict(status='empty', column=cands[0], candidates=cands, evidence=f'None of {", ".join(cands)} has a value for this day.')
+    return cols, mapping
+
+
+def _list_segment(url):
+    from urllib.parse import unquote
+    m = re.search(r'/Lists/([^/?#]+)', url or '')
+    return unquote(m.group(1)) if m else None
+
+
+def compare(day, records, export_records, snap, confirmed=None, report=None):
+    """Item-level comparison. Returns the reconciliation dict saved on the report (no file is changed).
+    report: dict(file_hash, checker_version) the result is bound to; a later version makes it stale."""
     cov = snap.get('coverage') or {}
     items = [i for i in snap.get('items') or [] if i.get('day') == day]
+    cols, mapping = choose_columns(snap, items, confirmed)
+    for it in snap.get('items') or []:   # values through the chosen columns (raw kept for the evidence above)
+        raw = it.get('raw') or {}
+        it['values'] = {q: _num(raw.get(c)) for q, c in cols.items()}
     by_item = {i['item']: i for i in items}
     all_items = {i['item']: i for i in snap.get('items') or []}
+    site, list_seg = snap.get('site'), _list_segment((snap.get('list') or {}).get('url'))
     rows, proposals = [], []
 
-    def row(status, item=None, rec=None, field=None, report=None, sharepoint=None, note=None):
+    def row(status, item=None, rec=None, field=None, report_value=None, sharepoint=None, note=None):
         sp_item = all_items.get(item) if item else None
-        rows.append(dict(status=status, item=item, field=field, report=report, sharepoint=sharepoint, note=note,
+        rows.append(dict(status=status, item=item, field=field, report=report_value, sharepoint=sharepoint, note=note,
                          sheet=rec['sheet'] if rec else None, row=rec['row'] if rec else None, url=(sp_item or {}).get('url')))
+
+    def same_list(src):
+        """True / False / None (the row does not say which site and list it came from)."""
+        if not src.get('site') and not src.get('list'):
+            return None
+        return (src.get('site') or '').lower() == (site or '').lower() and (not list_seg or (src.get('list') or '').lower() == list_seg.lower())
 
     # 1. captured export (inside the workbook) against the live list
     export_summary = None
@@ -251,14 +302,14 @@ def compare(day, records, export_records, snap):
         changed = missing = 0
         for e in export_records:
             src = e.get('source') or {}
-            it = all_items.get(src.get('item'))
+            it = all_items.get(src.get('item')) if same_list(src) is not False else None
             if not it:
                 missing += 1
-                row('export_item_not_on_sharepoint', src.get('item'), e, note='The captured export lists an item the SharePoint list no longer has.')
+                row('export_item_not_on_sharepoint', src.get('item'), e, note='The captured export lists an item this SharePoint list does not have.')
                 continue
             if src.get('version') and it.get('version') and str(src['version']) != str(it['version']):
                 changed += 1
-                row('changed_since_export', it['item'], e, field='version', report=src['version'], sharepoint=it['version'],
+                row('changed_since_export', it['item'], e, field='version', report_value=src['version'], sharepoint=it['version'],
                     note='The SharePoint item was edited after the export was captured.')
             for f in QTY:
                 if f in e['values'] and f in it['values'] and e['values'][f] != it['values'][f]:
@@ -266,9 +317,12 @@ def compare(day, records, export_records, snap):
                     row('export_value_differs', it['item'], e, f, _show(e['values'][f]), _show(it['values'][f]))
         export_summary = dict(rows=len(export_records), changed=changed, missing=missing)
 
-    # 2. the record rows against the snapshot
-    seen = set()
-    unidentified = 0
+    # 2. the record rows against the snapshot: identity is site + list + item
+    seen, unidentified, unconfirmed = set(), 0, 0
+    report_fields = sorted({f for r in records for f in QTY if r['values'].get(f) is not None})
+    unsupported = [f for f in report_fields if f not in cols]
+    for f in unsupported:
+        row('field_not_in_source', None, None, f, note=f'The report has {f} values but this SharePoint list has no {f} column, so they could not be checked.')
     for r in records:
         src = r.get('source') or {}
         key = src.get('item')
@@ -276,36 +330,68 @@ def compare(day, records, export_records, snap):
             unidentified += 1
             row('report_row_without_item_id', None, r, note='This row has no SharePoint item ID, so it cannot be matched one to one.')
             continue
-        if key in seen:
+        where = same_list(src)
+        if where is False:
+            row('wrong_list', key, r, note=f'This row comes from {src.get("site")} / {src.get("list")}, not {site} / {list_seg or "this list"}.')
+            continue
+        if where is None:
+            unconfirmed += 1
+        ident = (src.get('site'), src.get('list'), key)
+        if ident in seen:
             row('item_listed_twice', key, r)
             continue
-        seen.add(key)
+        seen.add(ident)
         it = by_item.get(key)
         if not it:
             other = all_items.get(key)
+            basis = (other or {}).get('day_basis') or 'no business date'
             row('not_on_sharepoint_for_day' if other else 'not_on_sharepoint', key, r,
-                note=f'On SharePoint the item is dated {other["day"]} ({other["day_basis"].replace("_", " ")}).' if other else 'No such item in the list.')
+                note=(f'On SharePoint the item is dated {other.get("day") or "nothing"} ({basis.replace("_", " ")}).' if other else 'No such item in the list.'))
             continue
         for f in QTY:
-            if f not in r['values'] and f not in it['values']:
+            if f not in cols:
                 continue
             mine, theirs = r['values'].get(f), it['values'].get(f)
-            if f in r['values'] and f in it['values'] and mine != theirs:
+            if f in r['values'] and mine != theirs:
                 row('value_differs', key, r, f, _show(mine), _show(theirs))
-                proposals.append(dict(item=key, sheet=r['sheet'], row=r['row'], column=r['columns'].get(f), field=f,
-                                      before=_show(mine), after=_show(theirs), url=it.get('url'), applied=False))
+                if theirs is not None and mapping.get(f, {}).get('status') in ('single', 'confirmed'):   # only from a column known to be right
+                    proposals.append(dict(item=key, sheet=r['sheet'], row=r['row'], column=r['columns'].get(f), field=f,
+                                          before=_show(mine), after=_show(theirs), url=it.get('url'), applied=False))
     for key, it in by_item.items():
-        if key not in seen:
+        if not any(k == key for _, _, k in seen):
             row('missing_from_report', key, None, note='This SharePoint item for the day is not in the report.')
 
     incomplete = Coverage(cov).incomplete() if cov else True
-    problems = rows   # every listed row is a difference a person should see
-    status = 'incomplete' if incomplete else ('discrepancies' if problems else ('verified' if records and not unidentified else 'unverified'))
+    doubtful = [f for f in report_fields if mapping.get(f, {}).get('status') not in ('single', 'confirmed') and f in cols]
+    status = ('incomplete' if incomplete else 'discrepancies' if rows else
+              'unverified' if (not records or unidentified or unconfirmed or doubtful) else 'verified')
+    import hashlib, json as _json
+    snap_id = hashlib.sha256(_json.dumps([(i['item'], i.get('version'), i.get('modified')) for i in snap.get('items') or []], sort_keys=True).encode()).hexdigest()[:16]
+    why = []
+    if unconfirmed:
+        why.append(f'{unconfirmed} row(s) do not say which SharePoint site and list they came from.')
+    for f in doubtful:
+        why.append(mapping[f]['evidence'])
     return dict(status=status, day=day, captured_at=snap.get('captured_at'), list=snap.get('list'), site=snap.get('site'),
-                coverage={k: cov.get(k) for k in ('pages', 'items', 'complete', 'denied', 'throttled', 'failed_pages', 'truncated', 'unknown_schema', 'notes')},
-                quantity_columns=snap.get('quantity_columns'),
+                snapshot_id=snap_id, bound_to=dict(report or {}),
+                coverage={k: cov.get(k) for k in ('pages', 'items', 'complete', 'denied', 'throttled', 'failed_pages', 'truncated', 'unknown_schema', 'undated', 'notes')},
+                quantity_columns=cols, column_mapping=mapping, fields_checked=[f for f in report_fields if f in cols], fields_not_checked=unsupported,
                 day_basis=sorted({i.get('day_basis') for i in items if i.get('day_basis')}),
-                sharepoint_items_for_day=len(items), report_rows=len(records), unidentified_rows=unidentified,
-                rows=rows[:2000], rows_truncated=len(rows) > 2000, export=export_summary,
-                proposed_corrections=proposals[:2000], corrections_applied=False,
-                verified=status == 'verified')
+                sharepoint_items_for_day=len(items), report_rows=len(records), unidentified_rows=unidentified, unconfirmed_rows=unconfirmed,
+                not_verified_because=why, rows=rows[:2000], rows_truncated=len(rows) > 2000, export=export_summary,
+                proposed_corrections=proposals[:2000], corrections_applied=False, verified=status == 'verified')
+
+
+def current(result):
+    """The reconciliation that belongs to exactly this report version and checker, or None (stale or missing)."""
+    rec = result.get('source_reconciliation') or None
+    if not rec or rec.get('stale'):
+        return None
+    bound = rec.get('bound_to') or {}
+    if bound.get('file_hash') and bound.get('file_hash') != result.get('file_hash'):
+        return None
+    if bound.get('checker_version') and bound.get('checker_version') != result.get('checker_version'):
+        return None
+    if not bound:   # made before results were bound to a report version
+        return None
+    return rec

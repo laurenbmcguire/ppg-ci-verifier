@@ -51,6 +51,7 @@ class FillKnown(unittest.TestCase):
         rec = dict(status='discrepancies', rows=[dict(status='value_differs', item='433', field='inspected', report='80', sharepoint='72',
                                                       sheet='Inspection Detail', row=5, url='https://sp/433')],
                    proposed_corrections=[dict(item='433', sheet='Inspection Detail', row=5, column=10, field='inspected', before='80', after='72')])
+        rec['bound_to'] = dict(file_hash=item['file_hash'], checker_version=item['checker_version'])
         self.inbox._update(item['file_hash'], lambda r: r.update(source_reconciliation=rec))
         fresh = self.inbox.get(item['file_hash'])
         issue = next(i for i in summarize(fresh)['issues'] if i['code'] == 'sharepoint_value_differs')
@@ -59,6 +60,40 @@ class FillKnown(unittest.TestCase):
         fix = next(p for p in self.inbox.fix_proposals(item['file_hash'])['proposals'] if p['cell'] == 'J5')
         self.assertEqual((fix['after'], fix['sure']), ('72', True))
 
+    def test_a_reconciliation_for_an_earlier_version_is_ignored(self):
+        item = self.inbox.ingest(NAME, sl_daily())
+        rec = dict(status='verified', rows=[], bound_to=dict(file_hash='0' * 64, checker_version=item['checker_version']))
+        self.inbox._update(item['file_hash'], lambda r: r.update(source_reconciliation=rec))
+        self.assertEqual(summarize(self.inbox.get(item['file_hash']))['sharepoint']['status'], 'stale')
+
+    def test_the_old_daily_export_comparison_is_superseded(self):
+        item = self.inbox.ingest(NAME, sl_daily())
+        legacy = dict(status='differences', findings=[dict(code='differs_from_sharepoint', message='SL Alabama LLC: Shift is 3 in the report but 2 on SharePoint.')])
+        rec = dict(status='verified', rows=[], bound_to=dict(file_hash=item['file_hash'], checker_version=item['checker_version']))
+        self.inbox._update(item['file_hash'], lambda r: r.update(sharepoint=legacy, source_reconciliation=rec))
+        rv = summarize(self.inbox.get(item['file_hash']))
+        self.assertEqual(rv['sharepoint']['status'], 'match')
+        self.assertFalse(any('Shift is 3' in i['text'] for i in rv['issues']))
+
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NoUnsafeSuggestions(unittest.TestCase):
+    def test_a_header_word_is_never_proposed_as_a_date(self):
+        inbox = SpreadsheetInbox(tempfile.mkdtemp())
+        def edit(wb):
+            wb['Daily Inspection Summary']['A9'] = 'Date'   # a blank "Date" detail; the Detail tab's header row has "Date | Shift"
+        item = inbox.ingest(NAME, workbook(edit))
+        props = inbox.fix_proposals(item['file_hash'])['proposals']
+        self.assertFalse(any(str(p['after']).strip().lower() == 'shift' for p in props))
+        date_fix = [p for p in props if p['sheet'] == 'Daily Inspection Summary' and p['cell'] == 'B9']
+        self.assertTrue(all(p['after'] == '2026-11-06' for p in date_fix), date_fix)
+
+    def test_one_identifier_on_separate_sharepoint_records_is_not_a_duplicate(self):
+        from hosting.spreadsheets import inspect_spreadsheet
+        from tests.sl_daily_fixture import records
+        r = inspect_spreadsheet(NAME, sl_daily(recs=records(same_values=True)))   # "LOT-A" on items 432-436
+        self.assertNotIn('duplicate_identifier', r['finding_counts'])
+        self.assertEqual(r['record_count'], 5)

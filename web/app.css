@@ -1317,3 +1317,13 @@ details.fixedlog .checkme{color:#9a6a00;font-weight:600}
 .recrows th,.recrows td{border-bottom:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
 .recrows small{color:#666}
 .listerror{border:1px solid #f0c2c2;background:#fff4f4;border-radius:10px;padding:10px 12px;margin:8px 0;font-size:14px}
+.btn.send-btn.blocked{background:#fff;color:#8a1c1c;border:1px solid #d9a3a3}
+.preview{max-width:860px}.preview details{margin:8px 0}.preview-table{border-collapse:collapse;width:100%;font-size:13px;display:block;overflow-x:auto;max-height:50vh}
+.preview-table th,.preview-table td{border-bottom:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
+.reviewcard{border:1px solid var(--line);border-radius:12px;background:#fff;padding:12px 14px;margin:0 0 12px;display:grid;gap:6px}
+.reviewcard .rc-top{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+.reviewcard .rc-state{font-weight:700;padding:2px 10px;border-radius:999px;border:1px solid currentColor;font-size:14px}
+.reviewcard .rc-state.ok{color:#1d6b3a}.reviewcard .rc-state.bad{color:#8a1c1c}.reviewcard .rc-state.warn{color:#7a5300}
+.reviewcard .rc-meta,.reviewcard .rc-groups{color:#555;font-size:14px;margin:0}.reviewcard .rc-totals{margin:0;font-size:15px}
+.reviewcard .spjob{margin:0}.reviewcard .btn.small{min-height:36px}
+@media (max-width:600px){.reviewcard{padding:10px}.reviewcard .rc-top b{flex-basis:100%}.btn.small{min-height:44px}}

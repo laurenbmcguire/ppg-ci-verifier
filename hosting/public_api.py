@@ -334,7 +334,10 @@ def op_build(h, job, day=None, force=False, header=None):
                             f'The report is ready at {_dt.fromisoformat(ready["ready_at"]).strftime("%I:%M %p").lstrip("0")} '
                             f'(45 minutes after the last scan). Build anyway to make it now.')
     raw = builder.build_xlsx(job, day, rows, schedule, saved)
+    # 45 quiet minutes only means nobody scanned for a while: it never proves the shift is over, so the built report says so
     built = dict(info, built_at=_dt.now(_tz.utc).isoformat(), ready=ready, nexus=builder.nexus_split(rows, windows),
+                 shift_end_confirmed=False,
+                 completeness_note='Built from the scans in SharePoint at this time. A pause in scanning does not prove the shift is over; build again later if more scans may come.',
                  shifts={sh['name']: sum(1 for r in rows if r['shift_name'] == sh['name']) for sh in schedule})
     with h.store().session() as directory:
         inbox = SpreadsheetInbox(directory)

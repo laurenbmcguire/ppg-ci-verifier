@@ -376,7 +376,7 @@
   async function copyClientSummary() {
     const r = state.report, rv = r.review || {}, n = v => v == null ? '—' : Number(v).toLocaleString('en-US');
     const client = (r.assignment && SETTLED.includes(r.assignment.status)) ? r.assignment.client : null;
-    const rate = rv.inspected ? ` (${(rv.rejected / rv.inspected * 100).toFixed(1)}%)` : '';
+    const rate = rv.inspected && rv.rejected != null && !rv.rejected_partial ? ` (${(rv.rejected / rv.inspected * 100).toFixed(1)}%)` : '';
     const text = [`${client ? client + ' · ' : ''}${rv.job || r.filename}`, `End-of-shift summary for ${dayLabel(rv.day)}`, '',
       `Parts inspected: ${n(rv.inspected)}`, rv.certified != null ? `Accepted: ${n(rv.certified)}` : null, `Rejected: ${n(rv.rejected)}${rate}${rv.rejected_partial ? ' (recorded rejects; not every record had a reject count)' : ''}`, '',
       'The full end-of-shift report is attached.'].filter(x => x !== null).join('\n');
@@ -482,23 +482,56 @@
   const REC_ROW = {value_differs: 'Value differs', missing_from_report: 'On SharePoint, not in the report', not_on_sharepoint: 'Not on SharePoint',
     not_on_sharepoint_for_day: 'On SharePoint for another day', report_row_without_item_id: 'No item ID', item_listed_twice: 'Listed twice',
     changed_since_export: 'Edited after the export', export_value_differs: 'Export differs from the list', export_item_not_on_sharepoint: 'Export item gone from the list'};
+  // One card at the top: what the report is, its totals, the source verdict and what is left to do.
+  function reviewCard(r) {
+    const rv = r.review || {}, a = r.assignment || {}, sp = rv.sharepoint || {}, c = rv.counts || {};
+    const block = blockers(r), review = c.medium || 0, info = (c.low || 0) + (c.info || 0);
+    const shifts = [...new Set((r.records || []).map(x => x.shift).filter(Boolean))];
+    const photos = r.photos?.image_count || 0;
+    const n = v => v == null ? null : fmt(Number(v));
+    const totals = [`${fmt(rv.scans || 0)} record${rv.scans === 1 ? '' : 's'}`, rv.inspected != null ? `${n(rv.inspected)} inspected` : 'inspected not recorded',
+      rv.certified != null ? `${n(rv.certified)} OK` : null,
+      rv.rejected == null ? 'rejects not recorded' : rv.rejected_partial ? `${n(rv.rejected)} rejects recorded (some records blank)` : `${n(rv.rejected)} rejected`,
+      shifts.length ? `${shifts.length} shift${shifts.length === 1 ? '' : 's'} (${shifts.join(', ')})` : null, `${photos} photo${photos === 1 ? '' : 's'}`].filter(Boolean);
+    const state = (r.sent || []).some(x => x.sent) ? ['Sent', 'ok'] : r.approval ? ['Approved, not sent', 'ok']
+      : block ? [`${block} blocker${block === 1 ? '' : 's'}`, 'bad'] : review ? [`${review} to review`, 'warn'] : ['Ready to approve', 'ok'];
+    return h('section', {class: 'reviewcard', 'aria-label': 'Report summary'},
+      h('div', {class: 'rc-top'},
+        h('span', {class: 'rc-state ' + state[1]}, state[1] === 'ok' ? '✓ ' : state[1] === 'bad' ? '✕ ' : '! ', state[0]),
+        h('b', {}, SETTLED.includes(a.status) ? a.label : `Client not settled → ${rv.job || 'job unknown'} → ${rv.day || 'date unknown'}`),
+        h('span', {class: 'rc-meta'}, `version ${r.version}`),
+        a.needs_person ? h('button', {type: 'button', class: 'btn small', onclick: e => assignForm(r, e.target)}, 'Choose client and job') : null),
+      h('p', {class: 'rc-totals'}, totals.join(' · ')),
+      (block || review || info) ? h('p', {class: 'rc-groups'}, [block ? `${block} blocker${block === 1 ? '' : 's'}` : null, review ? `${review} to review` : null, info ? `${info} for information` : null].filter(Boolean).join(' · ') + ' (listed under Fixes)') : null,
+      reconcileLine(r));
+  }
   function reconcileLine(r) {
     const x = r.source_reconciliation, a = r.assignment || {};
     const can = a.site && a.list_id && SETTLED.includes(a.status);
     const run = async e => {
       e.target.disabled = true; e.target.textContent = 'Reading the SharePoint list…';
       try { await api('/api/spreadsheets/source-reconcile', {file_hash: r.file_hash}); const fresh = await api('/api/spreadsheet?id=' + r.file_hash);
-        Object.assign(state.report, {source_reconciliation: fresh.source_reconciliation, holds: fresh.holds}); drawReport(); }
+        Object.assign(state.report, {source_reconciliation: fresh.source_reconciliation, holds: fresh.holds, review: fresh.review}); drawReport(); }
       catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Reconcile with SharePoint'; } };
     const btn = h('button', {type: 'button', class: 'btn small', disabled: can ? null : '', title: can ? 'Read-only: nothing on SharePoint is changed' : 'Choose the client and job first', onclick: run}, x ? 'Reconcile again' : 'Reconcile with SharePoint');
-    if (!x) return h('div', {class: 'spjob none'}, h('span', {class: 'spjob-tag'}, 'Source'), h('span', {}, 'Not reconciled with the live SharePoint list yet.'), btn);
+    if (!x) return h('div', {class: 'spjob none'}, h('span', {class: 'spjob-tag'}, 'Source'), h('span', {}, 'Not checked against the live SharePoint list yet.'), btn);
     const c = x.coverage || {};
     const rows = x.rows || [];
-    return h('div', {class: 'spjob ' + (x.status === 'verified' ? 'ok' : 'warn')},
-      h('span', {class: 'spjob-tag'}, x.status === 'verified' ? 'Source ✓' : 'Source'),
-      h('b', {}, REC[x.status] || x.status),
-      h('span', {}, `${x.list?.name || x.site} · ${x.sharepoint_items_for_day} SharePoint item(s) for ${x.day}, ${x.report_rows} report row(s) · ${c.pages || 0} page(s) read · captured ${ago(x.captured_at)}` + (c.notes?.length ? ' · ' + c.notes.join(' ') : '')),
+    const stale = (r.review?.sharepoint || {}).status === 'stale';
+    const verified = x.status === 'verified' && !stale;
+    const label = stale ? 'Re-check needed: this check was made for an earlier version' : REC[x.status] || x.status;
+    const confirm = Object.entries(x.column_mapping || {}).filter(([, m]) => m.status === 'needs_confirmation' || m.status === 'conflict');
+    return h('div', {class: 'spjob ' + (verified ? 'ok' : 'warn')},
+      h('span', {class: 'spjob-tag'}, verified ? 'Source ✓' : 'Source'),
+      h('b', {}, label),
+      h('span', {}, `${x.list?.name || x.site} · ${x.sharepoint_items_for_day} SharePoint item(s) for ${x.day}, ${x.report_rows} report row(s) · checked: ${(x.fields_checked || []).join(', ') || 'nothing'}`
+        + ((x.fields_not_checked || []).length ? ` · not checked: ${x.fields_not_checked.join(', ')}` : '') + ` · ${c.pages || 0} page(s) read · captured ${ago(x.captured_at)}`
+        + ((x.not_verified_because || []).length ? ' · ' + x.not_verified_because.join(' ') : '') + (c.notes?.length ? ' · ' + c.notes.join(' ') : '')),
       btn,
+      confirm.length && x.list?.id ? h('button', {type: 'button', class: 'btn small', onclick: async e => {
+        e.target.disabled = true;
+        try { await api('/api/sharepoint/confirm-columns', {list_id: x.list.id, mapping: Object.fromEntries(confirm.map(([f, m]) => [f, m.column]))}); await run({target: e.target}); }
+        catch (err) { toast(err.message, true); e.target.disabled = false; } }}, `Confirm ${confirm.map(([f, m]) => `${f} = ${m.column}`).join(', ')}`) : null,
       rows.length ? h('details', {class: 'recrows', open: ''}, h('summary', {}, `${rows.length} difference${rows.length === 1 ? '' : 's'} from SharePoint` + (x.proposed_corrections?.length ? ' · the fixes are in the issues below' : '')),
         h('table', {}, h('thead', {}, h('tr', {}, ...['What', 'Item', 'Where', 'Field', 'Report', 'SharePoint'].map(t => h('th', {}, t)))),
           h('tbody', {}, ...rows.slice(0, 300).map(d => h('tr', {},
@@ -526,13 +559,13 @@
           const out = await api('/api/spreadsheets/assign', {file_hash: r.file_hash, choice: o, reason: why.value, remember: remember.checked});
           form.remove();
           const fresh = await api('/api/spreadsheet?id=' + r.file_hash);   // read back from the server, not from what was typed
-          state.report.assignment = fresh.assignment;
-          $('assignline')?.replaceWith(assignmentLine(state.report) || '');
+          Object.assign(state.report, {assignment: fresh.assignment, holds: fresh.holds, review: fresh.review});
+          drawReport();
           await loadList();
           toast(`Saved: ${fresh.assignment?.label || out.assignment?.label}. The report is still on hold until it is approved.`);
         } catch (e) { toast(e.message, true); } }}, 'Save'),
         h('button', {type: 'button', class: 'btn', onclick: () => form.remove()}, 'Cancel')));
-    $('assignline').after(form);
+    (btn?.closest('.reviewcard') || btn).after(form);
   }
   function spJobLine(r) {
     const j = r.sp_job; if (!j || j.status === 'no_list' && state.me?.user?.role !== 'admin') return null;
@@ -642,9 +675,10 @@
         h('span', {class: 'meta'}, `${dayLabel(rv.day)} · ${r.filename} · version ${r.version} · uploaded ${ago(r.received_at)}`)),
       h('div', {class: 'ractions'}, more,
         h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, r.fixed_from ? 'Download fixed version' : 'Download report'),
-        h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
+        h('button', {type: 'button', class: 'btn send-btn ' + (blockers(r) && !r.approval ? 'blocked' : 'primary'), id: 'send-btn', onclick: openSend,
+          title: blockers(r) && !r.approval ? 'Resolve the blockers first. Approving anyway needs a reason and is recorded.' : r.approval ? 'Approved. Sending is a separate step.' : 'Approve internally. Sending is a separate step.'}, sendLabel(r))));
     const status = h('div', {class: 'rstatus'},
-      reconcileLine(r), docBanner(r), fixedLog(r),
+      reviewCard(r), docBanner(r), fixedLog(r),
       h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
       h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
     const steps = h('ol', {class: 'steps-bar', id: 'steps', 'aria-label': 'Where this report stands'});
@@ -826,14 +860,14 @@
   function numbers(r) {
     const rv = r.review, bl = r.baseline || {}, usual = bl.usual || {}, flagged = new Set((bl.findings || []).map(f => f.field));
     const perRow = rv.rejected_unit === 'rows', base = perRow ? rv.scans : rv.inspected;
-    const rate = base ? (rv.rejected || 0) / base * 100 : null;
+    const rate = base && rv.rejected != null && !rv.rejected_partial ? rv.rejected / base * 100 : null;
     const cell = (value, label, u, key) => h('div', {}, h('b', {}, value), h('span', {}, label),
       u ? h('em', {class: flagged.has(key) ? 'off' : ''}, `Usual ${u.median}`) : null);
     return h('div', {class: 'numbers'},
       cell(fmt(rv.scans), 'Scans / rows', usual.scans, 'scans'),
       cell(fmt(rv.inspected), 'Inspected', usual.inspected, 'inspected'),
       cell(rv.rejected == null ? 'Not recorded' : fmt(rv.rejected), perRow ? 'Failed audits' : rv.rejected_partial ? 'Rejected (recorded on some rows only; blanks are not zero)' : 'Rejected', usual.rejected, 'rejected'),
-      cell(rate == null ? '—' : rate.toFixed(1) + '%', perRow ? 'Fail rate' : 'Reject rate', usual.reject_rate, 'reject_rate'));
+      cell(rate == null ? 'Unknown' : rate.toFixed(1) + '%', perRow ? 'Fail rate' : rate == null ? 'Reject rate (rejects not recorded on every record)' : 'Reject rate', usual.reject_rate, 'reject_rate'));
   }
 
   // ---------------- fixes
@@ -1091,7 +1125,7 @@
         h('div', {class: 'kind-ex'}, h('span', {class: 'kind-ex-k'}, n > 1 ? 'The first one' : 'The issue'),
           h('button', {type: 'button', class: 'linkish small kind-ex-where', onclick: ex.go}, ex.where), ex.what ? h('span', {class: 'kind-ex-what'}, ex.what) : null, h('span', {class: 'kind-ex-change'}, ex.change)),
         h('div', {class: 'kind-btns'},
-          k.hasSugg ? h('button', {type: 'button', class: 'btn primary', disabled: !on, onclick: e => approve(p, e.target)}, n > 1 ? `Change${cnt}` : 'Change it') : null,
+          k.hasSugg ? h('button', {type: 'button', class: 'btn primary', disabled: !on, onclick: e => { const b = e.target; previewAll({...p, none: []}, () => approve(p, b)); }}, n > 1 ? `Change${cnt}` : 'Change it') : null,
           k.ai ? h('button', {type: 'button', class: 'btn ai', disabled: !on, onclick: e => aiFix(k.unsure ? partsOf([k], {includeLeft: true}) : p, e.target)}, n > 1 ? `Fix${cnt} with AI` : 'Fix with AI') : null,
           h('button', {type: 'button', class: 'btn', disabled: !on, onclick: () => fixMyself(k)}, 'Fix myself'),
           h('button', {type: 'button', class: 'btn ghost', disabled: !on, onclick: () => ignore(p, k)}, `Ignore${cnt}`)),
@@ -1106,7 +1140,7 @@
     };
     if (kinds.length) {
       const all = partsOf(kinds), total = kinds.reduce((t, k) => t + k.entries.length, 0);
-      const acceptAll = btn => { if (btn) { btn.disabled = true; btn.textContent = 'Fixing everything…'; } return fixEverythingLoop(); };
+      const acceptAll = btn => previewAll(partsOf(kinds, {includeLeft: true}), () => { if (btn) { btn.disabled = true; btn.textContent = 'Fixing everything…'; } return fixEverythingLoop(); });
       const unsureAny = kinds.some(k => k.unsure);
       state.fixEverything = {hash, parts: opt => partsOf(kinds, opt), approve, run: () => acceptAll(document.querySelector('#cleanoffer .sum-accept'))};
       const canAll = all.fixes.length || all.dups.length || (state.aiOn && (all.none.length || unsureAny));
@@ -1125,8 +1159,8 @@
     if (!walkOpen.length && wentThrough) steps.push({id: 'walked', title: `Went through ${plural(wentThrough, 'item')}`, done: true});
     if (c.total) steps.push({id: 'save', title: `Save your ${plural(c.total, 'change')}`, say: 'They go into a new version, which is checked again. Your original stays as it is.',
       go: ['Save the changes', () => { toast('Saving your changes into a new version…'); applyFixes(c.accepted, c.dec, c.edits, {download: false}); }]});
-    if (!(r.sent || []).some(x => x.sent)) steps.push({id: 'send', title: r.approval ? 'Send it to the client' : 'Approve and send', say: r.approval ? 'Approved. The email is ready to review.' : 'Everything is handled. Check the totals, then approve and send.',
-      go: [r.approval ? 'Send to client' : 'Approve and send', sendFinal]});
+    if (!(r.sent || []).some(x => x.sent)) steps.push({id: 'send', title: r.approval ? 'Send it to the client' : 'Approve it', say: r.approval ? 'Approved. Sending is a separate step: the email is ready to review.' : 'Everything is handled. Check the totals, then approve.',
+      go: [r.approval ? 'Send to client…' : 'Approve…', sendFinal]});
     const live = steps.filter(s => !s.done && !(s.skippable && skipped.includes(s.id)));
     const current = live[0];
     const numbered = steps;
@@ -1175,7 +1209,7 @@
     ];
     const current = list.findIndex(x => !x[1]);
     const next = current === 1 ? (sureN ? 'Next: clean the data (see the box below), or pick fixes one by one on the right.' : unsureLeft ? 'Next: check the items the app is not sure about.' : 'Next: fix the must-fix issues on the right.')
-      : current === 2 ? 'Next: approve the final copy with Approve and send.' : current === 3 ? 'Next: send it to the client.' : 'All done. This report has been sent.';
+      : current === 2 ? 'Next: approve the final copy.' : current === 3 ? 'Next: send it to the client.' : 'All done. This report has been sent.';
     const pr = progress(), total = (state.fixes || []).length + walkIssues().length, left = pr ? pr.undecided + pr.open : null;
     const meter = (i, done) => i === 1 && !done && pr && total ? (() => { const f = h('i'); f.style.width = `${Math.round((total - left) / total * 100)}%`;
       return h('span', {class: 'meter', title: `${total - left} of ${total} handled`, role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': String(total), 'aria-valuenow': String(total - left)}, f); })() : null;
@@ -1686,7 +1720,7 @@
       h('div', {class: 'row'},
         nextRep ? h('button', {type: 'button', class: 'btn ghost', onclick: () => { dlg.close(); select(nextRep.file_hash); }}, 'Next report ›') : h('button', {type: 'button', class: 'btn ghost', onclick: () => dlg.close()}, 'Not now'),
         h('button', {type: 'button', class: 'btn', onclick: downloadFinal}, 'Download final report'),
-        h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, 'Approve and send'))));
+        h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, 'Approve…'))));
     if (!dlg.open) dlg.showModal();
   }
 
@@ -2394,14 +2428,14 @@
     if (!dlg.open) dlg.showModal();
     const hash = state.report.file_hash;
     state.sendForm = null; state.sendConfirm = false;
-    dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('span', {class: 'spin'}), h('h2', {id: 'send-title'}, 'Approve and send'),
+    dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('span', {class: 'spin'}), h('h2', {id: 'send-title'}, state.report.approval ? 'Send to client' : 'Approve'),
       h('p', {}, 'Finding the last report sent for this job in data@ppgquality.com…')));
     try {
       const info = await api('/api/spreadsheets/send-info', {file_hash: hash});
       if (state.report?.file_hash !== hash) return;
       state.sendInfo = info; drawSend();
     } catch (e) {
-      dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('h2', {id: 'send-title'}, 'Approve and send'), h('p', {class: 'note'}, e.message),
+      dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('h2', {id: 'send-title'}, 'Approve'), h('p', {class: 'note'}, e.message),
         h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Close'), h('button', {type: 'button', class: 'btn primary', onclick: openSend}, 'Try again'))));
     }
   }
@@ -2508,7 +2542,10 @@
     const b = $('send-btn'); if (b) b.textContent = sendLabel(state.report);
     updateFinish();
   }
-  const sendLabel = r => (r.sent || []).some(x => x.sent) ? 'Sent to client' : r.approval ? 'Send to client' : 'Approve and send';
+  // Internal approval and sending to the client are separate steps; a report with blockers never looks ready.
+  const blockers = r => (r.review?.counts?.high || 0) + (r.holds || []).filter(x => x.hard).length;
+  const sendLabel = r => (r.sent || []).some(x => x.sent) ? 'Sent to client' : r.approval ? 'Send to client…'
+    : blockers(r) ? `${blockers(r)} blocker${blockers(r) === 1 ? '' : 's'} to resolve` : 'Approve…';
 
   const sameKey = i => (i.code || '') + '|' + (i.column || (String(i.cell || '').match(/^[A-Z]+/i) || [''])[0].toUpperCase()) + '|' + String(i.text || '').replace(/"[^"]*"|“[^”]*”|'[^']*'/g, '"…"').replace(/\b[A-Za-z0-9-]*\d[A-Za-z0-9-]*\b/g, '#').replace(/\s+/g, ' ').trim();
   const walkIssues = () => {
@@ -2861,6 +2898,29 @@
   // sees what is left, one at a time.
   // "Accept all fixes" / "Let AI fix everything": one click. Each saved version is checked again, and anything new it turns up is
   // fixed too (a few rounds at most). Items Claude already tried are not asked again; whatever is left is for a person.
+  // Before anything is changed: every suggested change with its cell, the value now, the new value, where it comes from
+  // and why; and how many items Claude will work out. Nothing is saved until "Make these changes". The original upload is
+  // always kept, and every change makes a new version that is checked again.
+  function previewAll(p, go) {
+    let dlg = $('preview-dialog');
+    if (!dlg) { dlg = h('dialog', {id: 'preview-dialog', class: 'fixer', 'aria-labelledby': 'preview-title'}); document.body.append(dlg); }
+    const fixes = (p.fixes || []).filter(f => f.state !== 'rejected');
+    const bySource = {};
+    for (const f of fixes) (bySource[f.source || 'Suggested'] ||= []).push(f);
+    const ai = state.aiOn ? (p.none || []).length : 0;
+    dlg.replaceChildren(h('div', {class: 'preview'},
+      h('h2', {id: 'preview-title'}, 'Review the changes'),
+      h('p', {}, `${fixes.length} suggested change${fixes.length === 1 ? '' : 's'}` + ((p.dups || []).length ? `, ${p.dups.length} duplicate row${p.dups.length === 1 ? '' : 's'} removed` : '')
+        + (ai ? `, and Claude works out ${ai} more (shown in "what changed" afterwards)` : '') + '. Your original file is kept, and the new version is checked again.'),
+      ...Object.entries(bySource).map(([src, list]) => h('details', {open: list.length <= 12 ? '' : null},
+        h('summary', {}, `${src}: ${list.length}`),
+        h('table', {class: 'preview-table'}, h('thead', {}, h('tr', {}, ...['Cell', 'Now', 'Change to', 'Why'].map(t => h('th', {}, t)))),
+          h('tbody', {}, ...list.slice(0, 400).map(f => h('tr', {}, h('td', {}, `${f.sheet} ${f.cell}`), h('td', {}, f.before === '' || f.before == null ? '(blank)' : String(f.before)),
+            h('td', {}, String(f.after)), h('td', {}, f.reason || ''))))))),
+      h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Cancel'),
+        h('button', {type: 'button', class: 'btn primary', onclick: () => { dlg.close(); go(); }}, 'Make these changes'))));
+    if (!dlg.open) dlg.showModal();
+  }
   async function fixEverythingLoop() {
     if (state.fixingAll) return; state.fixingAll = true;
     const issueId = i => `${i.code}|${i.text}|${i.sheet}|${i.row ?? ''}|${i.cell || ''}`, tries = new Map(), wait = ms => new Promise(r => setTimeout(r, ms));

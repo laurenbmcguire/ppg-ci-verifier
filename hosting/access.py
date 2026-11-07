@@ -220,11 +220,17 @@ def microsoft_ready():
 
 def microsoft_url(redirect_uri, state):
     q = dict(client_id=os.environ['MS_CLIENT_ID'], response_type='code', redirect_uri=redirect_uri, response_mode='query',
-             scope='openid email profile', state=state, prompt='select_account')
+             scope='openid email profile', state=state, nonce=nonce_for(state), prompt='select_account')
     return f'https://login.microsoftonline.com/{os.environ["MS_TENANT_ID"]}/oauth2/v2.0/authorize?' + urllib.parse.urlencode(q)
 
 
-def microsoft_email(code, redirect_uri, opener=None):
+def nonce_for(state):
+    """A nonce tied to this browser's sign-in state (kept in its short-lived cookie), checked in the ID token."""
+    import hashlib
+    return hashlib.sha256(('ppg-verifier-nonce|' + str(state)).encode()).hexdigest()[:32]
+
+
+def microsoft_email(code, redirect_uri, opener=None, state=None, now=None):
     """Trade the code for an ID token (directly with Microsoft over TLS) and return the signed-in email."""
     body = urllib.parse.urlencode(dict(client_id=os.environ['MS_CLIENT_ID'], client_secret=os.environ['MS_CLIENT_SECRET'], grant_type='authorization_code',
                                        code=code, redirect_uri=redirect_uri, scope='openid email profile')).encode()
@@ -240,7 +246,18 @@ def microsoft_email(code, redirect_uri, opener=None):
         raise AccessError(out.get('error_description') or 'Microsoft sign-in did not finish. Try again.')
     payload = token.split('.')[1]
     claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
-    if claims.get('aud') != os.environ['MS_CLIENT_ID'] or claims.get('tid') != os.environ['MS_TENANT_ID']:
+    # The token came straight from Microsoft's token endpoint over TLS in exchange for our secret (OIDC core 3.1.3.7),
+    # and its claims are still checked: audience, tenant, issuer, expiry and the nonce from this sign-in.
+    import time as _time
+    tid = os.environ['MS_TENANT_ID']
+    if claims.get('aud') != os.environ['MS_CLIENT_ID'] or claims.get('tid') != tid:
         raise AccessError('That Microsoft account is not a PPG account.')
+    if claims.get('iss') not in (f'https://login.microsoftonline.com/{tid}/v2.0', f'https://sts.windows.net/{tid}/'):
+        raise AccessError('Microsoft sign-in did not finish. Try again.')
+    t = now or _time.time()
+    if not isinstance(claims.get('exp'), (int, float)) or claims['exp'] < t - 60 or (isinstance(claims.get('nbf'), (int, float)) and claims['nbf'] > t + 300):
+        raise AccessError('The Microsoft sign-in expired. Try again.')
+    if state is not None and claims.get('nonce') != nonce_for(state):
+        raise AccessError('The sign-in took too long or was opened in another browser. Try again.')
     email = claims.get('email') or claims.get('preferred_username') or claims.get('upn')
     return _clean_email(email), claims.get('name')

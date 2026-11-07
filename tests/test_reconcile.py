@@ -24,7 +24,7 @@ def graph(pages, columns=COLS, fail=None):
     """A fake Graph: pages is a list of item lists; fail maps a page number (1-based) to an HTTP status."""
     def fetch(url, opener=None, retries=2):
         if url.endswith('?$select=id,displayName,webUrl,lastModifiedDateTime'):
-            return 200, {'id': LIST, 'displayName': 'Data #2214', 'webUrl': f'https://ppg.sharepoint.com/sites/{SITE}/Lists/x'}
+            return 200, {'id': LIST, 'displayName': 'Data #2214', 'webUrl': f'https://ppg.sharepoint.com/sites/{SITE}/Lists/Data%202214SLALSLAL'}
         if '/columns?' in url:
             return 200, {'value': columns}
         n = 1 if '/items?' in url else int(url.rsplit('page', 1)[1])
@@ -83,8 +83,19 @@ class ColumnChoice(unittest.TestCase):
             f = dict(it['fields']); f['Quantity'] = f.pop('QuantityInspected'); f['QtyInspected'] = None
             items.append(dict(it, fields=f))
         s = snap([items], columns=[c for c in cols if c['name'] != 'QuantityInspected'])
-        self.assertEqual(s['quantity_columns']['inspected'], 'Quantity')
-        self.assertEqual(run(sl_daily(), s)['status'], 'verified')
+        r = run(sl_daily(), s)
+        self.assertEqual(r['quantity_columns']['inspected'], 'Quantity')
+        self.assertEqual(r['column_mapping']['inspected']['status'], 'needs_confirmation')   # never verified on a guess
+        self.assertEqual(r['status'], 'unverified')
+        confirmed = reconcile.compare('2026-11-06', *report_and_export_records('r.xlsx', sl_daily()), s, confirmed={'inspected': 'Quantity'})
+        self.assertEqual(confirmed['status'], 'verified')
+
+    def test_two_filled_columns_that_disagree_are_a_conflict(self):
+        cols = COLS + [dict(name='Quantity', displayName='Quantity')]
+        items = [dict(it, fields=dict(it['fields'], Quantity=70)) for it in ALL]
+        r = run(sl_daily(), snap([items], columns=cols))
+        self.assertEqual(r['column_mapping']['inspected']['status'], 'conflict')
+        self.assertNotEqual(r['status'], 'verified')
 
 
 class Differences(unittest.TestCase):
@@ -155,3 +166,38 @@ class SavedNotApplied(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Identity(unittest.TestCase):
+    def test_same_item_id_on_another_list_is_not_a_match(self):
+        s = snap([ALL])
+        s['list']['url'] = f'https://ppg.sharepoint.com/sites/{SITE}/Lists/Data%202207SLALSLAL'
+        r = run(sl_daily(), s)
+        self.assertNotEqual(r['status'], 'verified')
+        self.assertTrue(any(x['status'] == 'wrong_list' for x in r['rows']))
+
+    def test_another_site_is_not_a_match(self):
+        s = snap([ALL]); s['site'] = 'Hyundai_Montgomery'
+        self.assertTrue(any(x['status'] == 'wrong_list' for x in run(sl_daily(), s)['rows']))
+
+    def test_report_values_with_no_source_column_are_not_verified(self):
+        r = run(sl_daily(nok_blank=False), snap([ALL]))   # the report has rejects (0); the list has no rejected column
+        self.assertIn('rejected', r['fields_not_checked'])
+        self.assertTrue(any(x['status'] == 'field_not_in_source' for x in r['rows']))
+        self.assertNotEqual(r['status'], 'verified')
+        self.assertEqual(r['fields_checked'], ['certified', 'inspected'])
+
+
+class MissingDates(unittest.TestCase):
+    def test_an_item_without_a_business_date_does_not_crash_and_keeps_coverage_incomplete(self):
+        undated = sp_item(436); undated['fields'].pop('Date'); undated['fields'].pop('Date0')
+        r = run(sl_daily(), snap([ALL[:4] + [undated]]))
+        self.assertEqual(r['status'], 'incomplete')
+        self.assertEqual(r['coverage']['undated'], 1)
+
+    def test_a_datetime_typed_date_column_is_still_the_business_date(self):
+        cols = [dict(c, dateTime=dict(format='dateTime')) if c['name'] == 'Date' else c for c in COLS]
+        items = [sp_item(i, date='2026-11-06T14:30:00Z') for i in range(432, 437)]
+        r = run(sl_daily(), snap([items], columns=cols))
+        self.assertEqual(r['sharepoint_items_for_day'], 5)
+        self.assertEqual(r['day_basis'], ['business_date_with_time'])

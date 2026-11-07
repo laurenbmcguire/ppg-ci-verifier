@@ -550,6 +550,9 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
         if ident:
             seen_id[ident.strip().upper()].append(r)
     for ident, rows in seen_id.items():
+        items = [(x.get('source') or {}).get('item') for x in rows]
+        if all(items) and len(set(items)) == len(items):
+            continue   # separate SharePoint records that share a label (a supplier name, a lot): not duplicates
         if len(rows) > 1:
             places = ', '.join(f'{x["sheet"]} row {x["row"]}' for x in rows)
             where = 'across shifts' if len({x['sheet'] for x in rows}) > 1 else 'on the same sheet'

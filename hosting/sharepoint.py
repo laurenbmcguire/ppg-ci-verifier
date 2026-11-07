@@ -102,7 +102,17 @@ def _configured_sites(opener=None):
 
 
 def _site_lists(site_id, opener=None):
-    return (_get(f'/sites/{site_id}/lists?$select=id,displayName,webUrl,lastModifiedDateTime&$top=500', opener) or {}).get('value', [])
+    out, url = [], f'/sites/{site_id}/lists?$select=id,displayName,webUrl,lastModifiedDateTime&$top=500'
+    while url:   # every page, not just the first 500
+        page = _get(url, opener) or {}
+        out.extend(page.get('value', []))
+        url = page.get('@odata.nextLink')
+    return out
+
+
+# what the last site discovery could and could not read, shown with the client list (a failed read is never "no lists")
+last_discovery = dict(at=None, search_failed=None, unreadable_sites=[])
+_JOB_LIST = re.compile(r'^\s*data\s*#|#\s*\d{4}\b|^\s*\d{4}-[A-Z0-9]', re.I)
 
 
 def client_sites(opener=None, refresh=False):
@@ -122,15 +132,27 @@ def client_sites(opener=None, refresh=False):
                 if site.get('id') and name and not _is_test(name, site.get('displayName')):
                     sites.setdefault(site['id'], name)
             url = page.get('@odata.nextLink')
-    except SharePointError:
-        pass
+    except SharePointError as exc:
+        search_error = str(exc)
+    else:
+        search_error = None
     configured = {sid for _, sid in _configured_sites(opener)}
     with ThreadPoolExecutor(8) as pool:
-        lists = dict(zip(sites, pool.map(lambda sid: _safe_lists(sid, opener), sites)))
+        got = dict(zip(sites, pool.map(lambda sid: _lists_or_error(sid, opener), sites)))
+    lists = {sid: v[0] for sid, v in got.items()}
+    last_discovery.update(at=time.time(), search_failed=search_error,
+                          unreadable_sites=[dict(site=sites[sid], error=v[1]) for sid, v in got.items() if v[1] and not _is_test(sites[sid])])
     value = [(name, sid, lists[sid]) for sid, name in sites.items()
-             if not _is_test(name) and (sid in configured or any((l.get('displayName') or '').lower().startswith('data #') for l in lists[sid]))]
+             if not _is_test(name) and (sid in configured or any(_JOB_LIST.search(l.get('displayName') or '') for l in lists[sid]))]
     _site_cache.update(key=key, until=time.time() + SITES_TTL, value=value)
     return value
+
+
+def _lists_or_error(site_id, opener=None):
+    try:
+        return _site_lists(site_id, opener), None
+    except SharePointError as exc:
+        return [], str(exc)[:200]
 
 
 def _safe_lists(site_id, opener=None):

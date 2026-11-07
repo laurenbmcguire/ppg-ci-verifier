@@ -124,3 +124,23 @@ class SharePointListChoice(unittest.TestCase):
         with patch('hosting.sharepoint.client_sites', return_value=sites):
             name, _, lst = sharepoint._find_list('2207')
         self.assertEqual((name, lst['id']), ('SLAlabama_AlexanderCity', SL_LIST))
+
+
+class DiscoveryCoverage(unittest.TestCase):
+    def test_an_unreadable_site_is_reported_not_treated_as_empty_and_lists_are_paged(self):
+        from unittest.mock import patch
+        from hosting import sharepoint
+        def get(url, opener=None):
+            if url.startswith('/sites?search'):
+                return {'value': [{'id': 'a', 'name': 'SLAlabama_AlexanderCity'}, {'id': 'b', 'name': 'Hyundai_Montgomery'}]}
+            if url.startswith('/sites/b/lists'):
+                raise sharepoint.SharePointError('Access denied (403).')
+            if url.startswith('/sites/a/lists'):
+                return {'value': [{'id': 'l1', 'displayName': 'Data #2207'}], '@odata.nextLink': 'page2'}
+            if url == 'page2':
+                return {'value': [{'id': 'l2', 'displayName': '2214-SLAL-SLAL'}]}
+            return None
+        with patch('hosting.sharepoint._get', get), patch.dict('os.environ', {'SHAREPOINT_SITES': ''}):
+            sites = sharepoint.client_sites(opener=lambda *a, **k: None, refresh=True)
+        self.assertEqual([len(l) for _, _, l in sites], [2])
+        self.assertEqual(sharepoint.last_discovery['unreadable_sites'][0]['site'], 'Hyundai_Montgomery')

@@ -44,6 +44,28 @@ def _norm(v):
     return re.sub(r'[^a-z0-9# ]', '', str(v or '').lower()).strip()
 
 
+def _is_value(v, what):
+    """Could v be the value of a "what" field? Labels, headers and formulas never are; a date field needs a date."""
+    if isinstance(v, str):
+        t = v.strip()
+        if not t or t.startswith('='):
+            return False
+        n = _norm(t)
+        if any(rx.search(n) for rx, _ in DETAIL_LABELS) or n in HEADER_WORDS:
+            return False
+        if what == 'day':
+            return bool(re.search(r'\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \d{1,2}', t.lower()))
+        return True
+    if what == 'day':
+        import datetime as _dt
+        return isinstance(v, (_dt.date, _dt.datetime)) or (isinstance(v, (int, float)) and 20000 < v < 80000)
+    return v is not None
+
+
+HEADER_WORDS = {'shift', 'area', 'auditor', 'identifier', 'part number', 'part name', 'quantity', 'quantity inspected', 'ok', 'nok', 'reworked',
+                'comments', 'condition', 'supplier', 'date', 'time', 'inspected', 'rejected', 'defect', 'recorded defect', 'project number'}
+
+
 def blank_details(sources, ctx, add, col_letter):
     """Label/value blocks ("Paying Client" | blank): suggest from the client, job and day, or from a filled twin label."""
     empty = lambda v: v in (None, '') or (isinstance(v, str) and not v.strip())
@@ -51,6 +73,9 @@ def blank_details(sources, ctx, add, col_letter):
     for sheet, rows in sources:
         spots, offsets = [], Counter()
         for r, row in enumerate(rows[:80]):   # details sit at the top of a sheet
+            texts = [v for v in row if isinstance(v, str) and v.strip()]
+            if len(texts) >= 4 and sum(1 for v in texts if len(v) <= 30 and not any(ch.isdigit() for ch in v)) >= 4:
+                continue   # a table's header row ("Project number | Date | Shift | ..."): labels, never label/value pairs
             for c, val in enumerate(row[:12]):
                 label = _norm(val)
                 if not label or len(label) > 40 or not isinstance(val, str):
@@ -59,6 +84,8 @@ def blank_details(sources, ctx, add, col_letter):
                 if not what:
                     continue
                 k = next((k for k in (1, 2, 3) if c + k < len(row) and not empty(row[c + k])), None)
+                if k and not _is_value(row[c + k], what):
+                    k = None   # the next cell is another label, a header or a formula: not this field's value
                 if k:
                     offsets[k] += 1
                 spots.append(dict(sheet=sheet, row=r + 1, c=c, label=val.strip(), what=what, filled=bool(k), value=row[c + k] if k else None))
@@ -67,7 +94,7 @@ def blank_details(sources, ctx, add, col_letter):
             sp['col'] = sp['c'] + step + 1
             found.setdefault(sp['what'], []).append(sp)
     for what, spots in found.items():
-        twin = next((s['value'] for s in spots if s['filled'] and isinstance(s['value'], str) and s['value'].strip()), None)   # "Client" filled, "Paying Client" blank
+        twin = next((s['value'] for s in spots if s['filled'] and isinstance(s['value'], str) and s['value'].strip() and _is_value(s['value'], what)), None)   # "Client" filled, "Paying Client" blank
         guess = twin or (ctx.get('day') if what == 'day' else ctx.get(what))
         if not guess:
             continue

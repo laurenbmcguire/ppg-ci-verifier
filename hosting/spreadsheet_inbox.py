@@ -186,8 +186,22 @@ class SpreadsheetInbox:
         with self.connect() as db:
             original, raw = self._original(db, file_hash)
         records, exports = report_and_export_records(original['filename'], raw)
-        found = reconcile.compare(day, records, exports, snap)
+        confirmed = self.setting(f'column_map|{(snap.get("list") or {}).get("id") or snap.get("list_id")}', None)
+        current = self.get(file_hash)
+        found = reconcile.compare(day, records, exports, snap, confirmed=confirmed,
+                                  report=dict(file_hash=file_hash, checker_version=current.get('checker_version')))
         return self._update(file_hash, lambda r: r.update(source_reconciliation=found))
+    def confirm_columns(self, list_id, mapping, by):
+        """A person confirms which SharePoint column holds each quantity for one list (kept with who and when)."""
+        clean = {k: str(v)[:120] for k, v in (mapping or {}).items() if k in ('inspected', 'certified', 'rejected', 'reworked') and v}
+        if not clean or not list_id:
+            raise ValueError('Choose the list and its columns.')
+        saved = dict(self.setting(f'column_map|{list_id}', {}) or {}, **clean)
+        self.set_setting(f'column_map|{list_id}', saved)
+        log = list(self.setting('column_map_log', []) or [])
+        log.append(dict(list_id=list_id, mapping=clean, by=by, at=datetime.now(timezone.utc).isoformat()))
+        self.set_setting('column_map_log', log[-500:])
+        return saved
     def holds(self, item, review=None):
         """Why this report must stay on hold, beyond its open issues. hard=True cannot be overridden."""
         out = []
@@ -275,6 +289,8 @@ class SpreadsheetInbox:
             raise ValueError('Say why you are approving anyway in the note.')
         if must and not override:
             raise ValueError(f'{must} must-fix issue{"s are" if must != 1 else " is"} still open. Fix them first, or tick "Approve anyway".')
+        if must and override and not ' '.join(str(note or '').split()):
+            raise ValueError('Say why you are approving with must-fix issues open; the reason is kept with the approval.')
         newer = (item.get('fixes_applied') or [])
         if newer and not override:
             raise ValueError(f'A corrected copy of this report exists ("{newer[-1]["fixed_filename"]}"). Approve that version instead, or tick "Approve anyway".')
@@ -803,7 +819,7 @@ class SpreadsheetInbox:
             db.execute('BEGIN IMMEDIATE')
             saved = self.save_check(db, fresh)
         previous = current.get('sharepoint') or {}
-        if previous.get('status') in ('match','differences') and previous.get('source_sha256'):
+        if previous.get('status') in ('match','differences') and previous.get('source_sha256') and not current.get('source_reconciliation'):
             # Re-run the last SharePoint comparison with the stored export so it reflects the new checks.
             name=previous.get('source_filename') or 'export.csv'
             stored=files_for(self.root).get('uploads/'+previous['source_sha256']+('.xlsx' if name.lower().endswith('.xlsx') else '.csv'))

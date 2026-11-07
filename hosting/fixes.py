@@ -145,8 +145,9 @@ def proposals(result, filename, raw, sharepoint_rows=None, context=None):
             add(f.get('sheet'), f['cell'], value, f'SharePoint shows {f["sharepoint_value"]} for this scan ({f.get("message", "")})', 'SharePoint')
 
     # 1a. The live SharePoint reconciliation: each value that differs takes the SharePoint value (SharePoint is the record).
-    rec = result.get('source_reconciliation') or {}
-    if not rec.get('stale'):
+    from hosting import reconcile as _rec
+    rec = _rec.current(result) or {}
+    if rec:
         for c in rec.get('proposed_corrections') or []:
             if c.get('sheet') and c.get('column') and c.get('row') and c.get('after') not in (None, 'blank'):
                 v = _num(c['after']) if _num(c['after']) is not None else c['after']

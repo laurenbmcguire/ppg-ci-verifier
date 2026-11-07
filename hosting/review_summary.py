@@ -63,6 +63,22 @@ def _annotate(issue):
     return issue
 
 
+def _source_status(result, sp):
+    """One source verdict for the whole screen."""
+    from hosting import reconcile
+    if result.get('source_reconciliation'):
+        rec = reconcile.current(result)
+        if not rec:
+            return dict(status='stale', message='The SharePoint check was made for an earlier version of this report. Reconcile again.')
+        word = {'verified': 'match', 'discrepancies': 'differences', 'incomplete': 'incomplete', 'unverified': 'unverified'}.get(rec['status'], rec['status'])
+        return dict(status=word, message=' '.join(rec.get('not_verified_because') or (rec.get('coverage') or {}).get('notes') or []) or None,
+                    matched=rec.get('report_rows'), rows=rec.get('sharepoint_items_for_day'), web_url=(rec.get('list') or {}).get('url'),
+                    source=(rec.get('list') or {}).get('name'), captured_at=rec.get('captured_at'), snapshot_id=rec.get('snapshot_id'),
+                    fields_checked=rec.get('fields_checked'), fields_not_checked=rec.get('fields_not_checked'), differences=len(rec.get('rows') or []))
+    return dict(status=sp.get('status') or 'not_checked', message=sp.get('message'), matched=sp.get('matched_rows'),
+                rows=sp.get('sharepoint_rows'), web_url=sp.get('web_url'), source=sp.get('path'))
+
+
 def _col_letter(n):
     s = ''
     while n > 0:
@@ -102,12 +118,17 @@ def summarize(result, with_issues=True, use_verdicts=True):
         issues.append(dict(key=f'check:{f.get("code")}:{f.get("sheet")}:{f.get("row")}:{f.get("column")}:{i}', source='Checks',
                            severity=severity(f.get('code')), code=f.get('code'), where=_where(f), sheet=f.get('sheet'), row=f.get('row'), cell=_cell(f),
                            text=_plain(f)))
+    from hosting import reconcile as _rec
     sp = result.get('sharepoint') or {}
+    if result.get('source_reconciliation'):
+        # the item-by-item reconciliation is the one source check; the older daily-export comparison (matched by
+        # identifier and clock-time shifts) is superseded and must not add its own differences or a second verdict
+        sp = {}
     for i, f in enumerate(sp.get('findings') or []):
         issues.append(dict(key=f'sp:{f.get("code")}:{f.get("row")}:{f.get("field")}:{i}', source='SharePoint', severity='high',
                            code=f.get('code'), where=_where(f), sheet=f.get('sheet'), row=f.get('row'), cell=_cell(f), text=f.get('message')))
-    rec = result.get('source_reconciliation') or {}
-    if not rec.get('stale'):   # each difference from the live SharePoint list is its own issue, with the cell when there is one
+    rec = _rec.current(result) or {}
+    if rec:   # each difference from the live SharePoint list is its own issue, with the cell when there is one
         cells = {(c.get('item'), c.get('field')): f'{_col_letter(int(c["column"]))}{c["row"]}' for c in rec.get('proposed_corrections') or [] if c.get('column') and c.get('row')}
         words = {'value_differs': 'differs from SharePoint', 'missing_from_report': 'is on SharePoint but not in the report',
                  'not_on_sharepoint': 'is not on SharePoint', 'not_on_sharepoint_for_day': 'is on SharePoint for another day',
@@ -177,8 +198,7 @@ def summarize(result, with_issues=True, use_verdicts=True):
                scans=result.get('record_count'), inspected=_num(totals.get('inspected')), rejected=_num(totals.get('rejected')),
                certified=_num(totals.get('certified')), rejected_unit=(totals.get('rejected') or {}).get('unit'),
                rejected_partial=bool(isinstance(totals.get('rejected'), dict) and totals['rejected'].get('total') is None and totals['rejected'].get('known_sum') is not None),
-               sharepoint=dict(status=sp.get('status') or 'not_checked', message=sp.get('message'), matched=sp.get('matched_rows'),
-                               rows=sp.get('sharepoint_rows'), web_url=sp.get('web_url'), source=sp.get('path')),
+               sharepoint=_source_status(result, sp),
                usual=dict(status=bl.get('status') or 'not_checked', message=bl.get('message')),
                ai=dict(status=ai.get('status') or 'not_run', summary=ai.get('summary'), message=ai.get('message')),
                fixed_from=(result.get('fixed_from') or {}).get('filename'), fixes_applied=len(result.get('fixes_applied') or []),

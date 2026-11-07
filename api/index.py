@@ -190,13 +190,29 @@ class handler(BaseHTTPRequestHandler):
             return True
         if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
             return False
-        from hosting.source_compare import identify
+        from hosting import registry
+        from hosting.review_summary import summarize
         try:
             with self.store().session() as directory:
-                item = SpreadsheetInbox(directory).get(file_hash)
+                inbox = SpreadsheetInbox(directory)
+                item = inbox.get(file_hash)
+                a = inbox.assignment_for(item, summarize(item, with_issues=False))   # the one client/job resolver
         except ValueError:
             return False
-        return self.can_job(identify(item.get('filename'), item)[0])
+        return self.can_report(a, (summarize(item, with_issues=False) or {}).get('job'))
+
+    def can_report(self, assignment, job):
+        """The one rule for who sees a report: its settled client; when several clients fit, admins only; when no
+        client list matches at all, the job's client as before."""
+        from hosting import registry
+        if self.is_admin():
+            return True
+        a = assignment or {}
+        if a.get('status') in registry.RESOLVED:
+            return a.get('client_key') in set((self.current_user() or {}).get('clients') or [])
+        if a.get('status') in ('ambiguous', 'conflict'):
+            return False
+        return self.can_job(job)
 
     def redirect(self, location, cookies=()):
         self.send_response(302)
@@ -228,7 +244,7 @@ class handler(BaseHTTPRequestHandler):
                 state = access.read_cookie(self.headers.get('Cookie'), access.STATE_COOKIE)
                 if not state or q.get('state', [''])[0] != state:
                     return oops('The sign-in took too long or was opened in another browser. Try again.')
-                email, name = access.microsoft_email(q.get('code', [''])[0], callback)
+                email, name = access.microsoft_email(q.get('code', [''])[0], callback, state=state)
                 with self.store().session() as directory:
                     inbox = SpreadsheetInbox(directory)
                     user = access.get_user(inbox, email=email)
@@ -378,11 +394,24 @@ class handler(BaseHTTPRequestHandler):
     def sharepoint_check(self, file_hash):
         from hosting.sharepoint import fetch_export, SharePointNotConfigured, SharePointNotFound, SharePointError
         from hosting.source_compare import identify, SourceError
+        from hosting import registry, reconcile
+        from hosting.review_summary import summarize
         with self.store().session() as directory:
             inbox = SpreadsheetInbox(directory)
             item = inbox.get(file_hash)
             job, day = identify(item.get('filename'), item)
             schedule = inbox.shift_schedule(job)
+            try:
+                rv = summarize(item, with_issues=False)
+                a = inbox.assignment_for(item, rv)
+            except Exception:
+                a, rv = {}, {}
+        has_ids = any((rec.get('source') or {}).get('item') for rec in item.get('records') or [])
+        if a.get('status') in registry.RESOLVED and a.get('site') and a.get('list_id') and (rv.get('day') or day) and (has_ids or item.get('dataset_selection', {}).get('identified_records')):
+            # the one source check: every record against the job's own SharePoint list, item by item
+            snap = reconcile.snapshot(a['site'], a['list_id'], schedule=schedule)
+            with self.store().session() as directory:
+                return SpreadsheetInbox(directory).source_reconcile(file_hash, snap, rv.get('day') or day)
         if not job or not day:   # say why instead of leaving "Not checked yet"
             with self.store().session() as directory:
                 return SpreadsheetInbox(directory).record_lookup(file_hash, 'not_found',
@@ -668,9 +697,7 @@ class handler(BaseHTTPRequestHandler):
                     if not self.is_admin():
                         from hosting import registry
                         mine = set((self.current_user() or {}).get('clients') or [])
-                        data['spreadsheets'] = [r for r in data['spreadsheets']
-                                                if (((r.get('assignment') or {}).get('client_key') in mine) if (r.get('assignment') or {}).get('status') in registry.RESOLVED
-                                                    else self.can_job((r.get('review') or {}).get('job')))]
+                        data['spreadsheets'] = [r for r in data['spreadsheets'] if self.can_report(r.get('assignment'), (r.get('review') or {}).get('job'))]
                         data['count'] = len(data['spreadsheets'])
                 elif route == '/api/spreadsheet':
                     file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
@@ -725,7 +752,7 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine', '/api/spreadsheets/assign', '/api/spreadsheets/source-reconcile', '/api/spreadsheets/recheck', '/api/change-summary', '/api/change-summaries', '/api/settings/sharepoint-jobs', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine', '/api/spreadsheets/assign', '/api/spreadsheets/source-reconcile', '/api/spreadsheets/recheck', '/api/sharepoint/confirm-columns', '/api/change-summary', '/api/change-summaries', '/api/settings/sharepoint-jobs', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload', '/api/periods/check-file', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/remove-rows') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
@@ -910,6 +937,16 @@ class handler(BaseHTTPRequestHandler):
                     record = registry.assign(inbox, file_hash, clean, self.current_user(), payload.get('reason'), current, remember=payload.get('remember') is True)
                     after = inbox.assignment_for(found, summarize(found, with_issues=False))   # read back what was saved
                 return self.send(200, encode_json({'ok': True, 'assignment': after, 'saved': record}))
+            if route == '/api/sharepoint/confirm-columns':   # admins: which SharePoint column holds each quantity, for one list
+                if not self.is_admin():
+                    return self.fail(403, 'Only admins can confirm SharePoint columns.')
+                payload = json.loads(raw)
+                if not isinstance(payload, dict) or not isinstance(payload.get('list_id'), str) or not isinstance(payload.get('mapping'), dict):
+                    raise Conflict('Choose the list and its columns.')
+                with self.store().session() as directory:
+                    saved = SpreadsheetInbox(directory).confirm_columns(payload['list_id'][:80], payload['mapping'],
+                                                                         (self.current_user() or {}).get('email') or 'admin')
+                return self.send(200, encode_json({'ok': True, 'mapping': saved}))
             if route == '/api/spreadsheets/recheck':   # show what the current checks would change; save only when a person applies them
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
@@ -1172,6 +1209,7 @@ class handler(BaseHTTPRequestHandler):
                     return self.send(200, encode_json(dict(clients=[], sharepoint=False)))
                 try:
                     found = sharepoint.clients(refresh=payload.get('refresh') is True)
+                    discovery = dict(sharepoint.last_discovery)
                     try:   # remembered so report assignment works without calling SharePoint on every list
                         from hosting import registry
                         with self.store().session() as directory:
@@ -1183,7 +1221,7 @@ class handler(BaseHTTPRequestHandler):
                     if not self.is_admin():
                         mine = set((self.current_user() or {}).get('clients') or [])
                         found = [c for c in found if c['key'] in mine]
-                    return self.send(200, encode_json(dict(clients=found, sharepoint=True)))
+                    return self.send(200, encode_json(dict(clients=found, sharepoint=True, coverage=dict(complete=not discovery.get("search_failed") and not discovery.get("unreadable_sites"), search_failed=discovery.get("search_failed"), unreadable_sites=discovery.get("unreadable_sites")))))
                 except (sharepoint.SharePointError, OSError) as exc:
                     return self.send(200, encode_json(dict(clients=[], sharepoint=True, error=str(exc))))
             if route in ('/api/build', '/api/nexus', '/api/settings/report-header'):
