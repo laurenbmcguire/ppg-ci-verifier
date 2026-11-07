@@ -937,6 +937,11 @@
     if (/far (above|below) the usual/i.test(t)) return ['number far from the usual (possible typo)', 'numbers far from the usual (possible typos)'];
     if (/^missing cell/i.test(t) || /missing_cell|blank_cell/.test(c)) { const col = (String(x.cell || '').match(/^[A-Z]+/i) || [''])[0].toUpperCase();
       return col ? [`blank cell in column ${col}`, `blank cells in column ${col}`] : ['blank cell', 'blank cells']; }
+    if (/sharepoint|differs_from_sharepoint/i.test(c) || /on SharePoint/i.test(t)) {
+      const m = t.match(/^(?:SharePoint item \S+: )?([A-Za-z][A-Za-z /]{1,30}?) (?:is|was|has)\b/), fld = m ? m[1].trim().toLowerCase() : (t.match(/: (\w+) is .* in the report/) || [])[1];
+      if (/missing_from_report|not in the report/i.test(c + t)) return ['record on SharePoint that is missing from the report', 'records on SharePoint that are missing from the report'];
+      if (/not_on_sharepoint|not on SharePoint/i.test(c + t)) return ['record that is not on SharePoint', 'records that are not on SharePoint'];
+      return fld && fld !== 'sharepoint item' && fld !== 'this row' ? [`${fld} value that differs from SharePoint`, `${fld} values that differ from SharePoint`] : ['value that differs from SharePoint', 'values that differ from SharePoint']; }
     if (/duplicate/.test(c)) return ['duplicate', 'duplicates'];
     if (/wrong_shift/.test(c)) return ['scan on the wrong shift', 'scans on the wrong shift'];
     if (/vin_/.test(c)) return ['VIN problem', 'VIN problems'];
