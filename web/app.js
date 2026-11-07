@@ -487,7 +487,7 @@
     const rv = r.review || {}, a = r.assignment || {}, sp = rv.sharepoint || {}, c = rv.counts || {};
     const block = blockers(r), review = c.medium || 0, info = (c.low || 0) + (c.info || 0);
     const shifts = [...new Set((r.records || []).map(x => x.shift).filter(Boolean))];
-    const photos = r.photos?.image_count || 0;
+    const photos = (r.photos?.images || []).filter(p => p.item || /photo|picture|image|gallery/i.test(p.sheet || '')).length;   // not logos
     const n = v => v == null ? null : fmt(Number(v));
     const totals = [`${fmt(rv.scans || 0)} record${rv.scans === 1 ? '' : 's'}`, rv.inspected != null ? `${n(rv.inspected)} inspected` : 'inspected not recorded',
       rv.certified != null ? `${n(rv.certified)} OK` : null,
