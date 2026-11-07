@@ -1535,3 +1535,4 @@ body.reportmode .btn.subtle{border-color:transparent;background:none}
 }
 @media (max-width:420px){.fd-foot-state b{font-size:11.5px}.fd-cmps{grid-template-columns:1fr 1fr}.fd-cmp.prop{grid-column:1/-1}}
 @media (prefers-reduced-motion:reduce){.fd-aside{transition:none}}
+.fd-zoom select,.fd-search input{min-height:36px}

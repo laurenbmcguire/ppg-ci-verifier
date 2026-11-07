@@ -1296,10 +1296,9 @@
     drawFixes();
     // first time a report with issues is opened, Claude drafts the fixes, then offers them in the chat
     const rv = state.report?.review || {}, open = (rv.issues || []).filter(i => i.severity !== 'info').length + (rv.dismissed || []).length;
-    if (state.aiOn && (rv.ai?.status === 'not_run' || !rv.ai) && !state.reviewTried?.has(hash)) { maybeBrief(hash, true); runReview(hash); return; }
-    if (state.aiOn && open && rv.verify?.status !== 'done' && !state.verifyTried?.has(hash)) { maybeBrief(hash, true); runVerify(hash); return; }
-    if (state.aiOn && open && state.aiFix.status === 'not_run' && !state.aiFixTried?.has(hash)) { maybeBrief(hash, true); runAiFixes(true); }
-    else maybeBrief(hash, false);
+    // Opening a report never runs Claude by itself: its read, its double-check (which can set issues aside) and its draft
+    // fixes all change what the report shows, so each is a person's choice (Ask Claude tab, or Facts → AI review).
+    void open; maybeBrief(hash, false);
   }
   async function runReview(hash) {
     (state.reviewTried ||= new Set()).add(hash);
