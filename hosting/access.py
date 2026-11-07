@@ -230,6 +230,35 @@ def nonce_for(state):
     return hashlib.sha256(('ppg-verifier-nonce|' + str(state)).encode()).hexdigest()[:32]
 
 
+_JWKS = {}
+
+
+def _signing_key(token, tid):
+    """Microsoft's public key for this token's key ID, from the tenant's published key set (cached per instance)."""
+    import jwt
+    client = _JWKS.get(tid)
+    if client is None:
+        client = _JWKS[tid] = jwt.PyJWKClient(f'https://login.microsoftonline.com/{tid}/discovery/v2.0/keys', cache_keys=True, lifespan=3600, timeout=10)
+    return client.get_signing_key_from_jwt(token).key
+
+
+def verified_claims(token, tid, client_id, now=None, key=None):
+    """The ID token's claims after its signature, audience, issuer and lifetime are verified; AccessError otherwise."""
+    import jwt
+    try:
+        if jwt.get_unverified_header(token).get('alg') != 'RS256':
+            raise AccessError('Microsoft sign-in did not finish. Try again.')
+        return jwt.decode(token, key if key is not None else _signing_key(token, tid), algorithms=['RS256'], audience=client_id,
+                          issuer=[f'https://login.microsoftonline.com/{tid}/v2.0', f'https://sts.windows.net/{tid}/'],
+                          leeway=60, options={'require': ['exp', 'aud', 'iss'], 'verify_iat': False})
+    except jwt.ExpiredSignatureError as exc:
+        raise AccessError('The Microsoft sign-in expired. Try again.') from exc
+    except jwt.InvalidAudienceError as exc:
+        raise AccessError('That Microsoft account is not a PPG account.') from exc
+    except (jwt.PyJWTError, ValueError) as exc:
+        raise AccessError('Microsoft sign-in did not finish. Try again.') from exc
+
+
 def microsoft_email(code, redirect_uri, opener=None, state=None, now=None):
     """Trade the code for an ID token (directly with Microsoft over TLS) and return the signed-in email."""
     body = urllib.parse.urlencode(dict(client_id=os.environ['MS_CLIENT_ID'], client_secret=os.environ['MS_CLIENT_SECRET'], grant_type='authorization_code',
@@ -244,12 +273,11 @@ def microsoft_email(code, redirect_uri, opener=None, state=None, now=None):
     token = out.get('id_token')
     if not token:
         raise AccessError(out.get('error_description') or 'Microsoft sign-in did not finish. Try again.')
-    payload = token.split('.')[1]
-    claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
-    # The token came straight from Microsoft's token endpoint over TLS in exchange for our secret (OIDC core 3.1.3.7),
-    # and its claims are still checked: audience, tenant, issuer, expiry and the nonce from this sign-in.
     import time as _time
     tid = os.environ['MS_TENANT_ID']
+    # Signature first, with the maintained PyJWT library and Microsoft's published signing keys (RS256 only),
+    # then the claims: audience, tenant, issuer, expiry and the nonce from this sign-in.
+    claims = verified_claims(token, tid, os.environ['MS_CLIENT_ID'], now=now)
     if claims.get('aud') != os.environ['MS_CLIENT_ID'] or claims.get('tid') != tid:
         raise AccessError('That Microsoft account is not a PPG account.')
     if claims.get('iss') not in (f'https://login.microsoftonline.com/{tid}/v2.0', f'https://sts.windows.net/{tid}/'):

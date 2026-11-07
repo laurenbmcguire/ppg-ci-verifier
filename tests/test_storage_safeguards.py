@@ -81,15 +81,21 @@ class ProposedRecheck(unittest.TestCase):
                     for row in db.execute(f'SELECT rowid AS rid, result_json FROM {table}').fetchall():
                         r = json.loads(row['result_json'])
                         r.update(checker_version='old', record_count=12, totals={'inspected': {'total': '1200'}, 'certified': {'total': '1200'}, 'rejected': {'total': None}})
+                        if (r.get('approval') or {}).get('run'):
+                            r['approval']['run']['checker_version'] = 'old'   # approved on the old checks
                         db.execute(f'UPDATE {table} SET result_json=? WHERE rowid=?', (json.dumps(r), row['rid']))
             proposal = inbox.propose_recheck(item['file_hash'])   # what will change can still be previewed
             changes = {c['field']: (c['before'], c['after']) for c in proposal['changes']}
             self.assertEqual(changes['record_count'], (12, 5))
             self.assertEqual(changes['inspected'], ('1200', '400'))
-            applied = inbox.get(item['file_hash'])                   # opening it brings it up to date
+            opened = inbox.get(item['file_hash'])                    # opening it never reclassifies it
+            self.assertEqual((opened['record_count'], opened['internal_check_status']), (12, 'outdated_checks_require_recheck'))
+            applied = inbox.apply_recheck(item['file_hash'], 'Chris')  # a person re-checks it
             self.assertEqual(applied['record_count'], 5)
-            self.assertEqual(applied['approval']['by'], 'Chris')                   # approvals are kept
-            self.assertEqual(applied['recheck_applied'][-1]['by'], 'Automatic update')
+            self.assertEqual(applied['approval']['by'], 'Chris')                   # the approval stays on record ...
+            from hosting.review_summary import summarize
+            self.assertFalse(summarize(applied)['approval_current'])               # ... but no longer counts: it was on other checks
+            self.assertEqual(applied['recheck_applied'][-1]['by'], 'Chris')
             self.assertEqual(applied['recheck_applied'][-1]['from_version'], 'old')
             self.assertEqual(inbox.download(item['file_hash'])[1], sl_daily())     # the original upload is untouched
             self.assertEqual(applied['release_status'], 'held')

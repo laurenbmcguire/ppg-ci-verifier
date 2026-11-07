@@ -63,6 +63,21 @@ def _annotate(issue):
     return issue
 
 
+def check_run(result):
+    """The check run everything on the screen belongs to: this exact file, this checker, this SharePoint snapshot."""
+    from hosting import reconcile
+    rec = reconcile.current(result) or {}
+    return dict(file_hash=result.get('file_hash'), checker_version=result.get('checker_version'), snapshot_id=rec.get('snapshot_id'))
+
+
+def same_run(bound, result):
+    """True only when something (an AI review, a verdict list, an approval) was made on this exact check run."""
+    if not isinstance(bound, dict):
+        return False
+    cur = check_run(result)
+    return all(bound.get(k) == cur[k] for k in ('file_hash', 'checker_version', 'snapshot_id'))
+
+
 def _source_status(result, sp):
     """One source verdict for the whole screen."""
     from hosting import reconcile
@@ -75,7 +90,14 @@ def _source_status(result, sp):
                     matched=rec.get('report_rows'), rows=rec.get('sharepoint_items_for_day'), web_url=(rec.get('list') or {}).get('url'),
                     source=(rec.get('list') or {}).get('name'), captured_at=rec.get('captured_at'), snapshot_id=rec.get('snapshot_id'),
                     fields_checked=rec.get('fields_checked'), fields_not_checked=rec.get('fields_not_checked'), differences=len(rec.get('rows') or []))
-    return dict(status=sp.get('status') or 'not_checked', message=sp.get('message'), matched=sp.get('matched_rows'),
+    legacy = sp.get('status') or 'not_checked'
+    if legacy in ('match', 'differences'):
+        # the older daily-export comparison matches by identifier and clock-time shift windows, not by SharePoint item:
+        # it can point at differences but it can never verify a report
+        return dict(status='day_level', day_level=legacy, message='Compared with the daily SharePoint export by totals and clock-time shifts, '
+                    'not record by record (the rows carry no SharePoint item links). Not verified.',
+                    matched=sp.get('matched_rows'), rows=sp.get('sharepoint_rows'), web_url=sp.get('web_url'), source=sp.get('path'))
+    return dict(status=legacy, message=sp.get('message'), matched=sp.get('matched_rows'),
                 rows=sp.get('sharepoint_rows'), web_url=sp.get('web_url'), source=sp.get('path'))
 
 
@@ -125,8 +147,9 @@ def summarize(result, with_issues=True, use_verdicts=True):
         # identifier and clock-time shifts) is superseded and must not add its own differences or a second verdict
         sp = {}
     for i, f in enumerate(sp.get('findings') or []):
-        issues.append(dict(key=f'sp:{f.get("code")}:{f.get("row")}:{f.get("field")}:{i}', source='SharePoint', severity='high',
-                           code=f.get('code'), where=_where(f), sheet=f.get('sheet'), row=f.get('row'), cell=_cell(f), text=f.get('message')))
+        issues.append(dict(key=f'sp:{f.get("code")}:{f.get("row")}:{f.get("field")}:{i}', source='SharePoint (day totals)', severity='medium',
+                           code=f.get('code'), where=_where(f), sheet=f.get('sheet'), row=f.get('row'), cell=_cell(f), day_level=True,
+                           text=f'{f.get("message")} (Day-level comparison by clock-time shifts, not by SharePoint item: check before changing anything.)'))
     rec = _rec.current(result) or {}
     if rec:   # each difference from the live SharePoint list is its own issue, with the cell when there is one
         cells = {(c.get('item'), c.get('field')): f'{_col_letter(int(c["column"]))}{c["row"]}' for c in rec.get('proposed_corrections') or [] if c.get('column') and c.get('row')}
@@ -134,11 +157,13 @@ def summarize(result, with_issues=True, use_verdicts=True):
                  'not_on_sharepoint': 'is not on SharePoint', 'not_on_sharepoint_for_day': 'is on SharePoint for another day',
                  'item_listed_twice': 'is listed twice', 'report_row_without_item_id': 'has no SharePoint item ID',
                  'changed_since_export': 'was edited on SharePoint after the export', 'export_value_differs': 'differs between the export tab and SharePoint',
-                 'export_item_not_on_sharepoint': 'is on the export tab but no longer on SharePoint'}
+                 'export_item_not_on_sharepoint': 'is on the export tab but no longer on SharePoint',
+                 'wrong_list': 'comes from a different SharePoint site or list', 'field_not_in_source': 'has a value SharePoint has no column for, so it was not checked',
+                 'undated': 'has no business date on SharePoint, so its day could not be confirmed'}
         for i, d in enumerate(rec.get('rows') or []):
             what = f'SharePoint item {d["item"]}' if d.get('item') else 'This row'
             detail = f': {d["field"]} is {d.get("report")} in the report, {d.get("sharepoint")} on SharePoint' if d.get('field') and d['status'] in ('value_differs', 'export_value_differs') else ''
-            issues.append(dict(key=f'rec:{d["status"]}:{d.get("item")}:{d.get("field")}:{i}', source='SharePoint', severity='high' if d['status'] in ('value_differs', 'missing_from_report', 'not_on_sharepoint', 'item_listed_twice') else 'medium',
+            issues.append(dict(key=f'rec:{d["status"]}:{d.get("item")}:{d.get("field")}:{i}', source='SharePoint', severity='high' if d['status'] in ('value_differs', 'missing_from_report', 'not_on_sharepoint', 'item_listed_twice', 'wrong_list') else 'medium',
                                code='sharepoint_' + d['status'], where=f'{d["sheet"]} row {d["row"]}' if d.get('sheet') else 'SharePoint',
                                sheet=d.get('sheet'), row=d.get('row'), cell=cells.get((d.get('item'), d.get('field'))),
                                text=f'{what} {words.get(d["status"], d["status"])}{detail}.' + (f' {d["note"]}' if d.get('note') and not detail else ''), url=d.get('url')))
@@ -147,7 +172,8 @@ def summarize(result, with_issues=True, use_verdicts=True):
         issues.append(dict(key=f'usual:{f.get("code")}:{i}', source='Usual day', severity=f.get('severity') or 'medium',
                            code=f.get('code'), where='Whole report', text=f.get('message')))
     ai = result.get('ai_review') or {}
-    for i, f in enumerate(ai.get('issues') or [] if ai.get('status') == 'done' else []):
+    ai_current = ai.get('status') == 'done' and same_run(ai.get('run'), result)
+    for i, f in enumerate(ai.get('issues') or [] if ai_current else []):
         issues.append(dict(key=f'ai:{i}:{f.get("sheet")}:{f.get("cell") or f.get("row")}', source='AI review',
                            severity=f.get('severity') or 'medium', code=f.get('category'),
                            where=' · '.join(p for p in (f.get('sheet'), f.get('cell') or (f'row {f["row"]}' if f.get('row') else None)) if p),
@@ -160,7 +186,7 @@ def summarize(result, with_issues=True, use_verdicts=True):
     # Claude's double-check: drop false alarms (kept in 'dismissed' with the reason), mark confirmed ones
     verify = result.get('ai_verify') or {}
     dismissed = []
-    if use_verdicts and verify.get('status') == 'done' and verify.get('checker_version') in (None, result.get('checker_version')):
+    if use_verdicts and verify.get('status') == 'done' and same_run(verify.get('run'), result):
         verdicts, kept = verify.get('verdicts') or {}, []
         for x in issues:
             v = verdicts.get(x['key'])
@@ -200,11 +226,16 @@ def summarize(result, with_issues=True, use_verdicts=True):
                rejected_partial=bool(isinstance(totals.get('rejected'), dict) and totals['rejected'].get('total') is None and totals['rejected'].get('known_sum') is not None),
                sharepoint=_source_status(result, sp),
                usual=dict(status=bl.get('status') or 'not_checked', message=bl.get('message')),
-               ai=dict(status=ai.get('status') or 'not_run', summary=ai.get('summary'), message=ai.get('message')),
+               ai=dict(status=('stale' if ai.get('status') == 'done' and not ai_current else ai.get('status') or 'not_run'),
+                       summary=ai.get('summary') if ai_current else None,
+                       message=ai.get('message') if ai.get('status') != 'done' or ai_current else 'Claude\'s read was made on an earlier check run of this report; it is not used. Ask again.'),
                fixed_from=(result.get('fixed_from') or {}).get('filename'), fixes_applied=len(result.get('fixes_applied') or []),
                auto_hidden=(result.get('auto_formatting') or {}).get('hidden') or [x for x in [(result.get('auto_formatting') or {}).get('from_hash')] if x],
-               verify=dict(status=verify.get('status') or 'not_run', dismissed=len(dismissed), message=verify.get('message')),
+               verify=dict(status=('stale' if verify.get('status') == 'done' and not same_run(verify.get('run'), result) else verify.get('status') or 'not_run'),
+                           dismissed=len(dismissed), message=verify.get('message')),
                approved=(result.get('approval') or {}).get('by'),
+               approval_current=bool(result.get('approval')) and same_run((result.get('approval') or {}).get('run'), result),
+               run=check_run(result),
                review_state=(result.get('review_request') or {}).get('status'),
                sent_at=next((x.get('at') for x in reversed(result.get('sent') or []) if x.get('sent')), None))
     if with_issues:

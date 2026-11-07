@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import eos_fixture
 from hosting import explain, overview
 from hosting.adaptive_reports import inspect_adaptive
-from hosting.review_summary import summarize
+from hosting.review_summary import summarize, check_run
 from hosting.spreadsheets import EXTERNAL_CONTENT_CODES, inspect_spreadsheet
 
 HOSTING = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'hosting')
@@ -117,7 +117,7 @@ class SummarizeFieldsTests(unittest.TestCase):
         result['sharepoint'] = dict(status='compared', findings=[dict(code='not_on_sharepoint', message='X is not on SharePoint.', sheet='SharePoint comparison')])
         result['baseline'] = dict(status='compared', findings=[dict(code='unusual_reject_rate', severity='medium', message='Rate is unusual.')])
         result['ai_review'] = dict(status='done', issues=[dict(category='odd_pattern', issue='Looks odd', severity='medium', sheet='1st Shift', row=20,
-                                                               why='The AI says why.', check='Look at row 20.')])
+                                                               why='The AI says why.', check='Look at row 20.')], run=check_run(result))
         review = summarize(result)
         self.assertGreaterEqual(len(review['issues']), 4)
         for i in review['issues']:

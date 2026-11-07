@@ -245,7 +245,8 @@ class SpreadsheetInbox:
             if ai_review.get('status') != 'done' and (result.get('ai_review') or {}).get('status') == 'done':
                 return result  # keep the last real review when a retry fails
             result.pop('check_hash', None); result.pop('checked_at', None)
-            result['ai_review'] = ai_review
+            from hosting.review_summary import check_run
+            result['ai_review'] = dict(ai_review, run=check_run(result))
             return self.save_check(db, result)
     def ai_fix_inputs(self, file_hash, include_dismissed=False):
         from hosting.review_summary import summarize
@@ -297,7 +298,7 @@ class SpreadsheetInbox:
         record = dict(by=approver, note=' '.join(str(note or '').split())[:500], at=datetime.now(timezone.utc).isoformat(),
                       status=rv['status'], open_must_fix=must, open_to_check=(rv['counts'].get('medium', 0) + rv['counts'].get('low', 0)),
                       overridden=bool((must or soft) and override), holds_overridden=[x['code'] for x in soft],
-                      filename=item['filename'], version=item.get('version'))
+                      filename=item['filename'], version=item.get('version'), run=rv.get('run'))
         def change(r):
             r['approval'] = record
             if (r.get('review_request') or {}).get('status') in ('waiting', 'sent_back'):
@@ -305,6 +306,29 @@ class SpreadsheetInbox:
                 rr.update(status='approved', reviewer=approver, answered_at=record['at'])
                 rr['history'] = (rr.get('history') or []) + [dict(action='approve', by=approver, note=record['note'], at=record['at'])]
                 r['review_request'] = rr
+        return self._update(file_hash, change)
+    DECISIONS = ('keep', 'reject', 'note', 'reopen')
+    def record_decision(self, file_hash, key, action, note, by):
+        """A reviewer's decision on one issue or suggestion, kept with this version and logged. A decision never clears a
+        blocker by itself: keeping a blank that has no source value keeps the report on hold."""
+        key, note, by = key.strip()[:300], ' '.join(note.split())[:1000], ' '.join(by.split())[:80]
+        if not key:
+            raise ValueError('Which issue or suggestion?')
+        if action not in self.DECISIONS:
+            raise ValueError('Unknown decision.')
+        if action == 'note' and not note:
+            raise ValueError('Type the note first.')
+        at = datetime.now(timezone.utc).isoformat()
+        def change(r):
+            d = dict(r.get('review_decisions') or {})
+            if action == 'reopen':
+                d.pop(key, None)
+            else:
+                prev = d.get(key) or {}
+                d[key] = dict(action=prev.get('action') if action == 'note' and prev.get('action') in ('keep', 'reject') else action,
+                              note=note or prev.get('note') or '', by=by or None, at=at)
+            r['review_decisions'] = d
+            r['review_decision_log'] = ((r.get('review_decision_log') or []) + [dict(key=key, action=action, note=note, by=by or None, at=at)])[-500:]
         return self._update(file_hash, change)
     def review_action(self, file_hash, action, by, note=''):
         """Ask a reviewer (usually the boss) to sign the report off, or send it back with a comment."""
@@ -602,7 +626,8 @@ class SpreadsheetInbox:
             original, _ = self._original(db, file_hash)
             result = dict(self.latest(db, file_hash, original))
             result.pop('check_hash', None); result.pop('checked_at', None)
-            result['ai_verify'] = record
+            from hosting.review_summary import check_run
+            result['ai_verify'] = dict(record, run=check_run(result))
             return self.save_check(db, result)
     def record_ai_fixes(self, file_hash, record):
         with self.connect() as db:
@@ -610,7 +635,8 @@ class SpreadsheetInbox:
             original, _ = self._original(db, file_hash)
             result = dict(self.latest(db, file_hash, original))
             result.pop('check_hash', None); result.pop('checked_at', None)
-            result['ai_fixes'] = record
+            from hosting.review_summary import check_run
+            result['ai_fixes'] = record = dict(record, run=check_run(result))
             self.save_check(db, result)
         return record
     def ai_fixes(self, file_hash, opener=None):
@@ -662,6 +688,11 @@ class SpreadsheetInbox:
         props = proposals(item, item['filename'], raw, context=ctx)
         taken = {(p['sheet'], p['cell']) for p in props}
         ai = item.get('ai_fixes') or {}
+        from hosting.review_summary import same_run
+        if ai.get('run') is not None and not same_run(ai.get('run'), item):
+            ai = dict(ai, fixes=[], status='stale')   # drafted on an earlier check run: never offered as a fix
+        elif ai.get('run') is None and ai.get('fixes'):
+            ai = dict(ai, fixes=[], status='stale')
         for f in ai.get('fixes') or []:
             if (f['sheet'], f['cell']) in taken:
                 continue
@@ -689,7 +720,14 @@ class SpreadsheetInbox:
         _, raw = self.original_bytes(file_hash)
         fixed = apply_fixes(item['filename'], raw, approved)
         new_item = self.ingest(fixed_filename(item['filename']), fixed)
-        record = dict(fixed_file_hash=new_item['file_hash'], fixed_filename=new_item['filename'],
+        if new_item.get('duplicate'):
+            # the same changes give byte-identical output: that version already exists, so it is opened, never
+            # recorded a second time (this is how one report once showed many "fixed" entries for a single file)
+            if any(x.get('fixed_file_hash') == new_item['file_hash'] for x in item.get('fixes_applied') or []) or \
+                    (new_item.get('fixed_from') or {}).get('file_hash') == file_hash:
+                return dict(new_item, already_applied=True)
+        revision = int(item.get('revision') or 1) + 1
+        record = dict(fixed_file_hash=new_item['file_hash'], fixed_filename=new_item['filename'], revision=revision,
                       applied_at=datetime.now(timezone.utc).isoformat(),
                       changes=[{k: c.get(k) for k in ('sheet', 'cell', 'before', 'after', 'reason', 'source')} for c in approved])
         with self.connect() as db:
@@ -702,7 +740,11 @@ class SpreadsheetInbox:
             fixed_original, _ = self._original(db, new_item['file_hash'])
             fixed_result = dict(self.latest(db, new_item['file_hash'], fixed_original))
             fixed_result.pop('check_hash', None); fixed_result.pop('checked_at', None)
-            fixed_result['fixed_from'] = dict(file_hash=file_hash, filename=item['filename'], version=item.get('version'), changes=record['changes'])
+            fixed_result['fixed_from'] = dict(file_hash=file_hash, filename=item['filename'], version=item.get('version'), revision=int(item.get('revision') or 1),
+                                              changes=record['changes'], applied_at=record['applied_at'])
+            # one lineage per report: v1 is the upload, each saved set of changes is the next revision with its own hash and checks
+            fixed_result['revision'] = revision
+            fixed_result['root_hash'] = item.get('root_hash') or file_hash
             if result.get('source_document'): fixed_result['source_document'] = result['source_document']   # still came from that PDF / Word file
             if result.get('accepted_issues'): fixed_result['accepted_issues'] = result['accepted_issues']     # still confirmed fine
             for k in ('auto_formatting', 'ai_fixed'):   # what was already fixed stays on the report as it moves on
@@ -728,7 +770,7 @@ class SpreadsheetInbox:
             if result.get('checker_version')!=CHECKER_VERSION:
                 result['internal_check_status']='outdated_checks_require_recheck'
         # List endpoint is bounded; detailed results remain available by hash.
-        fields = ('file_hash','filename','version','received_at','format','status','internal_check_status','verification_scope','release_status','finding_count','findings_truncated','sheet_count','row_count')
+        fields = ('file_hash','filename','version','revision','root_hash','received_at','format','status','internal_check_status','verification_scope','release_status','finding_count','findings_truncated','sheet_count','row_count')
         from hosting.review_summary import summarize
         try:
             ctx = self.assignment_context()
@@ -757,16 +799,13 @@ class SpreadsheetInbox:
             if not found: raise ValueError('Spreadsheet version not found.')
             result=self.latest(db,file_hash,json.loads(found['result_json']))
         if result.get('checker_version')!=CHECKER_VERSION:
-            # brought up to date automatically: approvals, sends, fixes and accepted issues are kept, the earlier result is kept
-            # as a revision, and the original upload is never touched
-            try:
-                return self.apply_recheck(file_hash, 'Automatic update')
-            except Exception:
-                result=dict(result, internal_check_status='outdated_checks_require_recheck',
-                            recheck=dict(available=True, checked_with=result.get('checker_version'), current=CHECKER_VERSION))
+            # never reclassified behind anyone's back: the stored result is shown as it is, marked out of date, and the
+            # new checks are saved only when a person presses Re-check (apply_recheck)
+            result=dict(result, internal_check_status='outdated_checks_require_recheck',
+                        recheck=dict(available=True, checked_with=result.get('checker_version'), current=CHECKER_VERSION))
         return result
     RECHECK_KEEP = ('approval','sent','fixes_applied','fixed_from','review_request','source_document','accepted_issues','auto_formatting','ai_fixed',
-                    'source_reconciliation','approval_withdrawn','recheck_applied')
+                    'source_reconciliation','approval_withdrawn','recheck_applied','review_decisions','review_decision_log','revision','root_hash')
     def _fresh_checks(self, file_hash):
         with self.connect() as db:
             original, raw = self._original(db, file_hash)

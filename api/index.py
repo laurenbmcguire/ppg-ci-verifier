@@ -752,7 +752,7 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine', '/api/spreadsheets/assign', '/api/spreadsheets/source-reconcile', '/api/spreadsheets/recheck', '/api/sharepoint/confirm-columns', '/api/change-summary', '/api/change-summaries', '/api/settings/sharepoint-jobs', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine', '/api/spreadsheets/decision', '/api/spreadsheets/assign', '/api/spreadsheets/source-reconcile', '/api/spreadsheets/recheck', '/api/sharepoint/confirm-columns', '/api/change-summary', '/api/change-summaries', '/api/settings/sharepoint-jobs', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload', '/api/periods/check-file', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/remove-rows') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
@@ -896,6 +896,19 @@ class handler(BaseHTTPRequestHandler):
                     cat = inbox.setting(sharepoint_jobs.KEY) or {}
                 return self.send(200, encode_json({k: cat.get(k) for k in ('as_of', 'filename', 'uploaded_at')} | dict(jobs=len(cat.get('jobs') or []),
                                  real=sum(1 for j in cat.get('jobs') or [] if (j.get('type') or 'Job') == 'Job'), active=sum(1 for j in cat.get('jobs') or [] if (j.get('status') or '').lower() == 'active'))))
+            if route == '/api/spreadsheets/decision':   # a reviewer's note, "keep as recorded" or "reject this suggestion", on this exact version
+                payload = json.loads(raw)
+                file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
+                me = self.current_user() or {}
+                by = str(payload.get('by') or me.get('name') or me.get('email') or '').strip()[:80]
+                with self.store().session() as directory:
+                    item = SpreadsheetInbox(directory).record_decision(file_hash, str(payload.get('key') or ''), str(payload.get('action') or ''),
+                                                                      str(payload.get('note') or ''), by)
+                return self.send(200, encode_json({'ok': True, 'decisions': item.get('review_decisions') or {}}))
             if route == '/api/spreadsheets/mark-fine':   # a person said these flags are fine: kept on this version and every later one
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
@@ -959,7 +972,17 @@ class handler(BaseHTTPRequestHandler):
                     if payload.get('apply') is True:
                         by = payload.get('by') or (self.current_user() or {}).get('name') or (self.current_user() or {}).get('email')
                         item = inbox.apply_recheck(file_hash, by)
-                        return self.send(200, encode_json({'ok': True, 'applied': True, 'checker_version': item.get('checker_version')}))
+                if payload.get('apply') is True:
+                    # the old SharePoint check belonged to the earlier checks: run it again so the new result is verified, not assumed
+                    reconciled = None
+                    if sharepoint_configured():
+                        try:
+                            reconciled = (self.sharepoint_check(file_hash) or {}).get('checker_version') is not None
+                        except Exception:
+                            debug_log()
+                    return self.send(200, encode_json({'ok': True, 'applied': True, 'checker_version': item.get('checker_version'), 'reconciled': reconciled}))
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
                     return self.send(200, encode_json({'ok': True, 'proposal': inbox.propose_recheck(file_hash)}))
             if route == '/api/spreadsheets/source-reconcile':   # item-by-item against the live SharePoint list (read-only)
                 payload = json.loads(raw)
@@ -1192,7 +1215,8 @@ class handler(BaseHTTPRequestHandler):
                         watch = inbox.set_setting('today_jobs', [j for j in watch if j != str(payload['remove']).upper()])
                     from datetime import timedelta
                     recent = set()
-                    for r in inbox.list()['spreadsheets']:
+                    listed = inbox.list()
+                    for r in listed['spreadsheets']:
                         rv = r.get('review') or {}
                         if rv.get('job') and rv.get('day') and rv['day'] >= (d0 - timedelta(days=21)).isoformat():
                             recent.add(rv['job'].upper())
@@ -1201,7 +1225,16 @@ class handler(BaseHTTPRequestHandler):
                     for job in jobs:
                         reps = inbox.reports_for(job, d0 - timedelta(days=1), d0)
                         rows.append(dict(job=job, watched=job in watch, today=reps.get(d0.isoformat()), yesterday=reps.get((d0 - timedelta(days=1)).isoformat())))
-                return self.send(200, encode_json(dict(day=d0.isoformat(), jobs=rows, sharepoint_on=sharepoint_configured())))
+                from hosting import sharepoint as _sp
+                disc = dict(_sp.last_discovery)
+                scanned, total = len(listed['spreadsheets']), listed.get('count') or len(listed['spreadsheets'])
+                # say what "missing" covers: only these jobs, from this many reports, and whether SharePoint discovery was whole
+                coverage = dict(basis='Jobs you watch plus jobs with a report in the last 21 days. A job with no report and no watch is not listed.',
+                                reports_scanned=scanned, reports_total=total, capped=total > scanned,
+                                discovery=dict(ran=bool(disc.get('at')), search_failed=disc.get('search_failed'),
+                                               unreadable_sites=[x.get('site') for x in disc.get('unreadable_sites') or []]),
+                                complete=total <= scanned and not disc.get('search_failed') and not disc.get('unreadable_sites'))
+                return self.send(200, encode_json(dict(day=d0.isoformat(), jobs=rows, sharepoint_on=sharepoint_configured(), coverage=coverage)))
             if route == '/api/clients':
                 from hosting import sharepoint
                 payload = json.loads(raw or b'{}') or {}

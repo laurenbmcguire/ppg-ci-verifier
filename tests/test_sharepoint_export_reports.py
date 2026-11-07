@@ -54,6 +54,8 @@ class VerifyTests(unittest.TestCase):
         result['ai_verify'] = dict(status='done', checker_version='v', verdicts={
             keys[0]: dict(verdict='not_an_issue', reason='Own record ID.', fixable=False),
             keys[1]: dict(verdict='valid', reason='Exact copy.', fixable=True)})
+        from hosting.review_summary import check_run
+        result['ai_verify']['run'] = check_run(result)
         out = summarize(result)
         self.assertEqual(len(out['issues']), 1)
         self.assertEqual(out['issues'][0]['verdict'], 'valid')

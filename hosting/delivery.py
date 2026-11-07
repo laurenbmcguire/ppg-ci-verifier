@@ -57,6 +57,9 @@ def send(store, file_hash, payload, defaults=None):
     approval = item.get('approval')
     if not approval:
         raise ValueError('Approve the report before sending it to the client.')
+    from hosting.review_summary import same_run
+    if item.get('checker_version') != _checker_version() or not same_run(approval.get('run'), item):
+        raise ValueError('The checks changed after this report was approved (re-checked, reconciled again, or approved before approvals were tied to a check run). Approve it again before sending.')
     mode = 'draft' if payload.get('mode') == 'draft' else 'send'
     done = [x for x in item.get('sent') or [] if x.get('sent')]
     if done and mode == 'send' and payload.get('again') is not True:
@@ -82,3 +85,8 @@ def send(store, file_hash, payload, defaults=None):
         item = inbox.record_send(file_hash, record)
         inbox.save_contacts(rv.get('job'), record['to'], record['cc'])
     return item, record
+
+
+def _checker_version():
+    from hosting.spreadsheet_inbox import CHECKER_VERSION
+    return CHECKER_VERSION

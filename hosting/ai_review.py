@@ -85,12 +85,27 @@ def _context(item, raw):
     text, truncated = sheet_text(item['filename'], raw)
     checks = [dict(code=f.get('code'), sheet=f.get('sheet'), row=f.get('row'), message=f.get('message'))
               for f in (item.get('findings') or [])[:MAX_FINDINGS_SENT]]
-    sp = item.get('sharepoint') or {}
-    sharepoint = {k: sp.get(k) for k in ('status', 'message', 'matched_rows', 'report_rows', 'sharepoint_rows',
-                                          'value_differences', 'missing_from_report', 'not_on_sharepoint', 'totals')
-                  if sp.get(k) is not None}
-    if sp.get('findings'):
-        sharepoint['differences'] = [f.get('message') for f in sp['findings'][:40]]
+    # Claude sees the same source verdict as the screen: the item-by-item reconciliation of this exact check run when
+    # there is one; a stale or superseded comparison is never handed over as if it were current
+    from hosting import reconcile
+    rec = reconcile.current(item)
+    if item.get('source_reconciliation'):
+        if rec:
+            sharepoint = dict(status=rec.get('status'), method='item by item (site + list + item ID)', snapshot_id=rec.get('snapshot_id'),
+                              captured_at=rec.get('captured_at'), report_rows=rec.get('report_rows'), fields_checked=rec.get('fields_checked'),
+                              fields_not_checked=rec.get('fields_not_checked'), not_verified_because=rec.get('not_verified_because'),
+                              differences=[{k: d.get(k) for k in ('status', 'item', 'field', 'report', 'sharepoint', 'sheet', 'row')} for d in (rec.get('rows') or [])[:40]])
+        else:
+            sharepoint = dict(status='stale', message='The SharePoint check belongs to an earlier version or check run; it is not used.')
+    else:
+        sp = item.get('sharepoint') or {}
+        sharepoint = {k: sp.get(k) for k in ('status', 'message', 'matched_rows', 'report_rows', 'sharepoint_rows',
+                                              'value_differences', 'missing_from_report', 'not_on_sharepoint', 'totals')
+                      if sp.get(k) is not None}
+        if sharepoint:
+            sharepoint['method'] = 'day-level export comparison by clock-time shifts (not item by item); leads only, never verification'
+        if sp.get('findings'):
+            sharepoint['differences'] = [f.get('message') for f in sp['findings'][:40]]
     columns = [dict(sheet=s.get('name'), tables=[dict(header_row=t.get('header_row'), columns={k: v.get('header') for k, v in (t.get('columns') or {}).items()},
                                                       rows=t.get('data_row_count'), kind=t.get('kind')) for t in (s.get('tables') or [])])
                for s in (item.get('sheets') or [])]

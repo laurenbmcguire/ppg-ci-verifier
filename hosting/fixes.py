@@ -86,12 +86,57 @@ def _num(text):
 
 
 SURE_SOURCES = ('SharePoint', 'Clean-up', 'Number as text', 'Known detail')
+# values that came from the app or from Claude rather than being typed by a person: re-checked for type when applied
+MACHINE_SOURCES = SURE_SOURCES + ('Suggested', 'AI fix', 'Spelling', 'Typo', 'Claude (chat)', 'SharePoint export')
 WRITTEN_ONLY = {   # fixes that only change how something is written, never what it means
     'Clean-up': 'Only extra spaces or invisible characters. The value is right; nothing else is wrong.',
     'Number as text': 'Only the way the number is stored. The number is right; nothing else is wrong.',
     'Spelling': 'Only the spelling is different from the other rows. Same value; nothing else is wrong.',
     'Typo': 'Looks like the same value typed with a letter for a digit (like O for 0). If that is all, nothing else is wrong.',
 }
+
+
+_DATE_LABEL = re.compile(r'(?i)\b(date|day)\b')
+_NUM_LABEL = re.compile(r'(?i)\b(qty|quantity|inspected|rejected|rejects?|nok|ok qty|okqty|count|total|scans?|units?|reworked|certified)\b')
+
+
+def _label_for(sources, sheet, cell):
+    """The words that say what a cell holds: the text just left of it (a 'Label | value' layout) or the nearest
+    text above it in the same column (a table header)."""
+    letters, row = _addr(cell)
+    rows = dict(sources).get(sheet) or []
+    c = col_index(letters)
+    if c > 0 and row - 1 < len(rows) and c - 1 < len(rows[row - 1]):
+        left = rows[row - 1][c - 1]
+        if isinstance(left, str) and left.strip() and not re.search(r'\d{3,}', left):
+            return left.strip()
+    for r in range(row - 2, max(-1, row - 40), -1):
+        v = rows[r][c] if r < len(rows) and c < len(rows[r]) else None
+        if isinstance(v, str) and v.strip() and not re.fullmatch(r'[\d\s.,:/-]+', v.strip()):
+            return v.strip()
+    return ''
+
+
+def type_problem(sources, sheet, cell, after, before=None):
+    """Why a proposed value cannot go into this cell, or None. A label or header word is never a value, a date
+    field takes only a date and a quantity field only a number: a suggestion that fails is dropped, never offered."""
+    text = str(after if after is not None else '').strip()
+    if not text:
+        return None
+    norm = lambda v: re.sub(r'[\s\u00a0\u200b-\u200f\ufeff]+', ' ', str(v if v is not None else '')).strip().lower()
+    if before is not None and norm(before) == norm(text):
+        return None   # only spacing, hidden characters or capitals change: the value itself stays what it was
+    from hosting.suggest import HEADER_WORDS
+    if text.lower() in HEADER_WORDS or text.lower() in ('date', 'shift', 'client', 'job', 'part', 'description'):
+        return f'"{text}" is a column or label name, not a value.'
+    label = _label_for(sources, sheet, cell)
+    if _DATE_LABEL.search(label) and not re.search(r'(?i)shift|time', label):
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|\d{1,2}-[A-Za-z]{3}-\d{2,4}|[A-Za-z]{3,9}\.? \d{1,2},? \d{4}', text):
+            return f'"{label}" holds a date; "{text}" is not a date.'
+    elif _NUM_LABEL.search(label) and not re.search(r'(?i)part|number|id\b|lot|serial|name', label):
+        if not re.fullmatch(r'-?[\d,]*\.?\d+', text):
+            return f'"{label}" holds a number; "{text}" is not a number.'
+    return None
 
 
 def proposals(result, filename, raw, sharepoint_rows=None, context=None):
@@ -110,6 +155,8 @@ def proposals(result, filename, raw, sharepoint_rows=None, context=None):
             return
         if isinstance(before, str) and before.startswith('='):
             return  # never overwrite a formula
+        if type_problem(sources, sheet, cell, after, before):
+            return  # wrong type for the field, or a header word: never a source-backed value
         kind = 'number' if isinstance(after, (int, float, Decimal)) and not isinstance(after, bool) else 'text'
         if (_show(before) == _show(after) and isinstance(before, str) == (kind == 'text')) or (sheet, cell) in seen:
             return
@@ -326,6 +373,10 @@ def apply_fixes(filename, raw, approved):
         if 'before' in change and _show(current) != str(change['before']):
             raise FixError(f'{sheet}!{cell} now holds "{_show(current)}", not "{change["before"]}". Re-open the report and review again.')
         after = str(change.get('after', ''))
+        if change.get('kind') != 'formula' and change.get('source') in MACHINE_SOURCES:   # a person's own typed value is theirs; every suggestion is re-checked here
+            problem = type_problem(sources, sheet, cell, after, current)
+            if problem:
+                raise FixError(f'{sheet}!{cell}: {problem} That suggestion cannot be applied.')
         kind = 'blank' if after == '' else change.get('kind') if change.get('kind') in ('number', 'text', 'formula') else ('number' if _num(after) is not None and isinstance(current, (int, float)) and not isinstance(current, bool) else 'text')
         if kind == 'number':
             n = _num(after)

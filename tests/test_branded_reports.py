@@ -156,7 +156,9 @@ class BrandedTests(unittest.TestCase):
             with inbox.connect() as db:
                 old=dict(original);old.pop('checker_version');old.pop('check_hash');old.pop('checked_at');db.execute('DELETE FROM spreadsheet_checks');db.execute('UPDATE spreadsheets SET result_json=?',(json.dumps(old),))
             self.assertEqual(inbox.list()['spreadsheets'][0]['internal_check_status'],'outdated_checks_require_recheck')
-            current=inbox.get(original['file_hash']);self.assertEqual(current['numeric_cells_checked'],2);self.assertEqual(current['recheck_applied'][0]['by'],'Automatic update')
+            # opening a report never reclassifies it: it stays marked out of date until a person re-checks it
+            current=inbox.get(original['file_hash']);self.assertEqual(current['internal_check_status'],'outdated_checks_require_recheck');self.assertNotIn('recheck_applied',current)
+            current=inbox.apply_recheck(original['file_hash'],'Reviewer');self.assertEqual(current['numeric_cells_checked'],2);self.assertEqual(current['recheck_applied'][0]['by'],'Reviewer')
             from pathlib import Path
             self.assertEqual((Path(directory)/original['original_path']).read_bytes(),data)
 
