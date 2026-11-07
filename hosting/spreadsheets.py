@@ -20,7 +20,7 @@ MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 MAX_FINDINGS = 200
-CHECKER_VERSION = '2026-11-05-sharepoint-exports-v7'
+CHECKER_VERSION = '2026-11-07-report-titles-v8'
 
 
 class SpreadsheetError(ValueError):
@@ -336,7 +336,14 @@ def inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) -
         rows = sources if fmt == 'xlsx' else [('CSV', list(csv.reader(io.StringIO(decoded, newline=''), strict=True)))]
         adaptive = inspect_adaptive(rows, pristine, cached=_cached_rows(raw) if fmt == 'xlsx' else None, hidden=_hidden(raw) if fmt == 'xlsx' else None)
         if adaptive is not None:
+            ident = _good_identity(adaptive.get('report_identity'), rows)
+            if ident:
+                adaptive['report_identity'] = ident
             return _finish(_attach_external(adaptive, notes), keep_records)
+    if fmt == 'xlsx':
+        ident = _good_identity(result.get('report_identity'), sources)
+        if ident:
+            result['report_identity'] = ident
     return _attach_external(result, notes)
 
 
@@ -364,13 +371,89 @@ def _hidden(raw):
     return hidden_layout(raw)
 
 
+_MONTHS = ('january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december')
+_JOB_IN_TEXT = re.compile(r'\bjob\s*(?:#|no\.?|number)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]*\d[A-Z0-9-]*)', re.I)
+_MONTH_DATE = re.compile(r'\b(' + '|'.join(m[:3] for m in _MONTHS) + r')[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})\b', re.I)
+_ISO_DATE = re.compile(r'(?<!\d)(\d{4})-(\d{2})-(\d{2})(?![\dT])')
+
+
+def header_identity(sources):
+    """Job number, report date and client from the title lines at the top of a report ("SL Alabama · Job 2207",
+    "November 6, 2026 · ..."), for layouts that do not keep them in a fixed cell. Formulas are never read as a title."""
+    from datetime import date as _date, datetime as _dt
+    job = day = client = None
+    ordered = sorted(sources, key=lambda s: 0 if str(s[0]).strip().lower() == 'summary' else 1)
+    for _title, rows in ordered[:4]:
+        for row in rows[:14]:
+            cells = list(row or [])
+            for ci, v in enumerate(cells):
+                if isinstance(v, _dt) and day is None and ci and isinstance(cells[ci - 1], str) and 'date' in cells[ci - 1].lower():
+                    day = v.date()
+                if not isinstance(v, str) or not v.strip() or v.lstrip().startswith('='):
+                    continue
+                text = v.strip()
+                low = text.lower()
+                if low.startswith(('captured', 'generated', 'printed', 'exported', 'created')):
+                    continue   # when the file was made, not the day it reports on
+                if job is None:
+                    m = _JOB_IN_TEXT.search(text)
+                    if m and not re.fullmatch(r'(19|20)\d\d', m.group(1)):
+                        job = m.group(1).upper()
+                        before = text[:m.start()].strip(' ·|-–—:,')
+                        if before and len(before) <= 60:
+                            client = before
+                    elif low.rstrip(': ') in ('project number', 'project no', 'job number', 'job', 'job no') and ci + 1 < len(cells):
+                        nxt = cells[ci + 1]
+                        if isinstance(nxt, (str, int)) and str(nxt).strip() and not str(nxt).lstrip().startswith('='):
+                            job = str(nxt).strip().upper()
+                if day is None:
+                    m = _MONTH_DATE.search(text)
+                    if m:
+                        try:
+                            day = _date(int(m.group(3)), [x[:3] for x in _MONTHS].index(m.group(1)[:3].lower()) + 1, int(m.group(2)))
+                        except ValueError:
+                            pass
+                    else:
+                        m = _ISO_DATE.search(text)
+                        if m:
+                            try:
+                                day = _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                            except ValueError:
+                                pass
+            if job and day:
+                break
+        if job and day:
+            break
+    out = {}
+    if job:
+        out['project_number'] = job
+    if day:
+        out['report_date'] = day.isoformat()
+    if client:
+        out['client'] = client
+    return out
+
+
+def _good_identity(identity, sources):
+    """The report's identity: a fixed-cell value only when it is real text (never a formula), else the title lines."""
+    identity = dict(identity or {})
+    pn = identity.get('project_number')
+    if not isinstance(pn, str) or not pn.strip() or pn.lstrip().startswith('='):
+        identity['project_number'] = None
+    found = header_identity(sources) if sources else {}
+    for k, v in found.items():
+        if not identity.get(k):
+            identity[k] = v
+    return identity if any(identity.values()) else None
+
+
 def _exact_or_adaptive(strict, sources, pristine, raw):
     """Keep an exact template match; otherwise use automatic column detection for this layout."""
     if strict.get('template_mapping_status') == 'matched' and strict.get('record_count'):
         return strict
     from datetime import date as _date
     from hosting.adaptive_reports import inspect_adaptive
-    identity = strict.get('report_identity') or {}
+    identity = _good_identity(strict.get('report_identity'), sources) or {}
     try:
         report_day = _date.fromisoformat(identity['report_date']) if identity.get('report_date') else None
     except ValueError:
@@ -381,8 +464,8 @@ def _exact_or_adaptive(strict, sources, pristine, raw):
     adaptive['recognized_template'] = strict.get('template_id')
     # Keep what differed from the exact template, as information (not blocking).
     adaptive['template_differences'] = dict(strict.get('finding_counts') or {})
-    if strict.get('report_identity'):
-        adaptive['report_identity'] = strict['report_identity']
+    if identity:
+        adaptive['report_identity'] = identity
     adaptive['findings'].insert(0, dict(code='known_template_layout_differs', sheet='Workbook', row=None, column=None,
         message='This looks like a known PPG/Pratt report, but its layout differs from the exact template. Columns were detected automatically instead.'))
     adaptive['finding_counts']['known_template_layout_differs'] = 1

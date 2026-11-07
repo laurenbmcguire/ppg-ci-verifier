@@ -203,6 +203,9 @@ def job_from_name(upper):
         if not DATE_LIKE.fullmatch(m.group(1)):
             return m.group(1)
     m = JOB2.search(upper)
+    if m:
+        return m.group(1)
+    m = re.match(r'PPG[_ -](\d{3,5})[_ -]', upper)   # PPG_2207_Nov06_Provisional.xlsx
     return m.group(1) if m else None
 
 
@@ -210,6 +213,8 @@ def identify(filename, result):
     """(job, day) for the SharePoint lookup, from the report's own identity, its rows, or its filename."""
     identity = result.get('report_identity') or {}
     job = identity.get('project_number')
+    if isinstance(job, str) and job.lstrip().startswith('='):
+        job = None   # a formula in the title cell is not a job number
     day = identity.get('report_date') or result.get('report_day')
     upper = (filename or '').upper()
     if not job:
