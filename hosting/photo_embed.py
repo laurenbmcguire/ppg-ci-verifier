@@ -51,6 +51,10 @@ def _token(opener=None):
         with sp._open(urllib.request.Request(url, data=body, method='POST'), opener) as r:
             data = json.loads(r.read())
     except urllib.error.HTTPError as exc:
+        if certificate_ready() and exc.code in (400, 401):
+            raise PhotoError('Microsoft did not accept the verifier certificate yet. An admin needs to upload it to the app registration '
+                             '(download it from /api/settings/sharepoint-cert) and grant SharePoint "Sites.Read.All" (application) '
+                             'with admin consent.') from None
         raise PhotoError(f'Microsoft sign-in for SharePoint photos failed (HTTP {exc.code}).') from None
     _sp_token.update(value=data['access_token'], expires=time.time() + int(data.get('expires_in', 3000)))
     return _sp_token['value']
