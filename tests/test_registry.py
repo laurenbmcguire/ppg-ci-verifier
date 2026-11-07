@@ -35,9 +35,15 @@ class DuplicateJobNumbers(unittest.TestCase):
         self.assertEqual((a['client_key'], a['list_id']), ('SLAlabama', SL_LIST))
         self.assertNotEqual(a['list_id'], HY_LIST)
 
-    def test_a_real_hyundai_report_stays_hyundai(self):
+    def test_a_filename_alone_cannot_move_2207_to_the_hyundai_list(self):
         a = resolve('Hyundai HMMA - 2207 - 2026-11-06.xlsx', '2207')
-        self.assertEqual(a['client_key'], 'Hyundai')
+        self.assertEqual(a['status'], 'ambiguous')   # a person decides; the report stays on hold
+        self.assertIsNone(a.get('client_key'))
+
+    def test_hyundai_source_urls_do_prove_the_hyundai_list(self):
+        result = {'dataset_selection': {'source_lists': [{'site': 'Hyundai_Montgomery', 'list': 'Data 2207'}]}}
+        a = resolve('Hyundai HMMA - 2207 - 2026-11-06.xlsx', '2207', result)
+        self.assertEqual((a['client_key'], a['list_id']), ('Hyundai', HY_LIST))
 
     def test_unpinned_job_on_two_sites_needs_a_person(self):
         a = resolve('PPG_2300_Nov06.xlsx', '2300')

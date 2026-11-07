@@ -153,7 +153,14 @@ def resolve(result, filename, job, day, registry, snapshot, manual=None):
             out['evidence'].append(f'The {label} names "{hint}".')
             pool = hits
             break
-    keep = [c for c in pool if not c.get('separate')] or pool
+    keep = [c for c in pool if not c.get('separate')]
+    pinned = [c for c in cands if c.get('verified') and not c.get('separate')]
+    if not keep and pinned and out['evidence']:
+        # Only a filename or title points at the separate list: that is a hint, not proof, so a person decides.
+        return dict(out, status='ambiguous', job=job, evidence=out['evidence'] + [
+            f'But job {job}\'s verified source list is on {pinned[0].get("site")}; the other list with this label never overrides it without proof '
+            '(source record URLs in the workbook, or a person\'s choice).'])
+    keep = keep or pool
     verified = [c for c in keep if c.get('verified')]
     if len(keep) == 1:
         c = keep[0]
