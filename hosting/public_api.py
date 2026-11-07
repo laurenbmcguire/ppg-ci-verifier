@@ -381,7 +381,7 @@ def remove_rows(h, file_hash, rows):
     """Corrected copy with the given report rows taken out (extra copies of duplicate rows). Rows below move up;
     totals and formulas are never touched. rows: [(sheet, row)]. Returns the new item."""
     from hosting.fixes import relocate_rows, FixError
-    rows = [(str(s_), int(r)) for s_, r in rows][:500]
+    rows = [(str(s_), int(r)) for s_, r in rows]
     if not rows:
         raise ApiError(409, 'Pick at least one row to remove.')
     with h.store().session() as directory:
@@ -466,7 +466,7 @@ def handle(h, method, route, send):
         if action == 'fixes' and method == 'GET':
             return send(200, op_fixes(h, file_hash))
         if action == 'fixes' and method == 'POST':
-            data = _body(h, 200000)
+            data = _body(h, MAX_UPLOAD)
             return send(201, op_apply(h, file_hash, data.get('accept'), data.get('ids'), data.get('changes')))
         if action == 'ai-fixes' and method == 'POST':
             return send(200, op_ai_fixes(h, file_hash))

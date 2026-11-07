@@ -573,8 +573,8 @@ class SpreadsheetInbox:
     def apply_fixes(self, file_hash, approved):
         """Write a corrected copy with the approved changes as a new upload; the original is untouched."""
         from hosting.fixes import apply_fixes, fixed_filename
-        if not isinstance(approved, list) or not 1 <= len(approved) <= 500 or not all(isinstance(c, dict) for c in approved):
-            raise ValueError('Send 1 to 500 approved changes.')
+        if not isinstance(approved, list) or not approved or not all(isinstance(c, dict) for c in approved):
+            raise ValueError('Send at least one approved change.')
         item = self.get(file_hash)
         _, raw = self.original_bytes(file_hash)
         fixed = apply_fixes(item['filename'], raw, approved)

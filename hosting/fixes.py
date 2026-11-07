@@ -546,8 +546,6 @@ def relocate_rows(filename, raw, moves):
                     changes.append(dict(sheet=sheet, cell=f'{col_letter(c)}{row}', before=_show(old), after=_show(after),
                                         kind='blank' if after == '' else ('number' if isinstance(after, (int, float)) and not isinstance(after, bool) else 'text'),
                                         reason='Put the row on the right shift (by scan time)', source='Shift times'))
-    if len(changes) > 500:
-        raise FixError(f'Moving these rows changes {len(changes)} cells, more than can be done at once. Move them in Excel.')
     return changes
 
 

@@ -79,3 +79,18 @@ class RecordedRejects(unittest.TestCase):
         r = inspect_spreadsheet('PPG_2207_Nov06_Provisional.xlsx', provisional())   # E5 'Rejected', every row blank
         self.assertIsNone(r['totals']['rejected']['known_sum'])
 
+
+
+class ManyChanges(unittest.TestCase):
+    def test_more_than_500_changes_go_through_in_one_corrected_copy(self):
+        import tempfile
+        from openpyxl import load_workbook
+        from hosting.spreadsheet_inbox import SpreadsheetInbox
+        raw = provisional()
+        with tempfile.TemporaryDirectory() as d:
+            inbox = SpreadsheetInbox(d)
+            item = inbox.ingest('PPG_2207_Nov06_Provisional.xlsx', raw)
+            changes = [dict(sheet='Shift 1', cell=f'M{r}', before='', after=f'note {r}', reason='test', source='test') for r in range(20, 720)]
+            fixed = inbox.apply_fixes(item['file_hash'], changes)
+            ws = load_workbook(io.BytesIO(inbox.original_bytes(fixed['file_hash'])[1]))['Shift 1']
+            self.assertEqual(ws['M719'].value, 'note 719')
