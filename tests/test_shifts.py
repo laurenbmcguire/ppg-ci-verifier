@@ -38,7 +38,7 @@ class FakeGraph:
             return ok({'access_token': 't', 'expires_in': 3600})
         if '/sites/ppgquality.sharepoint.com:/sites/' in url:
             return ok({'id': 'site-' + url.rsplit('/', 1)[1]})
-        if url.endswith('/lists?$select=id,displayName,webUrl&$top=500'):
+        if url.endswith('/lists?$select=id,displayName,webUrl,lastModifiedDateTime&$top=500'):
             return ok({'value': [{'id': 'L1', 'displayName': f'Data #{JOB}', 'webUrl': 'https://x/lists/data'}]})
         if '/lists/L1/columns' in url:
             return ok({'value': COLS})

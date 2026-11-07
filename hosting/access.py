@@ -194,11 +194,10 @@ def client_of(job, clients):
         return None
     up = str(job).upper()
     nums = set(re.findall(r'\d{3,}', up))
-    for c in clients or []:
-        for j in c.get('jobs', []):
-            if j.get('job', '').upper() == up or nums & set(j.get('numbers') or []):
-                return c['key']
-    return None
+    hits = [(j.get('job', '').upper() == up, j.get('modified') or '', c['key']) for c in clients or [] for j in c.get('jobs', [])
+            if j.get('job', '').upper() == up or nums & set(j.get('numbers') or [])]
+    # one job list on two client sites: the exact name first, then the list the tablets wrote to most recently
+    return max(hits)[2] if hits else None
 
 
 def can_see_job(user, job, clients):

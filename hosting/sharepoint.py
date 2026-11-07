@@ -102,7 +102,7 @@ def _configured_sites(opener=None):
 
 
 def _site_lists(site_id, opener=None):
-    return (_get(f'/sites/{site_id}/lists?$select=id,displayName,webUrl&$top=500', opener) or {}).get('value', [])
+    return (_get(f'/sites/{site_id}/lists?$select=id,displayName,webUrl,lastModifiedDateTime&$top=500', opener) or {}).get('value', [])
 
 
 def client_sites(opener=None, refresh=False):
@@ -247,7 +247,7 @@ def _list_match(job, display, web_url=''):
 def _find_list(job, opener=None):
     """The job's "Data #<job>" list. Field lists put the job number first (Data #2219-HANDS-HMMA) while reports
     often put it last (HANDS-HMMA-2219), so match on the job's parts in any order, then on the job number alone."""
-    best = None
+    exact, near = [], []
     _seen_lists.clear()
     for name, site_id, site_lists in client_sites(opener):
         for lst in site_lists:
@@ -255,10 +255,15 @@ def _find_list(job, opener=None):
                 _seen_lists.append(lst['displayName'])
             score = _list_match(job, lst.get('displayName'), lst.get('webUrl'))
             if score == 2:
-                return name, site_id, lst
-            if score == 1 and best is None:
-                best = (name, site_id, lst)
-    return best
+                exact.append((name, site_id, lst))
+            elif score == 1:
+                near.append((name, site_id, lst))
+    # The same job list can exist on two sites (e.g. SL Alabama's Alexander City site and the Hyundai Montgomery
+    # site). The one the tablets are writing to is the one changed most recently.
+    for found in (exact, near):
+        if found:
+            return max(found, key=lambda f: f[2].get('lastModifiedDateTime') or '')
+    return None
 
 
 def _list_items(job, opener=None):
@@ -495,7 +500,7 @@ def clients(opener=None, refresh=False):
                 continue
             job = title[6:].strip()
             numbers = sorted({t for t in re.split(r'[^0-9]+', job) if len(t) >= 3})
-            c['jobs'].append(dict(job=job, numbers=numbers, site=name, url=lst.get('webUrl')))
+            c['jobs'].append(dict(job=job, numbers=numbers, site=name, url=lst.get('webUrl'), modified=lst.get('lastModifiedDateTime')))
     value = sorted(out.values(), key=lambda c: c['client'].lower())
     for c in value:
         c['jobs'].sort(key=lambda j: j['job'])

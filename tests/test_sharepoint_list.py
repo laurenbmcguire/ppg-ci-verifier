@@ -33,7 +33,7 @@ class FakeGraph:
             return io.BytesIO(json.dumps({'access_token': 't', 'expires_in': 3600}).encode())
         if '/sites/ppgquality.sharepoint.com:/sites/' in url:
             return io.BytesIO(json.dumps({'id': 'site-' + url.rsplit('/', 1)[1]}).encode())
-        if url.endswith('/lists?$select=id,displayName,webUrl&$top=500'):
+        if url.endswith('/lists?$select=id,displayName,webUrl,lastModifiedDateTime&$top=500'):
             lists = [{'id': 'L1', 'displayName': f'Data #{JOB}', 'webUrl': 'https://x/lists/data'}] if 'site-Hyundai_Montgomery' in url else [{'id': 'L0', 'displayName': 'Documents'}]
             return io.BytesIO(json.dumps({'value': lists}).encode())
         if '/lists/L1/columns' in url:

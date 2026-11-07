@@ -237,7 +237,7 @@ def day_scans(job, day, schedule=None):
         return dict(found=False)
     d0 = date.fromisoformat(day)
     prev = (d0 - timedelta(days=1)).isoformat()
-    out = dict(found=True, list=data[1].get('displayName'), today=0, yesterday=0, last=None, shifts={})
+    out = dict(found=True, list=data[1].get('displayName'), site=data[0], today=0, yesterday=0, last=None, shifts={})
     last = None
     for it in data[3]:
         d = sharepoint._item_day(it, schedule)
