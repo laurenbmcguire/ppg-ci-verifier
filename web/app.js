@@ -861,8 +861,8 @@
       const gs = groups.filter(g => g.tier === id), recs = gs.reduce((n, g) => n + g.records, 0);
       return h('button', {type: 'button', role: 'tab', class: id === tier ? 'on' : '', 'aria-selected': String(id === tier), disabled: !gs.length,
         onclick: () => { state.fdTier = id; state.fdCur = null; drawSide(); }},
-        h('span', {}, label), h('b', {}, String(gs.reduce((n, g) => n + g.items.length, 0))),
-        h('small', {}, gs.length ? `${plural(gs.length, 'group')} · ${plural(recs, 'record')}` : 'none'));
+        h('span', {}, label), h('b', {'aria-label': 'open'}, String(gs.reduce((n, g) => n + g.open, 0))),
+        h('small', {}, gs.length ? `${plural(gs.length, 'group')} · ${plural(recs, 'record')}${gs.some(g => g.open < g.items.length) ? ` · ${gs.reduce((n, g) => n + g.items.length - g.open, 0)} decided` : ''}` : 'none'));
     })));
     const tierGroups = groups.filter(g => g.tier === tier);
     const cur = items.find(x => x.key === state.fdCur) || null;
@@ -871,7 +871,7 @@
       const selectable = g.items.filter(x => x.selectable && x.state === 'open' && (x.evidence === 'source' || x.evidence === 'mechanical'));
       return h('section', {class: 'fd-group' + (cur && cur.group === g.key ? ' cur' : '')},
         h('button', {type: 'button', class: 'fd-grouphead', 'aria-expanded': String(!!cur && cur.group === g.key), onclick: () => fdOpen(g.items.find(x => x.state === 'open') || g.items[0])},
-          h('span', {class: 'fd-gtitle'}, g.title),
+          h('span', {class: 'fd-gtitle'}, g.open ? '' : icon('ok', 14), g.open ? '' : ' ', g.title),
           h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'item')} · ${plural(g.records, 'record')}${g.open < g.items.length ? ` · ${g.items.length - g.open} decided` : ''}`)),
         selectable.length > 1 || (selectable.length === 1 && g.items.length === 1 && g.tier === 'format') ? h('button', {type: 'button', class: 'btn small fd-selectall', onclick: () => fdSelect(selectable, true)},
           `Select ${selectable.length === 1 ? 'it' : 'all ' + selectable.length} for preview`) : null,
@@ -930,6 +930,8 @@
           it.state === 'selected' ? 'Remove from preview' : 'Select for preview') : null,
         it.fix && it.state !== 'rejected' ? h('button', {type: 'button', class: 'btn', onclick: () => fdDecide(it, 'reject')}, 'Reject suggestion') : null,
         it.state !== 'kept' ? h('button', {type: 'button', class: 'btn', onclick: () => fdDecide(it, 'keep')}, it.report === '' || it.report == null ? 'Keep blank' : 'Keep as recorded') : null,
+        it.state === 'open' && !it.fix && inGroup.filter(x => x.state === 'open').length > 1 ? h('button', {type: 'button', class: 'btn', onclick: () => fdDecideAll(inGroup.filter(x => x.state === 'open'), 'keep')},
+          `${it.report === '' || it.report == null ? 'Keep all' : 'Keep all'} ${inGroup.filter(x => x.state === 'open').length} ${it.report === '' || it.report == null ? 'blank' : 'as recorded'}`) : null,
         it.state !== 'open' ? h('button', {type: 'button', class: 'btn subtle', onclick: () => fdDecide(it, 'reopen')}, 'Undo decision') : null,
         h('button', {type: 'button', class: 'btn subtle', onclick: () => fdEvidence(it)}, icon('db', 15), ' Source evidence')),
       h('details', {class: 'fd-notebox', open: it.note ? true : null}, h('summary', {}, icon('note', 14), ' Note'),
@@ -966,17 +968,33 @@
       const out = await api('/api/spreadsheets/decision', {file_hash: state.report.file_hash, key: it.key, action, note: note || '', by});
       state.report.review_decisions = out.decisions;
       if (it.fix) { const dec = store.get(decisionsKey(), {}); if (action === 'reject') dec[it.fix.id] = {state: 'rejected'}; else if (action === 'reopen' || action === 'keep') delete dec[it.fix.id]; store.set(decisionsKey(), dec); }
-      toast({reject: 'Suggestion rejected. Kept with this version.', keep: it.tier === 'blocker' && it.evidence === 'none' ? 'Kept as recorded. The hold stays until the source question is settled.' : 'Kept as recorded.', note: 'Note saved with this version.', reopen: 'Decision undone.'}[action]);
-      if (action === 'reject' || action === 'keep') { const flat = (state.fdItems || []).filter(x => x.tier === it.tier && x.state === 'open' && x.key !== it.key); fdRefresh(); if (flat[0]) fdOpen(flat[0]); return; }
-      fdRefresh();
+      if (action === 'note' || action === 'reopen') toast(action === 'note' ? 'Note saved with this version.' : 'Decision undone.');
+      if (action === 'reject' || action === 'keep') fdAdvance(it); else fdRefresh();
     } catch (e) { toast(e.message, true); }
+  }
+  // after a decision: the next open item in the same group, then the next group of the same kind, then the next kind;
+  // the toast says how many are left so every click visibly moves forward
+  function fdAdvance(done) {
+    state.fdItems = fdItems();
+    const groups = fdGroups(state.fdItems), g = groups.find(x => x.key === done.group);
+    const order = [...groups.filter(x => x.tier === done.tier), ...groups.filter(x => x.tier !== done.tier)];
+    const start = g ? order.indexOf(g) : 0, rotated = [...order.slice(start), ...order.slice(0, start)];
+    let next = null;
+    if (g) { const at = g.items.findIndex(x => x.key === done.key); next = [...g.items.slice(at + 1), ...g.items.slice(0, at)].find(x => x.state === 'open'); }
+    if (!next) for (const x of rotated.slice(1)) { next = x.items.find(y => y.state === 'open'); if (next) break; }
+    const leftInGroup = g ? g.items.filter(x => x.state === 'open').length : 0, leftInTier = state.fdItems.filter(x => x.tier === done.tier && x.state === 'open').length;
+    const what = done.state === 'kept' || (state.report.review_decisions || {})[done.key]?.action === 'keep' ? 'Kept as recorded' : 'Suggestion rejected';
+    toast(`${what}. ` + (leftInGroup ? `${leftInGroup} left in this group.` : leftInTier ? `This group is done; ${leftInTier} left in ${TIERS.find(t => t[0] === done.tier)[1].toLowerCase()}.` : `Nothing left in ${TIERS.find(t => t[0] === done.tier)[1].toLowerCase()}.`)
+      + (done.tier === 'blocker' && done.evidence === 'none' ? ' The hold stays until the source question is settled.' : ''));
+    if (next) { fdOpen(next); return; }
+    state.fdCur = null; drawSide(); drawGrid(); fdRefreshFoot();
   }
   async function fdDecideAll(list, action) {
     try {
       const out = await api('/api/spreadsheets/decision', {file_hash: state.report.file_hash, keys: list.map(x => x.key), action, by: myName()});
       state.report.review_decisions = out.decisions;
       toast(`${plural(list.length, 'item')} kept as recorded. Saved with this version.`);
-      fdRefresh();
+      if (list[0]) fdAdvance(list[0]); else fdRefresh();
     } catch (e) { toast(e.message, true); }
   }
   function fdRefreshFoot() {
