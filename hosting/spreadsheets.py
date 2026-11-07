@@ -360,7 +360,21 @@ def report_records(filename, raw):
     return result['_detail_records'] if result else []
 
 
+def report_and_export_records(filename, raw):
+    """(record rows, the workbook's own SharePoint export rows) for reconciliation against the live lists."""
+    from hosting.adaptive_reports import inspect_adaptive
+    if filename.lower().endswith('.xlsx'):
+        rows = [(title, list(it)) for title, it in _xlsx_rows(raw, [])]
+        cached = _cached_rows(raw)
+    else:
+        rows = [('CSV', list(csv.reader(io.StringIO(raw.decode('utf-8-sig'), newline=''), strict=True)))]
+        cached = None
+    result = inspect_adaptive(rows, {'limitations': []}, cached=cached)
+    return (result['_detail_records'], result.get('_export_records') or []) if result else ([], [])
+
+
 def _finish(result, keep_records):
+    result.pop('_export_records', None)
     if not keep_records:
         result.pop('_detail_records', None)
     return result

@@ -437,6 +437,40 @@
       last ? h('span', {class: 'spjob-recs'}, `Changed by ${last.by} ${ago(last.at)}${last.reason ? ` (“${last.reason}”)` : ''}`) : null,
       h('button', {type: 'button', class: 'btn small', onclick: e => assignForm(r, e.target)}, ok ? 'Change' : 'Choose client and job'));
   }
+  // Why the report stays on hold beyond its issues (client not settled, record set unclear, SharePoint coverage or differences).
+  function holdLine(r) {
+    const hs = r.holds || []; if (!hs.length) return null;
+    return h('div', {class: 'spjob warn', id: 'holdline'}, h('span', {class: 'spjob-tag'}, 'On hold'),
+      h('span', {}, hs.map(x => x.text).join(' ')));
+  }
+  const REC = {verified: 'Matches SharePoint item by item', discrepancies: 'Differs from SharePoint', incomplete: 'SharePoint coverage incomplete: not verified', unverified: 'Not verified'};
+  const REC_ROW = {value_differs: 'Value differs', missing_from_report: 'On SharePoint, not in the report', not_on_sharepoint: 'Not on SharePoint',
+    not_on_sharepoint_for_day: 'On SharePoint for another day', report_row_without_item_id: 'No item ID', item_listed_twice: 'Listed twice',
+    changed_since_export: 'Edited after the export', export_value_differs: 'Export differs from the list', export_item_not_on_sharepoint: 'Export item gone from the list'};
+  function reconcileLine(r) {
+    const x = r.source_reconciliation, a = r.assignment || {};
+    const can = a.site && a.list_id && SETTLED.includes(a.status);
+    const run = async e => {
+      e.target.disabled = true; e.target.textContent = 'Reading the SharePoint list…';
+      try { await api('/api/spreadsheets/source-reconcile', {file_hash: r.file_hash}); const fresh = await api('/api/spreadsheet?id=' + r.file_hash);
+        Object.assign(state.report, {source_reconciliation: fresh.source_reconciliation, holds: fresh.holds}); drawReport(); }
+      catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Reconcile with SharePoint'; } };
+    const btn = h('button', {type: 'button', class: 'btn small', disabled: can ? null : '', title: can ? 'Read-only: nothing on SharePoint is changed' : 'Choose the client and job first', onclick: run}, x ? 'Reconcile again' : 'Reconcile with SharePoint');
+    if (!x) return h('div', {class: 'spjob none'}, h('span', {class: 'spjob-tag'}, 'Source'), h('span', {}, 'Not reconciled with the live SharePoint list yet.'), btn);
+    const c = x.coverage || {};
+    const rows = x.rows || [];
+    return h('div', {class: 'spjob ' + (x.status === 'verified' ? 'ok' : 'warn')},
+      h('span', {class: 'spjob-tag'}, x.status === 'verified' ? 'Source ✓' : 'Source'),
+      h('b', {}, REC[x.status] || x.status),
+      h('span', {}, `${x.list?.name || x.site} · ${x.sharepoint_items_for_day} SharePoint item(s) for ${x.day}, ${x.report_rows} report row(s) · ${c.pages || 0} page(s) read · captured ${ago(x.captured_at)}` + (c.notes?.length ? ' · ' + c.notes.join(' ') : '')),
+      btn,
+      rows.length ? h('details', {class: 'recrows'}, h('summary', {}, `${rows.length} difference${rows.length === 1 ? '' : 's'}` + (x.proposed_corrections?.length ? ` · ${x.proposed_corrections.length} proposed correction(s), not applied` : '')),
+        h('table', {}, h('thead', {}, h('tr', {}, ...['What', 'Item', 'Where', 'Field', 'Report', 'SharePoint'].map(t => h('th', {}, t)))),
+          h('tbody', {}, ...rows.slice(0, 300).map(d => h('tr', {},
+            h('td', {}, REC_ROW[d.status] || d.status, d.note ? h('small', {}, ' ' + d.note) : null),
+            h('td', {}, d.url ? h('a', {href: d.url, target: '_blank', rel: 'noopener'}, d.item) : (d.item || '—')),
+            h('td', {}, d.sheet ? `${d.sheet} row ${d.row}` : '—'), h('td', {}, d.field || ''), h('td', {}, d.report ?? ''), h('td', {}, d.sharepoint ?? '')))))) : null);
+  }
   function assignForm(r, btn) {
     if ($('assignform')) { $('assignform').remove(); return; }
     const a = r.assignment || {};
@@ -574,7 +608,7 @@
         h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, r.fixed_from ? 'Download fixed version' : 'Download report'),
         h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
     const status = h('div', {class: 'rstatus'},
-      assignmentLine(r), spJobLine(r), docBanner(r), fixedLog(r),
+      assignmentLine(r), holdLine(r), reconcileLine(r), spJobLine(r), docBanner(r), fixedLog(r),
       h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
       h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
     const steps = h('ol', {class: 'steps-bar', id: 'steps', 'aria-label': 'Where this report stands'});

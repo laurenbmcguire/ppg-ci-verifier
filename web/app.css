@@ -1312,3 +1312,7 @@ details.fixedlog .checkme{color:#9a6a00;font-weight:600}
 .assignform select,.assignform input[type=text]{min-width:260px;max-width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;font:inherit}
 .assignform .check{display:flex;gap:6px;align-items:center}
 @media (max-width:600px){.assignform select,.assignform input[type=text]{min-width:0;width:100%}}
+.recrows{flex-basis:100%;margin-top:4px}
+.recrows table{border-collapse:collapse;width:100%;font-size:13px;margin-top:6px;display:block;overflow-x:auto}
+.recrows th,.recrows td{border-bottom:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
+.recrows small{color:#666}

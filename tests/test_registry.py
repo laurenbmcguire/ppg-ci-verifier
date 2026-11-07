@@ -107,3 +107,14 @@ class ManualAssignment(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SharePointListChoice(unittest.TestCase):
+    def test_pinned_list_wins_over_the_more_recently_modified_one(self):
+        from unittest.mock import patch
+        from hosting import sharepoint
+        sites = [('Hyundai_Montgomery', 'h', [dict(id=HY_LIST, displayName='Data #2207', lastModifiedDateTime='2026-11-07T10:00:00Z')]),
+                 ('SLAlabama_AlexanderCity', 's', [dict(id=SL_LIST, displayName='Data #2207', lastModifiedDateTime='2026-11-01T10:00:00Z')])]
+        with patch('hosting.sharepoint.client_sites', return_value=sites):
+            name, _, lst = sharepoint._find_list('2207')
+        self.assertEqual((name, lst['id']), ('SLAlabama_AlexanderCity', SL_LIST))

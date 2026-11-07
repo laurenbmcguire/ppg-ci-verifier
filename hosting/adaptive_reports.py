@@ -711,6 +711,8 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
         findings_truncated=sum(finding.counts.values()) > MAX_FINDINGS, row_count=stats['rows'], cell_count=stats['cells'],
         internal_check_status='unverified' if not numeric else ('findings' if issues else 'no_findings_in_checks_performed'))
     result['_detail_records'] = detail  # internal, removed before saving
+    result['_export_records'] = [r for r in records if r['table_kind'] == 'source_copy' and not r['is_total']
+                                 and next((s_['role'] for s_ in sheets if s_['name'] == r['sheet']), None) == 'source_export']
     return result
 
 

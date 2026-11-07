@@ -149,6 +149,19 @@ _add('summary_part_mismatch summary_part_not_in_records summary_value_without_re
      'The summary sheet does not agree with the record rows it is meant to summarize.',
      'Recalculate the summary in Excel or correct the record rows; the totals use the record rows.', True)
 
+_add('client_not_settled client_unmatched',
+     'The report is not tied to one client and job for certain, so it could be filed or sent under the wrong client.',
+     'Choose the client and job on the report (Client line, Choose client and job); the choice is kept with your name and reason.', False)
+_add('record_set_ambiguous',
+     'It is not certain which sheet holds the records, so production could be over- or under-counted.',
+     'Confirm which sheet is the record set before approving.', False)
+_add('source_coverage_incomplete',
+     'Not all of the SharePoint list could be read (access, throttling or an unknown layout), so the report cannot be verified against it.',
+     'Run the SharePoint check again later, or ask an admin to fix access; approve anyway only with a reason.', False)
+_add('source_discrepancies',
+     'The report differs from the live SharePoint list.',
+     'Open each difference, check the SharePoint item, and correct the report or the list.', True)
+
 # ---------------------------------------------------------------- typos and formats
 _add('possible_identifier_typo possible_part_number_typo possible_defect_typo possible_condition_typo possible_auditor_typo',
      'This value looks almost the same as a more common one, so it may be a typing mistake that splits or hides a count.',

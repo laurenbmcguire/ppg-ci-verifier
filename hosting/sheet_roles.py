@@ -88,7 +88,9 @@ def attach_identity(sheet_rows, sheets, records):
             id_col = next((i for i, h in enumerate(heads) if h in ('source item id', 'sharepoint item id', 'list item id', 'item id', 'source id')), None)
             if id_col is None and sheet.get('role') == 'source_export':
                 id_col = next((i for i, h in enumerate(heads) if h == 'id'), None)
-            table['identity_columns'] = dict(url=url_col, item=id_col)
+            ver_col = next((i for i, h in enumerate(heads) if h in ('ui version string', 'version', 'item version')), None)
+            mod_col = next((i for i, h in enumerate(heads) if h == 'modified'), None)
+            table['identity_columns'] = dict(url=url_col, item=id_col, version=ver_col, modified=mod_col)
             for r in records:
                 if r['sheet'] != sheet['name'] or r['table'] != table['index']:
                     continue
@@ -101,6 +103,10 @@ def attach_identity(sheet_rows, sheets, records):
                 if id_col is not None and id_col < len(row):
                     item = _item_id(row[id_col]) or item
                 r['source'] = dict(site=site, list=lst, item=item) if item else None
+                if item and ver_col is not None and ver_col < len(row) and row[ver_col] not in (None, ''):
+                    r['source']['version'] = str(row[ver_col])
+                if item and mod_col is not None and mod_col < len(row) and row[mod_col] not in (None, ''):
+                    r['source']['modified'] = str(row[mod_col])
 
 
 def _key(r):

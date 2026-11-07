@@ -145,6 +145,37 @@ class SpreadsheetInbox:
             if comparison['status'] != 'match':
                 result['internal_check_status'] = 'findings'
             return self.save_check(db, result)
+    def source_reconcile(self, file_hash, snap, day):
+        """Compare the stored original (record rows and its own captured export) with a SharePoint snapshot, item by
+        item. Saved as a new check revision; the workbook is not changed and no correction is applied."""
+        from hosting import reconcile
+        from hosting.spreadsheets import report_and_export_records
+        with self.connect() as db:
+            original, raw = self._original(db, file_hash)
+        records, exports = report_and_export_records(original['filename'], raw)
+        found = reconcile.compare(day, records, exports, snap)
+        return self._update(file_hash, lambda r: r.update(source_reconciliation=found))
+    def holds(self, item, review=None):
+        """Why this report must stay on hold, beyond its open issues. hard=True cannot be overridden."""
+        out = []
+        try:
+            ctx = self.assignment_context()
+            a = self.assignment_for(item, review, ctx)
+            if a.get('status') in ('ambiguous', 'conflict'):   # more than one client fits: a person must choose
+                out.append(dict(code='client_not_settled', hard=True, text='Choose the client and job first: ' + ' '.join(a.get('evidence') or [])))
+            elif a.get('status') == 'unmatched' and ctx['snapshot']:   # without SharePoint's client lists there is nothing to match against
+                out.append(dict(code='client_unmatched', hard=False, text='No client list matches this report. ' + ' '.join(a.get('evidence') or [])))
+        except Exception:
+            out.append(dict(code='client_unmatched', hard=False, text='The client and job could not be worked out.'))
+        sel = item.get('dataset_selection') or {}
+        if sel.get('status') == 'ambiguous':
+            out.append(dict(code='record_set_ambiguous', hard=False, text='It is not certain which sheet holds the records. ' + ' '.join(sel.get('notes') or [])))
+        rec = item.get('source_reconciliation') or {}
+        if rec.get('status') == 'incomplete':
+            out.append(dict(code='source_coverage_incomplete', hard=False, text='The SharePoint snapshot was incomplete: ' + ' '.join((rec.get('coverage') or {}).get('notes') or [])))
+        elif rec.get('status') == 'discrepancies':
+            out.append(dict(code='source_discrepancies', hard=False, text=f'{len(rec.get("rows") or [])} difference(s) from SharePoint are open.'))
+        return out
     def record_lookup(self, file_hash, status, message, job=None, day=None):
         self.get(file_hash)
         with self.connect() as db:
@@ -202,6 +233,15 @@ class SpreadsheetInbox:
             raise ValueError('Type your name to approve the report.')
         rv = summarize(item, with_issues=False)
         must = (rv.get('counts') or {}).get('high', 0)
+        holds = self.holds(item, rv)
+        hard = [x for x in holds if x['hard']]
+        if hard:
+            raise ValueError(hard[0]['text'])
+        soft = [x for x in holds if not x['hard']]
+        if soft and not override:
+            raise ValueError(soft[0]['text'] + ' Resolve it first, or tick "Approve anyway" and say why in the note.')
+        if soft and override and not ' '.join(str(note or '').split()):
+            raise ValueError('Say why you are approving anyway in the note.')
         if must and not override:
             raise ValueError(f'{must} must-fix issue{"s are" if must != 1 else " is"} still open. Fix them first, or tick "Approve anyway".')
         newer = (item.get('fixes_applied') or [])
@@ -209,7 +249,8 @@ class SpreadsheetInbox:
             raise ValueError(f'A corrected copy of this report exists ("{newer[-1]["fixed_filename"]}"). Approve that version instead, or tick "Approve anyway".')
         record = dict(by=approver, note=' '.join(str(note or '').split())[:500], at=datetime.now(timezone.utc).isoformat(),
                       status=rv['status'], open_must_fix=must, open_to_check=(rv['counts'].get('medium', 0) + rv['counts'].get('low', 0)),
-                      overridden=bool(must and override), filename=item['filename'], version=item.get('version'))
+                      overridden=bool((must or soft) and override), holds_overridden=[x['code'] for x in soft],
+                      filename=item['filename'], version=item.get('version'))
         def change(r):
             r['approval'] = record
             if (r.get('review_request') or {}).get('status') in ('waiting', 'sent_back'):

@@ -260,7 +260,12 @@ def _find_list(job, opener=None):
                 near.append((name, site_id, lst))
     # The same job list can exist on two sites (e.g. SL Alabama's Alexander City site and the Hyundai Montgomery
     # site). The one the tablets are writing to is the one changed most recently.
+    from hosting import registry
+    pinned = {e['list_id'] for e in registry.SEED if e.get('list_id') and not e.get('separate') and e.get('job') and registry._same_job(job, e['job'])}
     for found in (exact, near):
+        hit = [f for f in found if f[2].get('id') in pinned]
+        if hit:   # the verified registry decides between two sites with the same job label
+            return hit[0]
         if found:
             return max(found, key=lambda f: f[2].get('lastModifiedDateTime') or '')
     return None
@@ -299,6 +304,10 @@ def _item_day(item, schedule=None):
     evening before belongs to that earlier day."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
+    from hosting.reconcile import is_local_midnight, business_day
+    business = (item.get('fields') or {}).get('Date')
+    if business and is_local_midnight(business):   # the date-only business Date wins over scan / submission times
+        return business_day(business, True)
     if schedule:
         from hosting.shifts import local_time, assign
         local = local_time(_stamp(item))
