@@ -15,6 +15,7 @@ is converted to America/Chicago before the date is taken, never cut from the UTC
 and Modified times are only used when a list has no business date, and the result says so.
 """
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -160,17 +161,17 @@ def snapshot(site_name, list_id, opener=None, schedule=None):
     snap['list'] = dict(id=lst.get('id'), name=lst.get('displayName'), url=lst.get('webUrl'), modified=lst.get('lastModifiedDateTime'))
     status, cols = _fetch(f'/sites/{site_id}/lists/{list_id}/columns?$select=name,displayName,hidden,readOnly,dateTime&$top=500', opener)
     columns = {c['name']: c for c in (cols or {}).get('value', [])} if status == 200 else {}
-    qty_cols = {}
+    # Lists often keep old, unused columns next to the ones the tablets fill (QtyInspected and Quantity, QtyRejected and
+    # NOKQty). Every candidate is read, and the column that actually holds values is used for each quantity.
+    candidates = {}
     for name, c in columns.items():
         if c.get('hidden'):
             continue
         f = field_for_header(c.get('displayName') or '') or field_for_header(header_text(name))
-        if f and f not in qty_cols:
-            qty_cols[f] = name
-    snap['quantity_columns'] = qty_cols
-    if 'inspected' not in qty_cols:
-        cov['unknown_schema'] = True
-        cov['notes'].append('No inspected-quantity column was recognized in this list.')
+        if not f and _bare_quantity(c.get('displayName') or name):
+            f = 'inspected'
+        if f:
+            candidates.setdefault(f, []).append(name)
     url = f'/sites/{site_id}/lists/{list_id}/items?$expand=fields&$top={PAGE_SIZE}'
     base = (lst.get('webUrl') or '').rstrip('/')
     while url:
@@ -190,14 +191,31 @@ def snapshot(site_name, list_id, opener=None, schedule=None):
                 modified=it.get('lastModifiedDateTime'), created=it.get('createdDateTime'),
                 url=it.get('webUrl') or (f'{base}/DispForm.aspx?ID={it.get("id")}' if base else None),
                 day=day, day_basis=basis, identifier=f.get('Identifier') or f.get('Title'),
-                values={q: _num(f.get(col)) for q, col in qty_cols.items()}, blank={q: f.get(col) in (None, '') for q, col in qty_cols.items()}))
+                raw={col: f.get(col) for cols in candidates.values() for col in cols}))
         cov['items'] = len(snap['items'])
         if len(snap['items']) >= MAX_ITEMS:
             cov['truncated'] = True; cov['notes'].append(f'Stopped at {MAX_ITEMS} items.'); break
         url = page.get('@odata.nextLink')
     if url is None and not (cov['denied'] or cov['throttled'] or cov['failed_pages'] or cov['truncated']):
         cov['complete'] = True
+    qty_cols = {}
+    for f, cols in candidates.items():   # the candidate filled on the most items (the first one on a tie)
+        qty_cols[f] = max(cols, key=lambda col: (sum(1 for it in snap['items'] if it['raw'].get(col) not in (None, '')), -cols.index(col)))
+    for it in snap['items']:
+        raw = it.pop('raw')
+        it['values'] = {q: _num(raw.get(col)) for q, col in qty_cols.items()}
+        it['blank'] = {q: raw.get(col) in (None, '') for q, col in qty_cols.items()}
+    snap['quantity_columns'] = qty_cols
+    snap['quantity_candidates'] = candidates
+    if 'inspected' not in qty_cols:
+        cov['unknown_schema'] = True
+        cov['notes'].append('No inspected-quantity column was recognized in this list.')
     return snap
+
+
+def _bare_quantity(name):
+    from hosting.adaptive_reports import header_text
+    return re.sub(r'[^a-z]', '', str(header_text(name)).lower()) in ('quantity', 'qty')
 
 
 def _num(v):

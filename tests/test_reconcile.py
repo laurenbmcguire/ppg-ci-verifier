@@ -75,6 +75,18 @@ class Coverage(unittest.TestCase):
         self.assertTrue(r['coverage']['unknown_schema'])
 
 
+class ColumnChoice(unittest.TestCase):
+    def test_the_column_the_tablets_fill_is_used_not_an_empty_legacy_one(self):
+        cols = COLS + [dict(name='QtyInspected', displayName='Qty Inspected'), dict(name='Quantity', displayName='Quantity')]
+        items = []
+        for it in ALL:
+            f = dict(it['fields']); f['Quantity'] = f.pop('QuantityInspected'); f['QtyInspected'] = None
+            items.append(dict(it, fields=f))
+        s = snap([items], columns=[c for c in cols if c['name'] != 'QuantityInspected'])
+        self.assertEqual(s['quantity_columns']['inspected'], 'Quantity')
+        self.assertEqual(run(sl_daily(), s)['status'], 'verified')
+
+
 class Differences(unittest.TestCase):
     def test_value_difference_is_listed_with_link_and_a_proposal_not_applied(self):
         items = list(ALL); items[1] = sp_item(433, inspected=72)
