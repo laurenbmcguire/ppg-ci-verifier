@@ -162,6 +162,13 @@ _add('source_discrepancies',
      'The report differs from the live SharePoint list.',
      'Open each difference, check the SharePoint item, and correct the report or the list.', True)
 
+_add('photo_link_inaccessible',
+     'A photo link points to a file on one computer (or a non-secure address), so the client and reviewers cannot open it.',
+     'Replace it with the SharePoint link to the photo, or embed the picture.', True)
+_add('photo_missing',
+     'A picture in the report points to an image that is not inside the file, so it shows as blank.',
+     'Insert the photo again from SharePoint; never use a sample picture.', True)
+
 # ---------------------------------------------------------------- typos and formats
 _add('possible_identifier_typo possible_part_number_typo possible_defect_typo possible_condition_typo possible_auditor_typo',
      'This value looks almost the same as a more common one, so it may be a typing mistake that splits or hides a count.',

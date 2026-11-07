@@ -73,10 +73,12 @@ class SpreadsheetInbox:
             found = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (file_hash,)).fetchone()
             if found:
                 old=self.latest(db,file_hash,json.loads(found['result_json']))
-                if old.get('checker_version')==CHECKER_VERSION:return dict(old,idempotent=True)
-                result.update({k:old[k] for k in ('file_hash','filename','version','original_path','received_at')})
-                result.update(finding_count=sum(result.get('finding_counts',{}).values()),sheet_count=len(result['sheets']))
-                return dict(self.save_check(db,result),idempotent=True,rechecked=True)
+                # The identical file is already stored: never a second copy, and never silently re-checked.
+                out=dict(old,idempotent=True,duplicate=True)
+                if old.get('checker_version')!=CHECKER_VERSION:
+                    out.update(internal_check_status='outdated_checks_require_recheck',
+                               recheck=dict(available=True, checked_with=old.get('checker_version'), current=CHECKER_VERSION))
+                return out
             version = db.execute('SELECT COALESCE(MAX(version),0)+1 FROM spreadsheets WHERE filename=?', (filename,)).fetchone()[0]
             suffix = '.xlsx' if filename.lower().endswith('.xlsx') else '.csv'
             relative = 'uploads/' + file_hash + suffix
@@ -105,6 +107,11 @@ class SpreadsheetInbox:
         if not isinstance(sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', sha256):
             raise ValueError('A SHA-256 of the complete file is required.')
         chunks = files_for(self.root).take_parts(upload_id)
+        if not chunks:   # a retried "finish" after the first one already saved the file: answer with what is stored
+            with self.connect() as db:
+                found = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (sha256,)).fetchone()
+                if found:
+                    return dict(self.latest(db, sha256, json.loads(found['result_json'])), idempotent=True, duplicate=True)
         if len(chunks) != part_count:
             raise ValueError(f'Upload incomplete: {len(chunks)} of {part_count} parts arrived. Nothing was saved; upload the file again.')
         raw = b''.join(chunks)
@@ -665,7 +672,13 @@ class SpreadsheetInbox:
         with self.connect() as db:
             rows = db.execute('SELECT result_json FROM spreadsheets ORDER BY seq DESC LIMIT 100').fetchall()
             count = db.execute('SELECT COUNT(*) FROM spreadsheets').fetchone()[0]
-            results = [self.latest(db,json.loads(row['result_json'])['file_hash'],json.loads(row['result_json'])) for row in rows]
+            results = []
+            for stored in rows:   # one unreadable report never empties the whole list
+                base = json.loads(stored['result_json'])
+                try:
+                    results.append(self.latest(db, base['file_hash'], base))
+                except Exception:
+                    results.append(dict(base, internal_check_status='could_not_load_latest_check'))
         for result in results:
             if result.get('checker_version')!=CHECKER_VERSION:
                 result['internal_check_status']='outdated_checks_require_recheck'
@@ -692,27 +705,79 @@ class SpreadsheetInbox:
                 'count': count, 'limit':100, 'has_more': count > 100,
                 'notice':'Mapped checks and optional separately supplied source comparisons. No source authentication, business approval or release.'}
     def get(self, file_hash):
+        """The stored result. A result made by an older checker is returned as it is, marked outdated: new checks
+        are only shown as a proposal (propose_recheck) and saved when a person applies them (apply_recheck)."""
         with self.connect() as db:
             found = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (file_hash,)).fetchone()
             if not found: raise ValueError('Spreadsheet version not found.')
             result=self.latest(db,file_hash,json.loads(found['result_json']))
         if result.get('checker_version')!=CHECKER_VERSION:
-            suffix='.xlsx' if result['filename'].lower().endswith('.xlsx') else '.csv'
-            raw=files_for(self.root).get('uploads/'+file_hash+suffix)
-            if hashlib.sha256(raw).hexdigest()!=file_hash:raise ValueError('Stored original integrity mismatch.')
-            previous=result.get('sharepoint') or {}
-            keep={k:result[k] for k in ('approval','sent','fixes_applied','fixed_from','review_request','source_document','accepted_issues','auto_formatting','ai_fixed') if result.get(k)}
-            fresh=self.ingest(result['filename'],raw)
-            if keep:
-                fresh=self._update(file_hash,lambda r:r.update(keep))
-            if previous.get('status') in ('match','differences') and previous.get('source_sha256'):
-                # Re-run the last SharePoint comparison with the stored export so it reflects the new checks.
-                name=previous.get('source_filename') or 'export.csv'
-                stored=files_for(self.root).get('uploads/'+previous['source_sha256']+('.xlsx' if name.lower().endswith('.xlsx') else '.csv'))
-                meta={k:previous[k] for k in ('origin','source_label','site','path','web_url','modified','job','day') if k in previous}
-                return self.compare_source(file_hash,name,stored,meta)
-            return fresh
+            result=dict(result, internal_check_status='outdated_checks_require_recheck',
+                        recheck=dict(available=True, checked_with=result.get('checker_version'), current=CHECKER_VERSION))
         return result
+    RECHECK_KEEP = ('approval','sent','fixes_applied','fixed_from','review_request','source_document','accepted_issues','auto_formatting','ai_fixed',
+                    'source_reconciliation','approval_withdrawn','recheck_applied')
+    def _fresh_checks(self, file_hash):
+        with self.connect() as db:
+            original, raw = self._original(db, file_hash)
+            current = dict(self.latest(db, file_hash, original))
+        fresh = inspect_spreadsheet(original['filename'], raw)
+        fresh.update({k: original[k] for k in ('file_hash','filename','version','original_path','received_at')})
+        fresh.update(finding_count=sum(fresh.get('finding_counts',{}).values()), sheet_count=len(fresh.get('sheets',[])))
+        return current, fresh
+    def propose_recheck(self, file_hash):
+        """What the current checker would change on this report, without saving anything to the report."""
+        from hosting.review_summary import summarize
+        current, fresh = self._fresh_checks(file_hash)
+        def facts(r):
+            rv = summarize(r, with_issues=False)
+            try:
+                a = self.assignment_for(r, rv)
+            except Exception:
+                a = {}
+            t = r.get('totals') or {}
+            return dict(checker_version=r.get('checker_version'), record_count=r.get('record_count'),
+                        inspected=(t.get('inspected') or {}).get('total'), certified=(t.get('certified') or {}).get('total'),
+                        rejected=(t.get('rejected') or {}).get('total'), finding_count=r.get('finding_count'),
+                        job=rv.get('job'), day=rv.get('day'), client=a.get('client'), assignment=a.get('label'), assignment_status=a.get('status'),
+                        authoritative=(r.get('dataset_selection') or {}).get('authoritative'),
+                        compared=(r.get('dataset_selection') or {}).get('compared'))
+        before, after = facts(current), facts(fresh)
+        changes = [dict(field=k, before=before[k], after=after[k]) for k in before if before[k] != after[k] and k != 'checker_version']
+        proposal = dict(file_hash=file_hash, filename=current.get('filename'), made_at=datetime.now(timezone.utc).isoformat(),
+                        before=before, after=after, changes=changes,
+                        selection=fresh.get('dataset_selection'), applied=False,
+                        note='Nothing on the report has changed. Apply only after reviewing these differences.')
+        self.set_setting(f'recheck_proposal|{file_hash}', proposal)
+        return proposal
+    def apply_recheck(self, file_hash, by):
+        """Save the current checker's results as a new revision of this report, keeping approvals, sends, fixes,
+        accepted issues and the reconciliation. The original upload and earlier revisions stay as they were."""
+        by = ' '.join(str(by or '').split())[:80]
+        if not by:
+            raise ValueError('Type your name to apply the new checks.')
+        current, fresh = self._fresh_checks(file_hash)
+        proposal = self.setting(f'recheck_proposal|{file_hash}', None)
+        keep = {k: current[k] for k in self.RECHECK_KEEP if current.get(k)}
+        if keep.get('source_reconciliation'):
+            keep['source_reconciliation'] = dict(keep['source_reconciliation'], stale=True, stale_reason='Made with the earlier checks; reconcile again.')
+        fresh.update(keep)
+        fresh['recheck_applied'] = (current.get('recheck_applied') or []) + [dict(
+            by=by, at=datetime.now(timezone.utc).isoformat(), from_version=current.get('checker_version'), to_version=fresh.get('checker_version'),
+            from_check=current.get('check_hash'), changes=(proposal or {}).get('changes'))]
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            saved = self.save_check(db, fresh)
+        previous = current.get('sharepoint') or {}
+        if previous.get('status') in ('match','differences') and previous.get('source_sha256'):
+            # Re-run the last SharePoint comparison with the stored export so it reflects the new checks.
+            name=previous.get('source_filename') or 'export.csv'
+            stored=files_for(self.root).get('uploads/'+previous['source_sha256']+('.xlsx' if name.lower().endswith('.xlsx') else '.csv'))
+            meta={k:previous[k] for k in ('origin','source_label','site','path','web_url','modified','job','day') if k in previous}
+            saved = self.compare_source(file_hash,name,stored,meta)
+        if proposal:
+            self.set_setting(f'recheck_proposal|{file_hash}', dict(proposal, applied=True, applied_by=by))
+        return saved
     def latest(self,db,file_hash,fallback):
         row=db.execute('SELECT result_json FROM spreadsheet_checks WHERE file_hash=? ORDER BY seq DESC LIMIT 1',(file_hash,)).fetchone()
         return json.loads(row['result_json']) if row else fallback

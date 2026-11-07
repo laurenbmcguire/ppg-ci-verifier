@@ -155,7 +155,7 @@ class InboxCompareTests(unittest.TestCase):
             item = inbox.ingest('r.xlsx', build())
             inbox.compare_source(item['file_hash'], '2230-OWENS-BASCO 2026-10-07.csv', source_csv(), {'origin': 'sharepoint', 'site': 'BriggsStratton_Auburn'})
             with patch('hosting.spreadsheet_inbox.CHECKER_VERSION', 'future-version'), patch('hosting.spreadsheets.CHECKER_VERSION', 'future-version'):
-                again = inbox.get(item['file_hash'])
+                again = inbox.apply_recheck(item['file_hash'], 'Chris')
             self.assertEqual(again['checker_version'], 'future-version')
             self.assertEqual(again['sharepoint']['status'], 'match')
             self.assertEqual(again['sharepoint']['site'], 'BriggsStratton_Auburn')

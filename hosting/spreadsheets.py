@@ -20,7 +20,7 @@ MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 MAX_FINDINGS = 200
-CHECKER_VERSION = '2026-11-07-recorded-rejects-v10'
+CHECKER_VERSION = '2026-11-07-one-record-set-v11'
 
 
 class SpreadsheetError(ValueError):
@@ -194,6 +194,43 @@ def _cached_rows(raw):
 
 
 def inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) -> dict:
+    result = _inspect_spreadsheet(filename, raw, keep_records)
+    if isinstance(filename, str) and filename.lower().endswith('.xlsx'):
+        try:
+            _attach_photos(result, raw)
+        except Exception:
+            result.setdefault('limitations', []).append('Embedded photos could not be listed for this file.')
+    return result
+
+
+def _attach_photos(result, raw):
+    from hosting import photos
+    sources = [(title, list(it)) for title, it in _xlsx_rows(raw, [])]
+    inv = photos.inventory(raw, sources, result.get('dataset_selection'))
+    if not inv['image_count'] and not inv['links']:
+        return
+    result['photos'] = inv
+    added = Counter()
+    for link in inv['inaccessible_links']:
+        added['photo_link_inaccessible'] += 1
+        if len(result['findings']) < MAX_FINDINGS:
+            result['findings'].append(dict(code='photo_link_inaccessible', sheet=link['sheet'], row=int(re.sub(r'\D', '', link['cell']) or 0) or None,
+                                           column=None, message=f'{link["cell"]}: "{link["link"][:80]}" only works on one computer, not for the client.'))
+    for p in inv['images']:
+        if p.get('missing'):
+            added['photo_missing'] += 1
+            if len(result['findings']) < MAX_FINDINGS:
+                result['findings'].append(dict(code='photo_missing', sheet=p['sheet'], row=p.get('row'), column=None,
+                                               message=f'A picture at {p.get("cell")} points to an image that is not in the file.'))
+    if added:
+        merged = dict(result.get('finding_counts') or {})
+        for code, n in added.items():
+            merged[code] = merged.get(code, 0) + n
+        result['finding_counts'] = merged
+        result['finding_count'] = sum(merged.values())
+
+
+def _inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) -> dict:
     """Return internal checks only; rejects unsafe input with SpreadsheetError.
 
     A successful parse is not source authentication, external reconciliation, or

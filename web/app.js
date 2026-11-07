@@ -107,9 +107,14 @@
   }
 
   // ---------------------------------------------------------------- queue
+  // An empty inventory and a failed or refused inventory request look different: a failure never says "No reports yet".
   async function loadList() {
-    const data = await api('/api/spreadsheets');
+    let data;
+    try { data = await api('/api/spreadsheets'); }
+    catch (e) { state.listError = e.message || 'The report list could not be loaded.'; state.list ||= []; drawQueue(); drawClientTabs(); throw e; }
+    state.listError = null;
     state.list = data.spreadsheets || [];
+    state.listTotal = data.count;
     drawQueue(); drawClientTabs();
   }
   // an upload the app cleaned automatically is shown once: as its cleaned copy (the original opens from that report)
@@ -128,6 +133,12 @@
     const todo = shown.filter(r => r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
     document.title = (todo ? `(${todo}) ` : '') + 'PPG Verifier';
     const list = $('queue-list'); list.replaceChildren();
+    if (state.listError) {
+      list.append(h('div', {class: 'listerror', role: 'alert'}, h('b', {}, 'The report list could not be loaded.'),
+        h('span', {}, ` ${state.listError} Saved reports are not affected; this is a loading problem, not an empty list. `),
+        h('button', {type: 'button', class: 'linkish', onclick: () => loadList().catch(() => {})}, 'Try again')));
+      if (!state.list.length) return;
+    }
     const client = (state.clients || []).find(c => c.key === state.client);
     if (client) {
       list.append(h('div', {class: 'clienthead'}, h('b', {}, client.client),
@@ -437,6 +448,30 @@
       last ? h('span', {class: 'spjob-recs'}, `Changed by ${last.by} ${ago(last.at)}${last.reason ? ` (“${last.reason}”)` : ''}`) : null,
       h('button', {type: 'button', class: 'btn small', onclick: e => assignForm(r, e.target)}, ok ? 'Change' : 'Choose client and job'));
   }
+  // Checked with an older version of the checker: show what the new checks would change, apply only on request.
+  function recheckLine(r) {
+    if (!r.recheck?.available) return null;
+    const box = h('div', {class: 'spjob warn', id: 'recheckline'}, h('span', {class: 'spjob-tag'}, 'Older checks'),
+      h('span', {}, 'These results were made by an earlier version of the checker. Nothing changes until you apply the new checks.'),
+      h('button', {type: 'button', class: 'btn small', onclick: async e => {
+        e.target.disabled = true;
+        try {
+          const {proposal: p} = await api('/api/spreadsheets/recheck', {file_hash: r.file_hash});
+          const show = v => v == null ? 'not recorded' : Array.isArray(v) ? v.join(', ') : String(v);
+          const NAMES = {record_count: 'Records', inspected: 'Inspected', certified: 'OK', rejected: 'Rejected', finding_count: 'Issues', job: 'Job', day: 'Business date',
+                         client: 'Client', assignment: 'Client → Job → Date', assignment_status: 'How the client was decided', authoritative: 'Counted sheet', compared: 'Compared, not counted'};
+          box.append(h('div', {class: 'recrows'}, p.changes.length
+            ? h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'What'), h('th', {}, 'Now'), h('th', {}, 'With the new checks'))),
+                h('tbody', {}, ...p.changes.map(c => h('tr', {}, h('td', {}, NAMES[c.field] || c.field), h('td', {}, show(c.before)), h('td', {}, show(c.after))))))
+            : h('p', {}, 'The new checks give the same numbers and client.'),
+            h('button', {type: 'button', class: 'btn primary', onclick: async ev => {
+              ev.target.disabled = true;
+              try { await api('/api/spreadsheets/recheck', {file_hash: r.file_hash, apply: true, by: myName() || null}); await openReport(r.file_hash, true); await loadList(); toast('New checks applied. The original file and earlier results are kept.'); }
+              catch (err) { toast(err.message, true); ev.target.disabled = false; } }}, 'Apply the new checks')));
+          e.target.remove();
+        } catch (err) { toast(err.message, true); e.target.disabled = false; } }}, 'Preview the new checks'));
+    return box;
+  }
   // Why the report stays on hold beyond its issues (client not settled, record set unclear, SharePoint coverage or differences).
   function holdLine(r) {
     const hs = r.holds || []; if (!hs.length) return null;
@@ -608,7 +643,7 @@
         h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, r.fixed_from ? 'Download fixed version' : 'Download report'),
         h('button', {type: 'button', class: 'btn primary send-btn', id: 'send-btn', onclick: openSend}, sendLabel(r))));
     const status = h('div', {class: 'rstatus'},
-      assignmentLine(r), holdLine(r), reconcileLine(r), spJobLine(r), docBanner(r), fixedLog(r),
+      recheckLine(r), assignmentLine(r), holdLine(r), reconcileLine(r), spJobLine(r), docBanner(r), fixedLog(r),
       h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
       h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
     const steps = h('ol', {class: 'steps-bar', id: 'steps', 'aria-label': 'Where this report stands'});
