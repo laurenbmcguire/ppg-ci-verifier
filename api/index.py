@@ -581,6 +581,33 @@ class handler(BaseHTTPRequestHandler):
                 safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', rec.get('filename') or 'Change summary.pdf')[:180]
                 disp = 'inline' if parse_qs(urlsplit(self.path).query).get('view') == ['1'] else 'attachment'
                 return self.send(200, pdf, 'application/pdf', {'Content-Disposition': f'{disp}; filename="{safe}"'})
+            if route == '/api/spreadsheets/download-photos':   # a copy with each record's SharePoint photos; the original is unchanged
+                file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
+                if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
+                from hosting import photo_embed, registry, sharepoint
+                from hosting.review_summary import summarize
+                if not sharepoint.configured():
+                    raise Conflict('SharePoint is not connected, so the photos cannot be fetched.')
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    found = inbox.get(file_hash)
+                    a = inbox.assignment_for(found, summarize(found, with_issues=False))
+                    filename, raw = inbox.download(file_hash)
+                if not filename.lower().endswith('.xlsx'):
+                    raise Conflict('Photos can only be added to Excel (.xlsx) reports.')
+                if a['status'] not in registry.RESOLVED or not a.get('site') or not a.get('list_id'):
+                    raise Conflict('Choose the client and job first, so the photos come from the right SharePoint list.')
+                try:
+                    name, data, info = photo_embed.build(filename, raw, a['site'], a['list_id'])
+                except photo_embed.PhotoError as exc:
+                    raise Conflict(str(exc))
+                safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', name)[:180]
+                return self.send(200, data, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                 {'Content-Disposition': f'attachment; filename="{safe}"', 'X-Photos-Embedded': str(info['embedded']),
+                                  'X-Photos-Missing': str(info['missing']), 'X-Photos-Records': str(info['with_photos']), 'X-Photos-Tab': info['tab']})
             if route == '/api/spreadsheets/download':
                 file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
                 if not re.fullmatch(r'[0-9a-f]{64}', file_hash):

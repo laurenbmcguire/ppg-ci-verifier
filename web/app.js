@@ -632,6 +632,7 @@
         !r.approval && (r.review_request || {}).status !== 'waiting' ? h('button', {type: 'button', onclick: e => { close(e); reviewForm('request'); }}, 'Send for review') : null,
         h('button', {type: 'button', onclick: e => { close(e); copyClientSummary(); }}, 'Copy client summary for an email'),
         h('button', {type: 'button', onclick: e => { close(e); makeChangeSummary(); }}, 'Change summary (PDF)'),
+        r.filename.toLowerCase().endsWith('.xlsx') ? h('button', {type: 'button', onclick: e => { close(e); downloadWithPhotos(r); }}, 'Download with SharePoint photos') : null,
         h('a', {href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename, onclick: close}, 'Download the original file')));
     const head = h('div', {class: 'rhead'},
       h('button', {type: 'button', class: 'back', onclick: () => { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }}, state.client ? `‹ ${clientName()} reports` : '‹ All reports'),
@@ -1279,6 +1280,19 @@
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
     const accepted = (state.fixes || []).filter(f => !edits[editId(f.sheet, f.cell)] && dec[f.id]?.state === 'accepted');
     return {accepted, dec, edits, total: accepted.length + Object.keys(edits).length};
+  }
+  // A copy of the report with each record's label and defect photos pulled from SharePoint (original unchanged).
+  async function downloadWithPhotos(r) {
+    toast('Getting the photos from SharePoint…');
+    try {
+      const res = await fetch('/api/spreadsheets/download-photos?id=' + r.file_hash);
+      if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || `The server answered ${res.status}.`); }
+      const blob = await res.blob();
+      const name = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || r.filename.replace(/\.xlsx$/i, ' (with photos).xlsx');
+      const a = h('a', {href: URL.createObjectURL(blob), download: name}); document.body.append(a); a.click(); a.remove();
+      const got = res.headers.get('X-Photos-Embedded'), miss = Number(res.headers.get('X-Photos-Missing') || 0);
+      toast(`Downloaded with ${got} photo${got === '1' ? '' : 's'} on the "${res.headers.get('X-Photos-Tab') || 'Defect Photos'}" tab.` + (miss ? ` ${miss} photo${miss === 1 ? '' : 's'} could not be read; the tab says which.` : ''));
+    } catch (e) { toast(e.message, true); }
   }
   function downloadWithChanges() {
     const c = readyChanges();
