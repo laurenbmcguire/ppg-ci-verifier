@@ -23,7 +23,7 @@ class ApiTests(unittest.TestCase):
         from legacy_storage_fake import PostgresWorkspace
         from test_vercel import FakeDatabase
         sharepoint._token.update(value=None, expires=0)
-        self.env = patch.dict(os.environ, dict(ENV, CI_LOCAL_DEV='1', VERCEL='0')); self.env.start()
+        self.env = patch.dict(os.environ, dict(ENV, CI_LOCAL_DEV='1', VERCEL='0', PPG_AUTOFORMAT_ON_UPLOAD='1')); self.env.start()   # opt-in cleanup is covered here
         os.environ.pop('ANTHROPIC_API_KEY', None)
         self.fake = FakeMail()
         self.graph = patch('hosting.sharepoint._open', lambda request, opener=None: self.fake(request)); self.graph.start()
@@ -54,6 +54,22 @@ class ApiTests(unittest.TestCase):
                 return r.status, (data if raw else json.loads(data))
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
+
+    def test_large_upload_in_parts(self):
+        import hashlib
+        made = self.app('/api/keys/create', {'name': 'Big files'}); key = made['key']['key']
+        raw = seeded(); digest = hashlib.sha256(raw).hexdigest()
+        status, start = self.call('POST', '/api/v1/uploads', {}, key)
+        self.assertEqual(status, 201); uid, size = start['upload_id'], start['part_size']
+        self.assertEqual(start['max_bytes'], 50 * 1024 * 1024)
+        pieces = [raw[:len(raw) // 2], raw[len(raw) // 2:]]
+        for n, piece in enumerate(pieces):
+            st, _ = self.call('POST', f'/api/v1/uploads/{uid}/parts/{n}', {'content_base64': base64.b64encode(piece).decode()}, key)
+            self.assertEqual(st, 200)
+        status, rep = self.call('POST', f'/api/v1/uploads/{uid}/finish', {'filename': NAME, 'part_count': 2, 'sha256': digest}, key)
+        self.assertEqual(status, 201, rep); self.assertEqual(rep['job'], '2230-OWENS-BASCO')
+        st, bad = self.call('POST', f'/api/v1/uploads/{uid}/finish', {'filename': NAME, 'part_count': 30, 'sha256': digest}, key)
+        self.assertEqual(st, 400); self.assertIn('50 MB', bad['error'] if 'error' in bad else json.dumps(bad))
 
     def test_full_flow(self):
         status, idx = self.call('GET', '/api/v1')

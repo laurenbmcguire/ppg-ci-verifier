@@ -20,7 +20,10 @@ STATUS_LABEL = {'hold': 'Hold: must be fixed', 'check': 'Check: items to look at
 ENDPOINTS = [
     ('GET', '/api/v1', 'This list. No key needed.'),
     ('GET', '/api/v1/reports', 'Latest 100 reports with status. Optional ?status=hold|check|clear&job=...'),
-    ('POST', '/api/v1/reports', 'Upload a report: {"filename": "...xlsx", "content_base64": "..."} (up to 4 MB). Runs every check (SharePoint, usual day, AI when on) and returns the result.'),
+    ('POST', '/api/v1/reports', 'Upload a report: {"filename": "...xlsx", "content_base64": "..."} (up to 4 MB in one request). Runs every check (SharePoint, usual day, AI when on) and returns the result. Nothing in the report is changed.'),
+    ('POST', '/api/v1/uploads', 'Start a large upload (up to 50 MB): returns {"upload_id", "part_size"}.'),
+    ('POST', '/api/v1/uploads/{upload_id}/parts/{n}', 'Send part n (0, 1, 2...) of the file: {"content_base64": "..."}, each part at most part_size bytes before base64.'),
+    ('POST', '/api/v1/uploads/{upload_id}/finish', 'Put the parts together and check the report: {"filename": "...xlsx", "part_count": N, "sha256": "<hex SHA-256 of the whole file>"}. Same result as POST /api/v1/reports.'),
     ('GET', '/api/v1/vins?q=...', 'Which reports a VIN or identifier is in (full or partial, at least 4 characters).'),
     ('POST', '/api/v1/build', 'Build the end-of-shift report from SharePoint: {"job": "SLAL-HYMOBAL-2221", "day": "YYYY-MM-DD" (default today, plant time), "force": false}. Each scan goes on the shift its scan time falls in. Waits until 45 minutes after the last scan unless force is true. The report is saved and checked like an upload; nothing is sent.'),
     ('GET', '/api/v1/nexus?job=...&day=...', 'The day split into Nexus shifts by plant-time window (Shift 1 6:00a-2:30p, Shift 2 2:30p-10:30p, Shift 3 10:00p-6:30a): scans, inspected, rejected, certified.'),
@@ -143,30 +146,77 @@ def op_list(h, status=None, job=None):
     return dict(reports=rows, count=len(rows))
 
 
+PART_SIZE = 3 * 1024 * 1024
+
+
+def _b64(content):
+    try:
+        return base64.b64decode(content, validate=True)
+    except (ValueError, TypeError):
+        raise ApiError(400, '"content_base64" is not valid base64.') from None
+
+
 def op_upload(h, name, content):
     if not isinstance(name, str) or not isinstance(content, str):
         raise ApiError(400, 'Send "filename" and "content_base64".')
-    try:
-        raw = base64.b64decode(content, validate=True)
-    except ValueError:
-        raise ApiError(400, '"content_base64" is not valid base64.') from None
+    raw = _b64(content)
     if len(raw) > MAX_UPLOAD:
-        raise ApiError(413, 'Reports up to 4 MB can be uploaded here.')
+        raise ApiError(413, 'Up to 4 MB fits in one request. For bigger reports (up to 50 MB) use POST /api/v1/uploads and send the file in parts.')
     with h.store().session() as directory:
-        item = SpreadsheetInbox(directory).ingest(name, raw)
+        try:
+            item = SpreadsheetInbox(directory).ingest(name, raw)
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from None
+    return _checked(h, item)
+
+
+def _checked(h, item):
+    """Run the checks on a new upload. Nothing in the report is changed: the person decides every fix."""
+    import os
     if item.get('idempotent') and item.get('auto_formatted_to'):   # the same file again: point at its cleaned copy
         item = dict(_get(h, item['auto_formatted_to']), idempotent=True)
     if not item.get('idempotent'):
         _after_change(h, item['file_hash'], ('sharepoint', 'baseline'))
-        from hosting import autoformat
-        try:
-            cleaned = autoformat.run(h, item['file_hash'])   # formatting-only fixes are made automatically
-        except Exception:
-            cleaned = None
-        if cleaned:
-            item = cleaned
+        if os.environ.get('PPG_AUTOFORMAT_ON_UPLOAD') == '1':
+            from hosting import autoformat
+            try:
+                cleaned = autoformat.run(h, item['file_hash'])
+            except Exception:
+                cleaned = None
+            if cleaned:
+                item = cleaned
         _after_change(h, item['file_hash'], ('ai',))
     return bool(item.get('idempotent')), dict(report(_get(h, item['file_hash'])), already_uploaded=bool(item.get('idempotent')))
+
+
+def op_upload_start():
+    import secrets
+    return dict(upload_id=secrets.token_hex(16), part_size=PART_SIZE, max_bytes=SpreadsheetInbox.MAX_FILE_BYTES)
+
+
+def op_upload_part(h, upload_id, index, content):
+    if not re.fullmatch(r'[0-9a-f]{32}', upload_id or ''):
+        raise ApiError(400, 'Unknown upload_id. Start with POST /api/v1/uploads.')
+    raw = _b64(content)
+    if len(raw) > PART_SIZE:
+        raise ApiError(413, f'Each part can be at most {PART_SIZE} bytes before base64.')
+    with h.store().session() as directory:
+        try:
+            out = SpreadsheetInbox(directory).store_part(upload_id, index, raw)
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from None
+    return dict(out, upload_id=upload_id)
+
+
+def op_upload_finish(h, upload_id, name, part_count, sha256):
+    if not re.fullmatch(r'[0-9a-f]{32}', upload_id or ''):
+        raise ApiError(400, 'Unknown upload_id. Start with POST /api/v1/uploads.')
+    with h.store().session() as directory:
+        try:
+            item = SpreadsheetInbox(directory).finish_upload(upload_id, name, part_count, sha256)
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from None
+    return _checked(h, item)
 
 
 def op_get(h, file_hash):
@@ -383,6 +433,16 @@ def handle(h, method, route, send):
         if path == '/api/v1/nexus' and method == 'GET':
             from urllib.parse import unquote_plus
             return send(200, op_nexus(h, unquote_plus(query.get('job', '')), query.get('day')))
+        if path == '/api/v1/uploads' and method == 'POST':
+            return send(201, op_upload_start())
+        m = re.fullmatch(r'/api/v1/uploads/([0-9a-f]{32})/(?:parts/(\d{1,5})|(finish))', path)
+        if m and method == 'POST':
+            if m.group(2) is not None:
+                data = _body(h, MAX_UPLOAD)
+                return send(200, op_upload_part(h, m.group(1), int(m.group(2)), data.get('content_base64')))
+            data = _body(h, 10000)
+            again, out = op_upload_finish(h, m.group(1), data.get('filename'), data.get('part_count'), data.get('sha256'))
+            return send(200 if again else 201, out)
         if path == '/api/v1/reports':
             if method == 'GET':
                 return send(200, op_list(h, query.get('status'), query.get('job', '').replace('%20', ' ') or None))

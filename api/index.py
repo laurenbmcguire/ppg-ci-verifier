@@ -1246,12 +1246,22 @@ class handler(BaseHTTPRequestHandler):
                                                            ai_on=ai_review_configured(), sharepoint_on=sharepoint_configured())))
                 if route == '/api/periods/check-file':
                     name, content = payload.get('filename'), payload.get('content_base64')
-                    if not isinstance(name, str) or not isinstance(content, str):
+                    if not isinstance(name, str) or not (isinstance(content, str) or isinstance(payload.get('upload_id'), str)):
                         raise Conflict('Choose a weekly or monthly report file.')
-                    try:
-                        file_raw = base64.b64decode(content, validate=True)
-                    except ValueError:
-                        raise Conflict('The file could not be read.')
+                    if isinstance(payload.get('upload_id'), str):   # sent in parts (files up to 50 MB)
+                        if not re.fullmatch(r'[0-9a-f]{32}', payload['upload_id']) or type(payload.get('part_count')) is not int or not 0 < payload['part_count'] <= 20:
+                            raise Conflict('The file could not be read. Try again.')
+                        with self.store().session() as directory:
+                            from hosting.files import files_for
+                            chunks = files_for(directory).take_parts(payload['upload_id'])
+                        if len(chunks) != payload['part_count']:
+                            raise Conflict(f'Upload incomplete: {len(chunks)} of {payload["part_count"]} parts arrived. Try again.')
+                        file_raw = b''.join(chunks)
+                    else:
+                        try:
+                            file_raw = base64.b64decode(content, validate=True)
+                        except ValueError:
+                            raise Conflict('The file could not be read.')
                     result = periods.check_file(name, file_raw, period)
                     with self.store().session() as directory:
                         SpreadsheetInbox(directory).set_setting(f'filecheck|{job}|{kind}|{start.isoformat()}', result)

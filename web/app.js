@@ -2042,10 +2042,13 @@
       : h('td', {class: 'num'}, num(a), b != null && a != null && Math.abs(a - b) > 0.0001 ? h('span', {class: 'differs', title: 'SharePoint shows ' + num(b)}, ` / ${num(b)}`) : null);
     const file = h('input', {type: 'file', accept: '.xlsx,.csv', hidden: true, onchange: async e => {
       const f = e.target.files[0]; if (!f) return;
-      if (f.size > 4 * 1024 * 1024) { toast('Weekly and monthly files up to 4 MB can be checked here.', true); return; }
-      const content_base64 = await new Promise(res => { const rd = new FileReader(); rd.onload = () => res(String(rd.result).split(',')[1]); rd.readAsDataURL(f); });
+      if (f.size > 50 * 1024 * 1024) { toast('Weekly and monthly files up to 50 MB can be checked here.', true); return; }
       toast(`Checking ${f.name}…`);
-      try { await api('/api/periods/check-file', {...q, filename: f.name, content_base64}); showPeriods(); } catch (err) { toast(err.message, true); } }});
+      try {
+        const id = crypto.randomUUID().replace(/-/g, ''), parts = Math.max(1, Math.ceil(f.size / CHUNK));   // big files go up in parts
+        for (let i = 0; i < parts; i++) await api('/api/spreadsheets/upload/part', {upload_id: id, index: i, content_base64: await toBase64(f.slice(i * CHUNK, (i + 1) * CHUNK))});
+        await api('/api/periods/check-file', {...q, filename: f.name, upload_id: id, part_count: parts}); showPeriods();
+      } catch (err) { toast(err.message, true); } }});
     const fc = data.file_check;
     wrap.replaceChildren(...[
       h('button', {type: 'button', class: 'back', onclick: () => { location.hash = ''; }}, '‹ All reports'),
@@ -2775,7 +2778,8 @@
     $('uploads').prepend(row);
     const problem = /\.(xls|xlsm|xlsb)$/i.test(file.name) ? `${file.name} is an older or macro Excel file. In Excel choose File, Save As, Excel Workbook (.xlsx), then upload that copy.`
       : /\.doc$/i.test(file.name) ? `${file.name} is an older Word file. In Word choose File, Save As, Word Document (.docx), then upload that copy.`
-      : !/\.(csv|xlsx|pdf|docx)$/i.test(file.name) ? `${file.name} is not a file the app can check. Upload Excel (.xlsx), CSV, PDF or Word (.docx).` : file.size < 1 ? `${file.name} is empty.` : null;
+      : !/\.(csv|xlsx|pdf|docx)$/i.test(file.name) ? `${file.name} is not a file the app can check. Upload Excel (.xlsx), CSV, PDF or Word (.docx).` : file.size < 1 ? `${file.name} is empty.`
+      : file.size > 50 * 1024 * 1024 ? `${file.name} is ${(file.size / 1048576).toFixed(1)} MB. Reports up to 50 MB can be uploaded.` : null;
     if (problem) { row.classList.add('failed'); text.textContent = problem; return null; }
     try {
       const hash = await sha256(file);
