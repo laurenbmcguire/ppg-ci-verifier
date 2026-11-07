@@ -54,6 +54,7 @@ def _token(opener=None):
 
 def _get(url, opener=None, raw=False):
     from hosting import sharepoint as sp
+    url = url.replace(' ', '%20')
     req = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + _token(opener), 'Accept': 'application/json;odata=nometadata'})
     try:
         with sp._open(req, opener) as r:
@@ -66,7 +67,7 @@ def _get(url, opener=None, raw=False):
         except Exception:
             pass
         return exc.code, detail
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return 0, 'no answer'
 
 

@@ -65,6 +65,14 @@ class WithPhotos(unittest.TestCase):
                 photo_embed.build('r.xlsx', sl_daily(), 'S', 'L')
         self.assertIn('certificate', str(caught.exception))
 
+    def test_urls_sent_to_sharepoint_have_no_spaces(self):
+        seen = []
+        def opener(req, timeout=None):
+            seen.append(req.full_url); raise OSError('offline')
+        with patch('hosting.photo_embed._token', return_value='t'):
+            photo_embed._get("https://x/_api/web/lists(guid'1')/fields?$filter=Hidden eq false", opener)
+        self.assertNotIn(' ', seen[0])
+
     def test_image_size_reader(self):
         self.assertEqual(photo_embed.image_size(PNG), (1, 1))
 
