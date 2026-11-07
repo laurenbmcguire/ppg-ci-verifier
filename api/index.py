@@ -126,6 +126,8 @@ class handler(BaseHTTPRequestHandler):
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
+        # True means "a reply has been sent": gate() relies on it, so a refusal always stops the request
+        return True
 
     def fail(self, status, message):
         return self.send(status, json.dumps({'error': message, 'fail_closed': True}).encode())
@@ -543,7 +545,7 @@ class handler(BaseHTTPRequestHandler):
                 return self.auth_get(route)
             if route.startswith('/api/'):
                 refused = self.gate('GET', route)
-                if refused is not None:
+                if refused:
                     return refused
             if route == '/api/me':
                 from hosting import access, mailer
@@ -768,7 +770,7 @@ class handler(BaseHTTPRequestHandler):
             except ValueError:
                 gate_payload = None
             refused = self.gate('POST', route, gate_payload)
-            if refused is not None:
+            if refused:
                 return refused
             if route.startswith(('/api/auth/', '/api/users', '/api/access/')):
                 return self.account_post(route, gate_payload)
