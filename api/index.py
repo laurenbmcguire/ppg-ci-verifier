@@ -24,9 +24,11 @@ from hosting.sqlite_storage import local_environment, SQLiteWorkspace
 
 FILES = {'/development-examples.js': 'development-examples.js', '/': 'index.html', '/ui.js': 'ui.js', '/report-ui.js': 'report-ui.js',
          '/style.css': 'style.css', '/spreadsheet-ui.js': 'spreadsheet-ui.js', '/workflow-ui.js':'workflow-ui.js', '/assets/ppg-client-intelligence.png': 'assets/ppg-client-intelligence.png',
-         '/app.js': 'app.js', '/app.css': 'app.css'}
+         '/app.js': 'app.js', '/app.css': 'app.css',
+         **{f'/assets/fonts/{n}': f'assets/fonts/{n}' for n in ('dm-sans-latin-400-normal.woff2', 'dm-sans-latin-500-normal.woff2', 'dm-sans-latin-600-normal.woff2',
+                                                                'dm-sans-latin-700-normal.woff2', 'libre-caslon-text-latin-700-normal.woff2')}}
 TYPES = {'html': 'text/html; charset=utf-8', 'js': 'text/javascript; charset=utf-8',
-         'css': 'text/css; charset=utf-8', 'png': 'image/png'}
+         'css': 'text/css; charset=utf-8', 'png': 'image/png', 'woff2': 'font/woff2'}
 MAX_RESPONSE_BYTES = 3 * 1024 * 1024
 
 def encode_json(data):
@@ -126,6 +128,8 @@ class handler(BaseHTTPRequestHandler):
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
+        # True means "a reply has been sent": gate() relies on it, so a refusal always stops the request
+        return True
 
     def fail(self, status, message):
         return self.send(status, json.dumps({'error': message, 'fail_closed': True}).encode())
@@ -543,7 +547,7 @@ class handler(BaseHTTPRequestHandler):
                 return self.auth_get(route)
             if route.startswith('/api/'):
                 refused = self.gate('GET', route)
-                if refused is not None:
+                if refused:
                     return refused
             if route == '/api/me':
                 from hosting import access, mailer
@@ -768,7 +772,7 @@ class handler(BaseHTTPRequestHandler):
             except ValueError:
                 gate_payload = None
             refused = self.gate('POST', route, gate_payload)
-            if refused is not None:
+            if refused:   # a refusal has been sent: nothing below may run (send() returns True)
                 return refused
             if route.startswith(('/api/auth/', '/api/users', '/api/access/')):
                 return self.account_post(route, gate_payload)
@@ -905,9 +909,12 @@ class handler(BaseHTTPRequestHandler):
                     return self.fail(404, 'Report not found.')
                 me = self.current_user() or {}
                 by = str(payload.get('by') or me.get('name') or me.get('email') or '').strip()[:80]
+                keys = payload.get('keys') if isinstance(payload.get('keys'), list) else [payload.get('key')]
+                if not 1 <= len(keys) <= 500:
+                    raise Conflict('Send 1 to 500 items.')
                 with self.store().session() as directory:
-                    item = SpreadsheetInbox(directory).record_decision(file_hash, str(payload.get('key') or ''), str(payload.get('action') or ''),
-                                                                      str(payload.get('note') or ''), by)
+                    inbox = SpreadsheetInbox(directory)
+                    item = inbox.record_decisions(file_hash, [str(k or '') for k in keys], str(payload.get('action') or ''), str(payload.get('note') or ''), by)
                 return self.send(200, encode_json({'ok': True, 'decisions': item.get('review_decisions') or {}}))
             if route == '/api/spreadsheets/mark-fine':   # a person said these flags are fine: kept on this version and every later one
                 payload = json.loads(raw)

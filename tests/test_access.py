@@ -156,6 +156,32 @@ class Access(unittest.TestCase):
         st, _, h = self.call(f'/auth/microsoft/callback?code=abc&state=forged', cookie=state_cookie)
         self.assertIn('signin=', h['Location'])
 
+    def test_every_api_route_refuses_anonymous_requests_once_sign_in_is_required(self):
+        """Audit: with sign-in required, no data or action route answers an anonymous caller."""
+        import re
+        from pathlib import Path
+        self.upload('2230-OWENS-BASCO - EOS - 2026-10-07.xlsx')
+        st, out, _ = self.call('/api/users/save', {'email': 'Lauren.McGuire@ppgquality.com', 'name': 'Lauren', 'role': 'admin'})
+        admin_cookie, _ = self.sign_in(next(u for u in out['users'] if u['role'] == 'admin')['id'])
+        self.assertEqual(self.call('/api/access/required', {'on': True}, admin_cookie)[0], 200)
+        src = Path(__file__).resolve().parents[1].joinpath('api', 'index.py').read_text()
+        posts = set(re.findall(r"'(/api/[a-z0-9/_-]+)'", src))
+        public = {'/api/auth/email', '/api/auth/signout', '/api/me', '/api/health'}   # asking for a sign-in link, signing out, "who am I"
+        leaks = []
+        for route in sorted(posts - public):
+            if route.startswith('/api/v1'):
+                continue   # the public API uses its own API keys (tested in test_api)
+            for body in ({'file_hash': 'a' * 64}, None):
+                status, data, _ = self.call(route, body)
+                if status not in (401, 403, 404, 405) and not (status == 409 and not data.get('item') and not data.get('spreadsheets')):
+                    leaks.append((route, 'POST' if body is not None else 'GET', status))
+        self.maxDiff = None
+        self.assertEqual(leaks, [])
+        # and a refused request must not run anyway: an anonymous "turn sign-in off" changes nothing
+        self.assertEqual(self.call('/api/access/required', {'on': False})[0], 401)
+        self.assertEqual(self.call('/api/spreadsheets')[0], 401)
+        self.assertEqual(self.call('/api/me', cookie=admin_cookie)[1]['required'] if 'required' in self.call('/api/me', cookie=admin_cookie)[1] else True, True)
+
 
 if __name__ == '__main__':
     unittest.main()

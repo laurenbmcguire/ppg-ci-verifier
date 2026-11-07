@@ -189,6 +189,13 @@
   document.addEventListener('keydown', e => {
     if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, textarea, select, [contenteditable], dialog') || document.querySelector('dialog[open]')) return;
     const onReports = document.body.dataset.page === 'reports';
+    // inside a report, J/K step through corrections and Esc closes the drawer or panel first: the reviewer never loses their place
+    if (document.body.classList.contains('reportmode') && ['j', 'k', 'ArrowDown'].includes(e.key)) return;
+    if (document.body.classList.contains('reportmode') && e.key === 'Escape' && (document.querySelector('.fd-drawer') || state.fdCur || document.body.classList.contains('fd-panel-open') || document.body.classList.contains('navopen'))) {
+      $('fd-evidence')?.replaceChildren(); document.body.classList.remove('fd-panel-open', 'navopen');
+      if (!document.querySelector('.fd-drawer') && state.fdCur) { state.fdCur = null; drawSide(); drawGrid(); }
+      return;
+    }
     const move = step => {
       const items = [...document.querySelectorAll('#queue-list .item')]; if (!items.length) return;
       const at = items.findIndex(b => b.classList.contains('sel'));
@@ -205,7 +212,8 @@
       const target = {a: btn('Make this change') || btn('Take out'), s: btn('Skip'), f: btn('It\'s fine as is'), ArrowRight: btn('Next'), ArrowLeft: btn('‹ Previous')}[e.key];
       if (target) { e.preventDefault(); target.click(); }
     }
-    else if (e.key === '?') toast('Shortcuts: J or K next or previous report · / search · U upload · Esc closes what is open, then back to the list · While checking: A make the change, S skip, F fine as is, ← → move');
+    else if (e.key === '?') toast(document.body.classList.contains('reportmode') ? 'Shortcuts: J or K next or previous correction · Esc closes the evidence, the correction, then goes back to the list · / search reports'
+      : 'Shortcuts: J or K next or previous report · / search · U upload · Esc closes what is open, then back to the list · While checking: A make the change, S skip, F fine as is, ← → move');
   });
   let vinTimer;
   $('search').addEventListener('input', e => {
@@ -348,6 +356,7 @@
     try {
       const data = await api('/api/spreadsheet?id=' + hash);
       if (state.selected !== hash) return;
+      if (state.report?.file_hash !== hash) { state.fdView = 'review'; state.fdCur = null; state.fdTier = null; state.gridSearch = ''; state.sheetScroll = {}; state.gridOnlyMarked = false; state.gridRow = null; document.body.classList.remove('fd-panel-open'); }
       state.report = data; state.fixes = null; state.showAll = false;
       const top = report.scrollTop;
       drawReport();
@@ -656,10 +665,98 @@
           (d.tables ? `They are checked like any report. Fixes come back as an Excel copy; your ${d.type} file is not changed.` : 'There is nothing to check as a table, but you can read the text below or ask Claude about it.'))),
       d.text ? h('details', {}, h('summary', {}, `Show the ${d.type} text`), h('pre', {class: 'doctext'}, d.text + (d.text_truncated ? '\n…' : ''))) : null);
   }
+  // ================================================================ Focus Desk: spreadsheet in the middle, corrections on the right
+  // Everything shown comes from the report's own check run (review.run): the same file hash, checker and SharePoint snapshot.
+  const ICON = {
+    review: 'M4 4h12l4 4v12H4z M8 12h8 M8 16h6', history: 'M12 7v5l3 2 M4 12a8 8 0 1 0 2.3-5.6 M4 4v3h3', sources: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3z M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6 M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3',
+    back: 'M15 5l-7 7 7 7', menu: 'M4 7h16 M4 12h16 M4 17h16', lock: 'M7 11V8a5 5 0 0 1 10 0v3 M5 11h14v10H5z', eye: 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',
+    warn: 'M12 3l10 18H2z M12 10v5 M12 18v.5', ok: 'M4 12l5 5L20 6', x: 'M6 6l12 12 M18 6L6 18', db: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3z M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6',
+    next: 'M9 5l7 7-7 7', prev: 'M15 5l-7 7 7 7', search: 'M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z M20 20l-4.8-4.8', note: 'M4 20h4L20 8l-4-4L4 16z', panel: 'M3 4h18v16H3z M15 4v16',
+  };
+  const icon = (name, size = 18) => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('width', size); s.setAttribute('height', size);
+    s.setAttribute('aria-hidden', 'true'); s.setAttribute('class', 'ic'); const p = document.createElementNS('http://www.w3.org/2000/svg', 'path'); p.setAttribute('d', ICON[name]); s.append(p); return s; };
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many || one + 's'}`;
+  const when2 = iso => { if (!iso) return null; const d = new Date(iso); return isNaN(d) ? null : d.toLocaleString('en-US', {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago'}) + ' CT'; };
+  const outdated = r => r.internal_check_status === 'outdated_checks_require_recheck';
+  const revisionOf = r => Number(r.revision || (r.fixed_from ? (r.fixed_from.revision || 1) + 1 : 1));
+
+  // one truthful status for the whole report, and the one next step when it is not ready
+  function fdStatus(r) {
+    const rv = r.review, sp = rv.sharepoint || {}, a = r.assignment || {}, c = fdCounts();
+    if (outdated(r)) return {tone: 'amber', icon: 'warn', text: 'Checks out of date', next: 'recheck', why: `Checked with an older version of the checks (${r.recheck?.checked_with || 'earlier'}). Nothing is trusted until it is checked again.`};
+    if ((r.sent || []).some(x => x.sent)) return {tone: 'green', icon: 'ok', text: 'Sent to client', next: null};
+    if (a.needs_person) return {tone: 'red', icon: 'x', text: 'Client not settled', next: 'client', why: a.reason || 'Choose the client and job before anything else; job numbers repeat between clients.'};
+    if (c.blockers) return {tone: 'red', icon: 'x', text: plural(c.blockers, 'blocker'), next: 'blockers'};
+    if (sp.status === 'stale') return {tone: 'amber', icon: 'warn', text: 'SharePoint check out of date', next: 'reconcile', why: sp.message};
+    if (sp.status !== 'match') return {tone: 'amber', icon: 'warn', text: 'Not verified against SharePoint', next: 'reconcile',
+      why: sp.status === 'day_level' ? sp.message : sp.status === 'incomplete' ? 'SharePoint could not be read completely, so the report is not verified. ' + (sp.message || '') : sp.status === 'unverified' ? sp.message || 'Some fields could not be compared.' : sp.status === 'differences' ? 'Differences from SharePoint are listed as blockers.' : 'The report has not been compared with SharePoint item by item yet.'};
+    if (c.review) return {tone: 'amber', icon: 'warn', text: `${c.review} to review`, next: 'review'};
+    if (r.approval && rv.approval_current) return {tone: 'green', icon: 'ok', text: 'Internally approved', next: 'send'};
+    if (r.approval) return {tone: 'amber', icon: 'warn', text: 'Approval out of date', next: 'approve', why: 'It was approved on an earlier check run. Approve again if it still looks right.'};
+    return {tone: 'green', icon: 'ok', text: 'Ready for internal approval', next: 'approve'};
+  }
+
+  // ---------- corrections: issues and suggested changes joined, grouped by root cause, in three tiers
+  const TIERS = [['blocker', 'Blockers'], ['review', 'Needs review'], ['format', 'Formatting']];
+  function fdItems() {
+    const r = state.report, rv = r.review, dec = store.get(decisionsKey(), {}), decided = r.review_decisions || {};
+    const issues = allIssues(rv).filter(i => i.severity !== 'info'), fixes = state.fixes || [], used = new Set(), items = [];
+    const make = (i, f) => {
+      const key = i ? i.key : 'fix:' + f.id, d = decided[key] || (f ? decided['fix:' + f.id] : null);
+      const fmt = f && fmtKind(f);
+      const tier = i && i.severity === 'high' ? 'blocker' : fmt && (!i || i.only) ? 'format' : 'review';
+      const cell = f ? String(f.cell).toUpperCase() : i.cell && splitCell(i.cell) ? String(i.cell).toUpperCase() : null;
+      const row = cell ? splitCell(cell)[1] : i?.row ? Number(i.row) : null;
+      const src = i?.source_value != null ? i.source_value : f?.source === 'SharePoint' ? f.after : null;
+      const kind = i ? i : {text: f.reason || '', code: 'fix:' + (fmt || f.source)};
+      const group = tier + '|' + (fmt ? 'fmt:' + fmt : i ? sameKey(i) : 'fix:' + f.source);
+      const stateNow = f && dec[f.id]?.state === 'accepted' ? 'selected' : (d?.action === 'reject' || (f && dec[f.id]?.state === 'rejected')) ? 'rejected' : d?.action === 'keep' ? 'kept' : 'open';
+      const evidence = f ? (f.source === 'SharePoint' || i?.source_value != null ? 'source' : isSureFix(f) ? 'mechanical' : f.source === 'AI fix' ? 'ai' : 'guess') : i?.source_value != null ? 'source_only' : 'none';
+      return {key, issue: i, fix: f, tier, group, cell, row, sheet: f?.sheet || i?.sheet || null, kind, fmt, state: stateNow, note: d?.note || '', decidedBy: d?.by,
+        report: f ? f.before : i?.report_value ?? null, source: src, proposed: f ? (dec[f.id]?.after ?? f.after) : null,
+        reason: fmt ? `Only ${fmt} change; the value itself stays the same.` : f?.only || f?.reason || i?.why || i?.text || '',
+        text: i?.text || f?.reason || '', url: i?.url || null, item: i?.item || null, evidence,
+        selectable: !!f && evidence !== 'none' && stateNow !== 'rejected'};
+    };
+    // a change can settle more than one issue on the same cell (the export tab and the live list both disagree with J5):
+    // each issue card shows it, and selecting it from either card selects the same single change
+    for (const i of issues) { const f = fixes.find(x => fixCovers(x, i) && (x.source === 'SharePoint' || !used.has(x.id))) || fixes.find(x => fixCovers(x, i)); if (f) used.add(f.id); items.push(make(i, f)); }
+    for (const f of fixes) if (!used.has(f.id)) items.push(make(null, f));
+    return items;
+  }
+  function fdGroups(items) {
+    const by = new Map();
+    for (const it of items) { if (!by.has(it.group)) by.set(it.group, {key: it.group, tier: it.tier, items: []}); by.get(it.group).items.push(it); }
+    const rank = {blocker: 0, review: 1, format: 2};
+    return [...by.values()].map(g => {
+      const [one, many] = kindNames(g.items[0].kind), n = g.items.length, first = g.items[0];
+      // one item: its own plain sentence; several: the plural name of the shared cause
+      const own = String(first.issue?.text || first.text || '').replace(/\s*\(Day-level comparison[^)]*\)/, '');
+      const generic = /…/.test(one) || !one;
+      g.title = (generic ? (n === 1 ? own : `${own.slice(0, 70)}${own.length > 70 ? '…' : ''} (and ${n - 1} more like it)`) : n === 1 ? one : (many || one)).replace(/^./, c => c.toUpperCase());
+      if (g.title.length > 120) g.title = g.title.slice(0, 117) + '…';
+      g.records = new Set(g.items.map(x => x.sheet && x.row ? x.sheet + '!' + x.row : x.key)).size;
+      g.open = g.items.filter(x => x.state === 'open').length;
+      return g;
+    }).sort((a, b) => rank[a.tier] - rank[b.tier] || b.items.length - a.items.length);
+  }
+  function fdCounts() {
+    if (!state.report) return {};
+    const items = state.fdItems || [], open = items.filter(x => x.state === 'open' || x.state === 'selected');
+    const c = readyChanges();
+    return {detected: allIssues(state.report.review).filter(i => i.severity !== 'info').length, suggestions: (state.fixes || []).length,
+      selected: c.total, applied: (state.report.fixed_from?.changes || []).length,
+      blockers: items.filter(x => x.tier === 'blocker' && x.state !== 'rejected').length + (state.report.holds || []).filter(x => x.hard).length,
+      review: open.filter(x => x.tier === 'review').length, format: open.filter(x => x.tier === 'format').length};
+  }
+
+  // ---------- the page
   function drawReport() {
     const r = state.report, rv = r.review;
     document.body.classList.add('reportmode');
-    state.sideTab ||= 'fixes';
+    state.sideTab ||= 'fixes'; state.fdView ||= 'review';
+    state.fdItems = state.fixes ? fdItems() : [];
+    const a = r.assignment || {}, sp = rv.sharepoint || {}, st = fdStatus(r);
     const close = e => e.target.closest('details')?.removeAttribute('open');
     const more = h('details', {class: 'more-menu'}, h('summary', {class: 'btn'}, 'More'),
       h('div', {class: 'menu'},
@@ -667,32 +764,340 @@
         h('button', {type: 'button', onclick: e => { close(e); copyClientSummary(); }}, 'Copy client summary for an email'),
         h('button', {type: 'button', onclick: e => { close(e); makeChangeSummary(); }}, 'Change summary (PDF)'),
         r.filename.toLowerCase().endsWith('.xlsx') ? h('button', {type: 'button', onclick: e => { close(e); downloadWithPhotos(r); }}, 'Download with SharePoint photos') : null,
-        h('a', {href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename, onclick: close}, 'Download the original file')));
-    const head = h('div', {class: 'rhead'},
-      h('button', {type: 'button', class: 'back', onclick: () => { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }}, state.client ? `‹ ${clientName()} reports` : '‹ All reports'),
-      h('div', {class: 'rtitle'},
-        h('h1', {}, rv.job || r.filename),
-        h('span', {class: 'meta'}, `${dayLabel(rv.day)} · ${r.filename} · version ${r.version} · uploaded ${ago(r.received_at)}`)),
-      h('div', {class: 'ractions'}, more,
-        h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, r.fixed_from ? 'Download fixed version' : 'Download report'),
-        h('button', {type: 'button', class: 'btn send-btn ' + (blockers(r) && !r.approval ? 'blocked' : 'primary'), id: 'send-btn', onclick: openSend,
-          title: blockers(r) && !r.approval ? 'Resolve the blockers first. Approving anyway needs a reason and is recorded.' : r.approval ? 'Approved. Sending is a separate step.' : 'Approve internally. Sending is a separate step.'}, sendLabel(r))));
-    const status = h('div', {class: 'rstatus'},
-      reviewCard(r), docBanner(r), fixedLog(r),
-      h('div', {id: 'reviewstate'}, ...[reviewState(r)].filter(Boolean)),
-      h('div', {id: 'sendstate'}, ...[sendState(r)].filter(Boolean)));
-    const steps = h('ol', {class: 'steps-bar', id: 'steps', 'aria-label': 'Where this report stands'});
-    const ws = h('div', {class: 'workspace'},
-      h('section', {class: 'sheetpane', id: 'sheet-block', 'aria-label': 'Spreadsheet'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Loading the spreadsheet…')),
-      h('aside', {class: 'sidepane', id: 'side', 'aria-label': 'Facts and fixes'}));
-    steps.hidden = true;   // the step-by-step guide shows where the report stands
-    $('report').replaceChildren(h('div', {class: 'rws'}, head, steps, status, ws));
-    drawSteps();
-    state.grid = null; state.gridSheet = null; state.gridCell = null; state.issueNav = null;
-    drawSide();
-    updateDownloads();
-    loadGrid();
+        h('a', {href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename, onclick: close}, `Download this version (v${revisionOf(r)})`),
+        r.approval && rv.approval_current ? h('button', {type: 'button', onclick: e => { close(e); openSend(); }}, 'Send to client…') : null));
+    const crumb = [a.client || h('em', {}, 'Client not settled'), rv.job || r.filename, rv.day ? shortDay(rv.day) : 'No business date'];
+    const recordsChecked = sp.status === 'match' || sp.status === 'differences' || sp.status === 'incomplete' || sp.status === 'unverified'
+      ? `${sp.matched ?? '?'} of ${rv.scans ?? '?'} records checked against SharePoint` : sp.status === 'day_level' ? 'Day totals only (not record by record)' : 'Not compared with SharePoint';
+    const head = h('header', {class: 'fd-head'},
+      h('div', {class: 'fd-title'},
+        h('p', {class: 'fd-eyebrow'}, 'Review workspace'),
+        h('h1', {}, ...crumb.flatMap((x, n) => n ? [h('span', {class: 'sep', 'aria-hidden': 'true'}, '/'), x] : [x])),
+        h('p', {class: 'fd-meta'},
+          h('span', {}, `v${revisionOf(r)}${r.fixed_from ? ` · made from v${r.fixed_from.revision || 1}` : ' · original upload'}`),
+          h('span', {}, icon('db', 14), ' ', recordsChecked),
+          sp.captured_at ? h('span', {}, `Source captured ${when2(sp.captured_at)}`) : null,
+          (sp.fields_checked || []).length ? h('span', {title: (sp.fields_not_checked || []).length ? 'Not checked: ' + sp.fields_not_checked.join(', ') : null},
+            `Fields checked: ${sp.fields_checked.join(', ')}${(sp.fields_not_checked || []).length ? ` · not checked: ${sp.fields_not_checked.join(', ')}` : ''}`) : null)),
+      h('div', {class: 'fd-actions'},
+        h('div', {class: `fd-status ${st.tone}`, role: 'status'}, icon(st.icon, 16), h('span', {}, st.text)),
+        more, h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download')));
+    const metrics = fdMetrics(r);
+    const rail = h('nav', {class: 'fd-rail', 'aria-label': 'Report'},
+      h('button', {type: 'button', class: 'fd-railbtn', onclick: () => { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }, 'aria-label': 'Back to all reports', title: 'All reports'}, icon('back', 22), h('span', {}, 'Reports')),
+      ...[['review', 'Review'], ['history', 'History'], ['sources', 'Sources']].map(([id, label]) =>
+        h('button', {type: 'button', class: 'fd-railbtn' + (state.fdView === id ? ' on' : ''), 'aria-pressed': String(state.fdView === id), onclick: () => { state.fdView = id; drawReport(); }}, icon(id, 22), h('span', {}, label))),
+      h('button', {type: 'button', class: 'fd-railbtn fd-menu', onclick: () => document.body.classList.toggle('navopen'), 'aria-label': 'All pages'}, icon('menu', 22), h('span', {}, 'Menu')));
+    let main;
+    if (state.fdView === 'history') main = fdHistory(r);
+    else if (state.fdView === 'sources') main = fdSources(r);
+    else {
+      main = h('div', {class: 'fd-work' + (state.fdAsideHidden ? ' aside-hidden' : ''), id: 'fd-work'},
+        h('section', {class: 'fd-sheet', 'aria-label': 'Spreadsheet'},
+          h('div', {class: 'sheetpane', id: 'sheet-block'}, h('p', {class: 'note fd-loading'}, h('span', {class: 'spin'}), ' Loading the spreadsheet…')),
+          h('div', {id: 'fd-evidence'})),
+        h('div', {class: 'fd-split', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': 'Resize the corrections panel', tabindex: '0',
+          onpointerdown: fdDragStart, onkeydown: e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { fdAsideWidth(fdAsideWidth() + (e.key === 'ArrowLeft' ? 24 : -24)); e.preventDefault(); } }}),
+        h('aside', {class: 'sidepane fd-aside', id: 'side', 'aria-label': 'Corrections'}));
+    }
+    const sel = readyChanges().total;
+    const foot = h('div', {class: 'fd-foot', role: 'region', 'aria-label': 'Selected changes'},
+      h('span', {class: 'fd-foot-state'}, icon('lock', 16), h('b', {id: 'fd-selcount'}, sel ? plural(sel, 'change') + ' selected' : 'No changes selected'),
+        h('span', {class: 'fd-foot-note'}, `Original v1 is kept unchanged${r.fixed_from ? '; this is v' + revisionOf(r) : ''}`)),
+      h('button', {type: 'button', class: 'btn fd-mobile-panel', onclick: () => document.body.classList.toggle('fd-panel-open'), 'aria-controls': 'side'}, 'Corrections', h('i', {id: 'fd-mobile-count'}, String(fdCounts().blockers + fdCounts().review || ''))),
+      h('button', {type: 'button', class: 'btn ' + (sel ? 'primary' : ''), id: 'fd-preview-btn', disabled: !sel || state.busy, onclick: fdPreview}, icon('eye', 16), ' Preview selected changes'));
+    $('report').replaceChildren(h('div', {class: 'fd'}, rail, h('div', {class: 'fd-main'}, head, metrics, main), foot));
+    const w = store.get('fd-aside-w', null); if (w) fdAsideWidth(w);
+    if (state.fdView !== 'review') return;
+    state.grid = state.grid?.hash === r.file_hash ? state.grid : null;
+    drawSide(); updateDownloads();
+    loadGrid(state.gridSheet && state.grid ? state.gridSheet : undefined);
   }
+  function fdMetrics(r) {
+    const rv = r.review, perRow = rv.rejected_unit === 'rows', base = perRow ? rv.scans : rv.inspected;
+    const rate = base && rv.rejected != null && !rv.rejected_partial ? rv.rejected / base * 100 : null;
+    const photos = r.photos?.image_count ?? null, shifts = (r.shift_summary || r.shifts || []).length || null;
+    const m = (value, label, extra) => h('div', {class: 'fd-metric'}, h('strong', {}, value), h('span', {}, label), extra ? h('small', {}, extra) : null);
+    return h('div', {class: 'fd-metrics', 'aria-label': 'Key totals'},
+      m(fmt(rv.scans), 'records', 'audit rows, counted once'),
+      m(fmt(rv.inspected), 'units inspected'),
+      rv.certified != null ? m(fmt(rv.certified), 'OK') : null,
+      m(rv.rejected == null ? (rv.rejected_partial ? 'Partly recorded' : 'Not recorded') : fmt(rv.rejected), perRow ? 'failed audits' : 'rejected units', rv.rejected == null ? 'blank is not zero' : null),
+      m(rate == null ? 'Unavailable' : rate.toFixed(1) + '%', perRow ? 'fail rate' : 'reject rate', rate == null ? 'rejects not recorded on every record' : null),
+      shifts ? m(String(shifts), shifts === 1 ? 'shift' : 'shifts', 'as recorded') : null,
+      photos != null ? m(String(photos), photos === 1 ? 'photo' : 'photos', 'linked to records') : null);
+  }
+  // resizable / collapsible corrections panel (width remembered in this browser only)
+  function fdAsideWidth(px) {
+    const work = $('fd-work'); if (!work) return 0;
+    if (px == null) return parseInt(getComputedStyle(work).getPropertyValue('--aside-w')) || 380;
+    px = Math.max(300, Math.min(620, Math.round(px)));
+    work.style.setProperty('--aside-w', px + 'px'); store.set('fd-aside-w', px); return px;
+  }
+  function fdDragStart(e) {
+    const work = $('fd-work'); if (!work || e.button !== 0) return;
+    e.preventDefault(); const right = work.getBoundingClientRect().right;
+    const move = ev => fdAsideWidth(right - ev.clientX), up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); };
+    addEventListener('pointermove', move); addEventListener('pointerup', up);
+  }
+
+  // ---------- right-hand panel
+  function fdCorrections(body) {
+    const r = state.report, st = fdStatus(r), c = fdCounts();
+    if (!state.fixes) { body.append(h('div', {class: 'fd-panel-loading', role: 'status'}, h('span', {class: 'spin'}), ' Reading the corrections…')); return; }
+    const items = state.fdItems = fdItems(), groups = fdGroups(items);
+    const tier = state.fdTier && groups.some(g => g.tier === state.fdTier) ? state.fdTier : (groups.find(g => g.open)?.tier || groups[0]?.tier || 'blocker');
+    state.fdTier = tier;
+    body.append(h('div', {class: 'fd-panelhead'}, h('h2', {}, 'Corrections'),
+      h('button', {type: 'button', class: 'fd-iconbtn fd-collapse', 'aria-label': 'Hide the corrections panel', title: 'Hide panel', onclick: () => { state.fdAsideHidden = true; $('fd-work')?.classList.add('aside-hidden'); }}, icon('panel', 18))));
+    body.append(h('p', {class: 'fd-countline'}, `${plural(c.detected, 'issue')} detected · ${plural(c.suggestions, 'suggestion')} · ${c.selected} selected · ${c.applied} applied in this version`));
+    const step = c.selected ? 2 : 1;
+    body.append(h('ol', {class: 'fd-steps', 'aria-label': 'Steps'}, ['Compare', 'Preview', 'Recheck'].map((t, n) => h('li', {class: n + 1 === step ? 'on' : n + 1 < step ? 'done' : '', 'aria-current': n + 1 === step ? 'step' : null}, `${n + 1} ${t}`))));
+    // a report that is not ready says why, with one clear next step
+    const nextStep = fdNextStep(r, st);
+    if (nextStep) body.append(nextStep);
+    if (!items.length) { body.append(fdClean(r, st)); return; }
+    body.append(h('div', {class: 'fd-tiers', role: 'tablist', 'aria-label': 'Kinds of correction'}, TIERS.map(([id, label]) => {
+      const gs = groups.filter(g => g.tier === id), recs = gs.reduce((n, g) => n + g.records, 0);
+      return h('button', {type: 'button', role: 'tab', class: id === tier ? 'on' : '', 'aria-selected': String(id === tier), disabled: !gs.length,
+        onclick: () => { state.fdTier = id; state.fdCur = null; drawSide(); }},
+        h('span', {}, label), h('b', {}, String(gs.reduce((n, g) => n + g.items.length, 0))),
+        h('small', {}, gs.length ? `${plural(gs.length, 'group')} · ${plural(recs, 'record')}` : 'none'));
+    })));
+    const tierGroups = groups.filter(g => g.tier === tier);
+    const cur = items.find(x => x.key === state.fdCur) || null;
+    if (cur) body.append(fdCard(cur, groups));
+    body.append(h('div', {class: 'fd-groups'}, tierGroups.map(g => {
+      const selectable = g.items.filter(x => x.selectable && x.state === 'open' && (x.evidence === 'source' || x.evidence === 'mechanical'));
+      return h('section', {class: 'fd-group' + (cur && cur.group === g.key ? ' cur' : '')},
+        h('button', {type: 'button', class: 'fd-grouphead', 'aria-expanded': String(!!cur && cur.group === g.key), onclick: () => fdOpen(g.items.find(x => x.state === 'open') || g.items[0])},
+          h('span', {class: 'fd-gtitle'}, g.title),
+          h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'item')} · ${plural(g.records, 'record')}${g.open < g.items.length ? ` · ${g.items.length - g.open} decided` : ''}`)),
+        selectable.length > 1 || (selectable.length === 1 && g.items.length === 1 && g.tier === 'format') ? h('button', {type: 'button', class: 'btn small fd-selectall', onclick: () => fdSelect(selectable, true)},
+          `Select ${selectable.length === 1 ? 'it' : 'all ' + selectable.length} for preview`) : null,
+        g.tier === 'review' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', onclick: () => fdDecideAll(g.items.filter(x => x.state === 'open'), 'keep')},
+          `Keep all ${g.open} as recorded`) : null);
+    })));
+    if (tier === 'blocker' && (r.holds || []).some(x => x.hard)) body.append(h('div', {class: 'fd-hold'}, icon('lock', 16), h('span', {}, 'Internal approval blocked', h('small', {}, (r.holds || []).filter(x => x.hard).map(x => x.text).join(' ')))));
+  }
+  function fdNextStep(r, st) {
+    const box = (title, text, button) => h('div', {class: 'fd-next ' + st.tone}, h('b', {}, title), text ? h('p', {}, text) : null, button);
+    if (st.next === 'recheck') return box('Checks out of date', st.why, h('button', {type: 'button', class: 'btn primary', onclick: fdRecheck}, 'Re-check this report'));
+    if (st.next === 'client') return box('Choose the client and job', st.why, h('button', {type: 'button', class: 'btn primary', onclick: e => assignForm(r, e.currentTarget)}, 'Choose client and job'));
+    if (st.next === 'reconcile') return box(st.text, st.why, h('button', {type: 'button', class: 'btn', onclick: () => fdReconcile()}, 'Check against SharePoint'));
+    return null;
+  }
+  function fdClean(r, st) {
+    const rv = r.review, sp = rv.sharepoint || {}, a = r.assignment || {}, sel = r.dataset_selection || {};
+    if (st.next !== 'approve' && st.next !== 'send') return h('div', {class: 'fd-clean muted'}, h('p', {}, 'No corrections to make. The report is not ready for approval until the step above is done.'));
+    const approved = r.approval && rv.approval_current;
+    const li = (ok, text) => h('li', {class: ok ? 'ok' : 'no'}, icon(ok ? 'ok' : 'warn', 15), text);
+    return h('div', {class: 'fd-clean'}, icon('ok', 40),
+      h('h3', {}, approved ? 'Internally approved.' : 'Everything lines up.'),
+      h('ul', {},
+        li(true, `Client and job: ${a.label || [a.client, rv.job].filter(Boolean).join(' → ')}`),
+        li(true, `${plural(rv.scans || 0, 'record')} checked once against SharePoint${sp.captured_at ? ` (captured ${when2(sp.captured_at)})` : ''}`),
+        li(!(sp.fields_not_checked || []).length, (sp.fields_not_checked || []).length ? `Not checked: ${sp.fields_not_checked.join(', ')} (no SharePoint column)` : `Fields checked: ${(sp.fields_checked || []).join(', ')}`),
+        li(rv.rejected != null, rv.rejected == null ? 'Rejects not recorded: the rate is shown as unavailable' : `Rejects recorded: ${fmt(rv.rejected)}`),
+        (sel.authoritative || []).length ? li(true, `One record set: ${(sel.authoritative || []).join(', ')}; summary and photo tabs are not added again`) : null),
+      approved ? h('p', {class: 'fd-hint'}, `Approved by ${r.approval.by} ${ago(r.approval.at)}. Sending to the client is a separate step (More → Send to client…).`)
+        : h('div', {class: 'fd-approve'},
+          h('label', {}, 'Your name', h('input', {id: 'fd-approver', value: myName(), autocomplete: 'name'})),
+          h('button', {type: 'button', class: 'btn primary', id: 'fd-approve-btn', onclick: fdApprove}, 'Approve internally'),
+          h('p', {class: 'fd-hint'}, 'Internal approval only. Nothing is emailed; sending to the client is a separate step.')));
+  }
+  function fdCard(it, groups) {
+    const g = groups.find(x => x.key === it.group), inGroup = g.items, pos = inGroup.indexOf(it);
+    const flat = groups.filter(x => x.tier === it.tier).flatMap(x => x.items), at = flat.indexOf(it);
+    const cmp = (label, value, cls) => h('div', {class: 'fd-cmp ' + (cls || '')}, h('b', {}, label), h('span', {}, value == null ? '—' : showWs(value)));
+    const conf = {source: ['Source-backed', 'SharePoint has this value for the same site, list and item.'], mechanical: ['Mechanical', 'Only how the value is written changes.'],
+      ai: ['Claude\'s suggestion', 'Not from a source: check it before selecting.'], guess: ['Needs your judgement', 'Worked out from the rest of the report, not from a source.'],
+      source_only: ['Source value, no change prepared', 'SharePoint has a value, but no safe cell to change was found. Correct it by hand or keep it on hold.'],
+      none: ['No source value', 'Nothing supports a change, so the value stays as recorded and the issue stays open.']}[it.evidence];
+    const where = [it.sheet, it.cell || (it.row ? 'row ' + it.row : null), it.item ? 'SharePoint item ' + it.item : null].filter(Boolean).join(' · ');
+    const decided = it.state === 'kept' ? `Kept as recorded${it.decidedBy ? ' by ' + it.decidedBy : ''}` : it.state === 'rejected' ? `Suggestion rejected${it.decidedBy ? ' by ' + it.decidedBy : ''}` : it.state === 'selected' ? 'Selected for preview' : null;
+    return h('article', {class: 'fd-card ' + it.tier, 'aria-label': 'Selected correction', id: 'fd-card'},
+      h('div', {class: 'fd-cardtop'}, icon(it.tier === 'blocker' ? 'x' : it.tier === 'format' ? 'note' : 'warn', 20),
+        h('div', {}, h('h3', {}, g.title), h('p', {}, `${where || 'Whole report'} · item ${pos + 1} of ${inGroup.length}`)),
+        h('button', {type: 'button', class: 'fd-iconbtn', 'aria-label': 'Close this correction', onclick: () => { state.fdCur = null; drawSide(); }}, icon('x', 16))),
+      it.text && it.text !== g.title ? h('p', {class: 'fd-text'}, it.text) : null,
+      h('div', {class: 'fd-cmps'}, cmp('Report', it.report ?? (it.fix ? '' : null)), cmp('Source', it.source, it.source == null ? 'empty' : ''), cmp('Proposed', it.proposed, it.proposed == null ? 'empty' : 'prop')),
+      h('p', {class: 'fd-reason'}, it.reason),
+      h('p', {class: 'fd-conf ' + it.evidence}, h('b', {}, conf[0]), ' ', conf[1]),
+      decided ? h('p', {class: 'fd-decided'}, icon('ok', 14), ' ', decided, it.note ? ` · “${it.note}”` : '') : null,
+      h('div', {class: 'fd-cardacts'},
+        it.selectable ? h('button', {type: 'button', class: 'btn ' + (it.state === 'selected' ? '' : 'primary'), onclick: () => fdSelect([it], it.state !== 'selected')},
+          it.state === 'selected' ? 'Remove from preview' : 'Select for preview') : null,
+        it.fix && it.state !== 'rejected' ? h('button', {type: 'button', class: 'btn', onclick: () => fdDecide(it, 'reject')}, 'Reject suggestion') : null,
+        it.state !== 'kept' ? h('button', {type: 'button', class: 'btn', onclick: () => fdDecide(it, 'keep')}, it.report === '' || it.report == null ? 'Keep blank' : 'Keep as recorded') : null,
+        it.state !== 'open' ? h('button', {type: 'button', class: 'btn subtle', onclick: () => fdDecide(it, 'reopen')}, 'Undo decision') : null,
+        h('button', {type: 'button', class: 'btn subtle', onclick: () => fdEvidence(it)}, icon('db', 15), ' Source evidence')),
+      h('details', {class: 'fd-notebox', open: it.note ? true : null}, h('summary', {}, icon('note', 14), ' Note'),
+        h('textarea', {id: 'fd-note', 'aria-label': 'Review note', rows: '2', placeholder: 'Why you kept, rejected or changed this…'}, it.note || ''),
+        h('button', {type: 'button', class: 'btn small', onclick: () => fdDecide(it, 'note', $('fd-note').value)}, 'Save note')),
+      it.tier === 'blocker' && it.evidence === 'none' ? h('p', {class: 'fd-holdnote'}, icon('lock', 14), ' Keeping it as recorded does not clear the hold; the report stays blocked until the source question is settled.') : null,
+      h('div', {class: 'fd-nav'},
+        h('button', {type: 'button', class: 'btn small', disabled: at <= 0, onclick: () => fdOpen(flat[at - 1]), 'aria-keyshortcuts': 'k'}, icon('prev', 15), ' Previous'),
+        h('span', {}, `${at + 1} of ${flat.length}`),
+        h('button', {type: 'button', class: 'btn small', disabled: at >= flat.length - 1, onclick: () => fdOpen(flat[at + 1]), 'aria-keyshortcuts': 'j'}, 'Next ', icon('next', 15))));
+  }
+  // open a correction: its exact cell is scrolled into view and highlighted; the sheet switches if needed
+  async function fdOpen(it) {
+    if (!it) return;
+    state.fdCur = it.key; state.fdTier = it.tier;
+    if (it.sheet && (!state.grid || state.grid.sheet !== it.sheet)) { fdKeepScroll(); await loadGrid(it.sheet, true); }
+    state.gridCell = it.cell || (it.row ? `A${it.row}` : null); state.gridRow = it.row || null;
+    drawSide(); drawGrid();
+    const td = state.gridCell && document.querySelector(`#sheet-block td[data-cell="${state.gridCell}"]`), wrap = document.querySelector('#sheet-block .gridwrap');
+    if (td && wrap) reveal(wrap, td, true);
+    if (document.body.classList.contains('fd-narrow')) document.body.classList.add('fd-panel-open');
+    $('fd-card')?.querySelector('h3')?.setAttribute('tabindex', '-1');
+  }
+  function fdSelect(list, on) {
+    const dec = store.get(decisionsKey(), {});
+    for (const it of list) if (it.fix) { if (on) dec[it.fix.id] = {state: 'accepted', after: it.proposed}; else delete dec[it.fix.id]; }
+    store.set(decisionsKey(), dec);
+    toast(on ? `${plural(list.length, 'change')} selected for preview. Nothing changes until you preview and apply.` : 'Removed from the preview.');
+    fdRefresh();
+  }
+  async function fdDecide(it, action, note) {
+    try {
+      const by = myName();
+      const out = await api('/api/spreadsheets/decision', {file_hash: state.report.file_hash, key: it.key, action, note: note || '', by});
+      state.report.review_decisions = out.decisions;
+      if (it.fix) { const dec = store.get(decisionsKey(), {}); if (action === 'reject') dec[it.fix.id] = {state: 'rejected'}; else if (action === 'reopen' || action === 'keep') delete dec[it.fix.id]; store.set(decisionsKey(), dec); }
+      toast({reject: 'Suggestion rejected. Kept with this version.', keep: it.tier === 'blocker' && it.evidence === 'none' ? 'Kept as recorded. The hold stays until the source question is settled.' : 'Kept as recorded.', note: 'Note saved with this version.', reopen: 'Decision undone.'}[action]);
+      if (action === 'reject' || action === 'keep') { const flat = (state.fdItems || []).filter(x => x.tier === it.tier && x.state === 'open' && x.key !== it.key); fdRefresh(); if (flat[0]) fdOpen(flat[0]); return; }
+      fdRefresh();
+    } catch (e) { toast(e.message, true); }
+  }
+  async function fdDecideAll(list, action) {
+    try {
+      const out = await api('/api/spreadsheets/decision', {file_hash: state.report.file_hash, keys: list.map(x => x.key), action, by: myName()});
+      state.report.review_decisions = out.decisions;
+      toast(`${plural(list.length, 'item')} kept as recorded. Saved with this version.`);
+      fdRefresh();
+    } catch (e) { toast(e.message, true); }
+  }
+  function fdRefreshFoot() {
+    const sel = readyChanges().total, b = $('fd-preview-btn'), n = $('fd-selcount');
+    if (b) { b.disabled = !sel || state.busy; b.classList.toggle('primary', !!sel); }
+    if (n) n.textContent = sel ? plural(sel, 'change') + ' selected' : 'No changes selected';
+    if (state.report) { const st = fdStatus(state.report), pill = document.querySelector('.fd-status');
+      if (pill) { pill.className = 'fd-status ' + st.tone; pill.replaceChildren(icon(st.icon, 16), h('span', {}, st.text)); } }
+  }
+  function fdRefresh() {
+    state.fdItems = fdItems(); drawSide(); drawGrid(); fdRefreshFoot();
+  }
+
+  // ---------- source evidence: shown beside the sheet, so the place in the spreadsheet is kept
+  async function fdEvidence(it) {
+    const slot = $('fd-evidence'); if (!slot) return;
+    const sp = state.report.review.sharepoint || {};
+    const close = h('button', {type: 'button', class: 'fd-iconbtn', 'aria-label': 'Close source evidence', onclick: () => slot.replaceChildren()}, icon('x', 16));
+    const box = h('section', {class: 'fd-drawer', 'aria-label': 'Source evidence', tabindex: '-1'},
+      h('div', {class: 'fd-drawerhead'}, h('b', {}, icon('db', 16), ` ${it.item ? 'SharePoint item ' + it.item : it.sheet ? `${it.sheet} row ${it.row || '?'}` : 'Whole report'} · source evidence`), close),
+      h('dl', {}, h('dt', {}, 'Report'), h('dd', {}, it.report == null ? '—' : showWs(it.report)), h('dt', {}, 'SharePoint'), h('dd', {}, it.source == null ? 'No value for this field' : showWs(it.source)),
+        h('dt', {}, 'Snapshot'), h('dd', {}, sp.snapshot_id ? `${String(sp.snapshot_id).slice(0, 12)} · ${when2(sp.captured_at) || ''}` : 'None for this version'),
+        h('dt', {}, 'List'), h('dd', {}, sp.source || '—')),
+      it.url || sp.web_url ? h('a', {href: it.url || sp.web_url, target: '_blank', rel: 'noopener'}, 'Open on SharePoint (read only)') : null,
+      h('div', {id: 'fd-rowcells'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Reading the row…')));
+    slot.replaceChildren(box); box.focus();
+    if (!it.sheet || !it.row) { $('fd-rowcells').replaceChildren(); return; }
+    try {
+      const row = await api('/api/spreadsheets/cells', {file_hash: state.report.file_hash, sheet: it.sheet, row: it.row});
+      $('fd-rowcells')?.replaceChildren(h('table', {class: 'fd-rowtable'}, h('tbody', {}, (row.cells || []).filter(c => c.header || c.value !== '').slice(0, 24).map(c =>
+        h('tr', {class: c.cell === it.cell ? 'cur' : ''}, h('th', {}, c.header || c.cell), h('td', {}, c.value === '' || c.value == null ? '(blank)' : String(c.value)))))));
+    } catch (e) { $('fd-rowcells')?.replaceChildren(h('p', {class: 'note'}, e.message)); }
+  }
+
+  // ---------- preview, then a new version, then the checks run again on it
+  function fdPreview() {
+    const c = readyChanges(); if (!c.total) return;
+    const r = state.report, next = revisionOf(r) + 1;
+    const rows = [...c.accepted.map(f => ({sheet: f.sheet, cell: f.cell, before: f.before, after: c.dec[f.id]?.after ?? f.after, why: f.reason, src: f.source})),
+      ...Object.values(c.edits).map(e => ({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, why: e.reason || 'Your edit', src: 'Your edit'}))];
+    const d = h('dialog', {class: 'fd-modal', 'aria-labelledby': 'fd-prev-title'},
+      h('p', {class: 'fd-eyebrow'}, 'Check before applying'),
+      h('h2', {id: 'fd-prev-title'}, plural(rows.length, 'change')),
+      h('p', {}, `These cells change in a new version (v${next}). v${revisionOf(r)} stays exactly as it is, and the checks and the SharePoint comparison run again on v${next}.`),
+      h('div', {class: 'fd-prevlist', tabindex: '0'}, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Cell'), h('th', {}, 'Before'), h('th', {}, 'After'), h('th', {}, 'Why'))),
+        h('tbody', {}, rows.map(x => h('tr', {}, h('td', {}, `${x.sheet}!${x.cell}`), h('td', {}, showWs(x.before)), h('td', {}, h('b', {}, showWs(x.after))), h('td', {}, `${x.src}: ${x.why || ''}`)))))),
+      h('div', {class: 'fd-modalacts'},
+        h('button', {type: 'button', class: 'btn', onclick: () => d.close()}, 'Back to review'),
+        h('button', {type: 'button', class: 'btn primary', id: 'fd-apply', onclick: async e => {
+          if (state.busy) return; e.currentTarget.disabled = true; e.currentTarget.textContent = `Saving v${next} and re-checking…`;
+          const hash = await applyFixes(c.accepted, c.dec, c.edits, {download: false});
+          d.close(); if (hash) toast(`v${next} saved and checked again. v${revisionOf(r)} is kept unchanged.`);
+        }}, `Create v${next} and re-check`)));
+    d.addEventListener('close', () => { d.remove(); $('fd-preview-btn')?.focus(); });
+    document.body.append(d); d.showModal(); d.querySelector('#fd-apply').focus();
+  }
+  async function fdApprove() {
+    const name = ($('fd-approver')?.value || '').trim(), btn = $('fd-approve-btn');
+    if (!name) { toast('Type your name to approve the report.', true); $('fd-approver')?.focus(); return; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Approving…'; }
+    try {
+      store.set('rd-approver', name);
+      const out = await api('/api/spreadsheets/approve', {file_hash: state.report.file_hash, approver: name, note: ''});
+      toast('Internally approved. Nothing was sent; sending to the client is a separate step.');
+      await openReport(out.item.file_hash, true); loadList();
+    } catch (e) { toast(e.message, true); if (btn) { btn.disabled = false; btn.textContent = 'Approve internally'; } }
+  }
+  async function fdRecheck() {
+    const name = myName() || 'Reviewer';
+    toast('Re-checking with the current checks…');
+    try { const out = await api('/api/spreadsheets/recheck', {file_hash: state.report.file_hash, apply: true, by: name});
+      toast(out.reconciled ? 'Checked again, and SharePoint compared again.' : 'Checked again. Compare with SharePoint to verify it.');
+      await openReport(state.report.file_hash, true); loadList();
+    } catch (e) { toast(e.message, true); }
+  }
+  async function fdReconcile() {
+    toast('Comparing every record with its SharePoint item…');
+    try { await api('/api/spreadsheets/sharepoint', {file_hash: state.report.file_hash}); await openReport(state.report.file_hash, true); loadList();
+      const sp = state.report.review.sharepoint || {}; toast(sp.status === 'match' ? 'Matches SharePoint item by item.' : sp.message || 'SharePoint compared.');
+    } catch (e) { toast(e.message, true); }
+  }
+
+  // ---------- history and sources
+  function fdHistory(r) {
+    const rv = r.review, rows = [];
+    const add = (title, text, link) => rows.push(h('article', {class: 'fd-hist'}, h('b', {}, title), h('span', {}, text), link || null));
+    if (r.fixed_from) add(`v${r.fixed_from.revision || 1} · ${r.fixed_from.filename}`, 'The version these changes were made on. Kept unchanged.', h('a', {href: '#r=' + r.fixed_from.file_hash}, `Open v${r.fixed_from.revision || 1}`));
+    add(`v${revisionOf(r)} · this version`, r.fixed_from ? `${plural(r.fixed_from.changes.length, 'change')} applied${r.fixed_from.applied_at ? ' ' + when2(r.fixed_from.applied_at) : ''}: ` + r.fixed_from.changes.slice(0, 8).map(c => `${c.sheet}!${c.cell} ${c.before || '(blank)'} → ${c.after || '(blank)'}`).join('; ') + (r.fixed_from.changes.length > 8 ? '…' : '') : `Uploaded ${when2(r.received_at) || ''}. Stored unchanged (SHA-256 ${r.file_hash.slice(0, 12)}…).`);
+    for (const f of r.fixes_applied || []) add(`v${f.revision || '?'} · ${f.fixed_filename}`, `${plural(f.changes.length, 'change')} applied ${when2(f.applied_at) || ''}.`, h('a', {href: '#r=' + f.fixed_file_hash}, 'Open it'));
+    for (const x of r.recheck_applied || []) add('Re-checked', `${x.by || 'Someone'} re-ran the checks ${when2(x.at) || ''} (from ${x.from_version || '?'} to ${x.to_version || '?'}).`);
+    for (const x of (r.review_decision_log || []).slice(-30)) add({keep: 'Kept as recorded', reject: 'Suggestion rejected', note: 'Note', reopen: 'Decision undone'}[x.action] || x.action, `${x.by || 'A reviewer'} ${when2(x.at) || ''}${x.note ? ': “' + x.note + '”' : ''}`);
+    if (r.approval) add(rv.approval_current ? 'Internally approved' : 'Approved on an earlier check run', `${r.approval.by} ${when2(r.approval.at) || ''}${r.approval.note ? ': ' + r.approval.note : ''}. Not sent.`);
+    for (const s of (r.sent || []).filter(x => x.sent)) add('Sent to client', `${when2(s.at) || ''} to ${(s.to || []).join(', ')}`);
+    return h('section', {class: 'fd-utility'}, h('h2', {}, 'Version history'), h('p', {}, 'Every version has its own file, its own checks and its own provenance. Originals are never changed.'), rows);
+  }
+  function fdSources(r) {
+    const rec = r.source_reconciliation || {}, sp = r.review.sharepoint || {}, sel = r.dataset_selection || {}, cov = rec.coverage || {};
+    const kv = (k, v) => v == null || v === '' ? null : [h('dt', {}, k), h('dd', {}, String(v))];
+    return h('section', {class: 'fd-utility'}, h('h2', {}, 'Sources'),
+      h('p', {}, 'Source coverage is shown separately from report correctness. A partial or conflicting read is never called verified.'),
+      h('article', {class: 'fd-hist'}, h('b', {}, `SharePoint: ${({match: 'matches item by item', differences: 'differs', incomplete: 'incomplete, not verified', unverified: 'not verified', stale: 'out of date', day_level: 'day totals only'})[sp.status] || 'not compared'}`),
+        h('dl', {class: 'fd-kv'}, kv('List', sp.source), kv('Snapshot', sp.snapshot_id), kv('Captured', when2(sp.captured_at)), kv('Records matched', sp.matched != null ? `${sp.matched} of ${r.review.scans}` : null),
+          kv('Fields checked', (sp.fields_checked || []).join(', ')), kv('Fields not checked', (sp.fields_not_checked || []).join(', ')), kv('Pages read', cov.pages),
+          kv('Denied / throttled / failed pages', [cov.denied, cov.throttled, (cov.failed_pages || []).length].some(Boolean) ? `${cov.denied || 0} / ${cov.throttled || 0} / ${(cov.failed_pages || []).length}` : null),
+          kv('Undated records', cov.undated), kv('Why not verified', (rec.not_verified_because || []).join(' '))),
+        sp.web_url ? h('a', {href: sp.web_url, target: '_blank', rel: 'noopener'}, 'Open the list (read only)') : null),
+      h('article', {class: 'fd-hist'}, h('b', {}, 'Record set'), h('dl', {class: 'fd-kv'}, kv('Counted', (sel.authoritative || []).join(', ')), kv('Compared, not added', (sel.compared || []).join(', ')),
+        kv('Status', sel.status), kv('Roles', Object.entries(sel.roles || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')))),
+      readBlock(r));
+  }
+  // switching sheets keeps each sheet's scroll position
+  function fdKeepScroll() { const w = document.querySelector('#sheet-block .gridwrap'); if (w && state.grid) (state.sheetScroll ||= {})[state.grid.sheet] = [w.scrollTop, w.scrollLeft]; }
+  // keyboard: j / k next and previous correction, s select, Escape closes drawers
+  document.addEventListener('keydown', e => {
+    if (!document.body.classList.contains('reportmode') || e.target.closest('input, textarea, select, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey) return;
+    const flat = (state.fdItems || []).filter(x => x.tier === state.fdTier), at = flat.findIndex(x => x.key === state.fdCur);
+    if (e.key === 'j') { fdOpen(flat[Math.min(flat.length - 1, at + 1)]); e.preventDefault(); }
+    if (e.key === 'k') { fdOpen(flat[Math.max(0, at - 1)]); e.preventDefault(); }
+  });
+  const fdNarrow = matchMedia('(max-width: 900px)'); const syncNarrow = () => document.body.classList.toggle('fd-narrow', fdNarrow.matches);
+  fdNarrow.addEventListener('change', syncNarrow); syncNarrow();
 
   // ---------------- right-hand panel: Fixes (issues grouped by severity and type, suggested fixes), Facts, Ask Claude
   const myName = () => store.get('rd-approver', '') || (state.me?.user && !state.me.user.virtual ? state.me.user.name || state.me.user.email || '' : '');
@@ -703,7 +1108,10 @@
     const done = reviewedSet(), open = walkIssues().filter(i => !done.has(i.key)).length, tab = state.sideTab;
     const btn = (id, label, badge) => h('button', {type: 'button', role: 'tab', class: tab === id ? 'on' : '', 'aria-selected': String(tab === id),
       onclick: () => { if (id === 'claude') state.chatUnread = false; showSide(id); }}, label, badge ? h('i', {}, badge) : null);
-    bar.replaceChildren(btn('fixes', 'Fixes', open ? String(open) : null), btn('facts', 'Facts'), btn('claude', 'Ask Claude', state.chatUnread ? 'new' : null));
+    const c = fdCounts(), todo = (c.blockers || 0) + (c.review || 0);
+    bar.replaceChildren(btn('fixes', 'Corrections', todo ? String(todo) : null), btn('facts', 'Facts'), btn('claude', 'Ask Claude', state.chatUnread ? 'new' : null));
+    const mc = $('fd-mobile-count'); if (mc) mc.textContent = todo ? String(todo) : '';
+    void open;
   }
   function drawSide() {
     const side = $('side'), r = state.report; if (!side || !r) return;
@@ -712,10 +1120,8 @@
     side.replaceChildren(h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
     drawSideTabs();
     if (tab === 'fixes') {
-      body.append(h('div', {id: 'cellslot'}), h('div', {id: 'cleanoffer'}), h('div', {id: 'finish'}), h('div', {id: 'shiftfix'}, ...[shiftCard(rv)].filter(Boolean)));
-      drawCleanOffer();
-      drawCellSlot();
-      if (state.fixes) drawFixes(); else updateFinish();
+      fdCorrections(body);
+      const sc = shiftCard(rv); if (sc) body.append(h('div', {id: 'shiftfix'}, sc));
     } else if (tab === 'facts') {
       body.append(h('div', {id: 'recs'}), numbers(r));
       if (r.built) body.append(builtBanner(r));
@@ -1221,7 +1627,8 @@
   function drawFixes() {
     const block = $('fixes-block'); if (!state.fixes) return;
     drawCleanOffer(); drawSteps();
-    if (!block) { drawGrid(); updateDownloads(); if (!state.chatBusy) drawChat(); updateFinish(); drawSideTabs(); return; }
+    if (!block) { state.fdItems = fdItems(); if (state.sideTab === 'fixes' && $('side') && !$('side').contains(document.activeElement)) drawSide(); else drawSideTabs();
+      drawGrid(); updateDownloads(); if (!state.chatBusy) drawChat(); updateFinish(); fdRefreshFoot(); return; }
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
     const editList = Object.entries(edits);
     const fixes = state.fixes.filter(f => !edits[editId(f.sheet, f.cell)]);
@@ -1338,7 +1745,7 @@
     applyFixes(c.accepted, c.dec, c.edits);
   }
   function updateDownloads() {
-    const c = readyChanges(), label = c.total ? `Download with ${c.total} change${c.total === 1 ? '' : 's'}` : state.report?.fixed_from ? 'Download fixed version' : 'Download report';
+    const c = readyChanges(), label = c.total ? `Download with ${c.total} change${c.total === 1 ? '' : 's'}` : `Download v${state.report ? revisionOf(state.report) : 1}`;
     for (const b of document.querySelectorAll('.dl-changes')) { b.textContent = state.busy ? 'Building the fixed copy…' : label; b.disabled = !!state.busy; }
   }
   async function applyFixes(accepted, dec, edits, opts = {}) {
@@ -1413,7 +1820,7 @@
     try {
       const g = await api('/api/spreadsheets/sheet', {file_hash: hash, sheet});
       if (state.selected !== hash) return;
-      state.grid = g; state.gridSheet = g.sheet; if (!quiet) drawGrid(true);
+      state.grid = {...g, hash}; state.gridSheet = g.sheet; if (!quiet) drawGrid(!(state.sheetScroll || {})[g.sheet]);
     } catch (e) { block.replaceChildren(h('p', {class: 'note'}, e.message)); }
   }
   // One sheet as an HTML table. opts: onlyRows (Set of row numbers), selected (cell), focus {cell, row}
@@ -1437,7 +1844,7 @@
     for (let r = 1; r <= g.height; r++) {
       if (onlyRows && !onlyRows.has(r)) continue;
       const rowIssues = m.rows[`${sheet}!${r}`];
-      const isFocusRow = !focusCell && focusRow === r;
+      const isFocusRow = focusRow === r;
       const tr = h('tr', {class: [rowIssues ? 'rowflag ' + rowIssues[0].severity : '', hiddenRows.has(r) ? 'hiddenrow' : '', isFocusRow ? 'focusrow' : ''].filter(Boolean).join(' ') || null},
         h('th', {title: rowIssues ? rowIssues.map(i => i.text).join('\n') : null}, String(r)));
       if (isFocusRow) focusEl = tr;
@@ -1473,37 +1880,50 @@
   function drawGrid(scroll) {
     const block = $('sheet-block'), g = state.grid; if (!block || !g) return;
     const m = marks(), sheet = g.sheet;
-    const onlyChanged = !!state.gridOnlyMarked;
+    const onlyChanged = !!state.gridOnlyMarked, q = (state.gridSearch || '').trim().toLowerCase();
     const markedRows = new Set();
     for (const k of Object.keys(m.cells)) if (k.startsWith(sheet + '!')) markedRows.add(splitCell(k.slice(sheet.length + 1))[1]);
     for (const k of Object.keys(m.rows)) if (k.startsWith(sheet + '!')) markedRows.add(Number(k.slice(sheet.length + 1)));
-    const {table, first} = buildGrid(g, m, {onlyRows: onlyChanged ? markedRows : null, selected: state.gridCell});
-    const counts = {flag: 0, fix: 0, ready: 0};
-    for (const [k, list] of Object.entries(m.cells)) if (k.startsWith(sheet + '!')) for (const x of list) counts[x.kind === 'issue' ? 'flag' : x.kind]++;
-    const tabs = h('div', {class: 'tabs', role: 'tablist'}, (g.sheets || []).map(n => h('button', {type: 'button', role: 'tab', class: n === sheet ? 'on' : '', 'aria-selected': String(n === sheet),
-      onclick: () => { state.gridCell = null; loadGrid(n); }}, n, m.perSheet[n] ? h('i', {}, String(m.perSheet[n])) : null)));
+    let only = onlyChanged ? new Set(markedRows) : null;
+    if (q) { const hit = new Set(); g.rows.forEach((row, n) => { if ((row || []).some(v => String(v ?? '').toLowerCase().includes(q))) hit.add(n + 1); });
+      only = only ? new Set([...only].filter(x => hit.has(x))) : hit; }
+    const cur = (state.fdItems || []).find(x => x.key === state.fdCur);
+    const focus = cur && cur.sheet === sheet ? {cell: cur.cell, row: cur.row} : state.gridRow ? {row: state.gridRow} : null;
+    const {table, first} = buildGrid(g, m, {onlyRows: only, selected: state.gridCell, focus});
+    table.style.fontSize = (state.gridZoom || 100) / 100 * 13 + 'px';
+    const flagged = Object.entries(m.cells).filter(([k, l]) => k.startsWith(sheet + '!') && l.some(x => x.kind === 'issue')).length + Object.keys(m.rows).filter(k => k.startsWith(sheet + '!')).length;
+    const tabs = h('div', {class: 'fd-tabs', role: 'tablist', 'aria-label': 'Sheets'}, (g.sheets || []).map(n => h('button', {type: 'button', role: 'tab', class: n === sheet ? 'on' : '', 'aria-selected': String(n === sheet),
+      onclick: () => { if (n === sheet) return; fdKeepScroll(); state.gridCell = null; state.gridRow = null; loadGrid(n); }}, n, m.perSheet[n] ? h('i', {'aria-label': `${m.perSheet[n]} flagged`}, String(m.perSheet[n])) : null)));
     table.addEventListener('click', e => {
       const td = e.target.closest('td[data-cell]'); if (!td) return;
-      state.gridCell = td.dataset.cell; state.issueNav = null;
-      if (state.sideTab !== 'fixes') { state.sideTab = 'fixes'; drawSide(); }
-      drawGrid();
-      $('side-body')?.scrollTo({top: 0, behavior: 'smooth'});
+      const addr = td.dataset.cell, row = splitCell(addr)[1];
+      const hit = (state.fdItems || []).find(x => x.sheet === sheet && x.cell === addr) || (state.fdItems || []).find(x => x.sheet === sheet && !x.cell && x.row === row);
+      if (hit) { if (state.sideTab !== 'fixes') state.sideTab = 'fixes'; fdOpen(hit); return; }
+      state.gridCell = addr; state.gridRow = row; state.fdCur = null; drawGrid(); if (state.sideTab === 'fixes') drawSide();
     });
-    const old = block.querySelector('.gridwrap'), keep = old && !scroll ? [old.scrollTop, old.scrollLeft] : null;
-    const scroller = h('div', {class: 'gridwrap'}, table);
-    const flagged = counts.flag + Object.keys(m.rows).filter(k => k.startsWith(sheet + '!')).length;
+    const old = block.querySelector('.gridwrap');
+    const keep = old && !scroll && old.dataset.sheet === sheet ? [old.scrollTop, old.scrollLeft] : (state.sheetScroll || {})[sheet] || null;
+    const scroller = h('div', {class: 'gridwrap', 'data-sheet': sheet, tabindex: '0', 'aria-label': `Sheet ${sheet}`}, table);
+    const search = h('input', {type: 'search', value: state.gridSearch || '', placeholder: 'Find a record, part or value…', 'aria-label': 'Find in this sheet',
+      oninput: e => { state.gridSearch = e.target.value; clearTimeout(state.gridSearchT); state.gridSearchT = setTimeout(() => { drawGrid(true); const i = document.querySelector('.fd-search input'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, 200); }});
+    const empty = only && !only.size;
     block.replaceChildren(
-      h('div', {class: 'sheetbar'}, tabs,
-        h('label', {class: 'only'}, h('input', {type: 'checkbox', checked: onlyChanged, onchange: e => { state.gridOnlyMarked = e.target.checked; drawGrid(true); }}), 'Only rows to fix')),
-      scroller,
+      h('div', {class: 'fd-toolbar'},
+        h('label', {class: 'fd-search'}, icon('search', 16), search),
+        h('label', {class: 'fd-check'}, h('input', {type: 'checkbox', checked: onlyChanged, onchange: e => { state.gridOnlyMarked = e.target.checked; drawGrid(true); }}), ` Only exceptions (${markedRows.size} row${markedRows.size === 1 ? '' : 's'})`),
+        h('label', {class: 'fd-zoom'}, 'Zoom ', h('select', {'aria-label': 'Sheet zoom', onchange: e => { state.gridZoom = Number(e.target.value); drawGrid(); }},
+          [80, 100, 125, 150].map(z => h('option', {value: String(z), selected: (state.gridZoom || 100) === z ? true : null}, z + '%')))),
+        state.fdAsideHidden ? h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdAsideHidden = false; $('fd-work')?.classList.remove('aside-hidden'); drawSide(); }}, icon('panel', 15), ' Show corrections') : null),
+      empty ? h('div', {class: 'fd-empty'}, h('b', {}, q ? 'No matching rows' : 'No exceptions on this sheet'), h('p', {}, q ? `Nothing on "${sheet}" contains “${state.gridSearch}”.` : 'Every row on this sheet is clear.')) : scroller,
+      tabs,
       h('div', {class: 'legend'},
         h('span', {class: 'k iss high'}, `Flagged (${flagged})`),
-        h('span', {class: 'k fixme'}, `Suggested fix (${counts.fix})`),
-        h('span', {class: 'k ready'}, `Will change in the download (${counts.ready})`),
+        h('span', {class: 'k fixme'}, 'Suggested change'),
+        h('span', {class: 'k ready'}, 'Selected for the new version'),
         h('span', {class: 'k fx'}, 'Formula'),
         g.truncated ? h('span', {class: 'note'}, 'Large sheet: only the first rows and columns are shown.') : null));
-    if (keep) { scroller.scrollTop = keep[0]; scroller.scrollLeft = keep[1]; }
-    if (scroll) requestAnimationFrame(() => reveal(scroller, first, false));
+    if (keep && !empty) { scroller.scrollTop = keep[0]; scroller.scrollLeft = keep[1]; }
+    else if (scroll && !empty) requestAnimationFrame(() => reveal(scroller, first, false));
     drawCellSlot();
   }
 

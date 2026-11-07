@@ -309,10 +309,12 @@ class SpreadsheetInbox:
         return self._update(file_hash, change)
     DECISIONS = ('keep', 'reject', 'note', 'reopen')
     def record_decision(self, file_hash, key, action, note, by):
-        """A reviewer's decision on one issue or suggestion, kept with this version and logged. A decision never clears a
-        blocker by itself: keeping a blank that has no source value keeps the report on hold."""
-        key, note, by = key.strip()[:300], ' '.join(note.split())[:1000], ' '.join(by.split())[:80]
-        if not key:
+        return self.record_decisions(file_hash, [key], action, note, by)
+    def record_decisions(self, file_hash, keys, action, note, by):
+        """A reviewer's decision on issues or suggestions, kept with this version and logged (one save for a group). A
+        decision never clears a blocker by itself: keeping a blank that has no source value keeps the report on hold."""
+        keys, note, by = [k.strip()[:300] for k in keys if k and k.strip()], ' '.join(note.split())[:1000], ' '.join(by.split())[:80]
+        if not keys:
             raise ValueError('Which issue or suggestion?')
         if action not in self.DECISIONS:
             raise ValueError('Unknown decision.')
@@ -321,14 +323,15 @@ class SpreadsheetInbox:
         at = datetime.now(timezone.utc).isoformat()
         def change(r):
             d = dict(r.get('review_decisions') or {})
-            if action == 'reopen':
-                d.pop(key, None)
-            else:
-                prev = d.get(key) or {}
-                d[key] = dict(action=prev.get('action') if action == 'note' and prev.get('action') in ('keep', 'reject') else action,
-                              note=note or prev.get('note') or '', by=by or None, at=at)
+            for key in keys:
+                if action == 'reopen':
+                    d.pop(key, None)
+                else:
+                    prev = d.get(key) or {}
+                    d[key] = dict(action=prev.get('action') if action == 'note' and prev.get('action') in ('keep', 'reject') else action,
+                                  note=note or prev.get('note') or '', by=by or None, at=at)
             r['review_decisions'] = d
-            r['review_decision_log'] = ((r.get('review_decision_log') or []) + [dict(key=key, action=action, note=note, by=by or None, at=at)])[-500:]
+            r['review_decision_log'] = ((r.get('review_decision_log') or []) + [dict(key=k, action=action, note=note, by=by or None, at=at) for k in keys])[-500:]
         return self._update(file_hash, change)
     def review_action(self, file_hash, action, by, note=''):
         """Ask a reviewer (usually the boss) to sign the report off, or send it back with a comment."""

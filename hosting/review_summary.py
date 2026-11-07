@@ -166,7 +166,10 @@ def summarize(result, with_issues=True, use_verdicts=True):
             issues.append(dict(key=f'rec:{d["status"]}:{d.get("item")}:{d.get("field")}:{i}', source='SharePoint', severity='high' if d['status'] in ('value_differs', 'missing_from_report', 'not_on_sharepoint', 'item_listed_twice', 'wrong_list') else 'medium',
                                code='sharepoint_' + d['status'], where=f'{d["sheet"]} row {d["row"]}' if d.get('sheet') else 'SharePoint',
                                sheet=d.get('sheet'), row=d.get('row'), cell=cells.get((d.get('item'), d.get('field'))),
-                               text=f'{what} {words.get(d["status"], d["status"])}{detail}.' + (f' {d["note"]}' if d.get('note') and not detail else ''), url=d.get('url')))
+                               text=(f'{what}: {d["field"]} is {d.get("report")} in the report, {d.get("sharepoint")} on SharePoint.' if detail and d['status'] == 'value_differs'
+                                     else f'{what} {words.get(d["status"], d["status"])}{detail}.' + (f' {d["note"]}' if d.get('note') and not detail else '')), url=d.get('url'),
+                               item=d.get('item'), field=d.get('field'), report_value=d.get('report'), source_value=d.get('sharepoint'),
+                               snapshot_id=rec.get('snapshot_id'), captured_at=rec.get('captured_at')))
     bl = result.get('baseline') or {}
     for i, f in enumerate(bl.get('findings') or []):
         issues.append(dict(key=f'usual:{f.get("code")}:{i}', source='Usual day', severity=f.get('severity') or 'medium',
