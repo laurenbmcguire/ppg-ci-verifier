@@ -84,7 +84,11 @@ def attach_identity(sheet_rows, sheets, records):
         rows = sheet_rows.get(sheet['name'], [])
         for table in sheet['tables']:
             heads = _headers(rows, table['header_row'])
-            url_col = next((i for i, h in enumerate(heads) if h in ('source record url', 'source url', 'record url', 'item url', 'sharepoint url')), None)
+            url_col = next((i for i, h in enumerate(heads) if h in ('source record url', 'source url', 'record url', 'item url', 'sharepoint url',
+                                                                     'source record', 'source link', 'sharepoint link', 'record link')), None)
+            if url_col is None:   # any column whose values are SharePoint item links
+                first = rows[table['header_row']:table['header_row'] + 5] if table['header_row'] else []
+                url_col = next((i for i in range(len(heads)) if any(parse_source_url(r[i]) for r in first if i < len(r))), None)
             id_col = next((i for i, h in enumerate(heads) if h in ('source item id', 'sharepoint item id', 'list item id', 'item id', 'source id')), None)
             if id_col is None and sheet.get('role') == 'source_export':
                 id_col = next((i for i, h in enumerate(heads) if h == 'id'), None)

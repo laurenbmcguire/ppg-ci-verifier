@@ -83,6 +83,16 @@ class The2214Case(unittest.TestCase):
         self.assertEqual(src, dict(site='SLAlabama_AlexanderCity', list='Data 2214SLALSLAL', item='432'))
         self.assertEqual(parse_source_url('https://x.sharepoint.com/sites/A/Lists/B%20C/DispForm.aspx?ID=9'), ('A', 'B C', '9'))
 
+    def test_identity_from_a_relative_source_record_link(self):
+        # the real template: header "Source record", value "/sites/<site>/Lists/Data%20<list>/<item>_.000"
+        wb = load_workbook(io.BytesIO(sl_daily(source_records=False)))
+        d = wb['Inspection Detail']; d['T3'] = 'Source record'
+        for row in range(4, 9):
+            d[f'T{row}'] = f'/sites/SLAlabama_AlexanderCity/Lists/Data%202214SLALSLAL/{428 + row}_.000'
+        buf = io.BytesIO(); wb.save(buf)
+        r = check(buf.getvalue())
+        self.assertEqual(r['records'][0]['source'], dict(site='SLAlabama_AlexanderCity', list='Data 2214SLALSLAL', item='432'))
+
     def test_photo_rows_are_not_production(self):
         r = check(sl_daily())
         self.assertFalse(any(rec['sheet'] == 'Defect Photos' for rec in r['records']))
