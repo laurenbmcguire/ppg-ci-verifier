@@ -74,3 +74,7 @@ class RecordedRejects(unittest.TestCase):
         out = io.BytesIO(); wb.save(out)
         r = inspect_spreadsheet('PPG_2207_Nov06_Provisional.xlsx', out.getvalue())
         self.assertIsNone((r.get('totals') or {}).get('rejected', {}).get('known_sum'))
+
+    def test_blank_reject_column_is_not_recorded(self):
+        r = inspect_spreadsheet('PPG_2207_Nov06_Provisional.xlsx', provisional())   # E5 'Rejected', every row blank
+        self.assertIsNone(r['totals']['rejected']['known_sum'])

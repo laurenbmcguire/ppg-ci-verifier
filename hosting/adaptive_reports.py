@@ -683,6 +683,8 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
     info = {'no_quantity_columns_detected', 'no_data_rows', 'quantity_formulas_not_evaluated', 'formula_results_used', 'known_template_layout_differs', 'labeled_total_unit_differs'}
     issues = {c for c in finding.counts if c not in info}
     mapped = {f for s_ in sheets for t in s_['tables'] if t['kind'] == 'detail' for f in t['columns']}
+    # a column with nothing written in it is "not recorded" too (a blank reject quantity is not zero rejects)
+    mapped = {f for f in mapped if any(r['values'].get(f) is not None for r in detail)}
     # a quantity the report has no column for is unknown, never 0
     totals = {f: dict(total=str(grand[f][0]) if grand[f][1] and f in mapped else None, known_sum=str(grand[f][0]) if f in mapped else None)
               for f in ('inspected', 'certified', 'rejected')} if sheet_sums else {}
