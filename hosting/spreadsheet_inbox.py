@@ -57,13 +57,9 @@ class SpreadsheetInbox:
         try:
             with db: yield db
         finally: db.close()
-    MAX_FILE_BYTES = 50 * 1024 * 1024   # reports up to 50 MB
-
     def ingest(self, filename, raw):
         if not isinstance(filename, str) or any(c in filename for c in '/\\') or any(ord(c) < 32 for c in filename):
             raise ValueError('Use a plain filename without folders or control characters.')
-        if len(raw or b'') > self.MAX_FILE_BYTES:
-            raise ValueError(f'{filename} is {len(raw) / 1048576:.1f} MB. Reports up to 50 MB can be uploaded.')
         from hosting import documents
         doc = None
         if documents.kind(filename):   # PDF or Word: its tables become a workbook and get the same checks
@@ -108,8 +104,6 @@ class SpreadsheetInbox:
             raise ValueError('Upload part count is invalid.')
         if not isinstance(sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', sha256):
             raise ValueError('A SHA-256 of the complete file is required.')
-        if part_count * 3 * 1024 * 1024 > self.MAX_FILE_BYTES + 3 * 1024 * 1024:
-            raise ValueError('Reports up to 50 MB can be uploaded.')
         chunks = files_for(self.root).take_parts(upload_id)
         if len(chunks) != part_count:
             raise ValueError(f'Upload incomplete: {len(chunks)} of {part_count} parts arrived. Nothing was saved; upload the file again.')

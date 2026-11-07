@@ -79,11 +79,3 @@ class RecordedRejects(unittest.TestCase):
         r = inspect_spreadsheet('PPG_2207_Nov06_Provisional.xlsx', provisional())   # E5 'Rejected', every row blank
         self.assertIsNone(r['totals']['rejected']['known_sum'])
 
-
-class FileLimit(unittest.TestCase):
-    def test_reports_over_50_mb_are_refused_with_a_clear_message(self):
-        import tempfile
-        from hosting.spreadsheet_inbox import SpreadsheetInbox
-        with tempfile.TemporaryDirectory() as d:
-            with self.assertRaisesRegex(ValueError, 'up to 50 MB'):
-                SpreadsheetInbox(d).ingest('big.xlsx', b'x' * (50 * 1024 * 1024 + 1))

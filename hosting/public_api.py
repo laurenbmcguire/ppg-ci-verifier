@@ -20,8 +20,8 @@ STATUS_LABEL = {'hold': 'Hold: must be fixed', 'check': 'Check: items to look at
 ENDPOINTS = [
     ('GET', '/api/v1', 'This list. No key needed.'),
     ('GET', '/api/v1/reports', 'Latest 100 reports with status. Optional ?status=hold|check|clear&job=...'),
-    ('POST', '/api/v1/reports', 'Upload a report: {"filename": "...xlsx", "content_base64": "..."} (up to 4 MB in one request). Runs every check (SharePoint, usual day, AI when on) and returns the result. Nothing in the report is changed.'),
-    ('POST', '/api/v1/uploads', 'Start a large upload (up to 50 MB): returns {"upload_id", "part_size"}.'),
+    ('POST', '/api/v1/reports', 'Upload a report: {"filename": "...xlsx", "content_base64": "..."} (up to 4 MB in one request; bigger files go in parts, below). Runs every check (SharePoint, usual day, AI when on) and returns the result. Nothing in the report is changed.'),
+    ('POST', '/api/v1/uploads', 'Start a large upload (any size): returns {"upload_id", "part_size"}.'),
     ('POST', '/api/v1/uploads/{upload_id}/parts/{n}', 'Send part n (0, 1, 2...) of the file: {"content_base64": "..."}, each part at most part_size bytes before base64.'),
     ('POST', '/api/v1/uploads/{upload_id}/finish', 'Put the parts together and check the report: {"filename": "...xlsx", "part_count": N, "sha256": "<hex SHA-256 of the whole file>"}. Same result as POST /api/v1/reports.'),
     ('GET', '/api/v1/vins?q=...', 'Which reports a VIN or identifier is in (full or partial, at least 4 characters).'),
@@ -161,7 +161,7 @@ def op_upload(h, name, content):
         raise ApiError(400, 'Send "filename" and "content_base64".')
     raw = _b64(content)
     if len(raw) > MAX_UPLOAD:
-        raise ApiError(413, 'Up to 4 MB fits in one request. For bigger reports (up to 50 MB) use POST /api/v1/uploads and send the file in parts.')
+        raise ApiError(413, 'Up to 4 MB fits in one request. For bigger reports use POST /api/v1/uploads and send the file in parts (any size).')
     with h.store().session() as directory:
         try:
             item = SpreadsheetInbox(directory).ingest(name, raw)
@@ -191,7 +191,7 @@ def _checked(h, item):
 
 def op_upload_start():
     import secrets
-    return dict(upload_id=secrets.token_hex(16), part_size=PART_SIZE, max_bytes=SpreadsheetInbox.MAX_FILE_BYTES)
+    return dict(upload_id=secrets.token_hex(16), part_size=PART_SIZE)
 
 
 def op_upload_part(h, upload_id, index, content):

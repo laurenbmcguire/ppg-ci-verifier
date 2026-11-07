@@ -1249,7 +1249,7 @@ class handler(BaseHTTPRequestHandler):
                     if not isinstance(name, str) or not (isinstance(content, str) or isinstance(payload.get('upload_id'), str)):
                         raise Conflict('Choose a weekly or monthly report file.')
                     if isinstance(payload.get('upload_id'), str):   # sent in parts (files up to 50 MB)
-                        if not re.fullmatch(r'[0-9a-f]{32}', payload['upload_id']) or type(payload.get('part_count')) is not int or not 0 < payload['part_count'] <= 20:
+                        if not re.fullmatch(r'[0-9a-f]{32}', payload['upload_id']) or type(payload.get('part_count')) is not int or not 0 < payload['part_count'] <= 100000:
                             raise Conflict('The file could not be read. Try again.')
                         with self.store().session() as directory:
                             from hosting.files import files_for

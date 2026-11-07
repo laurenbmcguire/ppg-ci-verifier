@@ -61,15 +61,12 @@ class ApiTests(unittest.TestCase):
         raw = seeded(); digest = hashlib.sha256(raw).hexdigest()
         status, start = self.call('POST', '/api/v1/uploads', {}, key)
         self.assertEqual(status, 201); uid, size = start['upload_id'], start['part_size']
-        self.assertEqual(start['max_bytes'], 50 * 1024 * 1024)
         pieces = [raw[:len(raw) // 2], raw[len(raw) // 2:]]
         for n, piece in enumerate(pieces):
             st, _ = self.call('POST', f'/api/v1/uploads/{uid}/parts/{n}', {'content_base64': base64.b64encode(piece).decode()}, key)
             self.assertEqual(st, 200)
         status, rep = self.call('POST', f'/api/v1/uploads/{uid}/finish', {'filename': NAME, 'part_count': 2, 'sha256': digest}, key)
         self.assertEqual(status, 201, rep); self.assertEqual(rep['job'], '2230-OWENS-BASCO')
-        st, bad = self.call('POST', f'/api/v1/uploads/{uid}/finish', {'filename': NAME, 'part_count': 30, 'sha256': digest}, key)
-        self.assertEqual(st, 400); self.assertIn('50 MB', bad['error'] if 'error' in bad else json.dumps(bad))
 
     def test_full_flow(self):
         status, idx = self.call('GET', '/api/v1')
