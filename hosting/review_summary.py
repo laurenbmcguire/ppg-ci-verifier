@@ -161,6 +161,7 @@ def summarize(result, with_issues=True, use_verdicts=True):
     out = dict(status=status, counts=counts, job=job, day=day,
                scans=result.get('record_count'), inspected=_num(totals.get('inspected')), rejected=_num(totals.get('rejected')),
                certified=_num(totals.get('certified')), rejected_unit=(totals.get('rejected') or {}).get('unit'),
+               rejected_partial=bool(isinstance(totals.get('rejected'), dict) and totals['rejected'].get('total') is None and totals['rejected'].get('known_sum') is not None),
                sharepoint=dict(status=sp.get('status') or 'not_checked', message=sp.get('message'), matched=sp.get('matched_rows'),
                                rows=sp.get('sharepoint_rows'), web_url=sp.get('web_url'), source=sp.get('path')),
                usual=dict(status=bl.get('status') or 'not_checked', message=bl.get('message')),

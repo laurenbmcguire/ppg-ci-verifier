@@ -378,7 +378,7 @@
     const client = (r.assignment && SETTLED.includes(r.assignment.status)) ? r.assignment.client : null;
     const rate = rv.inspected ? ` (${(rv.rejected / rv.inspected * 100).toFixed(1)}%)` : '';
     const text = [`${client ? client + ' · ' : ''}${rv.job || r.filename}`, `End-of-shift summary for ${dayLabel(rv.day)}`, '',
-      `Parts inspected: ${n(rv.inspected)}`, rv.certified != null ? `Accepted: ${n(rv.certified)}` : null, `Rejected: ${n(rv.rejected)}${rate}`, '',
+      `Parts inspected: ${n(rv.inspected)}`, rv.certified != null ? `Accepted: ${n(rv.certified)}` : null, `Rejected: ${n(rv.rejected)}${rate}${rv.rejected_partial ? ' (recorded rejects; not every record had a reject count)' : ''}`, '',
       'The full end-of-shift report is attached.'].filter(x => x !== null).join('\n');
     try { await navigator.clipboard.writeText(text); toast('Client summary copied: totals only, with no scan times, inspector names or internal checks.'); }
     catch (e) { toast('Your browser blocked copying. Try again, or allow clipboard access for this site.', true); }
@@ -831,7 +831,7 @@
     return h('div', {class: 'numbers'},
       cell(fmt(rv.scans), 'Scans / rows', usual.scans, 'scans'),
       cell(fmt(rv.inspected), 'Inspected', usual.inspected, 'inspected'),
-      cell(fmt(rv.rejected), perRow ? 'Failed audits' : 'Rejected', usual.rejected, 'rejected'),
+      cell(rv.rejected == null ? 'Not recorded' : fmt(rv.rejected), perRow ? 'Failed audits' : rv.rejected_partial ? 'Rejected (recorded on some rows only; blanks are not zero)' : 'Rejected', usual.rejected, 'rejected'),
       cell(rate == null ? '—' : rate.toFixed(1) + '%', perRow ? 'Fail rate' : 'Reject rate', usual.reject_rate, 'reject_rate'));
   }
 

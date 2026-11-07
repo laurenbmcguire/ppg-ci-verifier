@@ -128,10 +128,27 @@ def select(sources, sheets, records, finding):
     for r in records:
         if r['table_kind'] == 'detail' and not r['is_total']:
             by_sheet[r['sheet']].append(r)
+    export_like = defaultdict(list)   # an export without an Inspected column is still compared item by item
+    for r in records:
+        if r['table_kind'] == 'supporting' and not r['is_total']:
+            export_like[r['sheet']].append(r)
     for sheet in sheets:
         header = sheet['tables'][0]['header_row'] if sheet['tables'] else None
         sheet['role'] = sheet_role(sheet['name'], sheet_rows.get(sheet['name'], []), header, bool(by_sheet.get(sheet['name'])))
+    for sheet in sheets:   # a raw SharePoint export is a source copy, never a reject log or production
+        if sheet['role'] != 'source_export' and not by_sheet.get(sheet['name']) and export_like.get(sheet['name']):
+            heads = set(_headers(sheet_rows.get(sheet['name'], []), sheet['tables'][0]['header_row'] if sheet['tables'] else None))
+            if len(heads & SYSTEM_COLUMNS) >= 2 or _norm(sheet['name']) in SOURCE_SHEET_NAMES:
+                sheet['role'] = 'source_export'
     attach_identity(sheet_rows, sheets, records)
+    for sheet in sheets:
+        if sheet['role'] == 'source_export' and not by_sheet.get(sheet['name']) and export_like.get(sheet['name']):
+            by_sheet[sheet['name']] = export_like[sheet['name']]
+            for r in export_like[sheet['name']]:
+                r['table_kind'] = 'detail'   # becomes 'source_copy' below unless it is the only record set
+            for t in sheet['tables']:
+                if t['kind'] == 'supporting':
+                    t['kind'] = 'detail'
     roles = {s['name']: s['role'] for s in sheets}
     with_rows = [s['name'] for s in sheets if by_sheet.get(s['name'])]
     notes, ambiguous = [], False

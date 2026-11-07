@@ -64,6 +64,19 @@ class The2214Case(unittest.TestCase):
         self.assertEqual((r['record_count'], inspected(r)), (5, '400'))
         self.assertEqual(r['dataset_selection']['authoritative'], ['Inspection Detail'])
 
+    def test_export_without_an_inspected_column_is_still_compared_by_item(self):
+        # 2169's export: Quantity / OKQty / NOKQty. It is compared, never treated as a reject log or production.
+        wb = load_workbook(io.BytesIO(sl_daily()))
+        x = wb['Source Records']
+        x['M1'] = 'Quantity'; x['N1'] = 'OKQty'; x['N3'] = 70
+        buf = io.BytesIO(); wb.save(buf)
+        r = check(buf.getvalue())
+        self.assertEqual((r['record_count'], inspected(r)), (5, '400'))
+        self.assertIn('Source Records', r['dataset_selection']['compared'])
+        msgs = [f.get('message', '') for f in r['findings'] if f['code'] == 'source_sheet_value_mismatch']
+        self.assertTrue(any('433' in m and '70' in m for m in msgs), msgs)
+        self.assertFalse(any(f['code'].startswith('reject_log') for f in r['findings']))
+
     def test_record_identity_is_site_list_item(self):
         r = check(sl_daily())
         src = r['records'][0]['source']
