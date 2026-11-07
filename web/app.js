@@ -1814,7 +1814,7 @@
     const hash = state.report.file_hash;
     if (!sheet) { // open the sheet with the most to look at
       const m = marks(), names = (state.report.sheets || []).map(x => x.name);
-      sheet = Object.entries(m.perSheet).sort((a, b) => b[1] - a[1])[0]?.[0] || names.find(n => (state.report.sheets.find(x => x.name === n).tables || []).length) || names[0];
+      sheet = Object.entries(m.perSheet).sort((a, b) => b[1] - a[1])[0]?.[0] || (state.report.dataset_selection?.authoritative || []).find(n => names.includes(n)) || names.find(n => (state.report.sheets.find(x => x.name === n).tables || []).length) || names[0];
     }
     try {
       const g = await api('/api/spreadsheets/sheet', {file_hash: hash, sheet});
