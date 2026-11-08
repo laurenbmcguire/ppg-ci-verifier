@@ -1548,3 +1548,6 @@ body.reportmode .btn.subtle{border-color:transparent;background:none}
 .fd-autolist li b{display:block;font-size:12.5px;font-weight:600;overflow-wrap:anywhere}
 .fd-autolist li small{display:block;font-size:11px;color:#6c7d75;margin-top:2px}
 .fd-autoacts{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:12px}
+.fd-own{display:flex;gap:6px;flex-wrap:wrap}
+.fd-own input{flex:1 1 140px;min-width:0;font:inherit;font-size:13px;padding:8px 10px;border:1px solid #b5c8c1;border-radius:6px;min-height:40px}
+.fd-askai{justify-self:start}

@@ -911,9 +911,9 @@ class handler(BaseHTTPRequestHandler):
                 from hosting.fixes import FixError
                 me = self.current_user() or {}
                 try:
-                    if route.endswith('/auto-fix'):
-                        item, summary = autofix.run(self, file_hash)
-                        return self.send(200, encode_json({'item': item, 'auto_fixed': summary}))
+                    if route.endswith('/auto-fix'):   # one short step at a time: sure fixes, Claude batches, finish
+                        out = autofix.step(self, file_hash, str(payload.get('phase') or 'sure'))
+                        return self.send(200, encode_json({'item': out['item'], 'auto_fixed': out['summary'], 'next': out['next']}))
                     cells = payload.get('cells') if isinstance(payload.get('cells'), list) else []
                     fine = payload.get('fine') if isinstance(payload.get('fine'), list) else []
                     if len(cells) + len(fine) > 1000 or not (cells or fine) or not all(isinstance(c, dict) for c in cells):

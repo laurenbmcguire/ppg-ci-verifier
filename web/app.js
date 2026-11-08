@@ -699,7 +699,7 @@
   // ---------- corrections: issues and suggested changes joined, grouped by root cause, in three tiers
   const TIERS = [['blocker', 'Blockers'], ['review', 'Needs review'], ['format', 'Formatting']];
   function fdItems() {
-    const r = state.report, rv = r.review, dec = store.get(decisionsKey(), {}), decided = r.review_decisions || {};
+    const r = state.report, rv = r.review, dec = store.get(decisionsKey(), {}), decided = r.review_decisions || {}, edits = store.get(editsKey(), {});
     const issues = allIssues(rv).filter(i => i.severity !== 'info'), fixes = state.fixes || [], used = new Set(), items = [];
     const make = (i, f) => {
       const key = i ? i.key : 'fix:' + f.id, d = decided[key] || (f ? decided['fix:' + f.id] : null);
@@ -710,10 +710,11 @@
       const src = i?.source_value != null ? i.source_value : f?.source === 'SharePoint' ? f.after : null;
       const kind = i ? i : {text: f.reason || '', code: 'fix:' + (fmt || f.source)};
       const group = tier + '|' + (fmt ? 'fmt:' + fmt : i ? sameKey(i) : 'fix:' + f.source);
-      const stateNow = f && dec[f.id]?.state === 'accepted' ? 'selected' : (d?.action === 'reject' || (f && dec[f.id]?.state === 'rejected')) ? 'rejected' : d?.action === 'keep' ? 'kept' : 'open';
+      const own = cell && edits[editId(f?.sheet || i?.sheet, cell)];
+      const stateNow = own || (f && dec[f.id]?.state === 'accepted') ? 'selected' : (d?.action === 'reject' || (f && dec[f.id]?.state === 'rejected')) ? 'rejected' : d?.action === 'keep' ? 'kept' : 'open';
       const evidence = f ? (f.source === 'SharePoint' || i?.source_value != null ? 'source' : isSureFix(f) ? 'mechanical' : f.source === 'AI fix' ? 'ai' : 'guess') : i?.source_value != null ? 'source_only' : 'none';
       return {key, issue: i, fix: f, tier, group, cell, row, sheet: f?.sheet || i?.sheet || null, kind, fmt, state: stateNow, note: d?.note || '', decidedBy: d?.by,
-        report: f ? f.before : i?.report_value ?? null, source: src, proposed: f ? (dec[f.id]?.after ?? f.after) : null,
+        report: f ? f.before : i?.report_value ?? null, source: src, proposed: own ? own.after : f ? (dec[f.id]?.after ?? f.after) : null, own: own || null,
         reason: fmt ? `Only ${fmt} change; the value itself stays the same.` : f?.only || f?.reason || i?.why || i?.text || '',
         text: i?.text || f?.reason || '', url: i?.url || null, item: i?.item || null, evidence,
         selectable: !!f && evidence !== 'none' && stateNow !== 'rejected'};
@@ -889,23 +890,40 @@
     return open > 0 || (state.fixes || []).some(f => f.sure);
   }
   async function fdMaybeAutoFix(hash) {
-    const r = state.report; if (!r || r.file_hash !== hash || !fdAutoEligible(r)) return;
-    (state.autoTried ||= new Set()); if (state.autoTried.has(hash)) return; state.autoTried.add(hash);
-    state.autoFixing = hash; if (state.sideTab === 'fixes') drawSide();
+    const r = state.report; if (!r || r.file_hash !== hash) return;
+    const resume = r.auto_fixed?.status === 'running' && !r.approval;
+    if (!resume && !fdAutoEligible(r)) return;
+    (state.autoTried ||= new Set()); if (state.autoTried.has(hash) || state.autoFixing) return; state.autoTried.add(hash);
+    fdAutoLoop(hash, resume ? 'ai' : 'sure');
+  }
+  // the pass runs as short steps (sure fixes, then Claude in batches, then one SharePoint check), so no request runs
+  // long and the rest of the page keeps loading; the reviewer can keep reading while it works
+  async function fdAutoLoop(hash, phase) {
+    const chain = new Set([hash]); let cur = hash, out = null, round = 0;
+    state.autoFixing = hash; state.autoChain = chain;
+    const say = text => { state.autoProgress = text; if (state.sideTab === 'fixes' && chain.has(state.selected)) drawSide(); };
     try {
-      const out = await api('/api/spreadsheets/auto-fix', {file_hash: hash});
+      while (phase) {
+        say(phase === 'sure' ? 'Applying the SharePoint values and clean-ups…' : phase === 'ai' ? `Claude is working through the rest (batch ${++round})…` : 'Checking the fixed version against SharePoint…');
+        out = await api('/api/spreadsheets/auto-fix', {file_hash: cur, phase});
+        cur = out.item.file_hash; chain.add(cur); state.autoFixing = cur; phase = out.next;
+      }
       const s = out.auto_fixed || {}, n = (s.changed || []).length + (s.removed || []).length + (s.moved || []).length, fine = (s.fine || []).length;
       state.autoFixing = null;
-      if (state.selected !== hash) return;
       toast(n || fine ? `Fixed ${plural(n, 'thing')}${fine ? ` and confirmed ${fine} fine` : ''} automatically. Every fix can be reverted.` : 'Nothing could be fixed automatically; what is left needs a person.');
-      await loadList();
-      if (out.item.file_hash !== hash) select(out.item.file_hash); else openReport(hash, true);
-    } catch (e) { state.autoFixing = null; if (state.selected === hash) { toast(e.message, true); if (state.sideTab === 'fixes') drawSide(); } }
+      loadList();
+      if (chain.has(state.selected)) { if (state.selected !== cur) select(cur); else openReport(cur, true); }
+    } catch (e) {
+      state.autoFixing = null;
+      if (chain.has(state.selected)) { toast(`The automatic pass stopped: ${e.message} What it already fixed is kept.`, true); loadList(); if (state.selected !== cur) select(cur); else drawSide(); }
+    }
   }
   function fdAutoSummary(r) {
-    if (state.autoFixing === r.file_hash) return h('div', {class: 'fd-auto working', role: 'status'}, h('span', {class: 'spin'}), h('div', {}, h('b', {}, 'Fixing what can be fixed…'),
-      h('p', {}, 'SharePoint values and spacing first, then Claude works through the rest. Your original stays as it is.')));
+    if (state.autoFixing && state.autoChain?.has(r.file_hash)) return h('div', {class: 'fd-auto working', role: 'status'}, h('span', {class: 'spin'}), h('div', {}, h('b', {}, 'Fixing what can be fixed…'),
+      h('p', {}, state.autoProgress || 'Starting…'), h('p', {}, 'You can keep reading the sheet. Your original stays as it is; every fix can be reverted.')));
     const s = r.auto_fixed; if (!s) return null;
+    if (s.status === 'running' && !state.autoFixing) return h('div', {class: 'fd-auto working'}, icon('warn', 18), h('div', {}, h('b', {}, 'The automatic pass stopped part way'),
+      h('p', {}, `${plural((s.changed || []).length, 'fix', 'fixes')} so far are kept.`), h('button', {type: 'button', class: 'btn small', onclick: () => { state.autoTried?.delete(r.file_hash); fdAutoLoop(r.file_hash, 'ai'); }}, 'Continue fixing')));
     const changed = (s.changed || []).filter(c => !c.reverted), fine = (s.fine || []).filter(f => !f.reverted), rows = [...(s.removed || []), ...(s.moved || [])];
     const left = fdCounts(), todo = (left.blockers || 0) + (left.review || 0);
     const total = changed.length + fine.length + rows.length;
@@ -987,6 +1005,9 @@
           `${it.report === '' || it.report == null ? 'Keep all' : 'Keep all'} ${inGroup.filter(x => x.state === 'open').length} ${it.report === '' || it.report == null ? 'blank' : 'as recorded'}`) : null,
         it.state !== 'open' ? h('button', {type: 'button', class: 'btn subtle', onclick: () => fdDecide(it, 'reopen')}, 'Undo decision') : null,
         h('button', {type: 'button', class: 'btn subtle', onclick: () => fdEvidence(it)}, icon('db', 15), ' Source evidence')),
+      it.cell && it.state !== 'kept' ? fdOwnValueForm(it) : null,
+      !it.fix && !it.own && it.cell ? h('button', {type: 'button', class: 'btn subtle fd-askai', disabled: state.aiFixing || null, onclick: () => { toast('Claude is drafting fixes for the open items…'); runAiFixes(false); }},
+        state.aiFixing ? 'Claude is drafting fixes…' : 'Ask Claude to suggest a fix') : null,
       h('details', {class: 'fd-notebox', open: it.note ? true : null}, h('summary', {}, icon('note', 14), ' Note'),
         h('textarea', {id: 'fd-note', 'aria-label': 'Review note', rows: '2', placeholder: 'Why you kept, rejected or changed this…'}, it.note || ''),
         h('button', {type: 'button', class: 'btn small', onclick: () => fdDecide(it, 'note', $('fd-note').value)}, 'Save note')),
@@ -1036,11 +1057,29 @@
     if (g) { const at = g.items.findIndex(x => x.key === done.key); next = [...g.items.slice(at + 1), ...g.items.slice(0, at)].find(x => x.state === 'open'); }
     if (!next) for (const x of rotated.slice(1)) { next = x.items.find(y => y.state === 'open'); if (next) break; }
     const leftInGroup = g ? g.items.filter(x => x.state === 'open').length : 0, leftInTier = state.fdItems.filter(x => x.tier === done.tier && x.state === 'open').length;
-    const what = done.state === 'kept' || (state.report.review_decisions || {})[done.key]?.action === 'keep' ? 'Kept as recorded' : 'Suggestion rejected';
+    const what = store.get(editsKey(), {})[editId(done.sheet, done.cell)] ? 'Added to the preview' : (state.report.review_decisions || {})[done.key]?.action === 'keep' ? 'Kept as recorded' : 'Suggestion rejected';
     toast(`${what}. ` + (leftInGroup ? `${leftInGroup} left in this group.` : leftInTier ? `This group is done; ${leftInTier} left in ${TIERS.find(t => t[0] === done.tier)[1].toLowerCase()}.` : `Nothing left in ${TIERS.find(t => t[0] === done.tier)[1].toLowerCase()}.`)
       + (done.tier === 'blocker' && done.evidence === 'none' ? ' The hold stays until the source question is settled.' : ''));
+    fdRefreshFoot();
     if (next) { fdOpen(next); return; }
-    state.fdCur = null; drawSide(); drawGrid(); fdRefreshFoot();
+    state.fdCur = null; drawSide(); drawGrid();
+  }
+  // the reviewer's own value for a cell: goes into the preview like any other change, applied only with the others
+  function fdOwnValueForm(it) {
+    const input = h('input', {value: it.own ? it.own.after : '', placeholder: it.fix ? 'Or type a different value' : 'Type the correct value', 'aria-label': `New value for ${it.sheet}!${it.cell}`});
+    return h('form', {class: 'fd-own', onsubmit: e => { e.preventDefault(); fdOwnValue(it, input.value); }},
+      input, h('button', {type: 'submit', class: 'btn ' + (it.fix ? '' : 'primary')}, it.own ? 'Update value' : 'Use this value'),
+      it.own ? h('button', {type: 'button', class: 'btn subtle', onclick: () => fdOwnValue(it, null)}, 'Remove') : null);
+  }
+  function fdOwnValue(it, value) {
+    const edits = store.get(editsKey(), {}), id = editId(it.sheet, it.cell), dec = store.get(decisionsKey(), {});
+    if (value === null) { delete edits[id]; store.set(editsKey(), edits); toast('Your value was removed from the preview.'); fdRefresh(); return; }
+    const g = state.grid, at = splitCell(it.cell), shown = g && g.sheet === it.sheet && at ? g.rows[at[1] - 1]?.[at[0]] : undefined;
+    edits[id] = {sheet: it.sheet, cell: it.cell, before: shown ?? it.report ?? '', after: value, header: '', source: 'Your edit', reason: 'Typed by the reviewer' + (it.note ? ': ' + it.note : '')};
+    if (it.fix) delete dec[it.fix.id];
+    store.set(editsKey(), edits); store.set(decisionsKey(), dec);
+    toast(`${it.sheet}!${it.cell} will be ${value === '' ? 'blank' : '“' + value + '”'} in the new version. Preview to apply.`);
+    fdAdvance(it);
   }
   async function fdDecideAll(list, action) {
     try {

@@ -11,7 +11,7 @@ class AIFixError(ValueError):
     pass
 
 
-def run(h, file_hash, keys=None, opener=None, auto=False):
+def run(h, file_hash, keys=None, opener=None, auto=False, after=True, merge=True):
     from hosting import ai_review
     from hosting.spreadsheet_inbox import SpreadsheetInbox, validate_changes
     from hosting.fixes import relocate_rows, FixError
@@ -83,7 +83,7 @@ def run(h, file_hash, keys=None, opener=None, auto=False):
                    removed=[dict(sheet=r['sheet'], row=r['row'], reason=r['reason'], check=r['confidence'] == 'check') for r in rows if not r.get('to_sheet')],
                    moved=[dict(sheet=r['sheet'], row=r['row'], to_sheet=r['to_sheet'], reason=r['reason'], check=r['confidence'] == 'check') for r in rows if r.get('to_sheet')],
                    fine=[dict(text=f['text'], reason=f['reason']) for f in fine], left=left)
-    prev = item.get('ai_fixed')
+    prev = item.get('ai_fixed') if merge else None
     if prev:   # several rounds (a big report is fixed in batches): one running record of everything Claude did
         asked_now = {(i.get('text'), str(i.get('row'))) for i in issues}
         for k in ('changed', 'removed', 'moved', 'fine'):
@@ -99,7 +99,7 @@ def run(h, file_hash, keys=None, opener=None, auto=False):
         r['ai_fixed'] = summary
     with h.store().session() as directory:
         SpreadsheetInbox(directory)._update(current, mark)
-    if current != file_hash:
+    if current != file_hash and after:
         _after_change(h, current)
     with h.store().session() as directory:
         return SpreadsheetInbox(directory).get(current), summary
