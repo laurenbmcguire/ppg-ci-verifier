@@ -1732,3 +1732,9 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-problems{margin:6px 0 8px}.fd-problems-head{margin:0 0 4px;font-weight:600}
 .fd-problems ul{margin:0;padding-left:18px}.fd-problems li{margin:2px 0;overflow-wrap:anywhere}
 .fd-panel-intro{margin:0;font-size:14px;line-height:1.4}
+/* one line per error in the review window: tick box, what is wrong, then the three small buttons */
+.fd-review-dialog li .fd-direct-actions{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px;margin:4px 0 0 26px;padding:0;border:0}
+.fd-review-dialog li .fd-direct-actions .fd-cardacts{gap:6px}.fd-review-dialog li .fd-direct-actions p{display:none}
+.fd-review-dialog .fd-review-group > .fd-direct-actions{border:0;padding:0}
+.fd-review-dialog .fd-review-toolbar{max-height:none}
+.fd-dialog-summary{margin:8px 0 12px}.fd-dialog-summary > summary{cursor:pointer;font-weight:600}

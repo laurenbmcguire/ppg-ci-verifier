@@ -960,7 +960,7 @@
     }, lock: () => {
       if (state.report !== report || state.selected !== selectedReport) { operation.cancel(); return; }
       document.querySelectorAll('#side button, #side input, #side textarea, #side select, #fd-preview-btn, .fd-mode-selector button, .fd-review-dialog button, .fd-review-dialog input, .fd-review-dialog textarea, dialog .primary').forEach(node => {
-        if (node.dataset?.aiCancel === 'true') return;
+        if (node.dataset?.aiCancel === 'true' || node.dataset?.selection === 'true') return;
         if (!controls.has(node)) controls.set(node, node.disabled);
         node.disabled = true;
       });
@@ -1045,7 +1045,7 @@
       }, lock: () => {
         if (!stillCurrent()) { operation.cancel(); return; }
         document.querySelectorAll('#side button, #side input, #side textarea, #side select, #fd-preview-btn, .fd-mode-selector button, .fd-review-dialog button, .fd-review-dialog input, .fd-review-dialog textarea, dialog .primary').forEach(node => {
-          if (node.dataset?.aiCancel === 'true') return;
+          if (node.dataset?.aiCancel === 'true' || node.dataset?.selection === 'true') return;
           if (!controls.has(node)) controls.set(node, node.disabled);
           node.disabled = true;
         });
@@ -1106,13 +1106,14 @@
     dlg.addEventListener('cancel', e => { if (state.decisionPending || !discard()) e.preventDefault(); });
     dlg.addEventListener('close', () => { if (state.aiProposalOperation?.owner === dlg) state.aiProposalOperation.cancel(); dlg.remove(); if (opener?.isConnected && opener.getClientRects().length) opener.focus(); else { const fallback = document.getElementById('fd-open-review'); fallback?.focus(); } });
     const choose = (list, on) => {
-      if (state.aiProposalOperation) return;
-      if (!discard()) { draw(); return; }
+      const pending = !!state.aiProposalOperation;
+      if (!pending && !discard()) { draw(); return; }
       actionVersion++;
       const label = document.activeElement?.getAttribute('aria-label'), focusKey = document.activeElement?.getAttribute('data-review-key');
       list.forEach(it => on ? selected.add(it.key) : selected.delete(it.key));
       state.fdReviewSelection = {binding: JSON.stringify(binding), keys: [...selected]};
-      dlg.classList.remove('fd-manual-active'); decision.replaceChildren(); draw();
+      if (!pending) { dlg.classList.remove('fd-manual-active'); decision.replaceChildren(); }
+      draw(); if (pending) state.aiProposalOperation?.lock?.();
       if (label || focusKey) [...dlg.querySelectorAll('input')].find(el => focusKey ? el.getAttribute('data-review-key') === focusKey : el.getAttribute('aria-label') === label)?.focus();
     };
     const prepareAI = (scope = picked()) => fdPrepareAI(scope, binding, {
@@ -1131,6 +1132,13 @@
             preview.disabled = !include.size; preview.textContent = `Preview ${include.size} selected AI proposals`;
           }});
         }}, 'Preview selected AI proposals');
+        if (!proposals.length) {
+          decision.replaceChildren(h('h3', {}, 'AI could not suggest a fix for these'),
+            h('p', {}, `Nothing was changed. Fix ${scope.length === 1 ? 'it' : 'them'} manually or ignore ${scope.length === 1 ? 'it' : 'them'}. You can keep ticking boxes.`),
+            (answer.skipped || []).length ? h('details', {}, h('summary', {}, 'Why'), h('ul', {}, answer.skipped.slice(0, 50).map(p => h('li', {}, p.reason)))) : null);
+          decision.querySelector('h3')?.setAttribute('tabindex', '-1'); decision.querySelector('h3')?.focus({preventScroll: true}); decision.scrollIntoView({block: 'nearest'});
+          return;
+        }
         decision.replaceChildren(h('h3', {}, `${proposals.length} AI proposals, not applied`),
           h('p', {}, 'AI suggestions are not verified source values. Check each proposal before including it. Existing cell safety checks and source holds still apply.'),
           h('ul', {}, proposals.map((p, i) => h('li', {}, h('label', {}, h('input', {type: 'checkbox', 'aria-label': `Include AI proposal ${p.sheet} ${p.cell}`, onchange: e => {
@@ -1245,10 +1253,10 @@
     const direct = scope => fdDirectControls(scope, act, true);
     const draw = () => {
       const scope = picked(), eligible = fdRecommended(scope), canDecide = scope.length > 0 && scope.length <= 1000 && scope.every(it => it.fp && ['open', 'claude'].includes(it.state));
-      status.textContent = `${scope.length} of ${items.length} selected.${filterKeys && selected.size > scope.length ? ' ' + (selected.size - scope.length) + ' selections outside this status are saved and excluded from these actions.' : ''} ${eligible.length} supported cell changes in this selection.${scope.length && !canDecide ? ' Keep/defer unavailable: choose at most 1000 open findings, excluding standalone proposals and previously decided items.' : ''}`;
+      status.textContent = `${scope.length} of ${items.length} selected.${filterKeys && selected.size > scope.length ? ' ' + (selected.size - scope.length) + ' selections outside this status are saved and excluded from these actions.' : ''} ${eligible.length ? `${eligible.length} ready-made fixes in this selection.` : ''}${scope.length && !canDecide ? ' Keep/defer unavailable: choose at most 1000 open findings, excluding standalone proposals and previously decided items.' : ''}`;
       actions.replaceChildren(
         h('button', {type: 'button', class: 'btn', disabled: !state.aiOn || !scope.length || scope.length > 120 || scope.some(it => !it.fp || it.state !== 'open'), onclick: () => act(picked(), 'ai')}, state.aiOn ? 'AI fix selected' : 'AI fix unavailable (AI is off)'),
-        h('button', {type: 'button', class: 'btn primary', disabled: !eligible.length, onclick: () => {
+        !eligible.length ? null : h('button', {type: 'button', class: 'btn primary', onclick: () => {
           if (!guard() || !discard()) return;
           const accepted = eligible.map(it => it.fix), dec = Object.fromEntries(accepted.map(f => [f.id, {state: 'accepted', after: f.after}]));
           const capture = {...captureCorrections(accepted, dec, {}, binding, report), recommendedOnly: true};
@@ -1256,25 +1264,25 @@
         }}, `Preview ${eligible.length} supported changes`),
         h('button', {type: 'button', class: 'btn', disabled: !scope.length, onclick: () => act(picked(), 'manual')}, 'Fix selected manually'),
         h('button', {type: 'button', class: 'btn', disabled: !canDecide, onclick: () => act(picked(), 'ignore')}, 'Ignore selected…'),
-        h('button', {type: 'button', class: 'btn', disabled: !canDecide, onclick: () => { if (discard()) { actionVersion++; decisionForm('defer'); } }}, 'Defer to source owner…'));
-      types.replaceChildren(h('h3', {}, 'Select by error type across groups'), ...[...byType].map(([type, list]) => {
+        h('button', {type: 'button', class: 'btn subtle', disabled: !canDecide, onclick: () => { if (discard()) { actionVersion++; decisionForm('defer'); } }}, 'Defer to source owner…'));
+      types.replaceChildren(h('h3', {}, 'Tick a whole type of error'), ...[...byType].map(([type, list]) => {
         const count = list.filter(it => selected.has(it.key)).length;
-        const toggle = h('input', {type: 'checkbox', checked: count === list.length || null, 'aria-label': 'Select error type ' + type, onchange: e => choose(list, e.target.checked)});
+        const toggle = h('input', {type: 'checkbox', 'data-selection': 'true', checked: count === list.length || null, 'aria-label': 'Select error type ' + type, onchange: e => choose(list, e.target.checked)});
         toggle.indeterminate = count > 0 && count < list.length;
         const label = kindNames(list[0].kind || list[0].issue || {})[1] || kindNames(list[0].kind || list[0].issue || {})[0] || type;
         return h('label', {}, toggle, ` ${label}: ${count} of ${list.length} selected`);
       }));
       content.replaceChildren(...groups.map((g, index) => {
         const page = pages.get(g.key) || 0, count = g.items.filter(it => selected.has(it.key)).length;
-        const toggle = h('input', {type: 'checkbox', checked: count === g.items.length || null, 'aria-label': `Select error group ${index + 1}: ${g.title}`, onchange: e => choose(g.items, e.target.checked)});
+        const toggle = h('input', {type: 'checkbox', 'data-selection': 'true', checked: count === g.items.length || null, 'aria-label': `Select error group ${index + 1}: ${g.title}`, onchange: e => choose(g.items, e.target.checked)});
         toggle.indeterminate = count > 0 && count < g.items.length;
         return h('section', {class: 'fd-review-group'}, h('h3', {}, g.title),
           h('label', {}, toggle, ` Select this group (${count} of ${g.items.length} selected)`),
           direct(g.items),
           h('p', {}, `Items ${page * 25 + 1}–${Math.min((page + 1) * 25, g.items.length)} of ${g.items.length}`),
           h('ul', {}, g.items.slice(page * 25, (page + 1) * 25).map(it => h('li', {'data-direct-finding': it.key}, h('label', {},
-            h('input', {type: 'checkbox', checked: selected.has(it.key) || null, 'data-review-key': it.key, 'aria-label': `Select ${it.sheet || 'Report'} ${it.cell || 'report finding'}, occurrence ${items.indexOf(it) + 1} of ${items.length}`, onchange: e => choose([it], e.target.checked)}),
-            ` ${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : '')} · ${it.state}: ${it.text || it.reason}`), direct([it])))),
+            h('input', {type: 'checkbox', 'data-selection': 'true', checked: selected.has(it.key) || null, 'data-review-key': it.key, 'aria-label': `Select ${it.sheet || 'Report'} ${it.cell || 'report finding'}, occurrence ${items.indexOf(it) + 1} of ${items.length}`, onchange: e => choose([it], e.target.checked)}),
+            ` ${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : '')}${it.state === 'open' ? '' : ' · ' + ({kept: 'ignored', rejected: 'ignored', deferred: 'waiting on owner', confirmed: 'confirmed', selected: 'ticked for fix', claude: 'AI says fine', kept_earlier: 'ignored earlier', corrected: 'fixed later'}[it.state] || it.state)}: ${it.text || it.reason}`), direct([it])))),
           h('div', {class: 'fd-cardacts'}, ...[['Previous items', -1], ['Next items', 1]].map(([label, step]) => h('button', {type: 'button', class: 'btn small', disabled: step < 0 ? page === 0 : (page + 1) * 25 >= g.items.length,
             onclick: () => { pages.set(g.key, page + step); draw(); const heading = content.children[index]?.querySelector('h3'); heading?.setAttribute('tabindex', '-1'); heading?.focus(); }}, label))));
       }));
@@ -1283,13 +1291,13 @@
       h('h2', {id: 'fd-review-title', tabindex: '-1'}, filterLabel || 'Needs review'),
       h('p', {}, `${filterLabel ? 'Only this selected status is listed below. ' : ''}Tick one, a few, or all. Then choose: AI fix, Fix manually (you edit the spreadsheet), or Ignore.`),
       h('p', {class: 'fd-hint'}, state.aiOn ? 'AI fix sends only the selected findings and their cells to Claude (Anthropic). Nothing changes until you preview and apply.' : 'AI fix is off.'),
-      filterLabel ? null : fdSummaryPanel(report, binding, dlg, current),
+      filterLabel ? null : h('details', {class: 'fd-dialog-summary'}, h('summary', {}, 'AI summary of these errors (optional)'), fdSummaryPanel(report, binding, dlg, current)),
       !items.length ? h('section', {}, h('h3', {}, 'No loaded review items'), h('p', {}, 'No selectable findings does not establish readiness. Client, job, business date, source verification or coverage may still need attention.'), ...(report.holds || []).map(hold => h('p', {}, hold.text || hold.code)), h('button', {type: 'button', class: 'btn', onclick: () => { if (!guard()) return; close(); state.fdView = 'sources'; drawReport(); }}, 'Open source and report context')) : null,
       h('div', {class: 'fd-review-toolbar'}, status, h('div', {class: 'fd-cardacts'},
         h('button', {type: 'button', class: 'btn', onclick: () => choose(unresolved, true)}, `Select all (${unresolved.length})`),
         h('button', {type: 'button', class: 'btn', onclick: () => choose(items, false)}, 'Select none'),
         h('button', {type: 'button', class: 'btn', 'data-ai-cancel': 'true', onclick: close}, 'Close review')), actions),
-      h('p', {class: 'fd-hint'}, 'Blockers are ignored one at a time, with evidence.'), decision, types, content);
+      decision, types, content);
     document.body.append(dlg); draw(); dlg.showModal(); dlg.querySelector('h2').focus();
     if (Array.isArray(initialScope) && initialAction) { const keys = new Set(initialScope.map(it => it.key)); act(items.filter(it => keys.has(it.key)), initialAction); }
   }
