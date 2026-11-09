@@ -1648,3 +1648,13 @@ td.has-pic{position:relative}
 .fd-mode-selector .fd-hint,.fd-occurrences .fd-hint,.fd-hold-details .fd-hint{color:#4c6056;font-size:.85rem}
 .fd-occurrences label{min-height:44px;align-content:center}
 .fd-preview-location{position:sticky;left:0;background:#fff;z-index:1}
+
+/* Keep the workbook usable even when evidence and review controls are long. */
+.fd-sheet .gridwrap{min-height:320px;flex:1 0 320px}
+.fd-sheet .sheetpane{height:auto;min-height:520px}
+.fd-aside .sidebody{overflow:visible;flex:none}
+.fd-grid-context{margin:0;padding:8px 12px;background:#f4f7f5;font-size:12px;flex:none}
+.fd-priority{border:1px solid #c68b30;background:#fff4df;padding:12px;border-radius:8px;margin-bottom:12px}
+.fd-priority p{margin:6px 0}
+.fd-sheet .gridwrap{height:52vh;max-height:650px}
+@media(max-width:600px){.fd-sheet .gridwrap{height:46vh;min-height:300px}.fd-grid-context{font-size:11px}}

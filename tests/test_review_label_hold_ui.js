@@ -18,3 +18,16 @@ test('individual accessible names match visible label, identify duplicate findin
  assert.equal(new Set(labels).size,3);labels.forEach(label=>assert.ok(label.startsWith('Include change,')));
  assert.match(labels[0],/North, cell A2, finding 1 of 3/);assert.match(labels[1],/finding 2 of 3/);assert.match(labels[0],/2 findings share this cell change; their selections stay together/);assert.match(labels[2],/South, cell A2/);assert.ok(!labels[2].includes('share'));
 });
+
+test('coverage dominates status ledger even when stored categories add up',()=>{
+ const {ctx,state}=harness([]);ctx.fmt=x=>String(x??'Unknown');
+ for(const coverage of [{truncated:true,findings_total:80,findings_listed:50,not_listed:30},{truncated:false,findings_total:50,findings_listed:50,not_listed:0}]){
+  state.report.review.coverage=coverage;state.report.review.reconcile={total:70,adds_up:true};
+  const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);
+  const ledger=text(nodes(body).find(n=>n.class==='fd-recon'));assert.match(ledger,/Listed finding status breakdown: 70 findings/);assert.doesNotMatch(ledger,/All .*accounted for|✓/);
+  assert.ok(ledger.includes(coverage.truncated?'coverage incomplete':'categories add up'));
+  const mode=ctx.fdModeSelector(state.report);assert.equal(!!nodes(mode).find(n=>n.class==='fd-priority'),coverage.truncated);
+ }
+ state.report.review.page={complete:false};state.report.review.coverage={};
+ assert.match(text(ctx.fdModeSelector(state.report)),/Finding coverage incomplete/);
+});

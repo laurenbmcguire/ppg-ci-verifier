@@ -64,7 +64,7 @@ test('cross-day evidence survives removal of Facts without missing context',()=>
  const ctx=vm.createContext({document:{createElement:t=>new Element(t)},shortDay:x=>x,when2:x=>x,readBlock:()=>new Element('div'),fdComparison:()=>new Element('details')});
  vm.runInContext(between('  const h = (','  const store =')+between('  function fdSourceVerified(', '  function drawReport(')+between('  function fdSources(', '  // switching sheets'),ctx);
  const text=textOf(ctx.fdSources({review:{job:'Synthetic'},other_days:[{vin:'SYNTHETIC-VIN',file_hash:'old',filename:'Synthetic old',day:'2026-01-01'}]}));
- assert.match(text,/Already reported on another day/);assert.match(text,/SYNTHETIC-VIN/);assert.match(text,/Synthetic old/);
+ assert.match(text,/Identifiers also found on another day/);assert.match(text,/SYNTHETIC-VIN/);assert.match(text,/Synthetic old/);
 });
 
 test('record totals do not double-count the same row across correction groups',()=>{
