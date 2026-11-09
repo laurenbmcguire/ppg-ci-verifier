@@ -1738,3 +1738,13 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-review-dialog .fd-review-group > .fd-direct-actions{border:0;padding:0}
 .fd-review-dialog .fd-review-toolbar{max-height:none}
 .fd-dialog-summary{margin:8px 0 12px}.fd-dialog-summary > summary{cursor:pointer;font-weight:600}
+/* select errors, then AI fix / Fix manually / Ignore — right in the panel */
+.fd-tickbar{position:sticky;top:0;z-index:3;background:var(--paper,#fff);border:1px solid var(--line,#ccd5d2);border-radius:10px;padding:10px 12px;margin:8px 0 12px;box-shadow:0 2px 8px #0000000d}
+.fd-tickbar .fd-tickall{font-weight:600;display:flex;gap:8px;align-items:center}.fd-tickbar .fd-tickcount{margin:4px 0 8px;font-size:13px;color:#5d6f69}
+.fd-tickbar input[type=checkbox],.fd-gtick input,.fd-tickline input{width:18px;height:18px;accent-color:#1f5e4f;cursor:pointer}
+.fd-group{position:relative}.fd-gtick{position:absolute;top:12px;left:10px;z-index:1}.fd-group > .fd-grouphead{padding-left:36px}
+.fd-tickline{display:flex;gap:8px;align-items:flex-start;cursor:pointer}.fd-tickline input{margin-top:2px;flex:none}
+.fd-problems ul{list-style:none;padding-left:0}
+.fd-linkbtn{border:0;background:none;padding:2px 0;color:#1f5e4f;text-decoration:underline;cursor:pointer;font:inherit;font-size:13px}
+.fd-airun{border-radius:10px;padding:10px 12px;margin:8px 0;background:#eef5f2;border:1px solid #b8d4c9}.fd-airun p{margin:2px 0}
+.fd-airun.good{background:#e9f6ee;border-color:#9fd1b3}.fd-airun.bad{background:#fdecea;border-color:#f0b4ad}

@@ -68,18 +68,18 @@ try:
     print(result.stdout);print(result.stderr,file=sys.stderr);assert result.returncode==0,result.returncode
     with store.session() as directory:
         box=SpreadsheetInbox(directory);parent=box.get(original_hash);assert box.download(original_hash)[1]==raw
-        assert len(parent.get('fixes_applied') or [])==1;record=parent['fixes_applied'][0];assert len(record['changes'])==1
+        assert len(parent.get('fixes_applied') or [])==1;record=parent['fixes_applied'][0];assert len(record['changes'])==2
         new_hash=record['fixed_file_hash'];new=box.get(new_hash);assert new['revision']==2
-        assert len(new['fixed_from']['changes'])==1 and new['fixed_from']['file_hash']==original_hash
+        assert len(new['fixed_from']['changes'])==2 and new['fixed_from']['file_hash']==original_hash
         original_wb=load_workbook(io.BytesIO(raw));new_wb=load_workbook(io.BytesIO(box.download(new_hash)[1]))
         diffs=[]
         for ws in original_wb:
             for row in ws:
                 for cell in row:
                     if cell.value!=new_wb[ws.title][cell.coordinate].value:diffs.append((ws.title,cell.coordinate,cell.value,new_wb[ws.title][cell.coordinate].value))
-        chosen=apply_requests[0]['changes'][0];assert diffs==[(chosen['sheet'],chosen['cell'],chosen['before'],chosen['after'])],diffs
-        assert not new.get('approval') and not new.get('sent');assert len(apply_requests)==1; assert len(provider_calls)==2; assert all(len(rows)==2 for rows in provider_calls)
+        assert sorted(diffs)==sorted((c['sheet'],c['cell'],c['before'],c['after']) for c in apply_requests[0]['changes']),diffs
+        assert not new.get('approval') and not new.get('sent');assert len(apply_requests)==1; assert len(provider_calls)==1; assert all(len(rows)==2 for rows in provider_calls)
         assert not external,external
-        print(json.dumps(dict(passed=True,width=WIDTH,actual_handler=True,original_byte_identical=True,one_corrected_version=True,revision=2,recorded_changes=1,exact_cell_differences=diffs,cancel_created_no_version=True,no_provider_traffic=True,synthetic_only=True)))
+        print(json.dumps(dict(passed=True,width=WIDTH,actual_handler=True,original_byte_identical=True,one_corrected_version=True,revision=2,recorded_changes=2,exact_cell_differences=diffs,cancel_created_no_version=True,no_provider_traffic=True,synthetic_only=True)))
 finally:
     server.shutdown();server.server_close()

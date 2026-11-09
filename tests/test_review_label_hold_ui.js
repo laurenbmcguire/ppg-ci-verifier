@@ -8,7 +8,7 @@ test('saved summary and disclosure share blocking/advisory counts, and no hold d
  for(const [holds,expected] of [[[],'0 blocking holds · 0 advisory holds'],[[{hard:true,text:'Blocked'}],'1 blocking hold · 0 advisory holds'],[[{hard:false,text:'Advisory'}],'0 blocking holds · 1 advisory hold'],[[{hard:true,text:'Blocked'},{hard:false,text:'Advisory'}, {text:'Unclassified advisory'}],'1 blocking hold · 2 advisory holds']]){
   const {ctx,state}=harness(holds);assert.equal(ctx.fdHoldSummary(state.report),expected);const mode=ctx.fdModeSelector(state.report);assert.equal(text(mode),'Review potential errors');
   const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);const details=nodes(body).find(n=>n.class==='fd-hold-details');
-  if(!holds.length){assert.equal(details,undefined);continue;}
+  assert.equal(details,undefined);continue;   // Nov 9: no hold line in the panel; the hold count stays in fdHoldSummary
   assert.ok(text(nodes(details).find(n=>n.tag==='summary')).includes(expected));const listed=nodes(details).filter(n=>n.tag==='li');assert.equal(listed.length,holds.length);
   holds.forEach((hold,i)=>assert.equal(text(listed[i]),`${hold.hard?'Blocking':'Advisory'}: ${hold.text}`));
  }

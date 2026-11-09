@@ -78,7 +78,7 @@ try:
                 for cell in row:
                     if cell.value!=new_wb[ws.title][cell.coordinate].value:diffs.append((ws.title,cell.coordinate,cell.value,new_wb[ws.title][cell.coordinate].value))
         chosen=apply_requests[0]['changes'][0];assert diffs==[(chosen['sheet'],chosen['cell'],chosen['before'],chosen['after'])],diffs
-        assert not new.get('approval') and not new.get('sent');assert len(apply_requests)==1; assert len(provider_calls)==2; assert [len(rows) for rows in provider_calls]==[1,2]
+        assert not new.get('approval') and not new.get('sent');assert len(apply_requests)==1; assert len(provider_calls)==1; assert [len(rows) for rows in provider_calls]==[1]
         assert not external,external
         print(json.dumps(dict(passed=True,width=WIDTH,actual_handler=True,original_byte_identical=True,one_corrected_version=True,revision=2,recorded_changes=1,exact_cell_differences=diffs,cancel_created_no_version=True,no_provider_traffic=True,synthetic_only=True)))
 finally:
