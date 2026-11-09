@@ -242,3 +242,11 @@ def test_http_explicit_route_auth_scope_and_readonly(tmp_path, monkeypatch):
         assert box.list()['count'] == 1
     finally:
         server.shutdown(); server.server_close(); thread.join()
+
+
+@pytest.mark.parametrize('summary,review,expected', [('synthetic-summary', 'synthetic-review', 'synthetic-summary'),
+    ('', 'synthetic-review', 'synthetic-review'), ('', '', ai_review.DEFAULT_MODEL)])
+def test_existing_summary_model_configuration_chain(monkeypatch, summary, review, expected):
+    monkeypatch.setenv('AI_SUMMARY_MODEL', summary)
+    monkeypatch.setenv('AI_REVIEW_MODEL', review)
+    assert fs.request_body(fs.inventory(fake_review(), []))['model'] == expected

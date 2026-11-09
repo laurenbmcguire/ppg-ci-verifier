@@ -5,6 +5,7 @@ Only aggregate finding metadata is sent, never workbook bytes or cell values.
 """
 import hashlib
 import json
+import os
 import re
 from collections import Counter
 from hosting import ai_review
@@ -20,6 +21,7 @@ Explain the main finding categories and the human review workflow: request sugge
 inspect the proposed changes, preview and choose whether to apply, or ignore a finding only after reviewing its evidence.
 Never choose finding IDs, invent values or propose cell corrections. A category count does not establish fix eligibility.
 Counts, coverage, groups and holds supplied by the server are authoritative, not your judgment.
+Do not invent or infer additional counts; focus on explanation while the interface displays authoritative counts.
 If stored coverage is incomplete, say so; never call this all errors or full workbook coverage.
 Even complete available findings do not establish complete source coverage or verification. Respect every hold.
 Distinguish active findings, informational notes and previously dismissed or kept history. Counts are findings, not cell changes.
@@ -119,7 +121,8 @@ def request_body(result):
                     truncated=bool(result['coverage'].get('truncated')))
     context = dict(scope='available_findings', counts=counts, coverage=coverage, groups=groups,
                    holds=[{'code': h.get('code'), 'hard': bool(h.get('hard'))} for h in result['holds']])
-    body = dict(model=ai_review.DEFAULT_MODEL, max_tokens=2000, system=SYSTEM,
+    model = os.environ.get('AI_SUMMARY_MODEL') or os.environ.get('AI_REVIEW_MODEL') or ai_review.DEFAULT_MODEL
+    body = dict(model=model, max_tokens=2000, system=SYSTEM,
                 messages=[{'role': 'user', 'content': 'Untrusted aggregate report metadata:\n' + canonical(context)}])
     if len(json.dumps(body).encode('utf-8')) > MAX_REQUEST_BYTES:
         raise ValueError('Aggregate metadata exceeds the safe AI request limit.')
