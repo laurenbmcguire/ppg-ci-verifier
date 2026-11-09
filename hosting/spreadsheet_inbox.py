@@ -1008,9 +1008,57 @@ class SpreadsheetInbox:
                 continue
             props.append(dict(id=f['id'], sheet=f['sheet'], cell=f['cell'], before=f['before'], after=f['after'], kind='auto',
                               reason=f['reason'], source='AI fix', confidence=f.get('confidence') or 'medium', sure=False))
+        self._mark_recommended_proposals(item, props, raw)
         return dict(file_hash=file_hash, filename=item['filename'], proposals=props, applied=item.get('fixes_applied') or [],
                     ai=dict(status=ai.get('status') or 'not_run', made_at=ai.get('made_at'), count=len(ai.get('fixes') or []),
                             skipped=ai.get('skipped') or [], dropped=ai.get('dropped') or 0, message=ai.get('message')))
+    def _mark_recommended_proposals(self, item, props, raw):
+        """Read-only eligibility for preview-all, never permission to apply.
+        The normal apply endpoint repeats guards under lock after explicit review.
+        Fail closed on holds, ambiguous cells, incomplete change sets and AI guesses.
+        """
+        from hosting.fixes import FixError
+        from collections import Counter
+        cells = Counter((p.get('sheet'), str(p.get('cell') or '').upper()) for p in props)
+        holds = self.holds(item)
+        global_reason = ('Resolve approval holds before selecting recommendations.' if holds else
+                         'Re-check this version first.' if item.get('checker_version') != CHECKER_VERSION else
+                         'This version is locked or has a newer corrected version.' if
+                         item.get('approval') or item.get('send_pending') or item.get('fixes_applied') or
+                         any(x.get('sent') for x in item.get('sent') or []) else '')
+        candidates = []
+        for p in props:
+            reason = global_reason
+            if not reason and (p.get('sure') is not True or str(p.get('source') or '').startswith(('AI', 'Suggested'))):
+                reason = 'This suggestion needs an individual review.'
+            if not reason and p.get('kind') == 'text' and p.get('before') == p.get('after'):
+                reason = 'This cell is already unchanged.'
+            if not reason and (p.get('change_set') or cells[(p.get('sheet'), str(p.get('cell') or '').upper())] != 1):
+                reason = 'Review this coordinated or ambiguous change individually.'
+            if not reason:
+                for d in (item.get('finding_decisions') or {}).values():
+                    if d.get('action') in ('reject', 'defer') and (not d.get('sheet') or d['sheet'] == p.get('sheet')) and (not d.get('cell') or str(d['cell']).upper() == str(p.get('cell') or '').upper()):
+                        reason = 'Reopen the held finding before changing this cell.'
+                        break
+            p['recommendation_eligible'] = not bool(reason)
+            p['recommendation_reason'] = reason or 'Current supported proposal; exact values and source are checked again when applied.'
+            p['recommendation_check_hash'] = item.get('check_hash')
+            if not reason:
+                candidates.append(p)
+        if candidates:
+            try:
+                self._validate_correction_batch(candidates)
+                self._check_changes(item, candidates, False, raw=raw)
+            except (ValueError, FixError):
+                # The common all-valid case performs source and summary work once.
+                # Isolate rejected members only when the batch check fails.
+                for p in candidates:
+                    try:
+                        self._check_changes(item, [p], False, raw=raw)
+                    except (ValueError, FixError) as exc:
+                        p['recommendation_eligible'] = False
+                        p['recommendation_reason'] = str(exc)
+
     def sheet_grid(self, file_hash, sheet=None):
         """The sheet as shown, with its clickable links and the pictures anchored on it, each labelled with its record,
         field, purpose and business date (a picture whose caption marks it as an earlier reference says so)."""
@@ -1081,7 +1129,7 @@ class SpreadsheetInbox:
             if any(size != len(sizes) for size in sizes):
                 raise ValueError(f'Change set {name} is incomplete ({len(sizes)} of its cells were sent). Nothing was applied.')
 
-    def apply_fixes(self, file_hash, approved, *, auto=False, automatic=False, expected_check_hash=None):
+    def apply_fixes(self, file_hash, approved, *, auto=False, automatic=False, expected_check_hash=None, recommended_only=False):
         """Write a corrected copy with the approved changes as a new upload; the original is untouched.
         Source freshness, change sets and (for the automatic pass, ``auto=True``) a person's decisions are checked under
         the report's lock, and the new version is created in the same transaction: a SharePoint read or decision that
@@ -1150,6 +1198,16 @@ class SpreadsheetInbox:
                     if (not decision.get('sheet') or decision.get('sheet') == c.get('sheet')) and (not decision.get('cell') or str(decision['cell']).upper() == str(c.get('cell') or '').upper()):
                         raise ValueError('Reopen the rejected or deferred finding before correcting its data.')
             self._validate_correction_batch(approved)
+            if recommended_only:
+                # Rebuild only deterministic proposals against this locked version. A bulk
+                # preview is not authority to bypass a newly appearing hold or human decision.
+                from hosting.fixes import proposals
+                current = proposals(result, result['filename'], raw)
+                self._mark_recommended_proposals(result, current, raw)
+                fields = ('id', 'sheet', 'cell', 'before', 'after', 'kind', 'source', 'snapshot_id', 'item', 'field')
+                eligible = [p for p in current if p.get('recommendation_eligible')]
+                if any(not any(all(c.get(k) == p.get(k) for k in fields) for p in eligible) for c in approved):
+                    raise ValueError('Recommendations changed or are now held. Reopen the current preview. Nothing was applied.')
 
             self._check_changes(result, approved, auto, raw=raw)  # against the state being saved
             new_item = self._store_new(db, new_name, fixed, new_check, new_hash)

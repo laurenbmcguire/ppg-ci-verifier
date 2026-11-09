@@ -879,7 +879,7 @@ class handler(BaseHTTPRequestHandler):
                     if isinstance(changes, list):
                         changes = [dict(c, kind='auto') if isinstance(c, dict) and c.get('kind') not in ('number', 'text', 'auto') else c for c in changes]
                     with self.store().session() as directory:
-                        fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, changes, expected_check_hash=payload.get('expected_check_hash'))
+                        fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, changes, expected_check_hash=payload.get('expected_check_hash'), recommended_only=payload.get('recommended_only') is True)
                 except FixError as exc:
                     raise Conflict(str(exc))
                 for step in (self.sharepoint_check if sharepoint_configured() else None, self.baseline_check):

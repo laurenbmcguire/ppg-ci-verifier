@@ -1632,3 +1632,19 @@ td.has-pic{position:relative}
 .statistics-notes summary{cursor:pointer;min-height:32px}.statistics-notes dt{font-weight:700}.statistics-notes dd{margin:4px 0 12px}
 .ktable td small{display:block;min-width:160px;font-size:11px;white-space:normal}
 .fd-panel-status{max-width:100%;white-space:normal;margin:4px 0 8px}
+
+/* Review choices keep the workbook central and occurrence lists bounded on phones. */
+.fd-mode-selector h2{font-size:1.15rem;margin:0 0 6px}
+.fd-mode-selector p{margin:6px 0}
+.fd-group-select{display:flex;align-items:center;gap:8px;padding:10px;min-height:44px}
+.fd-occurrence-page{max-height:42vh;overflow:auto;overscroll-behavior:contain}
+.fd-occurrence-range{padding:0 10px;font-size:.85rem}
+.fd-occurrences input[type=checkbox]{width:20px;height:20px;flex-shrink:0;accent-color:var(--fd-green,#246a50)}
+.fd-hold-details{border:1px solid #d8b66b;border-radius:8px;padding:8px 12px;margin-bottom:10px}
+.fd-hold-details summary{cursor:pointer;min-height:32px}
+.fd-group-select:focus-within,.fd-occurrence-range:focus,.fd-hold-details summary:focus-visible{outline:3px solid #246a50;outline-offset:2px}
+@media(max-width:600px){.fd-mode-selector{padding:10px 12px}.fd-mode-selector .fd-cardacts{gap:6px}.fd-mode-selector .btn{white-space:normal;min-height:44px}.fd-occurrence-page{max-height:38vh}}
+
+.fd-mode-selector .fd-hint,.fd-occurrences .fd-hint,.fd-hold-details .fd-hint{color:#4c6056;font-size:.85rem}
+.fd-occurrences label{min-height:44px;align-content:center}
+.fd-preview-location{position:sticky;left:0;background:#fff;z-index:1}

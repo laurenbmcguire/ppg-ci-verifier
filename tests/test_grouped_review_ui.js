@@ -162,7 +162,7 @@ test('header reports receipt matches, never parsed report rows as matched source
 test('next action and unresolved tabs precede optional collapsed recorded history',()=>{
  const ui=between('  function fdCorrections(', '  // ---------- the app fixes');
  assert.ok(ui.indexOf('const nextStep')<ui.indexOf('const auto ='));
- assert.ok(ui.includes("class: 'fd-history-overview'"));assert.ok(ui.includes('History · ${plural(historyApplied'));assert.ok(ui.includes('Show all ${hardHolds.length} approval holds'));
+ assert.ok(ui.includes("class: 'fd-history-overview'"));assert.ok(ui.includes('History · ${plural(historyApplied'));assert.ok(ui.includes("${plural(hardHolds.length, 'approval hold')} · review details"));
  assert.ok(ui.indexOf("class: 'fd-tiers'")<ui.lastIndexOf('appendHistory();'));
 });
 
@@ -189,6 +189,6 @@ test('blocker and approval-hold counts live beside sheet, not in report title',(
  assert.equal(ctx.fdGlobalStatus(st),'Review blocked');
  assert.equal(ctx.fdPanelStatus({holds:[{hard:true},{hard:true},{hard:true}]},st),'1 blocker · 3 approval holds');
  assert.ok(between('  function drawReport(', '  function fdMetrics(').includes('fd-global-status'));
- assert.ok(between('  function fdCorrections(', '  // ---------- the app fixes').includes('fd-panel-status'));
+ assert.ok(between('  function fdCorrections(', '  // ---------- the app fixes').includes('fd-hold-details'));
  assert.ok(!source.includes("btn('facts', 'Facts')"));assert.ok(source.includes("btn('claude', 'Ask Dex'"));
 });
