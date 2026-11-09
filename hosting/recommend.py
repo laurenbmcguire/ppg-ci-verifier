@@ -70,8 +70,10 @@ def report_rules(f):
         out.append(_rec(f'Find {_n(sp["missing_from_report"], "scan")} missing from the report', 'They are on SharePoint for this day and shift but not in the report: the list may not have fully loaded, or scans came after the export.', 'high', 'check', 'you'))
     if f.get('vins_on_other_days_count'):
         n, first = f['vins_on_other_days_count'], f['vins_on_other_days'][0]
-        out.append(_rec(f'Check {n}{"+" if n >= 20 else ""} {"VIN" if n == 1 else "VINs"} already reported on another day',
-                        f'{first["vin"]} is also in the {first["day"]} report. An old file re-sent, or a car counted (and billed) twice?', 'high', 'check', 'you'))
+        out.append(_rec(f'Review {n}{"+" if n >= 20 else ""} normalized identifier/day match{"es" if n != 1 else ""} across reports',
+                        f'{first["vin"]} matches an identifier in the {first["day"]} report after normalization. '
+                        'A normalized identifier match is not proof of a duplicate inspection. Review the underlying records; do not delete rows based on this match alone.',
+                        'high', 'check', 'you'))
     for flag in f['timeline_flags'][:2]:
         out.append(_rec('Ask the site lead about the scanning pattern', flag, 'low', 'follow_up', 'site lead'))
     if f['usual_day'].get('status') == 'unusual':
