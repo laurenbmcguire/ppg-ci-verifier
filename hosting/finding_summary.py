@@ -68,7 +68,14 @@ def snapshot(inbox, payload, authorize):
         review = summarize(item)
         assignment = inbox.assignment_for(item, review)
         holds = inbox.holds(item, review)
-        binding = hashlib.sha256(canonical([item, review, assignment, holds, inbox.assignment_context()]).encode()).hexdigest()
+        mappings = []
+        for source in (assignment, item.get('source_reconciliation') or {}):
+            if source.get('site_id') and source.get('list_id'):
+                try:
+                    mappings.append(inbox.source_mapping(source['site_id'], source['list_id']))
+                except ValueError:
+                    mappings.append({'invalid_source_identity': True})
+        binding = hashlib.sha256(canonical([item, review, assignment, holds, inbox.assignment_context(), mappings]).encode()).hexdigest()
         return review, holds, binding
 
 

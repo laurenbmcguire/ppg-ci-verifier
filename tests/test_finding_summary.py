@@ -250,3 +250,13 @@ def test_existing_summary_model_configuration_chain(monkeypatch, summary, review
     monkeypatch.setenv('AI_SUMMARY_MODEL', summary)
     monkeypatch.setenv('AI_REVIEW_MODEL', review)
     assert fs.request_body(fs.inventory(fake_review(), []))['model'] == expected
+
+
+def test_source_mapping_revision_race_rejected_even_if_holds_unchanged(setup, monkeypatch):
+    box, item, p = setup
+    monkeypatch.setattr(box, 'assignment_for', lambda *a: {'status': 'unmatched', 'site_id': 'synthetic-site', 'list_id': 'synthetic-list'})
+    monkeypatch.setattr(box, 'holds', lambda *a: [{'code': 'source_mapping_changed', 'hard': True}])
+    def change(body):
+        box.set_setting(box.source_mapping_key('synthetic-site', 'synthetic-list'), {'revision': 'changed', 'mapping': {'inspected': 'synthetic'}})
+        return provider(body)
+    with pytest.raises(ValueError, match='changed'): fs.prepare(box, p, lambda: True, change)
