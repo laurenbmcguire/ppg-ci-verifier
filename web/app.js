@@ -50,6 +50,7 @@
   // ---------------------------------------------------------------- connections
   api('/api/health').then(hh => { state.health = hh;
     state.aiOn = !!hh.ai_review_configured;
+    if (state.report) drawChat();
     const box = $('connections'); box.replaceChildren(
       h('span', {class: 'conn' + (hh.storage === 'vercel-postgres' ? ' on' : '')}, h('i'), 'Saved in the cloud'),
       h('span', {class: 'conn' + (hh.sharepoint_configured ? ' on' : '')}, h('i'), hh.sharepoint_configured ? 'SharePoint connected' : 'SharePoint off'),
@@ -292,6 +293,7 @@
 
   // ---------------------------------------------------------------- sign-in and who is using the app
   function showSignIn(message) {
+    state.reportChat = null;
     const me = state.me || {};
     let box = $('signin');
     if (!box) { box = h('div', {id: 'signin', class: 'signin', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'signin-title'}); document.body.append(box); }
@@ -2798,27 +2800,59 @@
     drawCellSlot();
   }
 
-  // ---------------- Dex: one route to the reviewed correction workflow
-  // Historical chat records are retained, but cannot select, undo or apply changes.
+  // ---------------- Dex: read-only questions, bound to the displayed report/check
+  // Conversation stays in memory, never in localStorage, and never selects corrections.
   function maybeBrief(hash, working) {
     if (state.report?.file_hash === hash && !working) drawChat();
   }
   function openChat() { showSide('claude'); }
   function closeChat() { if (state.sideTab === 'claude') showSide('fixes'); }
+  function chatState() {
+    const r = state.report, key = r ? r.file_hash + ':' + r.check_hash : '';
+    if (!state.reportChat || state.reportChat.key !== key) state.reportChat = {key, messages: [], draft: '', busy: false, error: ''};
+    return state.reportChat;
+  }
+  async function askDex(chat, binding) {
+    const r = state.report;
+    if (chat !== state.reportChat || chat.busy || !state.aiOn || !r || state.selected !== binding.file_hash || r.file_hash !== binding.file_hash || r.check_hash !== binding.expected_check_hash) return;
+    const question = chat.draft.trim(); if (!question || question.length > 4000) return;
+    chat.busy = true; chat.error = ''; drawChat();
+    const conversation = [...chat.messages.slice(-14), {role: 'user', content: question}];
+    try {
+      const out = await api('/api/spreadsheets/chat', {...binding, messages: conversation});
+      if (chat !== state.reportChat || state.selected !== binding.file_hash || state.report?.file_hash !== binding.file_hash || state.report?.check_hash !== binding.expected_check_hash) return;
+      if (out.read_only !== true || out.file_hash !== binding.file_hash || out.check_hash !== binding.expected_check_hash || typeof out.reply !== 'string' || !out.reply.trim()) throw new Error('Dex returned an answer for different report evidence. Reload before asking again.');
+      chat.messages = [...conversation, {role: 'assistant', content: out.reply}]; chat.draft = '';
+      chat.truncated = out.context_truncated; chat.provider = out.provider;
+    } catch (e) {
+      if (chat === state.reportChat && state.selected === binding.file_hash && state.report?.check_hash === binding.expected_check_hash) chat.error = e.message;
+    } finally {
+      chat.busy = false;
+      if (chat === state.reportChat && state.selected === binding.file_hash && state.report?.check_hash === binding.expected_check_hash) drawChat();
+    }
+  }
   function drawChat() {
     const panel = $('chat'); if (!panel || !state.report) return;
+    const r = state.report, chat = chatState(), available = !!state.aiOn && !!r.check_hash;
+    const binding = {file_hash: r.file_hash, expected_check_hash: r.check_hash};
+    const send = h('button', {type: 'button', class: 'btn primary', disabled: !available || chat.busy || !chat.draft.trim(), onclick: () => askDex(chat, binding)}, chat.busy ? 'Asking Dex…' : 'Send');
+    const input = h('textarea', {rows: 3, maxlength: '4000', disabled: !available || chat.busy, 'aria-label': 'Message to Dex', placeholder: available ? 'Ask about a finding, quantity or source hold…' : 'Ask an administrator to configure Claude.', oninput: e => { chat.draft = e.target.value; send.disabled = !available || chat.busy || !chat.draft.trim(); }});
+    input.value = chat.draft;
     panel.replaceChildren(
       h('div', {class: 'chat-top'}, h('b', {}, 'Ask Dex about this report')),
       h('div', {class: 'chat-hello'},
-        h('p', {}, state.aiOn
-          ? 'Dex can prepare suggestions through the AI prepares suggestions review mode. Chat sending is unavailable in this version.'
-          : 'Dex is unavailable because AI preparation is not configured. You can review manually or leave the file unchanged.'),
-        h('p', {}, 'Choose a review mode above the spreadsheet. Include or remove individual corrections, then preview the selected changes before explicitly creating a new version. Your original file and source-review holds are preserved.'),
-        h('button', {type: 'button', class: 'btn', onclick: () => {
-          showSide('fixes'); document.querySelector('.fd-mode-selector')?.scrollIntoView({behavior: 'smooth', block: 'center'});
-        }}, 'Go to review modes')),
-      h('textarea', {rows: 2, disabled: true, 'aria-label': 'Message to Dex', placeholder: 'Chat sending is unavailable. Use the review modes above.'}),
-      h('button', {type: 'button', class: 'btn primary', disabled: true}, 'Send'));
+        h('p', {}, `${r.filename || 'Selected report'} · version ${r.revision || 1} · ${r.file_hash.slice(0, 8)}`),
+        h('p', {}, available
+          ? 'Sending shares your question and extracted cells, findings and source evidence from this report version with Claude (Anthropic). Answers explain evidence only; they cannot change, approve or send a report.'
+          : 'Dex is unavailable because AI preparation is not configured. Ask an administrator to configure Claude on the server. Do not paste an API key here.'),
+        h('p', {}, 'Check answers against the report. Blank values stay unknown and source-review holds remain in place. This conversation is not saved after reload.'),
+        h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); document.querySelector('.fd-mode-selector')?.scrollIntoView({behavior: 'smooth', block: 'center'}); }}, 'Go to review modes')),
+      h('div', {class: 'dex-messages', 'aria-live': 'polite'}, chat.messages.map(m => h('div', {class: 'dex-message'}, h('b', {}, m.role === 'user' ? 'You' : 'Dex · Claude (Anthropic)'), h('p', {}, m.content)))),
+      chat.truncated ? h('p', {class: 'hint'}, 'Dex received a limited excerpt. This answer does not establish complete report coverage.') : null,
+      chat.error ? h('p', {class: 'hint', role: 'alert'}, chat.error) : null,
+      h('label', {for: 'dex-question'}, 'Your question'), input, send,
+      h('p', {class: 'hint', role: 'status'}, chat.busy ? 'Waiting for Claude. Your report is unchanged.' : 'No changes are selected or applied by chat.'));
+    input.id = 'dex-question';
   }
   async function showCell(sheet, cell, quiet) {
     if (!state.grid || state.grid.sheet !== sheet) await loadGrid(sheet);

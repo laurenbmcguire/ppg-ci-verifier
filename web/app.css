@@ -1692,3 +1692,5 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-review-types label{display:block;margin:8px 0;overflow-wrap:anywhere}
 
 .fd-review-dialog .fd-review-toolbar{max-height:45vh;overflow:auto}.fd-review-dialog{scroll-padding-top:45vh}.fd-review-dialog .fd-review-toolbar p{margin:4px 0 8px}
+/* Read-only report Q&A; plain text only, bounded at phone width. */
+.dex-messages{display:grid;gap:12px;min-width:0;margin:12px 0}.dex-message{padding:10px;border:1px solid var(--line);border-radius:7px;min-width:0}.dex-message p{white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0 0}#chat textarea{width:100%;box-sizing:border-box;min-height:90px;resize:vertical}#chat .chat-hello p{overflow-wrap:anywhere}

@@ -89,25 +89,12 @@ test('assistant display is Dex while provider setup and provenance remain accura
 });
 
 
-test('Dex pane uses only the review workflow and cannot send or bulk-select',()=>{
- for (const configured of [false,true]) {
-  const panel=new Element('section');panel.replaceChildren=(...children)=>{panel.children=children;};
-  const writes=[],requests=[];
-  const ctx=vm.createContext({document:{createElement:tag=>new Element(tag)},$:()=>panel,
-   state:{report:{file_hash:'synthetic'},aiOn:configured},showSide(){},
-   store:{get:()=>[{kind:'brief',content:'Want me to do all the fixes?',offer:['old']}],set:(...args)=>writes.push(args)},
-   api:(...args)=>requests.push(args)});
-  vm.runInContext(between('  const h = (','  const store =')+between('  function drawChat() {','  async function showCell('),ctx);
-  vm.runInContext('drawChat()',ctx);
-  const nodes=panel.walk(),text=nodes.flatMap(x=>x.children.filter(y=>typeof y==='string')).join(' ');
-  assert.match(text,configured ? /Chat sending is unavailable/ : /AI preparation is not configured/);
-  assert.ok(!text.includes('Want me to do all'));
-  assert.equal(nodes.filter(x=>x.tag==='button'&&!Object.hasOwn(x,'disabled')).length,1);
-  assert.ok(Object.hasOwn(nodes.find(x=>x.tag==='textarea'),'disabled'));
-  assert.ok(Object.hasOwn(nodes.find(x=>x.tag==='button'&&x.children.includes('Send')),'disabled'));
-  assert.deepEqual(writes,[]);assert.deepEqual(requests,[]);
- }
- for (const legacy of ['function applyChat(', 'function undoChat(', 'function doFixes(', 'function undoFixes(', "api('/api/spreadsheets/chat'", 'Go through them with me', 'Want me to do all the fixes?']) assert.ok(!source.includes(legacy),legacy);
+test('Dex question pane cannot restore legacy bulk editing paths',()=>{
+ for (const legacy of ['function applyChat(', 'function undoChat(', 'function doFixes(', 'function undoFixes(', 'Go through them with me', 'Want me to do all the fixes?']) assert.ok(!source.includes(legacy),legacy);
+ const chat=between('  function chatState()', '  async function showCell(');
+ assert.ok(chat.includes("api('/api/spreadsheets/chat'"));
+ assert.ok(!chat.includes('store.set('));assert.ok(!chat.includes('applyFixes('));
+ assert.ok(chat.includes('out.read_only !== true'));
 });
 
 test('completion and recommendation actions distinguish internal review from delivery',()=>{

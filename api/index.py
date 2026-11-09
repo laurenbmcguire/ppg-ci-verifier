@@ -937,16 +937,29 @@ class handler(BaseHTTPRequestHandler):
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
                 if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                     raise Conflict('Valid spreadsheet version ID required.')
-                messages, queued = payload.get('messages'), payload.get('queued') or []
-                if not isinstance(messages, list) or not messages or not isinstance(queued, list):
-                    raise Conflict('Send the conversation so far.')
-                from hosting.spreadsheet_inbox import chat_turn
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
+                from hosting import report_chat
+                conversation = report_chat.messages(payload.get('messages'))
+                expected = payload.get('expected_check_hash')
                 with self.store().session() as directory:
-                    item, data, issues = SpreadsheetInbox(directory).ai_fix_inputs(file_hash)
-                suggested = [x for x in (payload.get('suggested') or []) if isinstance(x, dict)] if isinstance(payload.get('suggested'), list) else []
-                out = chat_turn(item, data, issues, [m for m in messages if isinstance(m, dict)], [q for q in queued if isinstance(q, dict)], suggested=suggested)
-                if out.get('status') != 'done':
-                    raise Conflict(out.get('message') or 'Claude could not answer.')
+                    inbox = SpreadsheetInbox(directory)
+                    item, review, holds, fingerprint = report_chat.snapshot(inbox, file_hash, expected)
+                    _, data = inbox.original_bytes(file_hash)
+                out = report_chat.answer(item, data, review, holds, conversation)
+                # Provider work happens outside a transaction. Recheck authorization and
+                # exact evidence before returning any answer, including revoked sessions.
+                self._user_cache = None
+                self._clients = None
+                refused = self.gate('POST', route, payload)
+                if refused:
+                    return refused
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
+                with self.store().session() as directory:
+                    current = report_chat.snapshot(SpreadsheetInbox(directory), file_hash, expected)
+                    if current[3] != fingerprint:
+                        raise Conflict('Report evidence or access changed while Dex was answering. Reload before asking again.')
                 return self.send(200, encode_json(out))
             if route == '/api/change-summary':   # make a PDF change summary now (kept on record)
                 payload = json.loads(raw)
