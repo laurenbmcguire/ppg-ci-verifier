@@ -3937,40 +3937,11 @@
     const setDone = (keys, on) => { keys.forEach(k => on ? done.add(k) : done.delete(k)); store.set(reviewedKey, [...done]); draw(); updateFinish(); drawSideTabs(); };
     if (state.issueSelFor !== state.report.file_hash) { state.issueSel = new Set(); state.issueSelFor = state.report.file_hash; }
     const sel = state.issueSel;
-    // accept every suggested fix for the selected issues; ask Claude for the rest when AI is on
-    const fixSelected = async btn => {
-      const hash = state.report.file_hash, picked = issues.filter(i => sel.has(i.key));
-      const dupRows = picked.filter(i => isDupRow(i) && i.row && !fixesFor(i).length).map(i => [i.sheet, Number(i.row)]);
-      const accept = () => {
-        const d = store.get(decisionsKey(), {}), fixedKeys = [];
-        let n = 0;
-        for (const i of picked) {
-          const fx = fixesFor(i).filter(f => f.state !== 'rejected');
-          for (const f of fx) if (d[f.id]?.state !== 'accepted') { d[f.id] = {state: 'accepted', after: d[f.id]?.after ?? f.after}; n++; }
-          if (fx.length) fixedKeys.push(i.key);
-        }
-        store.set(decisionsKey(), d);
-        return {n, fixedKeys};
-      };
-      let {n, fixedKeys} = accept();
-      const missing = picked.filter(i => !fixedKeys.includes(i.key) && !isDupRow(i));
-      if (missing.length && state.aiOn) {
-        btn.disabled = true; btn.textContent = `Dex is fixing ${missing.length}…`;
-        try {
-          await api('/api/spreadsheets/ai-fixes', {file_hash: hash});
-          if (state.selected !== hash) return;
-          const data = await api('/api/spreadsheets/fixes', {file_hash: hash});
-          state.fixes = data.proposals || []; state.aiFix = data.ai || {};
-          ({n, fixedKeys} = accept());
-        } catch (e) { toast(e.message, true); }
-      }
-      fixedKeys.forEach(k => done.add(k)); store.set(reviewedKey, [...done]);
-      const left = picked.length - fixedKeys.length;
-      sel.clear();
-      toast(fixedKeys.length ? `${n} fix${n === 1 ? '' : 'es'} accepted for ${fixedKeys.length} issue${fixedKeys.length === 1 ? '' : 's'}; they go into the download.` + (left - dupRows.length > 0 ? ` ${left - dupRows.length} have no automatic fix yet: open each one to choose what to do.` : '')
-        : dupRows.length ? '' : 'None of these have an automatic fix yet. Open each one to choose what to do' + (state.aiOn ? '.' : ', or turn on AI review so Dex can write fixes.'), !fixedKeys.length && !dupRows.length);
-      drawFixes(); draw(); updateFinish(); drawSideTabs();
-      if (dupRows.length) await removeRows(dupRows);
+    // Retained legacy panel: selected issues only open the guarded review chooser.
+    const fixSelected = () => {
+      const binding = reviewBinding(state.report), available = new Set(fdItems().map(it => it.key));
+      state.fdReviewSelection = {binding: JSON.stringify(binding), keys: issues.filter(i => sel.has(i.key) && available.has(i.key)).map(i => i.key)};
+      fdReviewDialog();
     };
     const draw = () => {
       const left = issues.filter(i => !done.has(i.key)).length;
@@ -3985,12 +3956,12 @@
       if (sel.size) {
         const picked = issues.filter(i => sel.has(i.key)), ready = picked.filter(i => fixesFor(i).some(f => f.state !== 'rejected') || isDupRow(i)).length;
         block.append(h('div', {class: 'selbar issel'},
-          h('span', {}, h('b', {}, `${picked.length} selected`), ` · ${ready} with a suggested fix` + (state.aiOn ? '. AI can fix any of them.' : picked.length > ready ? `, ${picked.length - ready} without one` : '')),
+          h('span', {}, h('b', {}, `${picked.length} selected`), ` · ${ready} with a suggested fix` + (picked.length > ready ? `, ${picked.length - ready} without one` : '')),
           h('button', {type: 'button', class: 'btn ghost small', onclick: () => { sel.clear(); draw(); }}, 'Clear'),
           picked.some(i => done.has(i.key)) ? h('button', {type: 'button', class: 'btn small', onclick: () => { const k = picked.map(i => i.key); sel.clear(); setDone(k, false); drawSteps(); drawCleanOffer(); }}, 'Mark not reviewed') : null,
           picked.some(i => !done.has(i.key)) ? h('button', {type: 'button', class: 'btn small', onclick: () => { const k = picked.map(i => i.key); sel.clear(); setDone(k, true); toast(`${k.length} marked reviewed.`); drawSteps(); drawCleanOffer(); }},
             `Mark ${picked.length === 1 ? 'it' : picked.length} reviewed`) : null,
-          ready ? h('button', {type: 'button', class: 'btn small', onclick: e => fixSelected(e.target)}, `Make the ${ready === 1 ? 'suggested fix' : `${ready} suggested fixes`}`) : null,
+          ready ? h('button', {type: 'button', class: 'btn small', onclick: e => fixSelected(e.target)}, 'Review selected suggested changes') : null,
           state.aiOn ? h('button', {type: 'button', disabled: true, title: 'AI workbook changes are paused pending reviewed-plan safety checks', class: 'btn primary small ai', onclick: e => { const k = picked.map(i => i.key); sel.clear(); aiFix(k, e.target); }}, `Fix ${picked.length === 1 ? 'it' : picked.length} with AI`) : null));
       }
       for (const [sev, label] of SEVERITIES) {

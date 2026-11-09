@@ -13,3 +13,22 @@ test('navigation or changed binding drops success/error and releases owned contr
 test('malformed/out-of-scope response is a visible failure without proposals',async()=>{const h=harness(),p=h.go();const a=h.answer();a.ai_proposals.ids=['unselected'];h.resolve(a);await p;assert.match(h.events.at(-1),/selected scope/);assert.equal(h.state.aiProposalOperation,null);});
 
 test('already changed navigation cannot start an old-report request',async()=>{const h=harness();h.state.selected='new-report';await h.go();assert.equal(h.requests.length,0);});
+
+test('legacy AI entrypoints open the exact-selection chooser without provider requests',async()=>{
+  const state={aiOn:true,report:{file_hash:'report',check_hash:'check'}},calls=[];
+  const ctx=vm.createContext({state,fdReviewDialog:()=>calls.push('chooser'),toast:x=>calls.push(x),api:()=>{throw Error('Must not request provider');}});
+  vm.runInContext(between('  async function runReview(', '  const restoredKey =')+between('  async function rerun(', '  // ---------------------------------------------------------------- upload'),ctx);
+  await ctx.runReview('report');await ctx.runVerify('report');await ctx.runAiFixes(false,{file_hash:'report',expected_check_hash:'check'});
+  for(const kind of ['ai-review','ai-verify','ai-fixes'])await ctx.rerun(kind,'');
+  assert.deepEqual(calls,Array(6).fill('chooser'));
+  await ctx.runReview('old');await ctx.runVerify('old');await ctx.runAiFixes(false,{file_hash:'old',expected_check_hash:'check'});
+  assert.equal(calls.filter(x=>x==='chooser').length,6);
+  assert.doesNotMatch(src,/api\(['"]\/api\/spreadsheets\/ai-(?:fix(?:es)?|review|verify)['"]/);
+});
+test('retained issue panel never accepts fixes or broadens selected scope',()=>{
+  const state={report:{file_hash:'report'}},calls=[],sel=new Set(['picked','missing']);
+  const ctx=vm.createContext({state,sel,issues:[{key:'picked'},{key:'other'},{key:'missing'}],reviewBinding:r=>r,fdItems:()=>[{key:'picked'},{key:'other'}],fdReviewDialog:()=>calls.push('chooser')});
+  vm.runInContext(between('    const fixSelected = () => {', '    const draw = () => {')+'fixSelected();',ctx);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.fdReviewSelection)),{binding:'{"file_hash":"report"}',keys:['picked']});
+  assert.deepEqual(calls,['chooser']);assert.deepEqual([...sel],['picked','missing']);
+});
