@@ -116,3 +116,12 @@ test('completion and recommendation actions distinguish internal review from del
  assert.ok(source.includes('Request internal review (no notification sent)'));
  assert.ok(source.includes('Internal review requested. No notification was sent.'));
 });
+test('failed apply retains preview, busy click makes no request, and Escape is blocked only while saving',async()=>{
+ const {context,dialogs}=harness();let calls=0;context.applyFixes=async()=>{calls++;return null;};
+ const c={binding:{file_hash:'h',expected_check_hash:'c'},report:{file_hash:'h',revision:1},accepted:[{id:'p',sheet:'Synthetic',cell:'A2',before:'1',after:'2'}],dec:{},edits:{},total:1};
+ context.fdPreview(c);const d=dialogs()[0],button=d.querySelector('#fd-apply');
+ context.state.busy=true;await button.onclick({currentTarget:button});assert.equal(calls,0);assert.equal(dialogs().length,1);
+ let prevented=false;d.listeners.cancel[0]({preventDefault(){prevented=true;}});assert.equal(prevented,true);
+ context.state.busy=false;prevented=false;d.listeners.cancel[0]({preventDefault(){prevented=true;}});assert.equal(prevented,false);
+ await button.onclick({currentTarget:button});assert.equal(calls,1);assert.equal(dialogs().length,1);assert.equal(button.disabled,false);assert.match(d.querySelector('#fd-preview-error').textContent,/Not confirmed saved/);
+});

@@ -882,13 +882,14 @@ class handler(BaseHTTPRequestHandler):
                         fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, changes, expected_check_hash=payload.get('expected_check_hash'), recommended_only=payload.get('recommended_only') is True)
                 except FixError as exc:
                     raise Conflict(str(exc))
+                already_applied = fixed.get('already_applied') is True
                 for step in (self.sharepoint_check if sharepoint_configured() else None, self.baseline_check):
                     if step:
                         try:
                             fixed = step(fixed['file_hash'])
                         except Exception:
                             debug_log()
-                return self.send(200, encode_json({'item': fixed}))
+                return self.send(200, encode_json({'item': fixed, 'already_applied': already_applied}))
             if route == '/api/spreadsheets/ai-summary':
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None

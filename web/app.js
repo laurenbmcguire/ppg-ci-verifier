@@ -794,6 +794,7 @@
 
   const fdMode = () => store.get('rd-mode:' + state.report.file_hash, null);
   function fdChooseMode(mode, binding) {
+    if (!['manual', 'unchanged'].includes(mode)) { toast('Choose a current review option. No AI request was made.', true); return; }
     if (state.report?.file_hash !== binding.file_hash || state.report?.check_hash !== binding.expected_check_hash) {
       toast('The report changed. Review the current version before choosing.', true); return;
     }
@@ -802,7 +803,6 @@
       toast('File left unchanged. Your draft selections are kept for later; findings and holds remain.');
     }
     drawReport();
-    if (mode === 'ai') runAiFixes(false, binding);
   }
   // Only the server's current eligibility is used for bulk selection. Local edits,
   // rejected suggestions and source-owner decisions are never silently overwritten.
@@ -1512,7 +1512,7 @@
     const r = c.report, binding = c.binding, next = revisionOf(r) + 1, opener = c.returnFocus || document.activeElement;
     c = {...c, returnFocus: opener};
     const rows = [...c.accepted.map(f => ({sheet: f.sheet, cell: f.cell, before: f.before, after: c.dec[f.id]?.after ?? f.after, why: f.reason, src: f.source})),
-      ...Object.values(c.edits).map(e => ({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, why: e.reason || 'Your edit', src: 'Your edit'}))];
+      ...Object.values(c.edits).map(e => ({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, why: e.reason || 'Your edit', src: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit'}))];
     const d = h('dialog', {id: 'fd-preview-dialog', class: 'fd-modal', 'aria-labelledby': 'fd-prev-title'},
       h('p', {class: 'fd-eyebrow'}, 'Check before applying'),
       h('h2', {id: 'fd-prev-title'}, plural(rows.length, 'change')),
@@ -2365,7 +2365,9 @@
         const link = h('a', {href: '/api/spreadsheets/download?id=' + answer.item.file_hash, download: answer.item.filename});
         document.body.append(link); link.click(); link.remove();
       }
-      toast(`${opts.download !== false ? 'Saved and downloaded' : answer.item.already_applied ? 'Opened the existing corrected version' : 'Saved'} "${answer.item.filename}" with ${changes.length} change${changes.length === 1 ? '' : 's'}. It has been checked again. The original is unchanged.`);
+      const existingVersion = answer.already_applied === true || answer.item.already_applied === true;
+      const recordedChanges = answer.item.fixed_from?.changes;
+      toast(`${existingVersion ? 'Opened the existing corrected version' : 'Saved the corrected version'} "${answer.item.filename}"${Array.isArray(recordedChanges) ? ` with ${plural(recordedChanges.length, 'recorded change')}` : ''}. ${existingVersion ? 'No new version was created. ' : ''}The original is unchanged.`);
       if (opts.thenOpen !== false) { await loadList(); select(answer.item.file_hash); }
       return answer.item.file_hash;
     } catch (e) { state.celebrate = null; toast(e.message, true); return null; }
