@@ -71,7 +71,7 @@
   function clientOfReport(r) {
     const a = r && r.assignment;
     if (a) return SETTLED.includes(a.status) ? a.client_key : null;
-    return clientOf(r?.review?.job);
+    return null; // A job label alone cannot establish a client assignment.
   }
   const inClientR = r => !state.client || (state.client === '_none' ? !clientOfReport(r) : clientOfReport(r) === state.client);
   const inClient = job => !state.client || (state.client === '_none' ? !clientOf(job) : clientOf(job) === state.client);
@@ -115,27 +115,67 @@
     state.listError = null;
     state.list = data.spreadsheets || [];
     state.listTotal = data.count;
+    state.listPartial = data.has_more === true;
     drawQueue(); drawClientTabs();
   }
   // an upload the app cleaned automatically is shown once: as its cleaned copy (the original opens from that report)
   const visibleList = () => { const cleaned = new Set(state.list.flatMap(r => r.review?.auto_hidden || [])); return state.list.filter(r => !cleaned.has(r.file_hash)); };
+  // Queue metadata never invents a business date or groups unrelated files by a similar name.
+  const queueDay = r => r.review?.day || '';
+  const queueFamily = r => JSON.stringify([r.assignment?.client_key || '', r.root_hash || r.file_hash]);
+  const queueNeedsAttention = r => !r.review?.sent_at && (!r.review || r.review.status !== 'clear' || r.review.coverage?.truncated || r.review.coverage?.not_listed || r.review.page?.complete === false ||
+    !r.review.day || !r.review.job || !r.assignment || !SETTLED.includes(r.assignment.status) || r.assignment.needs_person || r.review.sharepoint?.status !== 'match' ||
+    r.internal_check_status === 'outdated_checks_require_recheck' || r.internal_check_status === 'could_not_load_latest_check');
+  function queueClient(r) {
+    const a = r.assignment;
+    return a && SETTLED.includes(a.status) && a.client ? a.client : 'Client not confirmed';
+  }
+  function queueQuantity(r, key) {
+    const q = r.review?.quantities?.[key];
+    // Older summaries do not establish quantity completeness. Do not turn their missing metadata into zero.
+    if (!q || q.value == null || q.value === '' || typeof q.value === 'boolean' || (!Number.isFinite(Number(q.value)) || Number(q.value) < 0)) return 'Unknown';
+    const n = Number(q.value).toLocaleString('en-US', {maximumFractionDigits: 12});
+    return `${n}${q.unit ? ' ' + q.unit : ' (unit unknown)'}${q.partial ? ' (partial)' : ''}`;
+  }
+  function queueSource(r) {
+    const sp = r.review?.sharepoint || {};
+    return ({match: 'Source comparison matched', differences: 'Source differences', incomplete: 'Source coverage incomplete', stale: 'Source check out of date',
+      day_level: 'Source compared by day totals only', unverified: 'Source not verified', not_found: 'Source not found', not_configured: 'Source not connected', error: 'Source check failed'})[sp.status] || 'Source not checked';
+  }
+  function queueCheck(r) {
+    const rv = r.review, c = rv?.counts || {};
+    if (!rv || r.internal_check_status === 'could_not_load_latest_check') return ['Check unavailable', 'check'];
+    if (r.internal_check_status === 'outdated_checks_require_recheck') return ['Checks out of date', 'check'];
+    if (rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false) return ['Finding coverage incomplete', 'check'];
+    if (rv.status === 'clear') return ['No open findings', 'clear'];
+    const high = c.high, other = Number.isFinite(c.medium) && Number.isFinite(c.low) ? c.medium + c.low : null;
+    if (rv.status === 'hold') return [high == null ? 'High-severity findings' : `${high} high-severity finding${high === 1 ? '' : 's'}`, 'hold'];
+    return [other == null ? 'Findings need review' : `${other} medium/low finding${other === 1 ? '' : 's'}`, 'check'];
+  }
+  const queueVersion = value => Number.isInteger(value) && value > 0 ? String(value) : 'unknown';
+  const queueSearch = r => [r.filename, r.review?.job, queueDay(r), queueClient(r), r.assignment?.status, r.review?.sharepoint?.source,
+    r.file_hash, r.version == null ? '' : 'v' + r.version, r.revision == null ? '' : 'revision ' + r.revision].filter(v => v != null).join(' ').toLowerCase();
   function drawQueue() {
     const q = state.search.trim().toLowerCase(), shown = visibleList();
-    let rows = shown.filter(r => inClientR(r) && (!q || [r.filename, r.review?.job, r.review?.day].some(v => (v || '').toLowerCase().includes(q))));
-    if (state.filter === 'attention') rows = rows.filter(r => !r.review || r.review.status !== 'clear');
+    let rows = shown.filter(r => inClientR(r) && (!q || queueSearch(r).includes(q)));
+    if (state.filter === 'attention') rows = rows.filter(queueNeedsAttention);
     if (state.filter === 'review') rows = rows.filter(r => r.review?.review_state === 'waiting');
-    document.querySelectorAll('.segmented button').forEach(b => b.classList.toggle('on', b.dataset.filter === state.filter));
     const mine = shown.filter(r => inClientR(r));
-    const attention = mine.filter(r => !r.review || r.review.status !== 'clear' && !r.review.sent_at).length, waiting = mine.filter(r => r.review?.review_state === 'waiting').length;
-    const label = {attention: 'To do', all: 'All', review: 'For review'};
-    document.querySelectorAll('.segmented button').forEach(b => { const n = b.dataset.filter === 'attention' ? attention : b.dataset.filter === 'review' ? waiting : 0;
-      b.replaceChildren(label[b.dataset.filter] || b.textContent, n ? h('i', {class: 'segn'}, String(n)) : null); });
-    const todo = shown.filter(r => r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
+    const attention = mine.filter(queueNeedsAttention).length, waiting = mine.filter(r => r.review?.review_state === 'waiting').length;
+    const label = {attention: 'To do', all: 'All', review: 'Review requested'};
+    document.querySelectorAll('.segmented button').forEach(b => {
+      const n = b.dataset.filter === 'attention' ? attention : b.dataset.filter === 'review' ? waiting : 0;
+      b.classList.toggle('on', b.dataset.filter === state.filter);
+      b.setAttribute('aria-pressed', String(b.dataset.filter === state.filter));
+      b.replaceChildren(label[b.dataset.filter] || b.textContent, n ? h('i', {class: 'segn'}, String(n)) : null);
+    });
+    const todo = shown.filter(queueNeedsAttention).length;
     document.title = (todo ? `(${todo}) ` : '') + 'PPG Verifier';
     const list = $('queue-list'); list.replaceChildren();
+    if (state.listPartial) list.append(h('p', {class: 'queue-notice', role: 'status'}, 'Only the most recent saved reports are loaded. Search, filters and counts cover this loaded list, not the full report history.'));
     if (state.listError) {
       list.append(h('div', {class: 'listerror', role: 'alert'}, h('b', {}, 'The report list could not be loaded.'),
-        h('span', {}, ` ${state.listError} Saved reports are not affected; this is a loading problem, not an empty list. `),
+        h('span', {}, ` ${state.listError} Saved reports are not affected; this is a loading problem, not an empty list. Previously loaded reports below may be out of date. `),
         h('button', {type: 'button', class: 'linkish', onclick: () => loadList().catch(() => {})}, 'Try again')));
       if (!state.list.length) return;
     }
@@ -158,41 +198,46 @@
     }
     if (!rows.length) {
       list.append(h('p', {class: 'queue-empty'}, state.list.length
-        ? (state.client && !q && !state.list.some(r => inClientR(r)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'Nothing is waiting for review.' : state.filter === 'attention' && !q ? h('span', {}, 'Nothing needs your attention. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
+        ? (state.client && !q && !state.list.some(r => inClientR(r)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'No reports have a review request. Use To do to find reports with findings.' : state.filter === 'attention' && !q ? h('span', {}, 'No matching to-do reports in this loaded list. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
         : 'No reports yet. Upload an end-of-shift report to start.'));
       return;
     }
-    const dayOf = r => r.review?.day || (r.received_at || '').slice(0, 10);
-    rows = [...rows].sort((a, b) => dayOf(b).localeCompare(dayOf(a)) || (b.received_at || '').localeCompare(a.received_at || ''));   // newest report day first, one heading per day
-    // one line per client / job / business day: the latest version, with earlier versions behind a toggle
-    // (each keeps its own decisions; nothing from an older version is applied to a newer one)
-    const groupKey = r => [r.assignment?.client || '', r.review?.job || (r.filename || '').replace(/\s*\(fixed\)|\.(xlsx|xlsm|xls|csv)$/gi, ''), dayOf(r)].join('|');
+    rows = [...rows].sort((a, b) => queueDay(b).localeCompare(queueDay(a)) || (b.received_at || '').localeCompare(a.received_at || ''));
     const groups = new Map();
-    for (const r of rows) { const k = groupKey(r); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+    for (const r of rows) { const k = queueFamily(r); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
     state.openGroups ||= new Set();
     const line = (r, older) => {
-      const rv = r.review || {status: 'check', counts: {}};
-      const c = rv.counts || {};
-      const incomplete = rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false;
-      const queueStatus = incomplete ? 'Coverage incomplete' : STATUS[rv.status] || 'Check';
-      const count = rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false ? 'Finding coverage incomplete' : rv.status === 'clear' ? 'Clear' : rv.status === 'hold' ? `${c.high || 0} high-severity finding${c.high === 1 ? '' : 's'}` : `${(c.medium || 0) + (c.low || 0)} medium/low finding${(c.medium || 0) + (c.low || 0) === 1 ? '' : 's'}`;
-      return h('button', {type: 'button', class: 'item' + (r.file_hash === state.selected ? ' sel' : '') + (older ? ' older' : ''), onclick: () => select(r.file_hash),
-        'aria-label': `${rv.job || r.filename}${older ? ', earlier version' : ''}, ${queueStatus}, ${count}`},
-        h('span', {class: 'tag tag-' + (incomplete ? 'check' : rv.status)}, queueStatus),
-        h('span', {class: 'job', title: rv.job ? null : 'No job number was found in this file. The file name is shown instead.'}, (rv.job || r.filename.replace(/\.(xlsx|xlsm|xls|csv)$/i, '').replace(/\s*\(fixed\)/g, ''))), rv.fixed_from ? h('span', {class: 'vtag', title: 'A corrected copy; the original upload is kept too'}, 'corrected') : null,
-        older ? h('span', {class: 'vtag'}, 'earlier') : null,
-        h('span', {class: 'count'}, rv.sent_at ? 'Sent' : rv.approved ? 'Approved' : rv.review_state === 'waiting' ? 'For review' : rv.review_state === 'sent_back' ? 'Sent back' : count),
-        h('span', {class: 'file'}, (r.assignment ? (SETTLED.includes(r.assignment.status) ? `${r.assignment.client} → ` : 'Needs client · ') : '') + `${r.filename} · v${r.version} · ${ago(r.received_at)}`));
+      const rv = r.review || {}, [check, tone] = queueCheck(r), current = r.file_hash === (state.selected || state.lastSelected);
+      const name = r.filename || 'Report name unavailable', client = queueClient(r), day = queueDay(r);
+      const identity = `${client} · ${rv.job ? 'Job ' + rv.job : 'Job not found'} · ${day ? 'Report date ' + day : 'Report date not found'}`;
+      const version = `${queueVersion(r.version) === 'unknown' ? 'Version unknown' : 'File v' + queueVersion(r.version)}${r.revision == null ? '' : ' · Revision ' + queueVersion(r.revision)} · ID ${String(r.file_hash || '').slice(0, 12) || 'unknown'}`;
+      const uploaded = r.received_at && !isNaN(new Date(r.received_at)) ? new Date(r.received_at).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : 'Unknown';
+      const workflow = rv.sent_at ? 'Previously sent' : rv.approved ? (rv.approval_current ? 'Approved for this version' : 'Earlier approval; review again') : rv.review_state === 'waiting' ? 'Review requested' : rv.review_state === 'sent_back' ? 'Sent back' : '';
+      const quantities = [['inspected', 'Inspected'], ['certified', 'OK'], ['rejected', 'Rejected']].map(([key, label]) => `${label}: ${queueQuantity(r, key)}`);
+      const open = h('button', {type: 'button', class: 'item' + (current ? ' sel' : '') + (older ? ' older' : ''), 'data-report-hash': r.file_hash,
+        onclick: () => select(r.file_hash), 'aria-label': `Open ${name}. ${identity}. ${version}. ${rv.fixed_from ? 'Corrected copy' : 'Uploaded file'}. ${check}. ${queueSource(r)}. ${workflow}. Report values: ${quantities.join('. ')}. Uploaded ${uploaded}`},
+        h('span', {class: 'queue-name'}, name),
+        h('span', {class: 'queue-identity'}, identity),
+        h('span', {class: 'queue-quantities'}, h('b', {}, 'Report values'), ...quantities.map(text => h('span', {}, text))),
+        h('span', {class: 'queue-state'}, h('span', {class: 'tag tag-' + tone}, check), h('span', {}, queueSource(r)), workflow ? h('span', {}, workflow) : null),
+        h('span', {class: 'queue-version'}, rv.fixed_from ? 'Corrected copy' : 'Uploaded file', older ? ' · Earlier version' : '', ` · ${version} · Uploaded ${uploaded}`, current ? ' · Last opened' : ''),
+        rv.sharepoint?.source ? h('span', {class: 'queue-source'}, `Source: ${rv.sharepoint.source}`) : null);
+      return h('div', {class: 'queue-entry' + (older ? ' older-entry' : '')}, open,
+        queueNeedsAttention(r) ? h('button', {type: 'button', class: 'queue-review', 'aria-label': `Needs review: ${name}, ${version}`, onclick: () => { state.openReviewFor = r.file_hash; select(r.file_hash); }}, 'Needs review') : null);
     };
     let lastDay = null;
     for (const [k, members] of groups) {
-      const latest = members[0], day = dayOf(latest), older = members.slice(1);
-      if (day !== lastDay) { list.append(h('div', {class: 'day'}, dayLabel(day))); lastDay = day; }
+      members.sort((a, b) => (b.received_at || '').localeCompare(a.received_at || '') || (b.revision || 0) - (a.revision || 0));
+      const latest = members[0], day = queueDay(latest), older = members.slice(1);
+      if (day !== lastDay) { list.append(h('div', {class: 'day'}, day ? dayLabel(day) : 'Report date not found')); lastDay = day; }
       list.append(line(latest, false));
       if (older.length) {
-        const open = state.openGroups.has(k), left = older.filter(r => r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
-        list.append(h('button', {type: 'button', class: 'linkish older-toggle', 'aria-expanded': String(open), onclick: () => { open ? state.openGroups.delete(k) : state.openGroups.add(k); drawQueue(); }},
-          `${open ? 'Hide' : 'Show'} ${older.length} earlier version${older.length === 1 ? '' : 's'}${left ? ` (${left} with open items)` : ''}`));
+        const open = state.openGroups.has(k) || older.some(r => r.file_hash === (state.selected || state.lastSelected)), left = older.filter(queueNeedsAttention).length;
+        const toggle = h('button', {type: 'button', class: 'linkish older-toggle', 'aria-expanded': String(open), 'data-family': k, onclick: () => {
+          if (open) { state.openGroups.delete(k); if (older.some(r => r.file_hash === state.lastSelected)) state.lastSelected = null; } else state.openGroups.add(k);
+          drawQueue(); [...list.querySelectorAll('.older-toggle')].find(b => b.getAttribute('data-family') === k)?.focus();
+        }}, `${open ? 'Hide' : 'Show'} ${older.length} earlier version${older.length === 1 ? '' : 's'} of this file${left ? ` (${left} with open items)` : ''}`);
+        list.append(toggle);
         if (open) for (const r of older) list.append(line(r, true));
       }
     }
@@ -235,7 +280,7 @@
   });
   let vinTimer;
   $('search').addEventListener('input', e => {
-    state.search = e.target.value; drawQueue();
+    state.search = e.target.value; state.vinHits = null; drawQueue();
     clearTimeout(vinTimer);
     const q = state.search.replace(/[^A-Za-z0-9]/g, '');
     if (q.length < 5 || !/\d/.test(q)) { state.vinHits = null; return; }
@@ -340,7 +385,7 @@
   }
 
   // ---------------------------------------------------------------- routing
-  function select(hash) { if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
+  function select(hash) { state.lastSelected = hash; state.queueScroll = {page: window.scrollY, list: $('queue-list').scrollTop}; if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
   window.addEventListener('hashchange', route);
   async function route() {
     document.body.classList.remove('reportmode');
@@ -360,7 +405,7 @@
     if (location.hash === '#api') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showApi(); return; }
     const m = location.hash.match(/^#r=([0-9a-f]{64})$/);
     document.body.classList.toggle('viewing', !!m);
-    if (!m) { state.selected = null; drawQueue(); showEmpty(); return; }
+    if (!m) { const returning = !!state.selected; state.selected = null; state.openReviewFor = null; drawQueue(); showEmpty(); if (returning) requestAnimationFrame(() => { const item = [...$('queue-list').querySelectorAll('.item')].find(b => b.getAttribute('data-report-hash') === state.lastSelected); item?.focus({preventScroll: true}); $('queue-list').scrollTop = state.queueScroll?.list || 0; window.scrollTo(0, state.queueScroll?.page || 0); }); return; }
     state.selected = m[1]; drawQueue();
     await openReport(m[1]);
   }

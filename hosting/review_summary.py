@@ -186,6 +186,27 @@ def _num(total):
         return None
 
 
+def quantity_summary(totals):
+    """Compact report values using the same numeric/completeness rules as statistics.
+
+    Local import avoids a module-level cycle: statistics imports summarize too.
+    Explicit row-unit counts remain visible but are never mixed with part totals.
+    """
+    from hosting.report_statistics import number, public_number
+    out = {}
+    for key in ('inspected', 'certified', 'rejected'):
+        raw = totals.get(key) if isinstance(totals, dict) else None
+        raw = raw if isinstance(raw, dict) else {}
+        full = number(raw.get('total'))
+        known = number(raw.get('known_sum')) if raw.get('known_sum') is not None else full
+        inconsistent = full is not None and raw.get('known_sum') is not None and known != full
+        complete = full is not None and not raw.get('missing_count') and not raw.get('numeric_range_exceeded') and not inconsistent
+        value = None if inconsistent or raw.get('numeric_range_exceeded') else full if complete else known
+        out[key] = dict(value=public_number(value), partial=value is not None and not complete,
+                        unit=raw.get('unit') or ('parts' if raw else None), complete=complete)
+    return out
+
+
 def summarize(result, with_issues=True, use_verdicts=True):
     from hosting.source_compare import identify
     issues = []
@@ -325,6 +346,7 @@ def summarize(result, with_issues=True, use_verdicts=True):
     totals = result.get('totals') or {}
     job, day = identify(result.get('filename'), result)
     out = dict(status=status, counts=counts, job=job, day=day,
+               quantities=quantity_summary(totals),
                scans=result.get('record_count'), inspected=_num(totals.get('inspected')), rejected=_num(totals.get('rejected')),
                certified=_num(totals.get('certified')), rejected_unit=(totals.get('rejected') or {}).get('unit'),
                rejected_partial=bool(isinstance(totals.get('rejected'), dict) and totals['rejected'].get('total') is None and totals['rejected'].get('known_sum') is not None),

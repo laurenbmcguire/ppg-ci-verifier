@@ -1658,3 +1658,24 @@ td.has-pic{position:relative}
 .fd-priority p{margin:6px 0}
 .fd-sheet .gridwrap{height:52vh;max-height:650px}
 @media(max-width:600px){.fd-sheet .gridwrap{height:46vh;min-height:300px}.fd-grid-context{font-size:11px}}
+
+/* Report inventory: the complete identity and report quantities are visible before opening. */
+body[data-page=reports]:not(.viewing) .desk{grid-template-columns:minmax(0,1fr)}
+body[data-page=reports]:not(.viewing) .report{display:none}
+body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min-width:0}
+.queue-tools .segmented button{white-space:normal;min-height:44px}
+.queue-entry{border-bottom:1px solid var(--line-2);min-width:0;padding-bottom:8px}
+#queue-list .queue-entry .item{display:flex;flex-direction:column;align-items:stretch;gap:7px;border-bottom:0;min-width:0;line-height:1.45}
+#queue-list .item.older{margin-left:0;opacity:1}
+.queue-entry.older-entry{margin-left:18px;border-left:2px solid var(--line)}
+.queue-name{font-size:16px;font-weight:750;color:var(--ink);white-space:normal;overflow-wrap:anywhere}
+.queue-identity{font-size:13px;color:var(--ink);overflow-wrap:anywhere}
+.queue-quantities,.queue-state{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px;align-items:center}
+.queue-quantities{font-variant-numeric:tabular-nums}
+.queue-state,.queue-version,.queue-source{color:var(--muted)}
+.queue-state .tag{white-space:normal;text-align:left}
+.queue-version,.queue-source{font-size:12px;overflow-wrap:anywhere}
+.queue-review{margin:0 16px;min-height:44px}
+.queue-notice{padding:12px 16px;margin:0;background:var(--med-bg);font-size:13px}
+#queue-list .older-toggle{min-height:44px;white-space:normal;text-align:left}
+@media(max-width:600px){.queue-entry.older-entry{margin-left:8px}.queue-state{gap:6px 10px}.queue-quantities{gap:6px 14px}.queue-tools{padding:12px}.queue-name{font-size:15px}}
