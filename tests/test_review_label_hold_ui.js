@@ -6,7 +6,7 @@ const nodes=n=>n?.kids?.flat(Infinity).flatMap(x=>x&&typeof x==='object'?[x,...n
 function harness(holds){const state={fixes:[],report:{file_hash:'h',check_hash:'c',fixed_from:{changes:[]},holds,review:{issues:[]}}};const h=(tag,attrs,...kids)=>({tag,...attrs,kids});const ctx=vm.createContext({state,h,plural:(n,s)=>`${n} ${s}${n===1?'':'s'}`,fdMode:()=> 'manual',reviewBinding:()=>({}),allIssues:r=>r.issues,fdRecommended:()=>[],revisionOf:()=>2,fdChooseMode(){},fdPreviewRecommended(){},fdStatus:()=>({next:'blockers'}),fdCounts:()=>({}),fdItems:()=>[],fdGroups:()=>[],icon:()=>null,fdHoldAction:()=>null,fdNextStep:()=>null,fdAutoSummary:()=>null,fdClean:()=>null});vm.runInContext(between('  function fdHoldSummary(', '  function fdOccurrenceList(')+between('  function fdCorrections(', '  // ---------- the app fixes'),ctx);return {ctx,state};}
 test('saved summary and disclosure share blocking/advisory counts, and no hold disappears',()=>{
  for(const [holds,expected] of [[[],'0 blocking holds · 0 advisory holds'],[[{hard:true,text:'Blocked'}],'1 blocking hold · 0 advisory holds'],[[{hard:false,text:'Advisory'}],'0 blocking holds · 1 advisory hold'],[[{hard:true,text:'Blocked'},{hard:false,text:'Advisory'}, {text:'Unclassified advisory'}],'1 blocking hold · 2 advisory holds']]){
-  const {ctx,state}=harness(holds);assert.equal(ctx.fdHoldSummary(state.report),expected);const mode=ctx.fdModeSelector(state.report);assert.equal(text(mode),'Review potential errors');
+  const {ctx,state}=harness(holds);assert.equal(ctx.fdHoldSummary(state.report),expected);const mode=ctx.fdModeSelector(state.report);assert.equal(text(mode),'Verification App');
   const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);const details=nodes(body).find(n=>n.class==='fd-hold-details');
   assert.equal(details,undefined);continue;   // Nov 9: no hold line in the panel; the hold count stays in fdHoldSummary
   assert.ok(text(nodes(details).find(n=>n.tag==='summary')).includes(expected));const listed=nodes(details).filter(n=>n.tag==='li');assert.equal(listed.length,holds.length);
@@ -26,11 +26,11 @@ test('coverage dominates status ledger even when stored categories add up',()=>{
   const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);
   const ledger=text(nodes(body).find(n=>n.class==='fd-recon'));assert.match(ledger,/Possible errors/);assert.doesNotMatch(ledger,/All .*accounted for|✓/);
   assert.equal(text(body).includes('Some potential errors are unavailable'),false);   // Nov 9: no coverage warning box; approval stays blocked by the server's hold
-  const mode=ctx.fdModeSelector(state.report);assert.equal(text(mode),'Review potential errors');
+  const mode=ctx.fdModeSelector(state.report);assert.equal(text(mode),'Verification App');
  }
  state.report.review.page={complete:false};state.report.review.coverage={};state.report.review.reconcile.adds_up=false;
  const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);assert.match(text(body),/Reopen the report to load the rest/);
- assert.equal(text(ctx.fdModeSelector(state.report)),'Review potential errors');
+ assert.equal(text(ctx.fdModeSelector(state.report)),'Verification App');
 });
 
 test('recheck waits for pending decisions and never reloads a different report after navigation',async()=>{

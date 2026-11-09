@@ -1768,3 +1768,15 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-manual-rowfield{display:grid;gap:2px;font-size:12px;color:#5d6f69}.fd-manual-rowfield input{padding:7px;font-size:14px;border:1px solid #8c98a5;border-radius:6px;color:#132b26}
 .tag-final{background:#1f5e4f;color:#fff;font-weight:700;letter-spacing:.3px}
 .fd-final{display:flex;gap:10px;align-items:flex-start;border:2px solid #1f5e4f;background:#e9f6ee;border-radius:10px;padding:10px 12px;margin:8px 0}.fd-final p{margin:2px 0 6px}
+/* polish: tighter right panel */
+.fd-apphead{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;padding:12px 16px 6px}
+.fd-apphead .fd-errcount{margin:0;font-size:18px}.fd-apphead #fd-open-review{grid-column:auto;grid-row:auto}
+.fd-report-summary{padding:8px 16px 10px}.fd-report-summary .fd-review-summary{border:0;padding:0;margin:6px 0 0}
+.fd-report-summary .fd-summary-text{margin:0 0 6px;font-size:14px;line-height:1.45}
+.fd-report-summary details{display:inline-block;margin:0 12px 0 0;font-size:12px}.fd-report-summary details[open]{display:block}
+.fd-report-summary details > summary{color:#5d6f69;cursor:pointer;font-weight:400}
+#side .fd-direct-actions{border:0;padding:0 12px 10px;margin:0}
+#side .fd-problems{font-size:13px;line-height:1.4}#side .fd-problems li{margin:4px 0}
+#side .fd-problems b{font-weight:600}
+.fd-countline{font-size:12px;color:#5d6f69;margin:6px 0}
+.fd-decision-list{max-height:30vh;overflow:auto;border:1px solid var(--line,#ccd5d2);border-radius:8px;padding:6px 6px 6px 26px}

@@ -928,7 +928,7 @@
   }
   function fdModeSelector(r) {
     return h('section', {class: 'fd-mode-selector', 'aria-label': 'Choose how to review'},
-      h('h2', {}, 'Review potential errors'));
+      h('h2', {}, 'Verification App'));
   }
   function fdReportSummary(r) {
     const binding = reviewBinding(r), owner = h('details', {class: 'fd-report-summary', open: true});
@@ -1089,7 +1089,7 @@
     }}, state.aiOn ? 'Ask AI to summarize available findings' : 'AI summary unavailable: AI is off');
     if (compact) return h('section', {class: 'fd-review-summary fd-summary-compact', 'aria-label': 'Findings summary'},
       output,
-      h('details', {}, h('summary', {}, 'About this summary'),
+      h('details', {class: 'fd-summary-about'}, h('summary', {}, 'About this summary'),
         h('p', {class: 'fd-hint'}, `${issues.length} loaded finding records, including information and history. Dex (AI by Anthropic) receives bounded finding-group metadata for this report, not workbook contents. Summary text never applies changes.`),
         button, h('button', {type: 'button', class: 'btn', onclick: () => { if (stillCurrent()) fdReviewDialog(); }}, 'Go to review actions')));
     return h('section', {class: 'fd-review-summary', 'aria-label': 'Findings summary'}, h('h3', {}, 'Findings summary'),
@@ -1196,12 +1196,13 @@
         finally { locked.forEach((wasDisabled, node) => { if (node.isConnected) node.disabled = wasDisabled; }); }
         if (!state.decisionFailed && !current()) dlg.close();
         else if (state.decisionFailed) decision.append(h('p', {role: 'alert'}, state.decisionFailed.message + ' Your typed reason is preserved here.'));
-      }}, h('h3', {}, `${defer ? 'Defer' : 'Keep as recorded'}: ${scope.length} selected findings`),
-      h('p', {}, 'This records your decision and reason. It does not change workbook cells, fill unknown values, remove source holds, or send the report.'),
-      count, h('ul', {}, scope.map(it => h('li', {}, h('label', {}, h('input', {type: 'checkbox', checked: true, 'data-decision-key': it.key, 'aria-label': `Include ${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : 'report finding')}, finding ${items.indexOf(it) + 1} of ${items.length} in this decision`, onchange: e => { e.target.checked ? included.add(it.key) : included.delete(it.key); count.textContent = `${included.size} findings included in this decision`; }}), `${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : '')}: ${it.text || it.reason}`)))),
-      h('label', {}, 'Reason', reason), owner, h('label', {}, 'Evidence', evidence),
-      h('button', {type: 'submit', class: 'btn primary'}, defer ? 'Save: awaiting source owner' : 'Save: keep as recorded'),
-      h('button', {type: 'button', class: 'btn', onclick: () => { if (discard()) decision.replaceChildren(); }}, 'Cancel decision')));
+      }}, h('h3', {}, `${defer ? 'Send to the source owner' : 'Ignore'}: ${scope.length} ${scope.length === 1 ? 'error' : 'errors'}`),
+      h('p', {class: 'fd-hint'}, 'The spreadsheet is not changed. Your reason is saved with the report.'),
+      h('label', {}, defer ? 'What needs confirming?' : 'Why are you ignoring this?', reason), owner, h('label', {}, 'Evidence (needed for serious errors)', evidence),
+      h('div', {class: 'fd-cardacts'}, h('button', {type: 'submit', class: 'btn primary'}, defer ? 'Save: awaiting source owner' : 'Save: keep as recorded'),
+      h('button', {type: 'button', class: 'btn', onclick: () => { if (discard()) decision.replaceChildren(); }}, 'Cancel decision')),
+      count, h('ul', {class: 'fd-decision-list'}, scope.map(it => h('li', {}, h('label', {}, h('input', {type: 'checkbox', checked: true, 'data-decision-key': it.key, 'aria-label': `Include ${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : 'report finding')}, finding ${items.indexOf(it) + 1} of ${items.length} in this decision`, onchange: e => { e.target.checked ? included.add(it.key) : included.delete(it.key); count.textContent = `${included.size} findings included in this decision`; }}), `${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : '')}: ${it.text || it.reason}`)))),
+      ));
       reason.focus();
     };
     // Direct actions never mutate the global review selection or correction basket.
@@ -1304,7 +1305,7 @@
           h('p', {}, `Items ${page * 25 + 1}–${Math.min((page + 1) * 25, g.items.length)} of ${g.items.length}`),
           h('ul', {}, g.items.slice(page * 25, (page + 1) * 25).map(it => h('li', {'data-direct-finding': it.key}, h('label', {},
             h('input', {type: 'checkbox', 'data-selection': 'true', checked: selected.has(it.key) || null, 'data-review-key': it.key, 'aria-label': `Select ${it.sheet || 'Report'} ${it.cell || 'report finding'}, occurrence ${items.indexOf(it) + 1} of ${items.length}`, onchange: e => choose([it], e.target.checked)}),
-            ` ${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : '')}${it.state === 'open' ? '' : ' · ' + ({kept: 'ignored', rejected: 'ignored', deferred: 'waiting on owner', confirmed: 'confirmed', selected: 'ticked for fix', claude: 'AI says fine', kept_earlier: 'ignored earlier', corrected: 'fixed later'}[it.state] || it.state)}: ${it.text || it.reason}`), direct([it])))),
+            ` ${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : '')}${it.state === 'open' ? '' : ' · ' + ({kept: 'ignored', rejected: 'ignored', deferred: 'waiting on owner', confirmed: 'confirmed', selected: 'ticked for fix', claude: 'AI says fine', kept_earlier: 'ignored earlier', corrected: 'fixed later'}[it.state] || it.state)}: ${/^Missing cell\.?$/i.test(String(it.text || '').trim()) ? 'this cell is blank.' : it.text || it.reason}`), direct([it])))),
           h('div', {class: 'fd-cardacts'}, ...[['Previous items', -1], ['Next items', 1]].map(([label, step]) => h('button', {type: 'button', class: 'btn small', disabled: step < 0 ? page === 0 : (page + 1) * 25 >= g.items.length,
             onclick: () => { pages.set(g.key, page + step); draw(); const heading = content.children[index]?.querySelector('h3'); heading?.setAttribute('tabindex', '-1'); heading?.focus(); }}, label))));
       }));
@@ -1332,7 +1333,8 @@
         h('button', {type: 'button', class: 'btn small', disabled: !ai, onclick: () => run(scope, 'ai')}, 'AI fix'),
         h('button', {type: 'button', class: 'btn small', onclick: () => run(scope, 'manual')}, 'Fix manually'),
         h('button', {type: 'button', class: 'btn small', disabled: !ignore, onclick: () => run(scope, 'ignore')}, 'Ignore')),
-      !ai && !state.aiOn ? h('p', {class: 'fd-hint'}, 'AI fix is off. Fix manually or ignore.') : null);
+      !ai && !state.aiOn ? h('p', {class: 'fd-hint'}, 'AI fix is off. Fix manually or ignore.') : null,
+      !ignore && scope.length > 1 && scope.some(it => it.issue?.severity === 'high') ? h('p', {class: 'fd-hint'}, 'These are serious errors, so each one is ignored on its own: tick one, then Ignore.') : null);
   }
   // The problems the three buttons act on, in plain words: where, and what is wrong.
   function fdProblemList(scope, max = 4) {
@@ -1341,8 +1343,9 @@
     const showKey = scope[0]?.key, all = !!state.fdShowAll[showKey], shown = all ? scope.slice(0, 300) : scope.slice(0, max);
     const line = it => {
       const where = [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ');
-      const value = it.report == null ? '' : it.report === '' ? ' (blank)' : ` (now “${String(it.report).slice(0, 40)}”)`;
-      const text = [h('b', {}, where || 'Whole report'), `${value}: ${String(it.text || it.reason || '').slice(0, 140)}`];
+      const blank = /^Missing cell\.?$/i.test(String(it.text || '').trim());
+      const value = blank || it.report == null || it.report === '' ? '' : ` (now “${String(it.report).slice(0, 40)}”)`;
+      const text = [h('b', {}, where || 'Whole report'), `${value}: ${blank ? 'this cell is blank.' : String(it.text || it.reason || '').slice(0, 140)}`];
       return h('li', {}, state.report ? h('label', {class: 'fd-tickline'}, h('input', {type: 'checkbox', 'data-selection': 'true', 'data-tick': it.key, checked: ticked.has(it.key) || null,
         'aria-label': `Select ${where || 'report error'}`, onchange: e => fdTick([it], e.target.checked)}), h('span', {}, ...text)) : text);
     };
@@ -1708,13 +1711,15 @@
     const end = () => { state.fdManual = null; state.fdCur = null; drawSide(); drawGrid(); };
     const where = [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' · ') || 'Whole report';
     // An error about a whole row (a part number, a duplicate, a record not on SharePoint) opens every cell of that row to type in.
-    const rowKey = !it.cell && it.sheet && it.row ? JSON.stringify([state.report.file_hash, it.sheet, it.row]) : null;
+    // The current value always comes from the saved workbook row, never from the error text.
+    const rowNo = it.row || (it.cell ? splitCell(it.cell)?.[1] : null);
+    const rowKey = it.sheet && rowNo ? JSON.stringify([state.report.file_hash, it.sheet, rowNo]) : null;
     state.fdManualRows ||= {};
     let rowCells = null, rowNote = null;
     if (rowKey) {
       const got = state.fdManualRows[rowKey];
       if (!got) { state.fdManualRows[rowKey] = 'loading'; const report = state.report;
-        api('/api/spreadsheets/cells', {file_hash: report.file_hash, sheet: it.sheet, row: it.row})
+        api('/api/spreadsheets/cells', {file_hash: report.file_hash, sheet: it.sheet, row: rowNo})
           .then(row => { state.fdManualRows[rowKey] = row; }, e => { state.fdManualRows[rowKey] = {error: e.message}; })
           .finally(() => { if (state.report === report && state.fdManual) drawSide(); });
         rowNote = 'Loading this row…'; }
@@ -1723,8 +1728,10 @@
       else rowCells = (got.cells || []).filter(c => !c.formula && typeof c.before === 'string');
     }
     const field = (cell, before, value, label) => h('input', {class: 'fd-manual-input', 'data-cell': cell, 'data-before': before, 'aria-label': `New value for ${label}`, value, placeholder: 'Type the correct value'});
-    const input = it.cell ? field(it.cell, it.report ?? '', mine ? mine.after : it.source != null ? String(it.source) : it.proposed != null ? String(it.proposed) : it.report ?? '', where) : null;
-    const rowFields = rowCells ? rowCells.map(c => h('label', {class: 'fd-manual-rowfield'}, h('span', {}, `${c.header || 'Column'} (${c.cell})`),
+    const one = it.cell && rowCells ? rowCells.find(c => c.cell === it.cell) : null;
+    const input = one ? field(it.cell, one.before, mine ? mine.after : it.source != null ? String(it.source) : it.proposed != null ? String(it.proposed) : one.before, where) : null;
+    if (it.cell && rowCells && !one) rowNote = 'This cell holds a formula or is protected, so it cannot be typed over here.';
+    const rowFields = rowCells && !it.cell ? rowCells.map(c => h('label', {class: 'fd-manual-rowfield'}, h('span', {}, `${c.header || 'Column'} (${c.cell})`),
       field(c.cell, c.before, edits[editId(it.sheet, c.cell)]?.after ?? c.before, `${c.header || c.cell}`))) : null;
     const keep = () => {
       if (!state.report) return;
@@ -1751,12 +1758,12 @@
       h('div', {class: 'fd-manual-top'}, h('b', {}, `Fix manually · ${at + 1} of ${list.length}`),
         h('button', {type: 'button', class: 'fd-iconbtn', 'aria-label': 'Stop fixing manually', title: 'Close', onclick: end}, icon('x', 16))),
       h('p', {class: 'fd-manual-where'}, where),
-      h('p', {}, it.text || it.reason || ''),
-      it.cell ? h('p', {class: 'fd-hint'}, `Now: ${it.report === '' || it.report == null ? 'blank' : '“' + it.report + '”'}${it.source != null ? ` · SharePoint: “${it.source}”` : ''}`) : null,
+      h('p', {}, /^Missing cell\.?$/i.test(String(it.text || '').trim()) ? 'This cell is blank.' : it.text || it.reason || ''),
+      one ? h('p', {class: 'fd-hint'}, `Now: ${one.before === '' ? 'blank' : '“' + one.before + '”'}${it.source != null ? ` · SharePoint: “${it.source}”` : ''}`) : null,
       input ? h('form', {class: 'fd-manual-form', onsubmit: e => { e.preventDefault(); keep(); if (at < list.length - 1) go(at + 1); else save(); }},
         input, h('button', {type: 'submit', class: 'btn primary'}, at < list.length - 1 ? 'Next' : 'Save my changes')) :
       rowFields && rowFields.length ? h('form', {class: 'fd-manual-rowform', onsubmit: e => { e.preventDefault(); keep(); if (at < list.length - 1) go(at + 1); else save(); }},
-        h('p', {class: 'fd-hint'}, `Row ${it.row}: change any cell you want.`), ...rowFields,
+        h('p', {class: 'fd-hint'}, `Row ${rowNo}: change any cell you want.`), ...rowFields,
         h('button', {type: 'submit', class: 'btn primary'}, at < list.length - 1 ? 'Next' : 'Save my changes')) :
         h('p', {class: 'fd-hint'}, rowNote || (rowFields ? 'This row has no cells that can be typed in (formulas only).' : 'This error is about the whole report, not one row. Click a cell in the spreadsheet to change it, or ignore the error.')),
       h('div', {class: 'fd-cardacts'},
@@ -2590,7 +2597,7 @@
     const rv = r.review, tab = state.sideTab || 'fixes';
     const body = h('div', {class: 'sidebody', id: 'side-body'});
     const open = state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
-    side.replaceChildren(h('header', {class: 'fd-apphead'}, h('h2', {}, 'Verification App'),
+    side.replaceChildren(h('header', {class: 'fd-apphead'},
         h('p', {class: 'fd-errcount'}, open == null ? 'Counting possible errors…' : plural(open, 'possible error')),
         h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors')),
       fdReportSummary(r), fdComparison(r), h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
