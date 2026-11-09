@@ -1,4 +1,4 @@
-"""Recommendations (rules and Claude), the new common data checks, and VINs already reported on another day."""
+"""Recommendations (rules and Claude), common data checks, and cross-day identifier matches."""
 import base64, json, os, sys, threading, unittest, urllib.error, urllib.request
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
@@ -123,7 +123,11 @@ class Endpoints(unittest.TestCase):
         status, out = self.post('/api/recommendations', {'file_hash': h2})
         self.assertEqual(status, 200, out)
         self.assertEqual(out['source'], 'rules'); self.assertFalse(out['ai_on'])
-        self.assertTrue(any('another day' in r['title'] for r in out['items']))
+        matches = [r for r in out['items'] if 'normalized identifier/day matches across reports' in r['title']]
+        self.assertEqual(len(matches), 1)
+        self.assertIn('not proof of a duplicate inspection', matches[0]['why'])
+        self.assertNotIn('VIN', matches[0]['title'])
+        self.assertNotIn('billed', matches[0]['why'])
         with urllib.request.urlopen(self.base + '/api/spreadsheet?id=' + h2, timeout=30) as r:
             item = json.loads(r.read())
         self.assertEqual(sorted(x['vin'] for x in item['other_days']), sorted(r[0] for r in ROWS[:3]))
