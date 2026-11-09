@@ -1607,9 +1607,13 @@
     if ([...document.querySelectorAll('#side input:not([type="checkbox"]):not([type="radio"]), #side textarea')].some(node => node.value !== node.defaultValue)) {
       toast('Finish or save the text you are editing before re-checking. Nothing changed.', true); return;
     }
-    const operation = {}; state.rechecking = operation;
-    const controls = [...document.querySelectorAll('#side button, #fd-preview-btn, .fd-mode-selector button, dialog .primary')].map(node => [node, node.disabled]);
-    controls.forEach(([node]) => { node.disabled = true; });
+    const controls = new Map();
+    const operation = {lock: () => {
+      document.querySelectorAll('#side button, #side input, #side textarea, #side select, #fd-preview-btn, .fd-mode-selector button, dialog .primary').forEach(node => {
+        if (!controls.has(node)) controls.set(node, node.disabled);
+        node.disabled = true;
+      });
+    }}; state.rechecking = operation; operation.lock();
     const name = myName() || 'Reviewer';
     toast('Re-checking with the current checks…');
     try { const out = await api('/api/spreadsheets/recheck', {file_hash: hash, apply: true, by: name});
@@ -1621,7 +1625,7 @@
       if (state.rechecking !== operation) return;
       state.rechecking = false;
       if (!state.busy && !state.decisionPending) {
-        controls.forEach(([node, disabled]) => { if (node.isConnected) node.disabled = disabled; });
+        controls.forEach((disabled, node) => { if (node.isConnected) node.disabled = disabled; });
         document.querySelectorAll('[data-recheck-disabled]').forEach(node => { node.disabled = false; node.removeAttribute('data-recheck-disabled'); });
       }
       if (state.report && state.selected === state.report.file_hash) document.querySelector('.fd-mode-selector')?.replaceWith(fdModeSelector(state.report));
@@ -1797,6 +1801,7 @@
       drawChat();
       body.querySelector('textarea')?.focus();
     }
+    state.rechecking?.lock?.();
   }
   // the selected cell (and the issue being stepped through) at the top of the Fixes tab
   function drawCellSlot() {

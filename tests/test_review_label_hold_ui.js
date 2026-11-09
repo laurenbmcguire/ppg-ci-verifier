@@ -80,3 +80,9 @@ test('dirty unsubmitted reviewer text stops recheck before any request',async()=
  let calls=0;const state={report:{file_hash:'one'},selected:'one'};const ctx=vm.createContext({state,toast:()=>{},document:{querySelectorAll:()=>[{value:'unsaved',defaultValue:''}]},api:()=>calls++});
  vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile('),ctx);await ctx.fdRecheck();assert.equal(calls,0);assert.equal(state.rechecking,undefined);
 });
+
+test('pending recheck freezes late form inputs and restores their prior disabled states',async()=>{
+ let reject;const original={value:'',defaultValue:'',disabled:false,isConnected:true},unavailable={value:'',defaultValue:'',disabled:true,isConnected:true},late={value:'',defaultValue:'',disabled:false,isConnected:true};let inputs=[original,unavailable];
+ const state={report:{file_hash:'one'},selected:'one'};const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},api:()=>new Promise((r,j)=>reject=j),document:{querySelectorAll:s=>s==='[data-recheck-disabled]'?[]:inputs,querySelector:()=>null},fdModeSelector:()=>null});
+ vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile('),ctx);const run=ctx.fdRecheck();assert.equal(original.disabled,true);inputs=[late];state.rechecking.lock();assert.equal(late.disabled,true);reject(Error('Synthetic failure'));await run;assert.equal(original.disabled,false);assert.equal(unavailable.disabled,true);assert.equal(late.disabled,false);
+});
