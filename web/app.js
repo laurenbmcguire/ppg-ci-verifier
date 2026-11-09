@@ -973,8 +973,9 @@
     finally { operation.cancel(); }
   }
   // A review scope is separate from the correction basket. Opening/selecting never writes data.
-  function fdReviewDialog() {
+  function fdReviewDialog(initialScope = null, initialAction = null) {
     if (!state.report || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation) return;
+    if (Array.isArray(initialScope) && initialScope.some(it => JSON.stringify(it.binding) !== JSON.stringify(reviewBinding(state.report)))) { toast('The report changed. Reopen this review action.', true); return; }
     const report = state.report, binding = reviewBinding(report), items = fdItems(), groups = fdGroups(items);
     const saved = state.fdReviewSelection;
     const selected = new Set(saved?.binding === JSON.stringify(binding) ? saved.keys : []), pages = new Map(), opener = document.activeElement;
@@ -987,17 +988,23 @@
     const byType = new Map();
     for (const it of items) { const type = it.issue?.code || it.kind?.code || it.group || 'Other findings'; if (!byType.has(type)) byType.set(type, []); byType.get(type).push(it); }
     const unresolved = items.filter(it => ['open', 'selected', 'deferred', 'confirmed', 'claude'].includes(it.state));
-    const close = () => dlg.close();
+    let actionVersion = 0;
+    const hasDraft = () => [...decision.querySelectorAll('input:not([type=checkbox]), textarea')].some(el => el.value !== el.defaultValue);
+    const discard = () => !hasDraft() || window.confirm('Discard the typed values or reason in this review action?');
+    const close = () => { if (!state.decisionPending && discard()) dlg.close(); };
+    dlg.addEventListener('cancel', e => { if (state.decisionPending || !discard()) e.preventDefault(); });
     dlg.addEventListener('close', () => { if (state.aiProposalOperation?.owner === dlg) state.aiProposalOperation.cancel(); dlg.remove(); if (opener?.isConnected && opener.getClientRects().length) opener.focus(); else { const fallback = document.getElementById('fd-open-review'); fallback?.focus(); } });
     const choose = (list, on) => {
       if (state.aiProposalOperation) return;
+      if (!discard()) { draw(); return; }
+      actionVersion++;
       const label = document.activeElement?.getAttribute('aria-label'), focusKey = document.activeElement?.getAttribute('data-review-key');
       list.forEach(it => on ? selected.add(it.key) : selected.delete(it.key));
       state.fdReviewSelection = {binding: JSON.stringify(binding), keys: [...selected]};
       decision.replaceChildren(); draw();
       if (label || focusKey) [...dlg.querySelectorAll('input')].find(el => focusKey ? el.getAttribute('data-review-key') === focusKey : el.getAttribute('aria-label') === label)?.focus();
     };
-    const prepareAI = () => fdPrepareAI(picked(), binding, {
+    const prepareAI = (scope = picked()) => fdPrepareAI(scope, binding, {
       owner: dlg,
       active: () => dlg.isConnected && current(),
       pending: () => decision.replaceChildren(h('p', {role: 'status'}, 'Preparing Claude proposals for your exact selection. No workbook changes will be made.')),
@@ -1008,7 +1015,7 @@
           if (!guard() || state.aiProposalOperation) return;
           const accepted = proposals.filter((p, i) => include.has(i)); if (!accepted.length) return;
           const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
-          const capture = captureCorrections(accepted, dec, {}, binding, report); close(); fdPreview(capture);
+          const capture = captureCorrections(accepted, dec, {}, binding, report); dlg.close(); fdPreview({...capture, independentScope: true});
         }}, 'Preview selected AI proposals');
         decision.replaceChildren(h('h3', {}, `${proposals.length} AI proposals, not applied`),
           h('p', {}, 'AI suggestions are not verified source values. Check each proposal before including it. Existing cell safety checks and source holds still apply.'),
@@ -1020,44 +1027,104 @@
         decision.scrollIntoView({block: 'nearest'});
       }
     });
-    const decisionForm = action => {
+    const decisionForm = (action, scope = picked()) => {
       if (!guard()) return;
-      const scope = picked(), defer = action === 'defer';
+      const defer = action === 'defer';
       if (!scope.length || scope.some(it => !it.fp || !['open', 'claude'].includes(it.state))) return;
       if (!defer && scope.length > 1 && scope.some(it => it.issue?.severity === 'high')) {
         toast('Blockers must be kept as recorded one at a time, with evidence.', true); return;
       }
+      const included = new Set(scope.map(it => it.key));
+      const count = h('p', {role: 'status'}, `${scope.length} findings included in this decision`);
       const reason = h('textarea', {required: true, rows: 2, 'aria-label': 'Reason for selected findings'});
       const evidence = h('input', {'aria-label': 'Evidence for selected findings', placeholder: 'Evidence references, separated by semicolons'});
       const owner = defer ? h('input', {'aria-label': 'Source owner', placeholder: 'Who needs to confirm this?'}) : null;
-      decision.replaceChildren(h('form', {onsubmit: e => {
-        e.preventDefault(); if (!guard()) return;
+      decision.replaceChildren(h('form', {onsubmit: async e => {
+        e.preventDefault(); if (!guard() || state.decisionPending || state.busy || state.rechecking || state.aiProposalOperation) return;
+        const chosen = scope.filter(it => included.has(it.key));
+        if (!chosen.length) { toast('Include at least one finding. Nothing was saved.', true); return; }
         const why = reason.value.trim(), ev = evidence.value.split(';').map(x => x.trim()).filter(Boolean);
         if (!why) { reason.focus(); return; }
-        if (!defer && scope.some(it => it.issue?.severity === 'high') && !ev.length) { evidence.focus(); toast('Evidence is required to keep a blocker as recorded.', true); return; }
-        close(); fdSendDecision({...findingBinding(scope), ids: scope.map(it => it.key), action, reason: why, evidence: ev, owner: owner?.value.trim() || '', from: scope[0], batch: scope.length > 1});
+        if (!defer && chosen.some(it => it.issue?.severity === 'high') && !ev.length) { evidence.focus(); toast('Evidence is required to keep a blocker as recorded.', true); return; }
+        const locked = new Map([...dlg.querySelectorAll('button, input, textarea, select')].map(node => [node, node.disabled]));
+        locked.forEach((wasDisabled, node) => { node.disabled = true; });
+        try { await fdSendDecision({...findingBinding(chosen), ids: chosen.map(it => it.key), action, reason: why, evidence: ev, owner: owner?.value.trim() || '', from: chosen[0], batch: chosen.length > 1}); }
+        finally { locked.forEach((wasDisabled, node) => { if (node.isConnected) node.disabled = wasDisabled; }); }
+        if (!state.decisionFailed && !current()) dlg.close();
+        else if (state.decisionFailed) decision.append(h('p', {role: 'alert'}, state.decisionFailed.message + ' Your typed reason is preserved here.'));
       }}, h('h3', {}, `${defer ? 'Defer' : 'Keep as recorded'}: ${scope.length} selected findings`),
       h('p', {}, 'This records your decision and reason. It does not change workbook cells, fill unknown values, remove source holds, or send the report.'),
-      h('ul', {}, scope.map(it => h('li', {}, `${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : '')}: ${it.text || it.reason}`))),
+      count, h('ul', {}, scope.map(it => h('li', {}, h('label', {}, h('input', {type: 'checkbox', checked: true, 'aria-label': `Include decision ${it.key}`, onchange: e => { e.target.checked ? included.add(it.key) : included.delete(it.key); count.textContent = `${included.size} findings included in this decision`; }}), `${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : '')}: ${it.text || it.reason}`)))),
       h('label', {}, 'Reason', reason), owner, h('label', {}, 'Evidence', evidence),
       h('button', {type: 'submit', class: 'btn primary'}, defer ? 'Save: awaiting source owner' : 'Save: keep as recorded'),
-      h('button', {type: 'button', class: 'btn', onclick: () => decision.replaceChildren()}, 'Cancel decision')));
+      h('button', {type: 'button', class: 'btn', onclick: () => { if (discard()) decision.replaceChildren(); }}, 'Cancel decision')));
       reason.focus();
     };
+    // Direct actions never mutate the global review selection or correction basket.
+    const manual = async scope => {
+      const version = ++actionVersion;
+      const box = h('section', {class: 'fd-inline-manual', 'aria-label': 'Fix manually in this review'});
+      decision.replaceChildren(box);
+      box.append(h('h3', {}, `Fix manually: ${scope.length} review items`), h('p', {}, 'Loading exact recorded cells. Nothing is selected for Apply yet.'));
+      const rows = new Map(), cells = new Map(), unavailable = [];
+      for (const it of scope) {
+        if (!it.cell || !it.sheet || fdConflict(it) || !['open', 'selected', 'confirmed'].includes(it.state)) {
+          unavailable.push(`${it.sheet || 'Report'} ${it.cell || 'row ' + (it.row || 'unknown')}: ${fdConflict(it) ? 'Source conflict: await the source owner, then use coordinated correction.' : 'No editable current cell. Review source evidence or reopen the finding.'}`); continue;
+        }
+        try {
+          const key = JSON.stringify([it.sheet, it.row]);
+          if (!rows.has(key)) rows.set(key, await api('/api/spreadsheets/cells', {file_hash: binding.file_hash, sheet: it.sheet, row: it.row}));
+          if (!current() || !dlg.isConnected || version !== actionVersion) return;
+          const row = rows.get(key), cell = row.sheet === it.sheet && row.cells?.find(c => c.cell === it.cell);
+          if (!cell || cell.formula || typeof cell.before !== 'string') throw new Error('Cell is unavailable or is a protected formula');
+          cells.set(editId(it.sheet, it.cell), {it, cell});
+        } catch (error) { unavailable.push(`${it.sheet} ${it.cell}: ${error.message}. Review the original and source evidence; do not guess a value.`); }
+      }
+      if (!current() || !dlg.isConnected || version !== actionVersion) return;
+      const edits = new Map();
+      const preview = h('button', {type: 'button', class: 'btn primary', disabled: true, onclick: () => {
+        if (!guard() || state.aiProposalOperation) return;
+        const included = Object.fromEntries([...edits].filter(([, e]) => e.include.checked && e.input.value !== e.cell.before).map(([id, e]) => [id,
+          {sheet: e.it.sheet, cell: e.it.cell, before: e.cell.before, after: e.input.value, header: e.cell.header || '', kind: 'auto', source: 'Your edit', reason: 'Typed by the reviewer in scoped review'}]));
+        if (!Object.keys(included).length) return;
+        // Keep this modal and its typed draft behind the preview, including on Back.
+        fdPreview({...captureCorrections([], {}, included, binding, report), independentScope: true, onApplied: () => dlg.close()});
+      }}, 'Preview manual changes');
+      const update = () => { const n = [...edits.values()].filter(e => e.include.checked && e.input.value !== e.cell.before).length; preview.disabled = !n; preview.textContent = `Preview ${n} manual changes`; };
+      box.replaceChildren(h('h3', {}, `Fix manually: ${scope.length} review items`),
+        h('p', {}, `${cells.size} distinct editable cells · ${unavailable.length} unavailable items. Shared-cell findings use one edit. Include only the cells you want; all source holds remain.`),
+        ...[...cells].map(([id, e]) => {
+          const input = h('input', {value: e.cell.before, 'aria-label': `New value for ${e.it.sheet}!${e.it.cell}`, oninput: update});
+          const include = h('input', {type: 'checkbox', 'aria-label': `Include manual change ${e.it.sheet}!${e.it.cell}`, onchange: update});
+          edits.set(id, {...e, input, include});
+          return h('div', {class: 'fd-inline-cell'}, h('b', {}, `${e.it.sheet} ${e.it.cell}`), h('p', {}, e.it.text || e.it.reason),
+            h('p', {}, `Recorded: ${showWs(e.cell.before)}`), h('label', {}, 'Your value', input), h('label', {}, include, ' Include this cell in preview'));
+        }), ...unavailable.map(text => h('p', {class: 'fd-coverage'}, text)),
+        unavailable.length ? h('button', {type: 'button', class: 'btn', onclick: () => { if (!discard()) return; dlg.close(); state.fdView = 'sources'; drawReport(); }}, 'Review source evidence and recovery') : null, preview);
+      box.querySelector('h3').setAttribute('tabindex', '-1'); box.querySelector('h3').focus();
+    };
+    const act = (scope, action) => {
+      if (!guard() || state.aiProposalOperation || state.decisionPending || state.busy || state.rechecking || !discard()) return;
+      actionVersion++; decision.replaceChildren();
+      if (action === 'ai') prepareAI(scope);
+      else if (action === 'manual') manual(scope);
+      else decisionForm('reject', scope);
+    };
+    const direct = scope => fdDirectControls(scope, act);
     const draw = () => {
       const scope = picked(), eligible = fdRecommended(scope), canDecide = scope.length > 0 && scope.length <= 1000 && scope.every(it => it.fp && ['open', 'claude'].includes(it.state));
       status.textContent = `${scope.length} of ${items.length} loaded review items selected. ${eligible.length} supported cell changes in this selection.${scope.length && !canDecide ? ' Keep/defer unavailable: choose at most 1000 open findings, excluding standalone proposals and previously decided items.' : ''}`;
       actions.replaceChildren(
-        h('button', {type: 'button', class: 'btn', disabled: !state.aiOn || !scope.length || scope.length > 120 || scope.some(it => !it.fp || it.state !== 'open'), onclick: prepareAI}, state.aiOn ? 'Prepare AI proposals for selected findings' : 'AI proposals unavailable'),
+        h('button', {type: 'button', class: 'btn', disabled: !state.aiOn || !scope.length || scope.length > 120 || scope.some(it => !it.fp || it.state !== 'open'), onclick: () => act(picked(), 'ai')}, state.aiOn ? 'Prepare AI proposals for selected findings' : 'AI proposals unavailable'),
         h('button', {type: 'button', class: 'btn primary', disabled: !eligible.length, onclick: () => {
-          if (!guard()) return;
+          if (!guard() || !discard()) return;
           const accepted = eligible.map(it => it.fix), dec = Object.fromEntries(accepted.map(f => [f.id, {state: 'accepted', after: f.after}]));
           const capture = {...captureCorrections(accepted, dec, {}, binding, report), recommendedOnly: true};
-          close(); fdPreview(capture);
+          dlg.close(); fdPreview(capture);
         }}, `Preview ${eligible.length} supported changes`),
-        h('button', {type: 'button', class: 'btn', disabled: !scope.length, onclick: () => { if (!guard()) return; close(); state.fdReviewScope = {binding: JSON.stringify(binding), keys: scope.map(it => it.key)}; state.fdView = 'review'; fdChooseMode('manual', binding); fdOpen(scope[0]); }}, 'Review / edit selected'),
-        h('button', {type: 'button', class: 'btn', disabled: !canDecide, onclick: () => decisionForm('reject')}, 'Ignore: keep as recorded…'),
-        h('button', {type: 'button', class: 'btn', disabled: !canDecide, onclick: () => decisionForm('defer')}, 'Defer to source owner…'));
+        h('button', {type: 'button', class: 'btn', disabled: !scope.length, onclick: () => { if (!guard() || !discard()) return; dlg.close(); state.fdReviewScope = {binding: JSON.stringify(binding), keys: scope.map(it => it.key)}; state.fdView = 'review'; fdChooseMode('manual', binding); fdOpen(scope[0]); }}, 'Review / edit selected'),
+        h('button', {type: 'button', class: 'btn', disabled: !canDecide, onclick: () => act(picked(), 'ignore')}, 'Ignore: keep as recorded…'),
+        h('button', {type: 'button', class: 'btn', disabled: !canDecide, onclick: () => { if (discard()) { actionVersion++; decisionForm('defer'); } }}, 'Defer to source owner…'));
       types.replaceChildren(h('h3', {}, 'Select by error type across groups'), ...[...byType].map(([type, list]) => {
         const count = list.filter(it => selected.has(it.key)).length;
         const toggle = h('input', {type: 'checkbox', checked: count === list.length || null, 'aria-label': 'Select error type ' + type, onchange: e => choose(list, e.target.checked)});
@@ -1071,10 +1138,11 @@
         toggle.indeterminate = count > 0 && count < g.items.length;
         return h('section', {class: 'fd-review-group'}, h('h3', {}, g.title),
           h('label', {}, toggle, ` Select this group: ${count} of ${g.items.length} items across all its pages`),
+          direct(g.items),
           h('p', {}, `Items ${page * 25 + 1}–${Math.min((page + 1) * 25, g.items.length)} of ${g.items.length}`),
-          h('ul', {}, g.items.slice(page * 25, (page + 1) * 25).map(it => h('li', {}, h('label', {},
+          h('ul', {}, g.items.slice(page * 25, (page + 1) * 25).map(it => h('li', {'data-direct-finding': it.key}, h('label', {},
             h('input', {type: 'checkbox', checked: selected.has(it.key) || null, 'data-review-key': it.key, 'aria-label': `Select ${it.sheet || 'Report'} ${it.cell || 'report finding'}, occurrence ${items.indexOf(it) + 1} of ${items.length}`, onchange: e => choose([it], e.target.checked)}),
-            ` ${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : '')} · ${it.state}: ${it.text || it.reason}`)))),
+            ` ${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : '')} · ${it.state}: ${it.text || it.reason}`), direct([it])))),
           h('div', {class: 'fd-cardacts'}, ...[['Previous items', -1], ['Next items', 1]].map(([label, step]) => h('button', {type: 'button', class: 'btn small', disabled: step < 0 ? page === 0 : (page + 1) * 25 >= g.items.length,
             onclick: () => { pages.set(g.key, page + step); draw(); const heading = content.children[index]?.querySelector('h3'); heading?.setAttribute('tabindex', '-1'); heading?.focus(); }}, label))));
       }));
@@ -1090,6 +1158,19 @@
         h('button', {type: 'button', class: 'btn', 'data-ai-cancel': 'true', onclick: close}, 'Close review')), actions),
       h('p', {class: 'fd-hint'}, 'Selection is a review scope, not approval. Preview includes only eligible cell changes. Manual review walks the selected items with Previous / Next. Keep/defer applies to at most 1000 open findings with recorded evidence identities. Blockers must be kept one at a time with evidence.'), decision, types, content);
     document.body.append(dlg); draw(); dlg.showModal(); dlg.querySelector('h2').focus();
+    if (Array.isArray(initialScope) && initialAction) { const keys = new Set(initialScope.map(it => it.key)); act(items.filter(it => keys.has(it.key)), initialAction); }
+  }
+  function fdDirectControls(scope, run = (items, action) => fdReviewDialog(items, action)) {
+    const ai = state.aiOn && scope.length > 0 && scope.length <= 120 && scope.every(it => it.fp && it.state === 'open');
+    const ignore = scope.length > 0 && scope.length <= 1000 && scope.every(it => it.fp && ['open', 'claude'].includes(it.state)) && !(scope.length > 1 && scope.some(it => it.issue?.severity === 'high'));
+    return h('div', {class: 'fd-direct-actions'},
+      h('p', {class: 'fd-hint'}, scope.length > 1 ? `Direct action scope: all ${scope.length} items in this group across all pages. Other selections are unchanged.` : 'Direct action scope: this item only. Other selections are unchanged.'),
+      h('div', {class: 'fd-cardacts'},
+        h('button', {type: 'button', class: 'btn small', disabled: !ai, onclick: () => run(scope, 'ai')}, 'AI fix'),
+        h('button', {type: 'button', class: 'btn small', onclick: () => run(scope, 'manual')}, 'Fix manually'),
+        h('button', {type: 'button', class: 'btn small', disabled: !ignore, onclick: () => run(scope, 'ignore')}, 'Ignore')),
+      !ai ? h('p', {class: 'fd-hint'}, !state.aiOn ? 'AI unavailable: AI is off. Fix manually or review the source.' : 'AI unavailable for this scope: choose up to 120 open findings with recorded identities; review other items manually.') : null,
+      !ignore ? h('p', {class: 'fd-hint'}, scope.some(it => it.issue?.severity === 'high') && scope.length > 1 ? 'Ignore blockers individually with evidence; group ignore is unavailable.' : 'Ignore unavailable: only current open findings with recorded identities can be kept as recorded. Review the existing decision or source.') : null);
   }
   function fdOccurrenceList(g) {
     const eligible = fdRecommended(g.items), picked = eligible.filter(it => it.state === 'selected');
@@ -1118,7 +1199,7 @@
             'data-selection-key': 'finding:' + it.key, 'aria-label': fdOccurrenceLabel(it, allItems), onchange: e => fdSelect([it], e.target.checked)}), ' Include change') :
             h('span', {class: 'fd-hint'}, it.fix?.recommendation_eligible ? 'Your decision or edited value needs individual review.' : it.fix?.recommendation_reason || 'Needs individual review; not included in bulk fixes.'),
           h('button', {type: 'button', class: 'btn small', onclick: () => fdOpen(it)}, `${it.sheet || 'Report'}${it.cell ? ' · ' + it.cell : it.row ? ' · row ' + it.row : ''} · ${it.state}`),
-          h('span', {}, it.text || it.reason));
+          h('span', {}, it.text || it.reason), fdDirectControls([it]));
       })));
       nav.replaceChildren(...[['Previous', -1], ['Next', 1]].map(([label, direction]) => h('button', {type: 'button', class: 'btn small', disabled: direction < 0 ? page === 0 : page >= pages - 1,
         onclick: () => { state.fdOccurrencePages[key] = page + direction; draw(true); }}, label)));
@@ -1306,7 +1387,7 @@
         h('button', {type: 'button', class: 'fd-grouphead', 'aria-expanded': String(!!cur && cur.group === g.key), onclick: () => fdOpen(g.items.find(x => x.state === 'open') || g.items[0])},
           h('span', {class: 'fd-gtitle'}, g.unresolved ? '' : icon('ok', 14), g.unresolved ? '' : ' ', g.title),
           h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'item')} · ${plural(g.records, 'record')}${g.unresolved ? ` · ${g.unresolved} unresolved` : ''}`)),
-        fdOccurrenceList(g),
+        fdDirectControls(g.items), fdOccurrenceList(g),
         r.review.page?.complete !== false && g.tier !== 'format' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null,
           onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'open'}; drawSide(); }}, `Keep ${g.open} as recorded…`) : null,
         r.review.page?.complete !== false && g.items[0].state === 'claude' ? h('div', {class: 'fd-cardacts'},
@@ -1792,12 +1873,12 @@
       dialog.close(); toast('The report changed. Reopen its correction list before editing the preview.', true); return;
     }
     const sameCell = x => x.sheet === row.sheet && String(x.cell).toUpperCase() === String(row.cell).toUpperCase();
-    if (!c.recommendedOnly) fdSelect([{sheet: row.sheet, cell: row.cell, binding: c.binding}], false);
+    if (!c.recommendedOnly && !c.independentScope) fdSelect([{sheet: row.sheet, cell: row.cell, binding: c.binding}], false);
     const accepted = c.accepted.filter(x => !sameCell(x));
     const edits = Object.fromEntries(Object.entries(c.edits).filter(([, x]) => !sameCell(x)));
     const next = captureCorrections(accepted, c.dec, edits, c.binding, c.report);
     dialog.close(); dialog.remove();
-    if (next.total) fdPreview({...next, recommendedOnly: c.recommendedOnly, returnFocus: c.returnFocus});
+    if (next.total) fdPreview({...next, recommendedOnly: c.recommendedOnly, independentScope: c.independentScope, onApplied: c.onApplied, returnFocus: c.returnFocus});
   }
   function fdPreview(c) {
     const existing = $('fd-preview-dialog');
@@ -1825,10 +1906,11 @@
           const applyButton = e.currentTarget; // DOM Event.currentTarget is null after awaiting.
           setSaving(true); errorMessage.textContent = ''; applyButton.textContent = `Saving v${next} and re-checking…`;
           let hash = null;
-          try { hash = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding, recommendedOnly: c.recommendedOnly}); }
+          try { hash = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding, recommendedOnly: c.recommendedOnly, independentScope: c.independentScope}); }
           catch (error) { toast('The save could not be confirmed. Reload the report before retrying.', true); }
           finally { setSaving(false); }
           if (hash) d.close();
+          if (hash) c.onApplied?.();
           else { applyButton.textContent = `Apply ${plural(rows.length, 'change')} and re-check`; errorMessage.textContent = 'Not confirmed saved. Review the error and reload the report before trying again; this preview remains available.'; errorMessage.focus(); }
         }}, `Apply ${plural(rows.length, 'change')} and re-check`)));
     const setSaving = pending => { saving = pending; for (const button of d.querySelectorAll('button')) button.disabled = pending; };
@@ -2009,7 +2091,7 @@
   function fdKeepScroll() { const w = document.querySelector('#sheet-block .gridwrap'); if (w && state.grid) (state.sheetScroll ||= {})[state.grid.sheet] = [w.scrollTop, w.scrollLeft]; }
   // keyboard: j / k next and previous correction, s select, Escape closes drawers
   document.addEventListener('keydown', e => {
-    if (!document.body.classList.contains('reportmode') || e.target.closest('input, textarea, select, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (document.querySelector('dialog[open]') || !document.body.classList.contains('reportmode') || e.target.closest('input, textarea, select, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey) return;
     const flat = (state.fdItems || []).filter(x => x.tier === state.fdTier && (state.fdIncludeDecided || x.state === 'open' || x.key === state.fdCur)), at = flat.findIndex(x => x.key === state.fdCur);
     if (e.key === 'j') { fdOpen(flat[Math.min(flat.length - 1, at + 1)]); e.preventDefault(); }
     if (e.key === 'k') { fdOpen(flat[Math.max(0, at - 1)]); e.preventDefault(); }
@@ -2658,13 +2740,13 @@
       });
       for (const e of Object.values(edits || {})) {
         const numeric = e.after.trim() !== '' && !isNaN(Number(e.after.replace(/,/g, ''))) && (e.before === '' || !isNaN(Number(e.before)));
-        changes.push({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: e.reason || 'Edited by reviewer', source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit', kind: numeric ? 'number' : 'text',
+        changes.push({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: e.reason || 'Edited by reviewer', source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit', kind: e.kind === 'auto' ? 'auto' : numeric ? 'number' : 'text',
           change_set: e.change_set || undefined, change_set_size: e.change_set_size || undefined});
       }
       const answer = await api('/api/spreadsheets/apply-fixes', {...binding, changes, ...(opts.recommendedOnly ? {recommended_only: true} : {})});
       if (state.celebrate) state.celebrate.hash = answer.item.file_hash;
       // Do not carry local review markers into a new file or erase edits made while this request ran.
-      for (const [key, shown] of [['rd-fixes:' + binding.file_hash, dec], ['rd-edits:' + binding.file_hash, edits]]) {
+      if (!opts.independentScope) for (const [key, shown] of [['rd-fixes:' + binding.file_hash, dec], ['rd-edits:' + binding.file_hash, edits]]) {
         if (JSON.stringify(store.get(key, {})) === JSON.stringify(shown)) store.set(key, {});
       }
       if (opts.download !== false) {
