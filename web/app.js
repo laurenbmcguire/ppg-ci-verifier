@@ -1216,7 +1216,7 @@
           const capture = {...captureCorrections(accepted, dec, {}, binding, report), recommendedOnly: true};
           dlg.close(); fdPreview(capture);
         }}, `Preview ${eligible.length} supported changes`),
-        h('button', {type: 'button', class: 'btn', disabled: !scope.length, onclick: () => { if (!guard() || !discard()) return; dlg.close(); state.fdReviewScope = {binding: JSON.stringify(binding), keys: scope.map(it => it.key)}; state.fdView = 'review'; fdChooseMode('manual', binding); fdOpen(scope[0]); }}, 'Review / edit selected'),
+        h('button', {type: 'button', class: 'btn', disabled: !scope.length, onclick: () => act(picked(), 'manual')}, 'Review / edit selected'),
         h('button', {type: 'button', class: 'btn', disabled: !canDecide, onclick: () => act(picked(), 'ignore')}, 'Ignore: keep as recorded…'),
         h('button', {type: 'button', class: 'btn', disabled: !canDecide, onclick: () => { if (discard()) { actionVersion++; decisionForm('defer'); } }}, 'Defer to source owner…'));
       types.replaceChildren(h('h3', {}, 'Select by error type across groups'), ...[...byType].map(([type, list]) => {
@@ -1251,7 +1251,7 @@
         h('button', {type: 'button', class: 'btn', onclick: () => choose(unresolved, true)}, `Select all ${unresolved.length} unresolved loaded items`),
         h('button', {type: 'button', class: 'btn', onclick: () => choose(items, false)}, 'Select none'),
         h('button', {type: 'button', class: 'btn', 'data-ai-cancel': 'true', onclick: close}, 'Close review')), actions),
-      h('p', {class: 'fd-hint'}, 'Selection is a review scope, not approval. Preview includes only eligible cell changes. Manual review walks the selected items with Previous / Next. Keep/defer applies to at most 1000 open findings with recorded evidence identities. Blockers must be kept one at a time with evidence.'), decision, types, content);
+      h('p', {class: 'fd-hint'}, 'Selection is a review scope, not approval. Preview includes only eligible cell changes. Review / edit selected opens the same scoped manual editor; only typed, included cells enter preview. Keep/defer applies to at most 1000 open findings with recorded evidence identities. Blockers must be kept one at a time with evidence.'), decision, types, content);
     document.body.append(dlg); draw(); dlg.showModal(); dlg.querySelector('h2').focus();
     if (Array.isArray(initialScope) && initialAction) { const keys = new Set(initialScope.map(it => it.key)); act(items.filter(it => keys.has(it.key)), initialAction); }
   }
