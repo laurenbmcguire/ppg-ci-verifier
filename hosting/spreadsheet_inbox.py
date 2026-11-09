@@ -1021,7 +1021,7 @@ class SpreadsheetInbox:
         from collections import Counter
         cells = Counter((p.get('sheet'), str(p.get('cell') or '').upper()) for p in props)
         holds = self.holds(item)
-        global_reason = ('Resolve approval holds before selecting recommendations.' if holds else
+        global_reason = ('Review current holds before selecting recommendations.' if holds else
                          'Re-check this version first.' if item.get('checker_version') != CHECKER_VERSION else
                          'This version is locked or has a newer corrected version.' if
                          item.get('approval') or item.get('send_pending') or item.get('fixes_applied') or

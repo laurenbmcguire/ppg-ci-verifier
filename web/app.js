@@ -841,12 +841,22 @@
     const dec = Object.fromEntries(accepted.map(f => [f.id, {state: 'accepted', after: f.after}]));
     fdPreview({...captureCorrections(accepted, dec, {}, binding, state.report), recommendedOnly: true});
   }
+  function fdHoldSummary(r) {
+    const holds = r.holds || [], blocking = holds.filter(hold => hold.hard).length;
+    return `${plural(blocking, 'blocking hold')} · ${plural(holds.length - blocking, 'advisory hold')}`;
+  }
+  function fdOccurrenceLabel(it, allItems) {
+    const occurrence = allItems.findIndex(item => item.key === it.key) + 1;
+    const linked = allItems.filter(item => item.fix?.id === it.fix?.id && item.sheet === it.sheet && item.cell === it.cell).length;
+    return `Include change, ${it.sheet || 'Report'}, cell ${it.cell}, finding ${occurrence} of ${allItems.length}`
+      + (linked > 1 ? `. ${linked} findings share this cell change; their selections stay together.` : '');
+  }
   function fdModeSelector(r) {
     const binding = reviewBinding(r), mode = fdMode(), busy = state.aiFixing || state.busy;
     const found = allIssues(r.review).filter(i => i.severity !== 'info').length;
     const recommended = state.fixes ? fdRecommended() : [];
     return h('section', {class: 'fd-mode-selector', 'aria-label': 'Choose how to review'},
-      r.fixed_from ? h('p', {class: 'fd-saved-summary', role: 'status'}, `Corrected version v${revisionOf(r)}: ${plural((r.fixed_from.changes || []).length, 'recorded cell change')}. Original preserved. ${plural(found, 'possible issue')} remain; ${(r.holds || []).filter(x => x.hard).length} approval holds. ${r.sent?.some(x => x.sent) ? 'Delivery is recorded in History.' : 'Not sent.'}`) : null,
+      r.fixed_from ? h('p', {class: 'fd-saved-summary', role: 'status'}, `Corrected version v${revisionOf(r)}: ${plural((r.fixed_from.changes || []).length, 'recorded cell change')}. Original preserved. ${plural(found, 'possible issue')} remain; ${fdHoldSummary(r)}. ${r.sent?.some(x => x.sent) ? 'Delivery is recorded in History.' : 'Not sent.'}`) : null,
       h('h2', {}, r.review.page?.complete === false || r.review.coverage?.truncated ? `Review loaded ${plural(found, 'possible issue')}` : `Review found ${plural(found, 'possible issue')}`),
       h('p', {class: 'fd-hint'}, 'Workbook and source checks. AI suggestions, when available, are labeled separately.'),
       h('p', {}, !state.fixes ? 'Loading supported recommendations…' : state.fixesError ? 'Recommendations could not be loaded. Reopen the report to retry.' : `${plural(recommended.length, 'supported cell change')} available for a combined preview. Findings and cell changes are counted separately.`),
@@ -855,12 +865,14 @@
         h('button', {type: 'button', class: 'btn', disabled: busy, 'aria-pressed': String(mode === 'manual'), onclick: () => fdChooseMode('manual', binding)}, 'Review manually'),
         h('button', {type: 'button', class: 'btn', disabled: busy, 'aria-pressed': String(mode === 'unchanged'), onclick: () => fdChooseMode('unchanged', binding)}, 'Leave file unchanged for now')),
       h('p', {class: 'fd-hint'}, 'Preview shows exact cells, before and after values, and reasons. Apply only after confirming. Originals and unresolved holds remain.'),
-      !recommended.length && state.fixes ? h('p', {class: 'fd-hint'}, r.review.page?.complete === false ? 'Findings are only partly loaded. Reopen the report before selecting across pages.' : (r.holds || []).length ? 'Approval holds prevent combined recommendations. Open hold details under Corrections; individual review remains available.' : 'No supported bulk fixes right now. Inspect the findings manually; uncertain values are not filled in.') : null);
+      !recommended.length && state.fixes ? h('p', {class: 'fd-hint'}, r.review.page?.complete === false ? 'Findings are only partly loaded. Reopen the report before selecting across pages.' : (r.holds || []).length ? 'Current holds prevent combined recommendations. Open hold details under Corrections; individual review remains available.' : 'No supported bulk fixes right now. Inspect the findings manually; uncertain values are not filled in.') : null);
   }
   function fdOccurrenceList(g) {
     const eligible = fdRecommended(g.items), picked = eligible.filter(it => it.state === 'selected');
+    const allItems = state.fdItems || fdItems();
+    const groupLabel = `Select all ${eligible.length} eligible cell changes across all pages (${picked.length} selected)`;
     const groupToggle = h('input', {type: 'checkbox', checked: picked.length === eligible.length && !!eligible.length || null,
-      disabled: !eligible.length, 'data-selection-key': 'group:' + g.key, 'aria-label': `Select all ${eligible.length} eligible changes in this group across all pages`,
+      disabled: !eligible.length, 'data-selection-key': 'group:' + g.key, 'aria-label': `${groupLabel}. ${g.title}`,
       onchange: e => fdSelect(eligible, e.target.checked)});
     groupToggle.indeterminate = picked.length > 0 && picked.length < eligible.length;
     const details = h('details', {class: 'fd-occurrences'}), pageSize = 25;
@@ -869,7 +881,7 @@
     if (state.fdExpandedGroups[key]) details.setAttribute('open', '');
     details.ontoggle = () => { state.fdExpandedGroups[key] = details.open; };
     details.append(h('summary', {}, `Show ${plural(g.items.length, 'occurrence')}`),
-      h('label', {class: 'fd-group-select'}, groupToggle, ` Select all ${eligible.length} eligible cell changes across all pages (${picked.length} selected)`));
+      h('label', {class: 'fd-group-select'}, groupToggle, ' ' + groupLabel));
     const content = h('div', {class: 'fd-occurrence-page'}), nav = h('div', {class: 'fd-cardacts'});
     const draw = focus => {
       const pages = Math.ceil(g.items.length / pageSize), page = Math.min(state.fdOccurrencePages[key] || 0, pages - 1);
@@ -879,7 +891,7 @@
         const selectable = eligible.some(x => x.fix.id === it.fix?.id);
         return h('li', {'data-finding-id': it.key},
           selectable ? h('label', {}, h('input', {type: 'checkbox', checked: it.state === 'selected' || null,
-            'data-selection-key': 'finding:' + it.key, 'aria-label': `Include ${it.sheet}!${it.cell} in preview`, onchange: e => fdSelect([it], e.target.checked)}), ' Include change') :
+            'data-selection-key': 'finding:' + it.key, 'aria-label': fdOccurrenceLabel(it, allItems), onchange: e => fdSelect([it], e.target.checked)}), ' Include change') :
             h('span', {class: 'fd-hint'}, it.fix?.recommendation_eligible ? 'Your decision or edited value needs individual review.' : it.fix?.recommendation_reason || 'Needs individual review; not included in bulk fixes.'),
           h('button', {type: 'button', class: 'btn small', onclick: () => fdOpen(it)}, `${it.sheet || 'Report'}${it.cell ? ' · ' + it.cell : it.row ? ' · row ' + it.row : ''} · ${it.state}`),
           h('span', {}, it.text || it.reason));
@@ -1011,9 +1023,9 @@
       h('button', {type: 'button', class: 'fd-iconbtn fd-collapse', 'aria-label': 'Hide the corrections panel', title: 'Hide panel', onclick: () => { state.fdAsideHidden = true; $('fd-work')?.classList.add('aside-hidden'); }}, icon('panel', 18))));
     const approvalHolds = r.holds || []; // Advisory holds also exclude bulk selection and must remain inspectable.
     if (approvalHolds.length) body.append(h('details', {class: 'fd-hold-details'},
-      h('summary', {}, `${plural(approvalHolds.length, 'approval hold')} · review details`),
-      h('p', {class: 'fd-hint'}, 'Corrections do not release approval holds. Resolve and re-check the evidence separately.'),
-      h('ul', {}, approvalHolds.map(hold => h('li', {}, hold.text || hold.code)))));
+      h('summary', {}, `${fdHoldSummary(r)} · review details`),
+      h('p', {class: 'fd-hint'}, 'Blocking holds prevent approval. All listed holds exclude combined recommendations; individual review remains available.'),
+      h('ul', {}, approvalHolds.map(hold => h('li', {}, `${hold.hard ? 'Blocking' : 'Advisory'}: ${hold.text || hold.code}`)))));
     if (approvalHolds.length) { const action = fdHoldAction(r, st); if (action) body.append(action); }
     else { const nextStep = fdNextStep(r, st); if (nextStep) body.append(nextStep); }
     const cov = r.review.coverage || {}, dc = r.review.decisions || {};
@@ -1543,7 +1555,7 @@
       h('p', {class: 'fd-hint'}, 'Approval is not granted by applying changes. Unresolved findings and holds remain; unavailable source comparisons remain unverified.'),
       errorMessage,
       h('div', {class: 'fd-prevlist', tabindex: '0', 'aria-label': 'Exact cell changes before applying'}, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Cell'), h('th', {}, 'Before'), h('th', {}, 'After'), h('th', {}, 'Why'), h('th', {}, 'Include'))),
-        h('tbody', {}, rows.map(x => h('tr', {}, h('td', {class: 'fd-preview-location'}, h('span', {class: 'fd-preview-sheet'}, x.sheet), h('b', {class: 'fd-preview-cell'}, x.cell)), h('td', {}, showWs(x.before)), h('td', {}, h('b', {}, showWs(x.after))), h('td', {}, `${x.src}: ${x.why || ''}`), h('td', {}, h('button', {type: 'button', class: 'btn small fd-preview-remove', 'aria-label': `Remove ${x.cell} from preview`, onclick: () => { if (!saving && !state.busy) fdRemovePreview(c, x, d); }}, 'Remove'))))))),
+        h('tbody', {}, rows.map(x => h('tr', {}, h('td', {class: 'fd-preview-location'}, h('span', {class: 'fd-preview-sheet'}, x.sheet), h('b', {class: 'fd-preview-cell'}, x.cell)), h('td', {}, showWs(x.before)), h('td', {}, h('b', {}, showWs(x.after))), h('td', {}, `${x.src}: ${x.why || ''}`), h('td', {}, h('button', {type: 'button', class: 'btn small fd-preview-remove', 'aria-label': `Remove ${x.sheet}, cell ${x.cell} from preview`, onclick: () => { if (!saving && !state.busy) fdRemovePreview(c, x, d); }}, 'Remove'))))))),
       h('div', {class: 'fd-modalacts'},
         h('button', {type: 'button', class: 'btn', onclick: () => { if (!saving && !state.busy) d.close(); }}, 'Back to review'),
         h('button', {type: 'button', class: 'btn primary', id: 'fd-apply', onclick: async e => {

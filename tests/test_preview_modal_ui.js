@@ -140,3 +140,9 @@ test('pending save disables Back and Remove; failed response restores controls a
  assert.equal(dialogs().length,1);assert.equal(back.disabled,false);assert.equal(remove.disabled,false);assert.equal(apply.disabled,false);assert.match(d.querySelector('#fd-preview-error').textContent,/Not confirmed saved/);
  back.onclick();assert.equal(dialogs().length,0);
 });
+
+test('preview Remove accessible names start with visible label and distinguish identical cells on different sheets',()=>{
+ const {context,dialogs}=harness();context.fdPreview({binding:{file_hash:'h',expected_check_hash:'c'},report:{file_hash:'h',revision:1},accepted:[{id:'a',sheet:'Synthetic North',cell:'A2',before:'1',after:'2'},{id:'b',sheet:'Synthetic South',cell:'A2',before:'1',after:'2'}],dec:{},edits:{},total:2});
+ const buttons=dialogs()[0].walk().filter(x=>x.tag==='button'&&x.children.includes('Remove'));
+ assert.deepEqual(buttons.map(x=>x['aria-label']),['Remove Synthetic North, cell A2 from preview','Remove Synthetic South, cell A2 from preview']);
+});

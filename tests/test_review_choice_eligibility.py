@@ -23,6 +23,12 @@ class RecommendationEligibility(unittest.TestCase):
         for field,value in [('approval',{'by':'Reviewer'}),('send_pending',True),('fixes_applied',[{}]),('checker_version','old')]:
             with self.subTest(field=field):
                 old=self.item.get(field);self.item[field]=value;self.assertEqual(self.mark([self.proposal()]),[False]);self.item[field]=old
+    def test_advisory_and_blocking_holds_keep_same_bulk_guard_with_neutral_reason(self):
+        for holds in [[{'hard':False}], [{'hard':True}], [{'hard':True},{'hard':False}]]:
+            self.box.holds.return_value=holds
+            p=self.proposal();self.assertEqual(self.mark([p]),[False])
+            self.assertEqual(p['recommendation_reason'],'Review current holds before selecting recommendations.')
+        self.box._check_changes.assert_not_called()
     def test_ambiguous_same_cell_and_coordinated_changes_not_bulk(self):
         self.assertEqual(self.mark([self.proposal(),self.proposal(id='p2',after='b')]),[False,False])
         self.assertEqual(self.mark([self.proposal(change_set='coordinated')]),[False])
