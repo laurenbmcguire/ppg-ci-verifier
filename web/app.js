@@ -1552,7 +1552,7 @@
     else if (st.next !== 'recheck') { const nextStep = fdNextStep(r, st); if (nextStep) body.append(nextStep); }
     const cov = r.review.coverage || {}, dc = r.review.decisions || {};
     // Every error in the report is reviewed: a saved check that listed fewer than it found is checked again once, by itself.
-    if ((cov.truncated || cov.not_listed) && !r.approval && !(r.sent || []).some(x => x.sent)) {
+    if ((cov.truncated || cov.not_listed || r.internal_check_status === 'outdated_checks_require_recheck') && !r.approval && !(r.sent || []).some(x => x.sent)) {
       state.fdAutoRecheck ||= {};
       if (!state.fdAutoRecheck[r.file_hash] && !state.fdAutoRecheckWaiting) { state.fdAutoRecheckWaiting = true; let tries = 0; const attempt = () => {
         if (state.report !== r || state.fdAutoRecheck[r.file_hash]) { state.fdAutoRecheckWaiting = false; return; }

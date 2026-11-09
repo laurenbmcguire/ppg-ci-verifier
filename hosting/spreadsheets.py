@@ -20,7 +20,7 @@ MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 from hosting.limits import MAX_FINDINGS  # every finding is stored (bounded only against hostile files)
-CHECKER_VERSION = '2026-11-08-exact-source-v18'
+CHECKER_VERSION = '2026-11-09-unused-columns-v19'
 
 
 class SpreadsheetError(ValueError):
@@ -339,6 +339,9 @@ def _inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False, 
             sums = {}
             formula_count = row_count = width = 0
             total_seen = False
+            # A blank cell is only "missing" when its column holds values on other rows; a column that is empty on
+            # every data row is simply unused and is not flagged.
+            blank_cells, used_columns = [], set()
             for row_count, original in enumerate(rows, 1):
                 row = list(original)
                 total_rows += 1
@@ -371,7 +374,9 @@ def _inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False, 
                     finding('inconsistent_row_width', title, row_count)
                 for i in range(max(width, len(row))):
                     if i >= len(row) or row[i] is None or (isinstance(row[i], str) and not row[i].strip()):
-                        finding('missing_cell', title, row_count, i + 1)
+                        blank_cells.append((row_count, i + 1))
+                    else:
+                        used_columns.add(i + 1)
                 values = {h: _number(row[i]) if i < len(row) else None for h, i in numeric.items()}
                 # A single final Total row is compared only for exact conventional numeric headers.
                 is_total = bool(row and isinstance(row[0], str) and row[0].strip().casefold() in ('total', 'grand total') and 0 not in numeric.values())
@@ -395,6 +400,9 @@ def _inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False, 
                     if values['inspected'] != _add(values['accepted'], values['rejected']):
                         finding('inspected_count_mismatch', title, row_count)
                 total_seen = total_seen or is_total
+            for blank_row, blank_column in blank_cells:
+                if blank_column in used_columns:
+                    finding('missing_cell', title, blank_row, blank_column)
             if not row_count:
                 finding('empty_sheet', title)
             elif row_count == 1:

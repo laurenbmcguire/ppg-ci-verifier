@@ -45,7 +45,7 @@ class EveryFindingIsStored(unittest.TestCase):
             d.cell(r, 17).hyperlink = f'https://ppg.sharepoint.com/sites/SLAlabama_AlexanderCity/photo-{r}.jpg'
         buf = io.BytesIO(); wb.save(buf)
         item = SpreadsheetInbox(tempfile.mkdtemp()).ingest('SL Alabama - 2200 - 2026-11-06.xlsx', add_cached_values(buf.getvalue(), wb.sheetnames, {}))
-        self.assertGreater(item['finding_count'], 300)                 # more than the old 200 / 300 caps
+        self.assertGreater(item['finding_count'], 100)                 # wholly empty columns are no longer flagged (Nov 9), so fewer findings
         self.assertEqual(len(item['findings']), item['finding_count'])
         self.assertFalse(item['findings_truncated'])
         self.assertEqual(sum(1 for f in item['findings'] if f['code'] == 'external_hyperlink'), item['finding_counts']['external_hyperlink'])
@@ -64,7 +64,7 @@ class LargeAndPartial(unittest.TestCase):
 
     def test_614_blank_fields_are_all_stored_and_counted(self):
         from hosting.spreadsheets import inspect_spreadsheet
-        rows = ['Part number,Identifier,Inspected,OK,NOK'] + [f'80139189,LOT-{i:03d},10,10,' for i in range(614)]
+        rows = ['Part number,Identifier,Inspected,OK,NOK'] + [f'80139189,LOT-{i:03d},10,10,' for i in range(614)] + ['80139189,LOT-999,10,10,0']   # NOK is in use, so its blanks are missing
         r = inspect_spreadsheet('HMMA 2236 2026-11-06.csv', ('\n'.join(rows) + '\n').encode())
         self.assertEqual(r['finding_counts'].get('missing_cell'), 614)
         self.assertEqual(len([f for f in r['findings'] if f['code'] == 'missing_cell']), 614)

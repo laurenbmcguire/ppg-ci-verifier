@@ -492,6 +492,8 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None, *
     # ---- per-row quantity and validity rules
     day_counts = Counter(r['day'] for r in detail if r['day'])
     expected_day = report_day or (day_counts.most_common(1)[0][0] if day_counts else None)
+    # A quantity column that is blank on every row of its sheet is unused, not missing.
+    used_fields = {(r['sheet'], f) for r in detail for f, st in r['states'].items() if st != 'blank'}
     for r in detail:
         v, s, c = r['values'], r['states'], r['columns']
         for f, n in v.items():
@@ -506,7 +508,7 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None, *
                     finding('fractional_count', r['sheet'], r['row'], c[f])
         if any(st in KNOWN for st in s.values()):
             for f in v:
-                if s[f] == 'blank':
+                if s[f] == 'blank' and (r['sheet'], f) in used_fields:
                     finding('missing_cell', r['sheet'], r['row'], c[f])
         ins, ok, nok, rw = v.get('inspected'), v.get('certified'), v.get('rejected'), v.get('reworked')
         if ins is not None and ok is not None and nok is not None:

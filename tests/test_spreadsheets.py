@@ -116,12 +116,12 @@ class SpreadsheetTests(unittest.TestCase):
 
     def test_result_bounded(self):
         from hosting.limits import MAX_FINDINGS
-        result = inspect_spreadsheet('test.csv', b'a,b\n' + b',\n' * 500)
+        result = inspect_spreadsheet('test.csv', b'a,b\n1,2\n' + b',\n' * 500)
         self.assertEqual(len(result['findings']), sum(result['finding_counts'].values()))   # every finding is stored, not the first 200
         self.assertEqual(result['finding_counts']['missing_cell'], 1000)
         self.assertFalse(result['findings_truncated'])
         with patch('hosting.spreadsheets.MAX_FINDINGS', 300):       # the safety bound still holds and says so
-            result = inspect_spreadsheet('test.csv', b'a,b\n' + b',\n' * 500)
+            result = inspect_spreadsheet('test.csv', b'a,b\n1,2\n' + b',\n' * 500)
         self.assertEqual(len(result['findings']), 300)
         self.assertTrue(result['findings_truncated'])
         self.assertEqual(result['finding_counts']['missing_cell'], 1000)
@@ -133,7 +133,7 @@ class SpreadsheetTests(unittest.TestCase):
         from hosting.spreadsheet_inbox import SpreadsheetInbox
         box = SpreadsheetInbox(tempfile.mkdtemp())
         with patch('hosting.spreadsheets.MAX_FINDINGS', 300), patch('hosting.limits.MAX_FINDINGS', 300):
-            item = box.ingest('big.csv', b'a,b\n' + b',\n' * 500)
+            item = box.ingest('big.csv', b'a,b\n1,2\n' + b',\n' * 500)
             self.assertTrue(item['findings_truncated'])
             holds = {h['code']: h for h in box.holds(item)}
         self.assertTrue(holds['findings_incomplete']['hard'])
@@ -240,3 +240,10 @@ class SpreadsheetTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class UnusedColumnTests(unittest.TestCase):
+    def test_empty_column_is_not_missing_but_gaps_in_a_used_column_are(self):
+        result = inspect_spreadsheet('t.csv', b'part,qty,notes\nA,1,\nB,,\nC,3,\n')
+        missing = [(f['row'], f['column']) for f in result['findings'] if f['code'] == 'missing_cell']
+        self.assertEqual(missing, [(3, 2)])   # qty blank on row 3 is flagged; the all-blank notes column is not
