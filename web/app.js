@@ -1138,17 +1138,18 @@
     const quantity = key => quantities[key] || {value: rv[key], partial: true, complete: false, unit: key === 'rejected' ? rv.rejected_unit : null};
     const inspected = quantity('inspected'), certified = quantity('certified'), rejected = quantity('rejected');
     const perRow = rejected.unit === 'rows', base = perRow ? rv.scans : inspected.value;
-    const compatible = perRow || (rejected.unit && inspected.unit && rejected.unit === inspected.unit);
+    const compatible = !perRow && rejected.unit && inspected.unit && rejected.unit === inspected.unit;
     const rate = Number.isFinite(base) && base > 0 && Number.isFinite(rejected.value) && rejected.value >= 0 && rejected.value <= base && rejected.complete === true && !rejected.partial && (perRow || inspected.complete === true && !inspected.partial) && compatible ? rejected.value / base * 100 : null;
-    const amount = q => q.value == null ? 'Not recorded' : fmt(q.value);
+    const amount = q => q.value == null ? 'Unknown' : fmt(q.value);
+    const unitLabel = q => q.unit === 'parts' ? 'parts' : q.unit === 'rows' ? 'rows' : 'unit unknown';
     const qualifier = q => q.value == null ? 'blank is not zero' : q.partial || q.complete !== true ? 'Partial or completeness unknown' : 'Recorded total';
     const photos = r.photos?.image_count ?? null, shifts = (r.shift_summary || r.shifts || []).length || null;
     const m = (value, label, extra) => h('div', {class: 'fd-metric'}, h('strong', {}, value), h('span', {}, label), extra ? h('small', {}, extra) : null);
     return h('div', {class: 'fd-metrics', 'aria-label': 'Key totals'},
       m(fmt(rv.scans), 'records', 'audit rows, counted once'),
-      m(amount(inspected), 'units inspected', qualifier(inspected)),
-      m(amount(certified), 'OK', qualifier(certified)),
-      m(amount(rejected), perRow ? 'failed audits' : 'rejected units', qualifier(rejected)),
+      m(amount(inspected), `inspected (${unitLabel(inspected)})`, qualifier(inspected)),
+      m(amount(certified), `OK (${unitLabel(certified)})`, qualifier(certified)),
+      m(amount(rejected), `rejected (${unitLabel(rejected)})`, qualifier(rejected)),
       m(rate == null ? 'Unavailable' : rate.toFixed(1) + '%', perRow ? 'fail rate' : 'reject rate', rate == null ? 'quantity completeness not established' : null),
       shifts ? m(String(shifts), shifts === 1 ? 'shift' : 'shifts', 'as recorded') : null,
       photos != null ? m(String(photos), photos === 1 ? 'photo' : 'photos', 'linked to records') : null);
