@@ -1,0 +1,5 @@
+
+{"passed":true,"width":1200,"read_only":true,"provider":"synthetic fake","safe_text":true,"failure_retry":true,"stale_navigation":true,"back_isolated":true}
+{"passed":true,"width":390,"read_only":true,"provider":"synthetic fake","safe_text":true,"failure_retry":true,"stale_navigation":true,"back_isolated":true}
+
+{"passed": true, "synthetic_only": true, "provider": "fake", "provider_calls": 8, "no_external_traffic": true, "unchanged_reports": true}

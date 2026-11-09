@@ -1,0 +1,1 @@
+Verified marked project-disposable postgres, ci_verifier, exact Unix socket and port55439, no TCP; test writes now permitted.

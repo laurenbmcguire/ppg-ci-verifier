@@ -1,5 +1,7 @@
 # Report list context update
 
+Status note: This document records an earlier development checkpoint. The integrated result and final test attribution are in [report-list-final.md](report-list-final.md); historical limitations below are preserved for traceability.
+
 Base: 1740eda7436d38ab5a1618ecf1afa542f3be542c. Isolated branch: fix/report-list-context.
 
 ## Changes

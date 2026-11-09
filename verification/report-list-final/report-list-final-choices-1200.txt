@@ -1,0 +1,4 @@
+
+{"passed":true,"width":1200,"actual_handler":true,"keep_defer_scope_bound":true,"manual_scope_one":true,"manual_preview_cancel":true,"manual_explicit_apply":true,"page_errors":[]}
+
+{"passed": true, "width": 1200, "actual_handler": true, "recorded_keep_and_defer": true, "source_hold_preserved": true, "manual_preview_cancel_preserved": true, "one_explicit_cell_change": true, "originals_unchanged": true, "no_provider_traffic": true}

@@ -1,0 +1,5 @@
+
+{"width":1200,"passed":true,"full_app":true,"unknown_date_labeled":true,"partial_and_zero_distinct":true,"lineage_only":true,"historical_filter_context":true,"parallel_copy_links":true,"complete_names_wrap":true,"no_horizontal_overflow":true,"keyboard_focus_restored":true,"search_filter_preserved":true,"no_mutations":true}
+{"width":390,"passed":true,"full_app":true,"unknown_date_labeled":true,"partial_and_zero_distinct":true,"lineage_only":true,"historical_filter_context":true,"parallel_copy_links":true,"complete_names_wrap":true,"no_horizontal_overflow":true,"keyboard_focus_restored":true,"search_filter_preserved":true,"no_mutations":true}
+
+{"passed": true, "full_app": true, "fake_storage": true, "original_unchanged": true, "no_provider_traffic": true, "requests": ["/api/clients", "/api/spreadsheets/sheet", "/api/spreadsheets/fixes", "/api/spreadsheets/sheet", "/api/spreadsheets/fixes", "/api/clients", "/api/clients", "/api/spreadsheets/sheet", "/api/spreadsheets/fixes", "/api/spreadsheets/sheet", "/api/spreadsheets/fixes", "/api/clients"]}

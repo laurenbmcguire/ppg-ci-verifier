@@ -1,0 +1,2 @@
+{"width":1200,"passed":true,"filter_retains_focus":true,"click_selects":true,"draft_preserved":true,"grid_min_height":300,"stale_load_ignored":true}
+{"width":390,"passed":true,"filter_retains_focus":true,"click_selects":true,"draft_preserved":true,"grid_min_height":300,"stale_load_ignored":true}

@@ -180,7 +180,7 @@
     const todo = shown.filter(queueNeedsAttention).length;
     document.title = (todo ? `(${todo}) ` : '') + 'PPG Verifier';
     const list = $('queue-list'); list.replaceChildren();
-    if (state.filter === 'attention') list.append(h('p', {class: 'queue-scope'}, `${rows.length} saved version${rows.length === 1 ? '' : 's'} match this To do view. Earlier copies keep their own findings.`));
+    if (state.filter === 'attention') list.append(h('p', {class: 'queue-scope'}, `${rows.length} saved version${rows.length === 1 ? '' : 's'} match${rows.length === 1 ? 'es' : ''} this To do view. Earlier copies keep their own findings.`));
     if (state.listPartial) list.append(h('p', {class: 'queue-notice', role: 'status'}, 'Only the most recent saved reports are loaded. Search, filters and counts cover this loaded list, not the full report history.'));
     if (state.listError) {
       list.append(h('div', {class: 'listerror', role: 'alert'}, h('b', {}, 'The report list could not be loaded.'),

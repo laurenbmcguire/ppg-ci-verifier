@@ -1,0 +1,4 @@
+
+{"passed":true,"width":390,"requests":2,"explicit_ai_selection":true,"cancel_unchanged":true,"per_change_removal":true,"exact_apply_binding":true,"source_preserved":true}
+
+{"passed": true, "width": 390, "actual_handler": true, "original_byte_identical": true, "one_corrected_version": true, "revision": 2, "recorded_changes": 1, "exact_cell_differences": [["1st Shift", "I18", "Holes /  Glue ", "Holes / Glue"]], "cancel_created_no_version": true, "no_provider_traffic": true, "synthetic_only": true}

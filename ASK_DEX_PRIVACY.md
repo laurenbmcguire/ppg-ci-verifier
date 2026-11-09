@@ -1,5 +1,7 @@
 # Explicit AI choice and minimized report questions
 
+Integrated acceptance: see [verification/report-list-final.md](verification/report-list-final.md) for the combined final gates and exact source attribution. The development-stage results below remain historical records.
+
 This patch is based on the Ask Dex core commit ec0d2f9. It does not include the separate temporary connectivity probe. No real provider request, production write, deployment, credential change, or source-service write was performed for these tests.
 
 ## Call-site inventory

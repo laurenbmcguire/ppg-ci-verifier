@@ -1,5 +1,7 @@
 # Ask Dex report questions
 
+Integrated acceptance: see [verification/report-list-final.md](verification/report-list-final.md) for the combined final gates and exact source attribution. The development-stage results below remain historical records.
+
 Ask Dex answers questions about the displayed saved report using the existing Anthropic configuration. It identifies Claude/Anthropic and the relevant evidence shared before Send. It never asks for credentials in chat.
 
 `/api/spreadsheets/chat` uses `hosting/report_chat.py`, not the legacy edit chat. It checks access and the exact displayed file/check before reading evidence, binds ongoing history to source/review context, and rechecks authorization and evidence after the provider. No answer is persisted, applied or treated as approval. Edit/undo fields cannot affect corrections.

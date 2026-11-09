@@ -1,5 +1,7 @@
 # Report identification and review chooser: core verification
 
+Status note: This document records an earlier development checkpoint. The integrated result and final test attribution are in [report-list-final.md](report-list-final.md); historical limitations below are preserved for traceability.
+
 Runtime snapshot: 321c9967e897d49c89d2bc9b0f151a589045ba7a, based on 1740eda7436d38ab5a1618ecf1afa542f3be542c.
 
 ## Saved changes
