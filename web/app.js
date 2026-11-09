@@ -42,7 +42,7 @@
   const shortDay = d => { if (!d) return ''; const x = new Date(d + 'T12:00:00'); return isNaN(x) ? d : x.toLocaleDateString('en-US', {weekday: 'short', month: 'short', day: 'numeric'}); };
   const ago = iso => { const s = (Date.now() - new Date(iso)) / 1000; if (!(s >= 0)) return ''; if (s < 90) return 'just now'; if (s < 3600) return `${Math.round(s / 60)} min ago`; if (s < 86400) return `${Math.round(s / 3600)} h ago`; return new Date(iso).toLocaleDateString('en-US', {month: 'short', day: 'numeric'}); };
   const STATUS = {hold: 'Hold', check: 'Check', clear: 'Clear'};
-  const statusNote = r => { const c = r.counts || {}; if (r.status === 'hold') return `${c.high || 0} high-severity findings`; if (r.status === 'check') return `${(c.medium || 0) + (c.low || 0)} medium/low findings`; return 'Nothing flagged'; };
+  const statusNote = r => { const c = r.counts || {}; if (r.coverage?.truncated || r.coverage?.not_listed || r.page?.complete === false) return 'Finding coverage incomplete'; if (r.status === 'hold') return `${c.high || 0} high-severity finding${c.high === 1 ? '' : 's'}`; if (r.status === 'check') return `${(c.medium || 0) + (c.low || 0)} medium/low finding${(c.medium || 0) + (c.low || 0) === 1 ? '' : 's'}`; return 'Nothing flagged'; };
 
   // ---------------------------------------------------------------- state
   const state = {list: [], filter: store.get('rd-filter', 'attention'), search: '', selected: null, report: null, fixes: null, issueSource: 'All', showAll: false, busy: false};
@@ -173,10 +173,12 @@
     const line = (r, older) => {
       const rv = r.review || {status: 'check', counts: {}};
       const c = rv.counts || {};
-      const count = rv.status === 'clear' ? 'Clear' : rv.status === 'hold' ? `${c.high || 0} high-severity findings` : `${(c.medium || 0) + (c.low || 0)} medium/low findings`;
+      const incomplete = rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false;
+      const queueStatus = incomplete ? 'Coverage incomplete' : STATUS[rv.status] || 'Check';
+      const count = rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false ? 'Finding coverage incomplete' : rv.status === 'clear' ? 'Clear' : rv.status === 'hold' ? `${c.high || 0} high-severity finding${c.high === 1 ? '' : 's'}` : `${(c.medium || 0) + (c.low || 0)} medium/low finding${(c.medium || 0) + (c.low || 0) === 1 ? '' : 's'}`;
       return h('button', {type: 'button', class: 'item' + (r.file_hash === state.selected ? ' sel' : '') + (older ? ' older' : ''), onclick: () => select(r.file_hash),
-        'aria-label': `${rv.job || r.filename}${older ? ', earlier version' : ''}, ${STATUS[rv.status] || 'Check'}, ${count}`},
-        h('span', {class: 'tag tag-' + rv.status}, STATUS[rv.status] || 'Check'),
+        'aria-label': `${rv.job || r.filename}${older ? ', earlier version' : ''}, ${queueStatus}, ${count}`},
+        h('span', {class: 'tag tag-' + (incomplete ? 'check' : rv.status)}, queueStatus),
         h('span', {class: 'job', title: rv.job ? null : 'No job number was found in this file. The file name is shown instead.'}, (rv.job || r.filename.replace(/\.(xlsx|xlsm|xls|csv)$/i, '').replace(/\s*\(fixed\)/g, ''))), rv.fixed_from ? h('span', {class: 'vtag', title: 'A corrected copy; the original upload is kept too'}, 'corrected') : null,
         older ? h('span', {class: 'vtag'}, 'earlier') : null,
         h('span', {class: 'count'}, rv.sent_at ? 'Sent' : rv.approved ? 'Approved' : rv.review_state === 'waiting' ? 'For review' : rv.review_state === 'sent_back' ? 'Sent back' : count),
@@ -1036,12 +1038,12 @@
     if (approvalHolds.length) { const action = fdHoldAction(r, st); if (action) body.append(action); }
     else { const nextStep = fdNextStep(r, st); if (nextStep) body.append(nextStep); }
     const cov = r.review.coverage || {}, dc = r.review.decisions || {};
-    body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(c.detected, 'active finding')}${r.review.counts?.info ? ` (+${r.review.counts.info} for information)` : ''} · ${c.kept} kept as recorded · ${c.deferred} waiting on the source · ${c.confirmed} confirmed · ${plural(c.suggestions, 'suggestion')} · ${c.selected} selected · ${c.applied} applied in this version`));
+    body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(c.detected, 'active finding')}${r.review.counts?.info ? ` (+${r.review.counts.info} for information)` : ''} · Review items: ${c.kept} kept as recorded · ${c.deferred} waiting on the source · ${c.confirmed} confirmed · ${plural(c.suggestions, 'cell-change proposal')} · Cell changes: ${c.selected} selected · ${c.applied} applied in this version`));
     const rc = r.review.reconcile;
     if (rc) body.append(h('details', {class: 'fd-recon'}, h('summary', {}, `Listed finding status breakdown: ${fmt(rc.total)} findings · ${rc.adds_up ? 'categories add up' : 'categories do not add up: report this'}${cov.truncated || cov.not_listed || r.review.page?.complete === false ? ' · coverage incomplete' : ''}`),
       h('dl', {class: 'fd-kv'}, ...[['Open, need a decision', rc.open], ['Waiting on the source owner', rc.deferred], ['Confirmed, need a correction', rc.confirmed],
         ['Kept as recorded by a person on this version', rc.kept_by_person], ['Kept by an earlier record (no cell named on some)', rc.kept_earlier_record],
-        ['Set aside by Dex (recommendation, not a decision)', rc.set_aside_by_claude], ['Corrected in a later version', rc.corrected], ['For information only', rc.informational]]
+        ['Set aside by Dex (recommendation, not a decision)', rc.set_aside_by_claude], ['Corrected in a later version (findings)', rc.corrected], ['For information only', rc.informational]]
         .flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, fmt(v))])),
       rc.ambiguous_earlier_records ? h('p', {class: 'fd-hint'}, `${rc.ambiguous_earlier_records} open findings sit on rows where an earlier “fine as is” did not say which cell; they are open until reviewed again.`) : null));
     if (cov.truncated || cov.not_listed) body.append(h('p', {class: 'fd-coverage', role: 'alert'}, icon('lock', 14),
@@ -2536,7 +2538,9 @@
     if (q) { const hit = new Set(); g.rows.forEach((row, n) => { if ((row || []).some(v => String(v ?? '').toLowerCase().includes(q))) hit.add(n + 1); });
       only = only ? new Set([...only].filter(x => hit.has(x))) : hit; }
     const cur = (state.fdItems || []).find(x => x.key === state.fdCur);
-    const contextText = cur ? `Correction retained: ${cur.sheet || 'Report'} · ${cur.cell || (cur.row ? 'row ' + cur.row : 'report-level')}${cur.sheet !== sheet || (only && !only.has(cur.row || splitCell(cur.cell || '')?.[1])) ? ' (outside the visible rows)' : ''}. ` : 'No correction focused. ';
+    const contextRow = cur?.row || splitCell(cur?.cell || '')?.[1];
+    const relation = !cur || !contextRow ? '' : cur.sheet !== sheet ? ' (on another sheet)' : contextRow > g.height || (only && !only.has(contextRow)) ? ' (outside the visible rows)' : '';
+    const contextText = cur ? `Correction retained: ${cur.sheet || 'Report'} · ${cur.cell || (cur.row ? 'row ' + cur.row : 'report-level')}${relation}. ` : 'No correction focused. ';
     const contextSlot = $('fd-correction-context'); if (contextSlot) contextSlot.textContent = contextText + 'Filtering does not change this correction or your draft.';
     const focus = cur && cur.sheet === sheet ? {cell: cur.cell, row: cur.row} : state.gridRow ? {row: state.gridRow} : null;
     const {table, first} = buildGrid(g, m, {onlyRows: only, selected: state.gridCell, focus});

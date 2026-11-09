@@ -47,3 +47,10 @@ test('successful explicit recheck refreshes recovery controls after releasing it
  const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},api:async()=>({}),openReport:async()=>{state.report={file_hash:'one'}},loadList:()=>{},fdModeSelector:()=>{assert.equal(state.rechecking,false);return {}},document:{querySelector:()=>({replaceWith:()=>refreshed++})}});
  vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile('),ctx);await ctx.fdRecheck();assert.equal(refreshed,1);assert.equal(state.rechecking,false);
 });
+
+test('queue summary never calls known incomplete finding coverage clear',()=>{
+ const ctx=vm.createContext({});vm.runInContext(source.split('\n').find(line=>line.includes('const statusNote ='))+'\nthis.note=statusNote;',ctx);
+ assert.equal(ctx.note({status:'clear',counts:{},coverage:{truncated:true}}),'Finding coverage incomplete');
+ assert.equal(ctx.note({status:'clear',counts:{},page:{complete:false}}),'Finding coverage incomplete');
+ assert.equal(ctx.note({status:'hold',counts:{high:1}}),'1 high-severity finding');
+});
