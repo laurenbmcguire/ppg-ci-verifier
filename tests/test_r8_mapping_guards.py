@@ -5,12 +5,12 @@ from unittest.mock import patch
 from hosting import reconcile, change_summary
 from hosting.spreadsheet_inbox import SpreadsheetInbox
 from test_r8_count_contract import fixture, DAY
-from eos_fixture import build
+from eos_fixture import build, ROWS
 
 class MappingGuards(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.box=SpreadsheetInbox(self.tmp.name)
-        self.h=self.box.ingest('report.xlsx',build())['file_hash']
+        self.h=self.box.ingest('report.xlsx',build(rows=list(ROWS)[:2]))['file_hash']
         self.a=dict(status='source',site='Plant',site_id='sid',list_id='lid',needs_person=False)
     def capture(self):
         records,snap=fixture()

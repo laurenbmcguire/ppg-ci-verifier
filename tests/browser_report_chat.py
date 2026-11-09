@@ -6,7 +6,8 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'tests')]
 for key in list(os.environ):
     if key.startswith(('MS_','ANTHROPIC_','OPENAI_','VERCEL','DATABASE_','PG','CI_PG_')):os.environ.pop(key,None)
-os.environ.update(CI_LOCAL_DEV='1',VERCEL='0',AI_LAYOUT='0')
+os.environ.update(CI_LOCAL_DEV='1',VERCEL='0')
+os.environ.pop('AI_LAYOUT',None)
 original_connect=socket.socket.connect
 external=[]
 def local_connect(self,address):

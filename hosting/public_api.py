@@ -20,7 +20,7 @@ STATUS_LABEL = {'hold': 'Hold: must be fixed', 'check': 'Check: items to look at
 ENDPOINTS = [
     ('GET', '/api/v1', 'This list. No key needed.'),
     ('GET', '/api/v1/reports', 'Latest 100 reports with status. Optional ?status=hold|check|clear&job=...'),
-    ('POST', '/api/v1/reports', 'Upload a report: {"filename": "...xlsx", "content_base64": "..."} (up to 4 MB in one request; bigger files go in parts, below). Runs every check (SharePoint, usual day, AI when on) and returns the result. Nothing in the report is changed.'),
+    ('POST', '/api/v1/reports', 'Upload a report: {"filename": "...xlsx", "content_base64": "..."} (up to 4 MB in one request; bigger files go in parts, below). Runs deterministic checks, SharePoint and usual-day comparison, and returns the result. AI preparation requires a separate explicit request. Nothing in the report is changed.'),
     ('POST', '/api/v1/uploads', 'Start a large upload (any size): returns {"upload_id", "part_size"}.'),
     ('POST', '/api/v1/uploads/{upload_id}/parts/{n}', 'Send part n (0, 1, 2...) of the file: {"content_base64": "..."}, each part at most part_size bytes before base64.'),
     ('POST', '/api/v1/uploads/{upload_id}/finish', 'Put the parts together and check the report: {"filename": "...xlsx", "part_count": N, "sha256": "<hex SHA-256 of the whole file>"}. Same result as POST /api/v1/reports.'),
@@ -185,7 +185,7 @@ def _checked(h, item):
                 cleaned = None
             if cleaned:
                 item = cleaned
-        _after_change(h, item['file_hash'], ('ai',))
+        # Importing is not an AI-sharing choice. AI review requires an explicit request.
     return bool(item.get('idempotent')), dict(report(_get(h, item['file_hash'])), already_uploaded=bool(item.get('idempotent')))
 
 

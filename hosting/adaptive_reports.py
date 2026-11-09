@@ -429,15 +429,15 @@ def _sum(rows, field):
     return sum((v for v in values if v is not None), Decimal(0)), known
 
 
-def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
+def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None, *, allow_ai_layout=False):
     """Return an adaptive result if any quantity column is found in any sheet, else None.
-    When AI layout detection is set up, Claude maps the tables on every sheet each time; its reading is used
-    when it finds more inspection rows than the header-keyword detection."""
+    Default parsing is deterministic and never contacts a provider. The legacy broad-layout helper
+    requires explicit programmatic opt-in; no passive or upload/recheck route enables it."""
     sources = [(title, list(rows)) for title, rows in sources]
     sheets, records, stats = scan(sources, cached)
     layout = None
     from hosting import ai_layout
-    found = ai_layout.detect(sources, cached)
+    found = ai_layout.detect(sources, cached) if allow_ai_layout is True else None
     if found:
         unit_sources, specs = ai_layout.apply_units(sources, found)
         a_sheets, a_records, a_stats = scan(unit_sources, cached, layout_specs=specs)
@@ -449,6 +449,7 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
                   verification_scope='adaptive_column_internal_checks_only', findings=[],
                   source_authenticity='not_supplied', source_reconciliation_status='not_performed',
                   approval_effective=False, release_status='held')
+    result['layout_ai_requested'] = allow_ai_layout is True
     result['limitations'] = list(base.get('limitations', [])) + [
         'Quantity columns were detected automatically from header text; review the detected columns.',
         'Formulas are never executed. Where Excel saved a result for a formula, that saved result was checked.']
@@ -464,6 +465,8 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None):
             result['limitations'].insert(1, 'Scan-list tables count each row as one inspected part; rejected = rows whose condition is a reject value.')
     else:
         result['layout_source'] = 'keywords'
+        if allow_ai_layout is not True:
+            result['limitations'].append('AI layout detection was not requested. Only locally recognized tables were checked; unrecognized rows remain unverified.')
     finding = Checker(result)
     from hosting import sheet_roles
     result['dataset_selection'] = sheet_roles.select(sources, sheets, records, finding)

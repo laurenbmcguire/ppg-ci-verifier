@@ -535,4 +535,14 @@ def current(result):
         return None
     if not bound:   # made before results were bound to a report version
         return None
+    # Saved evidence is historical, not a fresh parse. A complete receipt for the
+    # same immutable workbook remains usable, but a partial authoritative row
+    # scope (including an older AI layout) must not look like full verification.
+    from hosting.row_scope import saved_detail_count
+    try:
+        expected = saved_detail_count(result)
+    except ValueError:
+        return None
+    if expected is not None and (type(rec.get('report_rows')) is not int or rec['report_rows'] != expected):
+        return None
     return rec

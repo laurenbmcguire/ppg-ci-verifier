@@ -175,8 +175,8 @@ class SpreadsheetInbox:
             self._begin(db, file_hash)
             original, raw = self._original(db, file_hash)
             rows = report_records(original['filename'], raw)
-            if not rows:
-                raise ValueError('No report rows with Inspected quantities were found to compare.')
+            from hosting.row_scope import require_complete_detail
+            require_complete_detail(self.latest(db, file_hash, original), rows)
             sha = digest(source_raw)
             suffix = '.xlsx' if source_name.lower().endswith('.xlsx') else '.csv'
             files_for(self.root).put('uploads/' + sha + suffix, source_raw)
@@ -201,6 +201,8 @@ class SpreadsheetInbox:
         mapping_state = self.source_mapping(snap.get('site_id'), snap.get('list_id'))
         confirmed = mapping_state['mapping']
         current = self.get(file_hash)
+        from hosting.row_scope import require_complete_detail
+        require_complete_detail(current, records)
         found = reconcile.compare(day, records, exports, snap, confirmed=confirmed,
                                   report=dict(file_hash=file_hash, checker_version=current.get('checker_version')))
         found['mapping_binding'] = mapping_state

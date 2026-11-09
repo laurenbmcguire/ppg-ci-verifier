@@ -43,6 +43,17 @@ def data_for(item, raw):
     rv = summarize(item, with_issues=False)
     per_row = rv.get('rejected_unit') == 'rows'
     recs = [r for r in report_records(item['filename'], raw) if r.get('table_kind') == 'detail']
+    from hosting.row_scope import saved_detail_count
+    saved_rows = saved_detail_count(item)
+    if not recs:
+        saved_values = [_n(rv.get(k)) for k in ('scans', 'inspected', 'rejected')]
+        if all(v == 0 for v in saved_values):
+            raise ValueError('No row analytics: the saved summary explicitly records zero inspection rows and quantities. View the saved report summary instead; nothing was changed.')
+        if any(v is not None and v != 0 for v in saved_values):
+            raise ValueError('Row analytics are unavailable: the saved summary has counts, but no detail rows could be recognized locally. Use recognized column headers or a supported template for row analytics; the saved checks and original file are unchanged.')
+        raise ValueError('Row analytics are unavailable: no detail rows could be recognized locally and the quantities are unknown. Use recognized column headers or a supported template; missing quantities were not treated as zero.')
+    if saved_rows is not None and saved_rows != len(recs):
+        raise ValueError('Row analytics are unavailable: the locally recognized rows do not match the saved report count. Review the report layout before rebuilding this dashboard; nothing was changed.')
     rows = []
     for r in recs:
         lab, val = r.get('labels') or {}, r.get('values') or {}

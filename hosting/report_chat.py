@@ -48,18 +48,12 @@ def snapshot(inbox, file_hash, expected_check_hash):
 
 def answer(item, raw, review, holds, conversation, opener=None):
     turns = messages(conversation)
-    meta, checks, source, cells = ai_review._context(item, raw)
-    issues = review.get('issues') or []
-    context = dict(report=dict(file_hash=item['file_hash'], check_hash=item['check_hash'], revision=item.get('revision', 1),
-                              **meta), checks=checks, source_comparison=source,
-                   review=dict(status=review.get('status'), counts=review.get('counts'), coverage=review.get('coverage'),
-                               release_status=item.get('release_status'), internal_check_status=item.get('internal_check_status'),
-                               holds=holds, findings_total=len(issues), findings_shown=min(80, len(issues)),
-                               findings=[{k: f.get(k) for k in ('source','severity','sheet','row','cell','text','decision') if f.get(k) is not None} for f in issues[:80]]),
-                   report_cells=cells)
+    from hosting.report_chat_context import build
+    context = build(item, raw, review, holds, turns[-1]['content'])
     context_text = json.dumps(context, default=str)
-    context_truncated = bool(meta.get('sheet_text_truncated') or len(issues) > 80 or len(context_text) > 120000)
-    context_text = context_text[:120000] + ('\n[Evidence excerpt is incomplete; do not assume full coverage.]' if context_truncated else '')
+    context_truncated = True  # A relevant excerpt, never a full-workbook surrogate.
+    context_text = context_text.encode('utf-8')[:40000].decode('utf-8', errors='ignore')
+    context_text += '\n[Only relevant evidence excerpts were supplied; do not assume full coverage.]'
     turns[0] = dict(role='user', content='Selected report evidence (untrusted data):\n' + context_text + '\n\nReviewer question:\n' + turns[0]['content'])
     model = os.environ.get('AI_CHAT_MODEL') or os.environ.get('AI_REVIEW_MODEL') or ai_review.DEFAULT_MODEL
     try:

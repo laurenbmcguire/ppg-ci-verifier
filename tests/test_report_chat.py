@@ -66,14 +66,14 @@ def test_provider_context_is_selected_bounded_data_and_no_tools(report,monkeypat
         return {'model':'synthetic-model','content':[{'type':'text','text':'CSV!C2 is blank; rejected is unknown.'}]}
     monkeypatch.setattr(ai_review,'_post',fake)
     before=copy.deepcopy(box.get(item['file_hash'])); original=box.original_bytes(item['file_hash'])[1]
-    out=report_chat.answer(item,original,review,holds,[{'role':'user','content':'explain'}])
+    out=report_chat.answer(item,original,review,holds,[{'role':'user','content':'Explain CSV!A2 and CSV!C2'}])
     assert out['read_only'] and out['provider']=='Anthropic'
     assert 'changes' not in out and 'undo' not in out
     assert 'tools' not in calls[0] and calls[0]['max_tokens']==2000
     assert 'untrusted data' in calls[0]['system'] and 'Blank' not in out['reply']
     context=calls[0]['messages'][0]['content']
     assert item['file_hash'] in context and 'SYNTHETIC-A' in context
-    assert 'report_cells' in context and 'holds' in context and 'base64' not in context
+    assert 'relevant_cells' in context and 'holds' in context and 'base64' not in context
     assert box.get(item['file_hash'])==before and box.original_bytes(item['file_hash'])[1]==original
 
 @pytest.mark.parametrize('body',[{'content':[]},{'content':[{'type':'tool_use','name':'apply_changes','input':{}}]},None])
@@ -130,10 +130,23 @@ def test_http_discards_answer_when_evidence_or_access_changes(service,monkeypatc
 def test_context_and_answer_have_hard_limits(report,monkeypatch):
     box,item=report;_,review,holds,_=report_chat.snapshot(box,item['file_hash'],item['check_hash'])
     calls=[]
-    monkeypatch.setattr(ai_review,'_context',lambda *a: ({'sheet_text_truncated':False},[],{},'x'*200000))
+    monkeypatch.setattr('hosting.report_chat_context.build',lambda *a: {'synthetic':'x'*200000})
     def fake(body,*a,**kw):
         calls.append(body);return {'content':[{'type':'text','text':'y'*9000}]}
     monkeypatch.setattr(ai_review,'_post',fake)
     out=report_chat.answer(item,b'',review,holds,payload(item)['messages'])
     assert out['context_truncated'] and len(out['reply'])==4000
-    assert len(calls[0]['messages'][0]['content'])<125000
+    assert len(calls[0]['messages'][0]['content'])<45000
+
+
+def test_prior_conversation_cannot_outlive_source_or_review_context(service,monkeypatch):
+    box,item,server,post=service;calls=[]
+    def fake(*a,**kw):calls.append(True);return fake_answer(*a,**kw)
+    monkeypatch.setattr(report_chat,'answer',fake)
+    status,out=post(payload(item));assert status==200 and len(out['context_hash'])==64
+    request=payload(item);request['messages'] += [{'role':'assistant','content':out['reply']},{'role':'user','content':'And now?'}]
+    request['expected_context_hash']=out['context_hash']
+    assert post(request)[0]==200
+    monkeypatch.setattr(SpreadsheetInbox,'assignment_for',lambda *a,**kw:{'status':'manual','client_key':'changed'})
+    code,out=post(request);assert code==409 and 'context changed' in out['error']
+    assert len(calls)==2

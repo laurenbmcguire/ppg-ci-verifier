@@ -945,6 +945,8 @@ class handler(BaseHTTPRequestHandler):
                 with self.store().session() as directory:
                     inbox = SpreadsheetInbox(directory)
                     item, review, holds, fingerprint = report_chat.snapshot(inbox, file_hash, expected)
+                    if len(conversation) > 1 and payload.get('expected_context_hash') != fingerprint:
+                        raise Conflict('Report source or review context changed. Reload before continuing this conversation.')
                     _, data = inbox.original_bytes(file_hash)
                 out = report_chat.answer(item, data, review, holds, conversation)
                 # Provider work happens outside a transaction. Recheck authorization and
@@ -960,6 +962,7 @@ class handler(BaseHTTPRequestHandler):
                     current = report_chat.snapshot(SpreadsheetInbox(directory), file_hash, expected)
                     if current[3] != fingerprint:
                         raise Conflict('Report evidence or access changed while Dex was answering. Reload before asking again.')
+                out['context_hash'] = fingerprint
                 return self.send(200, encode_json(out))
             if route == '/api/change-summary':   # make a PDF change summary now (kept on record)
                 payload = json.loads(raw)
@@ -1927,13 +1930,8 @@ class handler(BaseHTTPRequestHandler):
                             body = encode_json({'item': cleaned})
                 except Exception:
                     debug_log()  # the upload itself was saved; the formatting can still be fixed from the report
-            if route in ('/api/spreadsheets/upload/finish', '/api/spreadsheets/import') and ai_review_configured():
-                try:
-                    item = json.loads(body)['item']
-                    if not (item.get('ai_review') or {}).get('status') == 'done':
-                        body = encode_json({'item': self.ai_review(item['file_hash'])})
-                except Exception:
-                    debug_log()  # the upload itself was saved; AI review can be retried from the UI
+            # Uploading preserves the user's manual-vs-AI choice. Provider preparation
+            # requires a separate explicit action; configuration is not consent.
             return self.send(200, body, content_type, headers)
         except (Conflict, IntakeError, ValueError, TypeError, KeyError) as exc:
             return self.fail(409, str(exc))

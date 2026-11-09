@@ -60,7 +60,7 @@ class AILayoutTests(unittest.TestCase):
         spec = dict(sheet='Shift Log', kind='detail', header_row=5, first_data_row=6, last_data_row=17,
                     columns=dict(identifier='B', part='C', condition='D', defect='E'), one_row_per_unit=True, reject_values=['NOK'])
         with patch('hosting.ai_review._post', return_value=answer([spec])) as post:
-            result = inspect_spreadsheet('eos.xlsx', raw)
+            result = inspect_spreadsheet('eos.xlsx', raw, allow_ai_layout=True)
         self.assertTrue(post.called)
         self.assertEqual(result['layout_source'], 'ai')
         self.assertEqual(result['record_count'], 12)
@@ -71,13 +71,13 @@ class AILayoutTests(unittest.TestCase):
 
     def test_without_ai_the_same_file_has_no_rows(self):
         os.environ.pop('ANTHROPIC_API_KEY')
-        result = inspect_spreadsheet('eos.xlsx', _xlsx(scan_list))
+        result = inspect_spreadsheet('eos.xlsx', _xlsx(scan_list), allow_ai_layout=True)
         self.assertIn('no_rows_found', [i['code'] for i in summarize(result)['issues']])
 
     def test_unusual_count_headers_mapped_by_ai(self):
         spec = dict(sheet='Daily', kind='detail', header_row=2, first_data_row=3, columns=dict(identifier='A', inspected='B', certified='C', rejected='D'))
         with patch('hosting.ai_review._post', return_value=answer([spec])):
-            result = inspect_spreadsheet('daily.xlsx', _xlsx(counts))
+            result = inspect_spreadsheet('daily.xlsx', _xlsx(counts), allow_ai_layout=True)
         self.assertEqual(result['record_count'], 2)
         self.assertEqual(result['totals']['inspected']['known_sum'], '150')
 
@@ -91,12 +91,12 @@ class AILayoutTests(unittest.TestCase):
     def test_ai_failure_falls_back_quietly(self):
         from hosting.ai_review import AIReviewError
         with patch('hosting.ai_review._post', side_effect=AIReviewError('down')):
-            result = inspect_spreadsheet('eos.xlsx', _xlsx(scan_list))
+            result = inspect_spreadsheet('eos.xlsx', _xlsx(scan_list), allow_ai_layout=True)
         self.assertIn('no_rows_found', [i['code'] for i in summarize(result)['issues']])
 
     def test_turned_off(self):
         with patch.dict(os.environ, {'AI_LAYOUT': '0'}), patch('hosting.ai_review._post') as post:
-            inspect_spreadsheet('eos.xlsx', _xlsx(scan_list))
+            inspect_spreadsheet('eos.xlsx', _xlsx(scan_list), allow_ai_layout=True)
         post.assert_not_called()
 
 

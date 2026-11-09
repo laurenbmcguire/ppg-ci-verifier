@@ -34,6 +34,9 @@ def source_receipt(item, day, assignment=None, mapping_state=None):
         reasons.append('The saved checker is outdated; recheck before source verification.')
     if not rec: reasons.append('No item-by-item source check is recorded.')
     if rec.get('stale'): reasons.append('The source check is stale.')
+    from hosting.reconcile import current
+    if rec and current(item) is None:
+        reasons.append('The saved source receipt does not match the current authoritative report scope or binding. Review the layout and compare the source again.')
     for key in ('file_hash', 'checker_version'):
         if not item.get(key) or bound.get(key) != item.get(key):
             reasons.append(f'Missing or mismatched {key} binding.')

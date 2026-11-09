@@ -203,8 +203,8 @@ def _cached_rows(raw):
         workbook.close()
 
 
-def inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) -> dict:
-    result = _inspect_spreadsheet(filename, raw, keep_records)
+def inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False, *, allow_ai_layout=False) -> dict:
+    result = _inspect_spreadsheet(filename, raw, keep_records, allow_ai_layout=allow_ai_layout)
     if isinstance(filename, str) and filename.lower().endswith('.xlsx'):
         try:
             _attach_photos(result, raw)
@@ -272,7 +272,7 @@ def _attach_photos(result, raw):
         result['finding_count'] = sum(merged.values())
 
 
-def _inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) -> dict:
+def _inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False, *, allow_ai_layout=False) -> dict:
     """Return internal checks only; rejects unsafe input with SpreadsheetError.
 
     A successful parse is not source authentication, external reconciliation, or
@@ -289,9 +289,11 @@ def _inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) 
     result = dict(filename=filename, file_sha256=digest, spreadsheet_id=digest,checker_version=CHECKER_VERSION,
                   format=fmt, byte_count=len(raw), verification_scope='internal_spreadsheet_checks_only',
                   source_authenticity='not_supplied', release_status='held',
-                  formulas_evaluated=False, sheets=[], findings=[], findings_truncated=False,
+                  formulas_evaluated=False, layout_ai_requested=allow_ai_layout is True, sheets=[], findings=[], findings_truncated=False,
                   limitations=['First row is treated as headers.', 'Formulas are not evaluated.',
                                'No external source reconciliation or authenticity verification was performed.'])
+    if allow_ai_layout is not True:
+        result['limitations'].append('AI layout detection was not requested. Only locally recognized layouts are checked.')
     counts = Counter()
     pristine = dict(result, sheets=[], findings=[], limitations=list(result['limitations']))
 
@@ -325,10 +327,10 @@ def _inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) 
             sources.append((title,sheet_rows))
         from hosting.pratt_reports import inspect_pratt
         pratt=inspect_pratt(sources,result)
-        if pratt is not None:return _finish(_attach_external(_exact_or_adaptive(pratt,sources,pristine,raw),notes),keep_records)
+        if pratt is not None:return _finish(_attach_external(_exact_or_adaptive(pratt,sources,pristine,raw,allow_ai_layout=allow_ai_layout),notes),keep_records)
         from hosting.branded_reports import inspect_branded
         branded=inspect_branded(sources,result)
-        if branded is not None:return _finish(_attach_external(_exact_or_adaptive(branded,sources,pristine,raw),notes),keep_records)
+        if branded is not None:return _finish(_attach_external(_exact_or_adaptive(branded,sources,pristine,raw,allow_ai_layout=allow_ai_layout),notes),keep_records)
     total_cells = total_rows = 0
     try:
         for title, rows in sources:
@@ -415,7 +417,7 @@ def _inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) 
         # (summary, detail, raw export): find the tables anywhere and count one authoritative record set.
         from hosting.adaptive_reports import inspect_adaptive
         rows = sources if fmt == 'xlsx' else [('CSV', list(csv.reader(io.StringIO(decoded, newline=''), strict=True)))]
-        adaptive = inspect_adaptive(rows, pristine, cached=_cached_rows(raw) if fmt == 'xlsx' else None, hidden=_hidden(raw) if fmt == 'xlsx' else None)
+        adaptive = inspect_adaptive(rows, pristine, cached=_cached_rows(raw) if fmt == 'xlsx' else None, hidden=_hidden(raw) if fmt == 'xlsx' else None, allow_ai_layout=allow_ai_layout)
         if adaptive is not None:
             ident = _good_identity(adaptive.get('report_identity'), rows)
             if ident:
@@ -428,7 +430,7 @@ def _inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) 
     return _attach_external(result, notes)
 
 
-def report_records(filename, raw):
+def report_records(filename, raw, *, allow_ai_layout=False):
     """Detail rows of any report layout (automatic column detection), for source comparison."""
     from hosting.adaptive_reports import inspect_adaptive
     if filename.lower().endswith('.xlsx'):
@@ -437,11 +439,11 @@ def report_records(filename, raw):
     else:
         rows = [('CSV', list(csv.reader(io.StringIO(raw.decode('utf-8-sig'), newline=''), strict=True)))]
         cached = None
-    result = inspect_adaptive(rows, {'limitations': []}, cached=cached)
+    result = inspect_adaptive(rows, {'limitations': []}, cached=cached, allow_ai_layout=allow_ai_layout)
     return result['_detail_records'] if result else []
 
 
-def report_and_export_records(filename, raw):
+def report_and_export_records(filename, raw, *, allow_ai_layout=False):
     """(record rows, the workbook's own SharePoint export rows) for reconciliation against the live lists."""
     from hosting.adaptive_reports import inspect_adaptive
     if filename.lower().endswith('.xlsx'):
@@ -450,7 +452,7 @@ def report_and_export_records(filename, raw):
     else:
         rows = [('CSV', list(csv.reader(io.StringIO(raw.decode('utf-8-sig'), newline=''), strict=True)))]
         cached = None
-    result = inspect_adaptive(rows, {'limitations': []}, cached=cached)
+    result = inspect_adaptive(rows, {'limitations': []}, cached=cached, allow_ai_layout=allow_ai_layout)
     return (result['_detail_records'], result.get('_export_records') or []) if result else ([], [])
 
 
@@ -542,7 +544,7 @@ def _good_identity(identity, sources):
     return identity if any(identity.values()) else None
 
 
-def _exact_or_adaptive(strict, sources, pristine, raw):
+def _exact_or_adaptive(strict, sources, pristine, raw, *, allow_ai_layout=False):
     """Keep an exact template match; otherwise use automatic column detection for this layout."""
     if strict.get('template_mapping_status') == 'matched' and strict.get('record_count'):
         return strict
@@ -553,7 +555,7 @@ def _exact_or_adaptive(strict, sources, pristine, raw):
         report_day = _date.fromisoformat(identity['report_date']) if identity.get('report_date') else None
     except ValueError:
         report_day = None
-    adaptive = inspect_adaptive(sources, pristine, cached=_cached_rows(raw), report_day=report_day, hidden=_hidden(raw))
+    adaptive = inspect_adaptive(sources, pristine, cached=_cached_rows(raw), report_day=report_day, hidden=_hidden(raw), allow_ai_layout=allow_ai_layout)
     if adaptive is None:
         return strict
     adaptive['recognized_template'] = strict.get('template_id')

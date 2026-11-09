@@ -81,7 +81,7 @@ class LargeAndPartial(unittest.TestCase):
             def change(r, rec=rec):
                 r.pop('source_reconciliation', None)
                 if rec:
-                    r['source_reconciliation'] = dict(rec, bound_to=rec.get('bound_to') or dict(file_hash=r['file_hash'], checker_version=r['checker_version']))
+                    r['source_reconciliation'] = dict(rec, report_rows=r['record_count'], bound_to=rec.get('bound_to') or dict(file_hash=r['file_hash'], checker_version=r['checker_version']))
             box._update(h, change)
             item = box.get(h); rv = summarize(item)
             facts = recommend.report_facts(item, rv, 0)
@@ -224,7 +224,7 @@ class DecisionsStayWithTheirRecord(unittest.TestCase):
         root, box, h = setup()
         def rec(value):
             def change(r):
-                r['source_reconciliation'] = dict(status='discrepancies', snapshot_id='snap-' + value, captured_at='2026-11-08T15:00:00Z',
+                r['source_reconciliation'] = dict(status='discrepancies', report_rows=r['record_count'], snapshot_id='snap-' + value, captured_at='2026-11-08T15:00:00Z',
                                                   rows=[dict(status='value_differs', item='6190', field='rejected', report=None, sharepoint=value,
                                                              sheet='Inspection Detail', row=19)],
                                                   bound_to=dict(file_hash=r['file_hash'], checker_version=r['checker_version']))

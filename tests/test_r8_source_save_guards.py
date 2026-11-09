@@ -5,12 +5,12 @@ from unittest.mock import patch
 from hosting.spreadsheet_inbox import SpreadsheetInbox
 from hosting import reconcile
 from test_r8_count_contract import fixture, DAY
-from eos_fixture import build
+from eos_fixture import build, ROWS
 
 class SourceSaveGuards(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
-        self.inbox=SpreadsheetInbox(self.tmp.name);item=self.inbox.ingest('report.xlsx',build());self.h=item['file_hash']
+        self.inbox=SpreadsheetInbox(self.tmp.name);item=self.inbox.ingest('report.xlsx',build(rows=list(ROWS)[:2]));self.h=item['file_hash']
         self.item=self.inbox.get(self.h);self.a=dict(status='source',site='Plant',site_id='sid',list_id='lid',job='2214',needs_person=False)
     def capture(self):
         records,snap=fixture()

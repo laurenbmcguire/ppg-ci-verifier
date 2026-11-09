@@ -293,7 +293,7 @@
 
   // ---------------------------------------------------------------- sign-in and who is using the app
   function showSignIn(message) {
-    state.reportChat = null;
+    state.reportChat = null; state.dexDrafts = {};
     const me = state.me || {};
     let box = $('signin');
     if (!box) { box = h('div', {id: 'signin', class: 'signin', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'signin-title'}); document.body.append(box); }
@@ -2849,25 +2849,29 @@
   }
   function openChat() { showSide('claude'); }
   function closeChat() { if (state.sideTab === 'claude') showSide('fixes'); }
+  function chatViewKey(r) {
+    return r ? JSON.stringify([r.file_hash, r.check_hash, r.version, r.revision, r.assignment, r.holds, r.finding_decisions_rev, r.review_decisions, r.accepted_issues]) : '';
+  }
   function chatState() {
-    const r = state.report, key = r ? r.file_hash + ':' + r.check_hash : '';
-    if (!state.reportChat || state.reportChat.key !== key) state.reportChat = {key, messages: [], draft: '', busy: false, error: ''};
+    const r = state.report, key = chatViewKey(r);
+    state.dexDrafts ||= {};
+    if (!state.reportChat || state.reportChat.key !== key) state.reportChat = {key, messages: [], draft: state.dexDrafts[key] || '', busy: false, error: ''};
     return state.reportChat;
   }
   async function askDex(chat, binding) {
     const r = state.report;
-    if (chat !== state.reportChat || chat.busy || !state.aiOn || !r || state.selected !== binding.file_hash || r.file_hash !== binding.file_hash || r.check_hash !== binding.expected_check_hash) return;
+    if (chat !== state.reportChat || chat.key !== chatViewKey(r) || chat.busy || !state.aiOn || !r || state.selected !== binding.file_hash || r.file_hash !== binding.file_hash || r.check_hash !== binding.expected_check_hash) return;
     const question = chat.draft.trim(); if (!question || question.length > 4000) return;
-    chat.busy = true; chat.error = ''; drawChat();
+    chat.busy = true; chat.error = ''; delete state.dexDrafts[chat.key]; drawChat();
     const conversation = [...chat.messages.slice(-14), {role: 'user', content: question}];
     try {
-      const out = await api('/api/spreadsheets/chat', {...binding, messages: conversation});
-      if (chat !== state.reportChat || state.selected !== binding.file_hash || state.report?.file_hash !== binding.file_hash || state.report?.check_hash !== binding.expected_check_hash) return;
+      const out = await api('/api/spreadsheets/chat', {...binding, messages: conversation, expected_context_hash: chat.contextHash || null});
+      if (chat !== state.reportChat || chat.key !== chatViewKey(state.report) || state.selected !== binding.file_hash || state.report?.file_hash !== binding.file_hash || state.report?.check_hash !== binding.expected_check_hash) return;
       if (out.read_only !== true || out.file_hash !== binding.file_hash || out.check_hash !== binding.expected_check_hash || typeof out.reply !== 'string' || !out.reply.trim()) throw new Error('Dex returned an answer for different report evidence. Reload before asking again.');
-      chat.messages = [...conversation, {role: 'assistant', content: out.reply}]; chat.draft = '';
-      chat.truncated = out.context_truncated; chat.provider = out.provider;
+      chat.messages = [...conversation, {role: 'assistant', content: out.reply}]; chat.draft = ''; delete state.dexDrafts[chat.key];
+      chat.truncated = out.context_truncated; chat.provider = out.provider; chat.contextHash = out.context_hash;
     } catch (e) {
-      if (chat === state.reportChat && state.selected === binding.file_hash && state.report?.check_hash === binding.expected_check_hash) chat.error = e.message;
+      if (chat === state.reportChat && state.selected === binding.file_hash && state.report?.check_hash === binding.expected_check_hash) { chat.error = e.message; state.dexDrafts[chat.key] = chat.draft; }
     } finally {
       chat.busy = false;
       if (chat === state.reportChat && state.selected === binding.file_hash && state.report?.check_hash === binding.expected_check_hash) drawChat();
@@ -2878,19 +2882,19 @@
     const r = state.report, chat = chatState(), available = !!state.aiOn && !!r.check_hash;
     const binding = {file_hash: r.file_hash, expected_check_hash: r.check_hash};
     const send = h('button', {type: 'button', class: 'btn primary', disabled: !available || chat.busy || !chat.draft.trim(), onclick: () => askDex(chat, binding)}, chat.busy ? 'Asking Dex…' : 'Send');
-    const input = h('textarea', {rows: 3, maxlength: '4000', disabled: !available || chat.busy, 'aria-label': 'Message to Dex', placeholder: available ? 'Ask about a finding, quantity or source hold…' : 'Ask an administrator to configure Claude.', oninput: e => { chat.draft = e.target.value; send.disabled = !available || chat.busy || !chat.draft.trim(); }});
+    const input = h('textarea', {rows: 3, maxlength: '4000', disabled: !available || chat.busy, 'aria-label': 'Message to Dex', placeholder: available ? 'Ask about a finding, quantity or source hold…' : 'Ask an administrator to configure Claude.', oninput: e => { chat.draft = e.target.value; state.dexDrafts[chat.key] = chat.draft; const keys = Object.keys(state.dexDrafts); if (keys.length > 10) delete state.dexDrafts[keys[0]]; send.disabled = !available || chat.busy || !chat.draft.trim(); }});
     input.value = chat.draft;
     panel.replaceChildren(
       h('div', {class: 'chat-top'}, h('b', {}, 'Ask Dex about this report')),
       h('div', {class: 'chat-hello'},
-        h('p', {}, `${r.filename || 'Selected report'} · version ${r.revision || 1} · ${r.file_hash.slice(0, 8)}`),
+        h('p', {}, `${r.filename || 'Selected report'} · file version ${r.version ?? 'unknown'} · revision ${r.revision ?? 'unknown'} · ${r.file_hash.slice(0, 12)}`),
         h('p', {}, available
-          ? 'Sending shares your question and extracted cells, findings and source evidence from this report version with Claude (Anthropic). Answers explain evidence only; they cannot change, approve or send a report.'
+          ? 'Sending shares your question, summary and relevant findings, referenced cells and column headers from this report version with Claude (Anthropic). Other cells and sheets are not sent. Answers explain evidence only; they cannot change, approve or send a report.'
           : 'Dex is unavailable because AI preparation is not configured. Ask an administrator to configure Claude on the server. Do not paste an API key here.'),
         h('p', {}, 'Check answers against the report. Blank values stay unknown and source-review holds remain in place. This conversation is not saved after reload.'),
         h('button', {type: 'button', class: 'btn', onclick: () => { showSide('fixes'); document.querySelector('.fd-mode-selector')?.scrollIntoView({behavior: 'smooth', block: 'center'}); }}, 'Go to review modes')),
       h('div', {class: 'dex-messages', 'aria-live': 'polite'}, chat.messages.map(m => h('div', {class: 'dex-message'}, h('b', {}, m.role === 'user' ? 'You' : 'Dex · Claude (Anthropic)'), h('p', {}, m.content)))),
-      chat.truncated ? h('p', {class: 'hint'}, 'Dex received a limited excerpt. This answer does not establish complete report coverage.') : null,
+      chat.truncated ? h('p', {class: 'hint'}, 'Dex received only relevant evidence excerpts, not the full workbook. This answer does not establish complete report coverage.') : null,
       chat.error ? h('p', {class: 'hint', role: 'alert'}, chat.error) : null,
       h('label', {for: 'dex-question'}, 'Your question'), input, send,
       h('p', {class: 'hint', role: 'status'}, chat.busy ? 'Waiting for Claude. Your report is unchanged.' : 'No changes are selected or applied by chat.'));
