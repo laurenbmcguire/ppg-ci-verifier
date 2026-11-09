@@ -29,7 +29,10 @@ Distinguish active findings, informational notes and previously dismissed or kep
 AI suggestions and previous AI dismissals are unverified. Human decisions are separate from open findings.
 A confirmed state is a human review status, not proof of correctness, source authority or client readiness.
 Unknown codes or missing coverage must not be interpreted as fix eligibility, zero errors or verified quantities.
-Do not claim that any changes or decisions have happened. No HTML, links, Markdown or executable instructions."""
+Do not claim that any changes or decisions have happened. No HTML, links, Markdown or executable instructions.
+Length and voice: you are "Dex". Write a quick summary of at most three short plain sentences for a busy non-technical
+reviewer: what kinds of problems this report has and roughly how big each is. Do not describe the review workflow, do not
+list codes, and do not add caveats beyond one short clause when coverage is incomplete or a hold applies."""
 NOTICE = ('AI explanation only. Counts, groups and holds are server-calculated. No report data, decisions, '
           'corrections or release holds changed. Request suggestions for selected findings separately; review and preview before applying.')
 
@@ -140,10 +143,13 @@ def request_body(result):
 def ask(body):
     data = ai_review._post(body, timeout=45)
     blocks = data.get('content') if isinstance(data, dict) else None
-    if (not isinstance(blocks, list) or not blocks or data.get('stop_reason') == 'max_tokens' or
-            any(not isinstance(b, dict) or b.get('type') != 'text' or not isinstance(b.get('text'), str) for b in blocks)):
+    if not isinstance(blocks, list) or not blocks or data.get('stop_reason') == 'max_tokens':
         raise ai_review.AIReviewError('Unusable narrative.')
-    reply = '\n'.join(b['text'] for b in blocks).strip()
+    # Only plain text blocks are read; any other block type (for example model reasoning) is ignored, never shown.
+    texts = [b['text'] for b in blocks if isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str)]
+    if not texts:
+        raise ai_review.AIReviewError('Unusable narrative.')
+    reply = '\n'.join(texts).strip()
     if not reply or len(reply.encode('utf-8')) > MAX_REPLY_BYTES:
         raise ai_review.AIReviewError('Unusable narrative length.')
     return reply
@@ -169,9 +175,10 @@ def prepare(inbox, payload, authorize, provider=None):
                     raise ai_review.AIReviewError('Unusable narrative.')
                 result.update(reply=reply, narrative_status='done', narrative_notice='AI received aggregate metadata for every available finding group, not workbook or cell values.', narrative_group_count=len(result['groups']))
             except ai_review.AIReviewNotConfigured:
-                result.update(narrative_status='not_configured', narrative_notice='Claude is not configured. The complete available finding inventory remains below; no report changes were made.')
-            except (ai_review.AIReviewError, OSError, IncompleteRead, ValueError, TypeError):
-                result.update(narrative_status='unavailable', narrative_notice='Claude could not return a usable summary. The complete available finding inventory remains below; no report changes were made.')
+                result.update(narrative_status='not_configured', narrative_notice='Dex is not configured. The complete available finding inventory remains below; no report changes were made.')
+            except (ai_review.AIReviewError, OSError, IncompleteRead, ValueError, TypeError) as failed:
+                print('review-summary: unavailable:', type(failed).__name__, str(failed)[:200], flush=True)
+                result.update(narrative_status='unavailable', narrative_notice='Dex could not write a summary just now. The complete available finding inventory remains below; no report changes were made.')
     if snapshot(inbox, payload, authorize)[2] != binding:
         raise ValueError('Report access, source, assignment, findings or review changed. Discard the summary and reload.')
     return result

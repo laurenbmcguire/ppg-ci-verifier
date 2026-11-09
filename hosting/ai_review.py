@@ -189,15 +189,15 @@ def _send(body, opener=None, timeout=None):
             return json.loads(response.read())
     except urllib.error.HTTPError as exc:
         hint = {401: ' Check the API key.', 403: ' The API key is not allowed to use this model.', 429: ' Rate limit or credit limit reached; try again shortly.',
-                529: ' Claude is overloaded; try again shortly.'}.get(exc.code, '')
+                529: ' Dex is overloaded; try again shortly.'}.get(exc.code, '')
         detail = ''
         try:
             detail = str((json.loads(exc.read() or b'{}').get('error') or {}).get('message') or '')[:300]
         except Exception:
             pass
-        raise AIReviewError(f'AI review failed (HTTP {exc.code}).{hint}' + (f' Claude said: {detail}' if detail else '')) from None
+        raise AIReviewError(f'AI review failed (HTTP {exc.code}).{hint}' + (f' The AI service said: {detail}' if detail else '')) from None
     except (urllib.error.URLError, TimeoutError, ValueError):
-        raise AIReviewError('Could not reach Claude for the AI review. Try again.') from None
+        raise AIReviewError('Could not reach Dex for the AI review. Try again.') from None
 
 
 def _rules_text(rules):

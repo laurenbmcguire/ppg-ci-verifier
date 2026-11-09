@@ -1007,6 +1007,14 @@
         h('ul', {class: 'fd-summary-scroll', tabindex: '0', 'aria-label': 'Read-only recorded finding groups'}, groups.map(group => h('li', {},
           h('b', {}, `${group.code}: ${group.count}`), ` · ${group.severity} · ${group.source} · ${group.state}. ${group.ids.filter(id => loadedKeys.has(id)).length} of ${group.count} identities loaded.`)))));
   }
+  // A plain summary from the error list itself, used whenever Dex's own words are not available.
+  function fdPlainSummary() {
+    const open = (state.fdItems || []).filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state));
+    if (!open.length) return 'No errors left to fix on this report.';
+    const groups = fdGroups(open).map(g => [g.items.length, g.title.replace(/ \(and \d+ more like it\)$/, '')]).sort((a, b) => b[0] - a[0]);
+    const top = groups.slice(0, 3).map(([n, title]) => `${n} × ${title.charAt(0).toLowerCase() + title.slice(1)}`);
+    return `This report has ${plural(open.length, 'possible error')} in ${plural(groups.length, 'group')}. The biggest: ${top.join('; ')}${groups.length > 3 ? `; and ${groups.length - 3} more ${groups.length - 3 === 1 ? 'group' : 'groups'}` : ''}.`;
+  }
   function fdSummaryContext(report) {
     return JSON.stringify({assignment: report.assignment, holds: report.holds, source: report.source_reconciliation,
       sharepoint: report.review?.sharepoint, coverage: report.review?.coverage, page: report.review?.page});
@@ -1020,9 +1028,8 @@
     const renderAnswer = (answer, inventory) => {
       if (compact) {
         const narrative = answer.reply.trim(), short = narrative.length > 360 ? narrative.slice(0, 357) + '…' : narrative;
-        output.replaceChildren(h('p', {class: 'fd-summary-text'}, short || 'AI explanation unavailable. Recorded findings remain available below.'),
-          h('p', {class: 'fd-hint'}, `${answer.counts.available} available findings. ${answer.coverage.label}`),
-          h('details', {class: 'fd-summary-more'}, h('summary', {}, 'Full explanation, findings and review reasons'),
+        output.replaceChildren(h('p', {class: 'fd-summary-text'}, short || fdPlainSummary()),
+          h('details', {class: 'fd-summary-more'}, h('summary', {}, 'More detail'),
             h('div', {class: 'fd-summary-detail-body', tabindex: '0'},
               narrative ? h('p', {}, narrative) : null, h('p', {}, answer.narrative_notice), inventory,
               ...(report.holds || []).map(hold => h('p', {}, hold.text || hold.code)), h('p', {}, answer.notice))));
@@ -1318,8 +1325,7 @@
         h('button', {type: 'button', class: 'btn small', disabled: !ai, onclick: () => run(scope, 'ai')}, 'AI fix'),
         h('button', {type: 'button', class: 'btn small', onclick: () => run(scope, 'manual')}, 'Fix manually'),
         h('button', {type: 'button', class: 'btn small', disabled: !ignore, onclick: () => run(scope, 'ignore')}, 'Ignore')),
-      !ai ? h('p', {class: 'fd-hint'}, !state.aiOn ? 'AI fix is off. Fix manually or ignore.' : 'Already decided. Open it to change the decision.') : null,
-      !ignore ? h('p', {class: 'fd-hint'}, scope.some(it => it.issue?.severity === 'high') && scope.length > 1 ? 'Blockers are ignored one at a time, with a reason.' : 'Already decided. Open it to change the decision.') : null);
+      !ai && !state.aiOn ? h('p', {class: 'fd-hint'}, 'AI fix is off. Fix manually or ignore.') : null);
   }
   // The problems the three buttons act on, in plain words: where, and what is wrong.
   function fdProblemList(scope, max = 4) {
@@ -1598,8 +1604,8 @@
         h('button', {type: 'button', class: 'fd-grouphead', 'aria-expanded': String(!!cur && cur.group === g.key), onclick: () => fdReviewDialog(g.items, null, g.title)},
           h('span', {class: 'fd-gtitle'}, g.unresolved ? '' : icon('ok', 14), g.unresolved ? '' : ' ', g.title),
           h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'error')}${g.unresolved && g.unresolved < g.items.length ? ` · ${g.unresolved} to fix` : ''}${g.status && g.status !== 'Needs review' ? ` · ${g.status}` : ''}`)),
-        fdDirectControls(g.items), fdOccurrenceList(g),
-        r.review.page?.complete !== false && g.tier !== 'format' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null,
+        fdDirectControls(g.items.filter(x => ['open', 'selected', 'deferred', 'confirmed'].includes(x.state))),
+        false && r.review.page?.complete !== false && g.tier !== 'format' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null,
           onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'open'}; drawSide(); }}, `Keep ${g.open} as recorded…`) : null,
         r.review.page?.complete !== false && g.items[0].state === 'claude' ? h('div', {class: 'fd-cardacts'},
           h('button', {type: 'button', class: 'btn small', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'claude',
@@ -1722,7 +1728,12 @@
     const dismiss = h('button', {type: 'button', class: 'btn small subtle', onclick: () => { state.fdAIRun = null; drawSide(); }}, 'OK');
     if (run.running) return h('div', {class: 'fd-airun', role: 'status'}, h('span', {class: 'spin'}), run.saving ? ` Saving ${plural(run.saving, 'fix', 'fixes')}…` : ` Dex is fixing ${plural(run.total, 'error')}…`);
     if (run.error) return h('div', {class: 'fd-airun bad', role: 'alert'}, h('p', {}, `AI fix did not finish: ${run.error}`), dismiss);
-    const why = (run.skipped || []).length ? h('details', {}, h('summary', {}, 'Why some were not fixed'), h('ul', {}, run.skipped.slice(0, 50).map(x => h('li', {}, x.reason)))) : null;
+    const plain = t => /report holds/i.test(t) ? 'This report is on hold (for example the client or SharePoint is not confirmed yet), so Dex is not allowed to change it.'
+      : /source authority|source correction/i.test(t) ? 'This one depends on SharePoint, so Dex cannot decide the right value.'
+      : /unambiguous editable cell|does not identify an editable cell/i.test(t) ? 'This error is about a whole row, not one cell, so it needs a person.'
+      : /No supported cell suggestion|could not return a safe/i.test(t) ? 'Dex does not know the right value (it never guesses missing numbers).' : t;
+    const reasons = new Map(); for (const x of run.skipped || []) { const t = plain(String(x.reason || '')); reasons.set(t, (reasons.get(t) || 0) + 1); }
+    const why = reasons.size ? h('ul', {class: 'fd-airun-why'}, [...reasons].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([t, n]) => h('li', {}, `${n} not fixed: ${t}`))) : null;
     if (!run.fixed) return h('div', {class: 'fd-airun', role: 'status'}, h('p', {}, `Dex could not fix ${run.tried === 1 ? 'this error' : `these ${run.tried} errors`}. Nothing was changed. Fix ${run.tried === 1 ? 'it' : 'them'} manually or ignore ${run.tried === 1 ? 'it' : 'them'}.`), why, dismiss);
     return h('div', {class: 'fd-airun good', role: 'status'},
       h('p', {}, h('b', {}, `${run.manual ? 'You changed' : 'Dex fixed'} ${plural(run.fixed, 'cell')}.`), ` Saved as version ${(run.from || 1) + 1}; version ${run.from || 1} is kept.`),
@@ -2294,6 +2305,25 @@
       if (state.report && state.selected === state.report.file_hash) document.querySelector('.fd-mode-selector')?.replaceWith(fdModeSelector(state.report));
     }
   }
+  // Every report is compared with SharePoint when it is opened: once per version, without a click. Reading only.
+  function fdAutoReconcile(r) {
+    const rec = r.source_reconciliation || {}, bound = rec.bound_to || {}, sp = r.review?.sharepoint || {};
+    const fresh = !rec.stale && bound.file_hash === r.file_hash && !!bound.checker_version && bound.checker_version === r.checker_version && !!rec.snapshot_id && sp.status && sp.status !== 'stale';
+    state.fdAutoSP ||= {};
+    const key = r.file_hash + ':' + r.check_hash;
+    if (fresh || state.fdAutoSP[key] || (r.assignment || {}).needs_person) return false;
+    if (state.fdAutoSPWaiting) return true;
+    state.fdAutoSPWaiting = true; let tries = 0;
+    const attempt = async () => {
+      if (state.report !== r || state.fdAutoSP[key]) { state.fdAutoSPWaiting = false; return; }
+      if (state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || state.fdAutoRecheckWaiting || state.fdReconciling || !state.fixes) { if (++tries < 120) setTimeout(attempt, 500); else state.fdAutoSPWaiting = false; return; }
+      state.fdAutoSP[key] = true; state.fdReconciling = true; drawSide();
+      try { await api('/api/spreadsheets/sharepoint', {file_hash: r.file_hash}); state.fdReconciling = false; state.fdAutoSPWaiting = false;
+        if (state.report === r) { await openReport(r.file_hash, true); loadList(); } }
+      catch (e) { state.fdReconciling = false; state.fdAutoSPWaiting = false; state.fdAutoSPError = {key, message: e.message}; if (state.report === r) drawSide(); }
+    };
+    setTimeout(attempt, 0); return true;
+  }
   async function fdReconcile() {
     toast('Comparing every record with its SharePoint item…');
     try { await api('/api/spreadsheets/sharepoint', {file_hash: state.report.file_hash}); await openReport(state.report.file_hash, true); loadList();
@@ -2415,17 +2445,28 @@
     if (rows.report_rows != null && rows.matched_unique_items != null && rows.report_rows !== rows.matched_unique_items && differs)
       totals.push(`Records: ${value(rows.report_rows)} rows in the report, ${value(rows.matched_unique_items)} matched in SharePoint.`);
     if (rows.duplicate_report_rows) totals.push(`${rows.duplicate_report_rows} duplicate row${rows.duplicate_report_rows === 1 ? '' : 's'} in the report.`);
-    const answer = verified ? 'Matches SharePoint' : differs ? `Does not match SharePoint · ${differences.length}${rec.rows_truncated ? '+' : ''} ${differences.length === 1 ? 'difference' : 'differences'}` : 'Not checked against SharePoint yet';
-    return h('details', {class: 'fd-comparison ' + (verified ? 'ok' : differs ? 'bad' : 'unknown'), open: differs || null},
-      h('summary', {}, verified ? icon('ok', 15) : differs ? icon('x', 15) : icon('warn', 15), ' ', answer),
+    const checking = !verified && !differs && (state.fdReconciling || (typeof fdAutoReconcile === 'function' && state.report === r && fdAutoReconcile(r)));
+    const possible = !verified && !differs && differences.length > 0;
+    const failed = state.fdAutoSPError?.key === r.file_hash + ':' + r.check_hash ? state.fdAutoSPError.message : null;
+    const kinds = new Map(); for (const row of differences) kinds.set(row.status, (kinds.get(row.status) || 0) + 1);
+    const kindText = {value_differs: 'values differ from SharePoint', export_value_differs: 'values differ from SharePoint', changed_since_export: 'changed on SharePoint since the export',
+      missing_from_report: 'on SharePoint but missing from the report', not_on_sharepoint_for_day: 'not on SharePoint for this day', not_on_sharepoint: 'not on SharePoint at all',
+      item_listed_twice: 'duplicate rows', report_row_without_item_id: 'rows with no SharePoint item number', wrong_list: 'from a different SharePoint list'};
+    const quick = [...kinds].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${kindText[k] || String(k).replace(/_/g, ' ')}`);
+    const answer = verified ? 'Matches SharePoint' : differs ? `Does not match SharePoint · ${differences.length}${rec.rows_truncated ? '+' : ''} ${differences.length === 1 ? 'difference' : 'differences'}`
+      : checking ? 'Checking SharePoint…' : possible ? `${differences.length} possible ${differences.length === 1 ? 'difference' : 'differences'} from SharePoint` : failed ? 'SharePoint could not be checked' : 'SharePoint check is not complete';
+    return h('details', {class: 'fd-comparison ' + (verified ? 'ok' : differs ? 'bad' : 'unknown'), open: differs || possible || null},
+      h('summary', {}, verified ? icon('ok', 15) : differs ? icon('x', 15) : checking ? h('span', {class: 'spin'}) : icon('warn', 15), ' ', answer),
+      (differs || possible) && quick.length ? h('p', {class: 'fd-sp-quick'}, quick.join(' · ') + '.') : null,
+      failed && !checking ? h('p', {class: 'fd-hint'}, failed, ' ', h('button', {type: 'button', class: 'fd-linkbtn', onclick: () => { state.fdAutoSPError = null; fdReconcile(); }}, 'Try again')) : null,
       verified ? h('p', {}, 'Every record and quantity in this report matches SharePoint.') : null,
       differs ? h('section', {}, h('h3', {}, `What is different (${differences.length}${rec.rows_truncated ? '+' : ''})`),
         totals.length ? h('ul', {class: 'fd-difference-totals'}, totals.map(t => h('li', {}, t))) : null,
         h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Differences from SharePoint'}, differences.map(row => h('li', {}, fdDifferenceText(row),
           row.url ? [' ', h('a', {href: row.url, target: '_blank', rel: 'noopener'}, 'Open in SharePoint')] : null))),
         null) : null,
-      !verified && !differs ? h('p', {}, current && rec.rows ? 'SharePoint was read, but the comparison is not complete or not confirmed, so this report is not verified yet.'
-        : 'This report has not been compared with SharePoint yet, so it is not verified.') : null,
+      !verified && !differs && !checking ? h('p', {class: 'fd-hint'}, current && rec.rows ? `SharePoint was read, but part of the comparison could not be confirmed${sp.message ? ': ' + String(sp.message).split('. ')[0] + '.' : '.'}`
+        : (r.assignment || {}).needs_person ? 'Choose the client and job first; then SharePoint is checked automatically.' : 'SharePoint has not answered for this report yet.') : null,
       !verified && !differs && differences.length ? h('details', {}, h('summary', {}, `Earlier comparison, not verified · ${differences.length} possible difference${differences.length === 1 ? '' : 's'}`),
         h('p', {class: 'fd-hint'}, 'Not confirmed: these may not be real differences until the comparison is complete.'),
         h('ul', {class: 'fd-difference-list'}, differences.map(row => h('li', {}, fdDifferenceText(row))))) : null,
