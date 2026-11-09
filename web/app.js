@@ -396,6 +396,7 @@
       loadFixes(hash);
       if (state.openSendFor && (state.openSendFor === hash || state.openSendFor === 'next' && data.fixed_from)) { state.openSendFor = null; openSend(); }
     } catch (e) {
+      if (state.selected !== hash) return;
       report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note'}, e.message)));
     }
   }

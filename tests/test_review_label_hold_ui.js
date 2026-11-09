@@ -70,3 +70,8 @@ test('recheck releases newly rendered report controls without replacing typed de
  vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile('),ctx);const run=ctx.fdRecheck();old.isConnected=false;state.report={file_hash:'two'};state.selected='two';resolve({});await run;
  assert.equal(current.disabled,false);assert.equal(current.released,true);assert.equal(refresh,1);assert.equal(typed.value,'Keep this typed reason');
 });
+
+test('failed old report refresh never paints over a newer selected report',async()=>{
+ let reject,paints=0;const state={selected:'one'};const ctx=vm.createContext({state,$:()=>({replaceChildren:()=>paints++}),api:()=>new Promise((r,j)=>reject=j),fillPages:x=>x,h:()=>({})});
+ vm.runInContext(between('  async function openReport(', '  // Reports uploaded before'),ctx);const pending=ctx.openReport('one',true);state.selected='two';reject(Error('Old refresh failed'));await pending;assert.equal(paints,0);
+});
