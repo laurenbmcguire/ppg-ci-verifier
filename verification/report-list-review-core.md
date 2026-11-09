@@ -36,3 +36,9 @@ After the immutable 321c996 runtime review snapshot, a narrow follow-up changes 
 A synthetic production-function test exercises both tab and sidebar badges for two clients plus Needs client, including source incomplete/stale, ambiguous/missing client, missing review, missing coverage, sent/clear/hidden records, and badge clearing after resolution. Eight list tests and all 113 Node UI tests passed; JavaScript syntax and diff-whitespace checks passed. No provider or report writes were invoked.
 
 A separate Ask Dex owner confirmed a passive AI_LAYOUT path in report parsing/proposal preparation and is gating it independently with a default-off explicit parser permission. That privacy change is not integrated or verified in this branch. The final combined aggregate must include the passive-open/fixes/record-extraction no-provider regression, with provider configuration present in synthetic fakes, before release. No Ask Dex or selected-AI feature wiring was added by this badge follow-up.
+
+## After-scroll chooser browser check
+
+The existing sticky chooser implementation was exercised directly in headless Chromium at 1200×850 and 390×850 using 31 fabricated items with two distinct error codes. After scrolling the modal to its last group (173px desktop, 857px phone), the selected count and all seven actions were visible and hit-testable within the viewport. A direct mouse-coordinate click on Select none, without locator auto-scrolling, cleared the selection. Error-type/group/individual and cross-page selection, blocker evidence guarding, exact preview capture, manual scope, stale-binding rejection and Escape/focus also passed. No runtime change was needed for this check.
+
+This remains a standalone production-chooser/synthetic-action test, not an integrated provider or persisted decision test. Final combined own-decision/manual/AI route verification remains pending the final integration and applicable sharing approval.
