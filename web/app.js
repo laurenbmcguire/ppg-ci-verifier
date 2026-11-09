@@ -1083,12 +1083,12 @@
           h('span', {class: 'fd-gtitle'}, g.unresolved ? '' : icon('ok', 14), g.unresolved ? '' : ' ', g.title),
           h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'item')} · ${plural(g.records, 'record')}${g.unresolved ? ` · ${g.unresolved} unresolved` : ''}`)),
         fdOccurrenceList(g),
-        r.review.page?.complete !== false && g.tier !== 'format' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', disabled: state.decisionPending || state.rechecking || state.busy || null,
+        r.review.page?.complete !== false && g.tier !== 'format' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null,
           onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'open'}; drawSide(); }}, `Keep ${g.open} as recorded…`) : null,
         r.review.page?.complete !== false && g.items[0].state === 'claude' ? h('div', {class: 'fd-cardacts'},
-          h('button', {type: 'button', class: 'btn small', disabled: state.decisionPending || state.rechecking || state.busy || null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'claude',
+          h('button', {type: 'button', class: 'btn small', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'claude',
             reason: 'Agreed with Claude: ' + (g.items[0].issue?.claude?.reason || g.items[0].issue?.verdict_reason || '')}; drawSide(); }}, `Agree with Dex for ${g.items.length}…`),
-          h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || state.rechecking || state.busy || null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reopen', which: 'claude'}; drawSide(); }}, `Put ${g.items.length} back for review…`)) : null,
+          h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reopen', which: 'claude'}; drawSide(); }}, `Put ${g.items.length} back for review…`)) : null,
         state.fdBatch && state.fdBatch.group === g.key ? fdBatchForm(g) : null);
     })));
     appendHistory();
@@ -1250,13 +1250,13 @@
           it.state === 'selected' ? 'Remove from preview' : 'Include in preview') : null,
         h('details', {class: 'fd-source-review'}, h('summary', {class: 'btn subtle'}, 'Source review'),
         it.fix && it.fp && it.state !== 'kept' ? h('button', {type: 'button', class: 'btn', onclick: () => fdDecide(it, 'keep')}, it.report === '' ? 'Keep blank' : 'Keep as recorded') : null,
-        finding && it.state === 'open' ? h('button', {type: 'button', class: 'btn', disabled: busy, onclick: () => { state.fdForm = {item: it, key: it.key, action: 'reject'}; drawSide(); }},
+        finding && it.state === 'open' ? h('button', {type: 'button', class: 'btn', disabled: busy, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => { state.fdForm = {item: it, key: it.key, action: 'reject'}; drawSide(); }},
           it.report === '' ? 'Keep blank…' : 'Keep as recorded…') : null,
-        finding && it.state === 'open' ? h('button', {type: 'button', class: 'btn', disabled: busy, onclick: () => { state.fdForm = {item: it, key: it.key, action: 'defer'}; drawSide(); }}, 'Await source owner…') : null,
-        finding && it.state === 'open' ? h('button', {type: 'button', class: 'btn subtle', disabled: busy, onclick: () => fdSendDecision({ids: [it.key], action: 'confirm', from: it})}, 'Confirm it needs a correction') : null,
-        dd ? h('button', {type: 'button', class: 'btn subtle', disabled: busy, onclick: () => fdSendDecision({action: 'undo', undo_of: dd.decision_id, from: it})}, 'Undo source decision') : null,
-        it.state === 'claude' ? h('button', {type: 'button', class: 'btn', disabled: busy, onclick: () => { state.fdForm = {item: it, key: it.key, action: 'reject', reason: 'Agreed with Claude: ' + (it.issue?.claude?.reason || it.issue?.verdict_reason || '')}; drawSide(); }}, 'Agree with Dex…') : null,
-        it.state === 'claude' || it.state === 'kept_earlier' ? h('button', {type: 'button', class: 'btn subtle', disabled: busy, onclick: () => fdSendDecision({ids: [it.key], action: 'reopen', reason: 'Put back for review', from: it})}, it.state === 'claude' ? 'Put back for review' : 'Review again') : null,
+        finding && it.state === 'open' ? h('button', {type: 'button', class: 'btn', disabled: busy, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => { state.fdForm = {item: it, key: it.key, action: 'defer'}; drawSide(); }}, 'Await source owner…') : null,
+        finding && it.state === 'open' ? h('button', {type: 'button', class: 'btn subtle', disabled: busy, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => fdSendDecision({ids: [it.key], action: 'confirm', from: it})}, 'Confirm it needs a correction') : null,
+        dd ? h('button', {type: 'button', class: 'btn subtle', disabled: busy, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => fdSendDecision({action: 'undo', undo_of: dd.decision_id, from: it})}, 'Undo source decision') : null,
+        it.state === 'claude' ? h('button', {type: 'button', class: 'btn', disabled: busy, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => { state.fdForm = {item: it, key: it.key, action: 'reject', reason: 'Agreed with Claude: ' + (it.issue?.claude?.reason || it.issue?.verdict_reason || '')}; drawSide(); }}, 'Agree with Dex…') : null,
+        it.state === 'claude' || it.state === 'kept_earlier' ? h('button', {type: 'button', class: 'btn subtle', disabled: busy, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => fdSendDecision({ids: [it.key], action: 'reopen', reason: 'Put back for review', from: it})}, it.state === 'claude' ? 'Put back for review' : 'Review again') : null,
         it.state === 'corrected' && it.issue?.corrected?.file_hash ? h('a', {class: 'btn subtle', href: '#r=' + it.issue.corrected.file_hash}, `Open v${it.issue.corrected.revision || ''}`) : null,
         h('button', {type: 'button', class: 'btn subtle', onclick: () => fdEvidence(it)}, icon('db', 15), ' Source evidence'))),
       fdConflict(it) ? fdCoordinatedForm(it) : it.cell && it.state !== 'kept' ? h('details', {class: 'fd-edit-value'}, h('summary', {class: 'btn subtle'}, 'Edit value'), fdOwnValueForm(it)) : null,
@@ -1616,8 +1616,11 @@
     finally {
       if (state.rechecking !== operation) return;
       state.rechecking = false;
-      controls.forEach(([node, disabled]) => { if (node.isConnected) node.disabled = disabled; });
-      if (state.selected === hash && state.report?.file_hash === hash) document.querySelector('.fd-mode-selector')?.replaceWith(fdModeSelector(state.report));
+      if (!state.busy && !state.decisionPending) {
+        controls.forEach(([node, disabled]) => { if (node.isConnected) node.disabled = disabled; });
+        document.querySelectorAll('[data-recheck-disabled]').forEach(node => { node.disabled = false; node.removeAttribute('data-recheck-disabled'); });
+      }
+      if (state.report && state.selected === state.report.file_hash) document.querySelector('.fd-mode-selector')?.replaceWith(fdModeSelector(state.report));
     }
   }
   async function fdReconcile() {
@@ -1645,7 +1648,7 @@
       add(`${word} · ${plural((x.ids || []).length, 'finding')}`,
         `${x.by || 'A reviewer'} ${when2(x.at) || ''}${x.owner ? ' · asked ' + x.owner : ''}${x.reason ? ' · “' + x.reason + '”' : ''}${(x.evidence || []).length ? ' · evidence: ' + x.evidence.join('; ') : ''}`
           + ` · ${cells.slice(0, 30).join(', ')}${cells.length > 30 ? ` and ${cells.length - 30} more` : ''}${x.undo_of ? ' (undid an earlier decision)' : ''}`,
-        x.action !== 'undo' && !undone.has(x.decision_id) && !r.approval ? h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || state.rechecking || state.busy || null,
+        x.action !== 'undo' && !undone.has(x.decision_id) && !r.approval ? h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null,
           onclick: () => fdSendDecision({...binding, action: 'undo', undo_of: x.decision_id, reason: 'Undone from the history'})}, 'Undo') : undone.has(x.decision_id) ? h('span', {class: 'muted'}, 'undone') : null);
     }
     if (r.approval) add(rv.approval_current ? 'Internally approved' : 'Approved on an earlier check run', `${r.approval.by} ${when2(r.approval.at) || ''}${r.approval.note ? ': ' + r.approval.note : ''}. Not sent.`);

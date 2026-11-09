@@ -35,7 +35,7 @@ test('coverage dominates status ledger even when stored categories add up',()=>{
 
 test('recheck waits for pending decisions and never reloads a different report after navigation',async()=>{
  let resolve,calls=0,reloads=0;const state={report:{file_hash:'one'},selected:'one',decisionPending:true};
- const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},document:{querySelectorAll:()=>[]},api:()=>{calls++;return new Promise(r=>resolve=r)},openReport:()=>{reloads++},loadList:()=>{}});
+ const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},document:{querySelectorAll:()=>[],querySelector:()=>null},api:()=>{calls++;return new Promise(r=>resolve=r)},openReport:()=>{reloads++},loadList:()=>{}});
  vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile('),ctx);
  await ctx.fdRecheck();assert.equal(calls,0);state.decisionPending=false;
  const running=ctx.fdRecheck();await ctx.fdRecheck();assert.equal(calls,1);state.report={file_hash:'two'};state.selected='two';resolve({});await running;
@@ -56,9 +56,17 @@ test('queue summary never calls known incomplete finding coverage clear',()=>{
 });
 
 test('recheck-first blocks later apply and decision requests and restores controls after navigation',async()=>{
- let resolve,calls=0;const button={disabled:false,isConnected:true};const state={report:{file_hash:'one'},selected:'one'};
+ let resolve,calls=0;const button={disabled:false,isConnected:true,removeAttribute(){}};const state={report:{file_hash:'one'},selected:'one'};
  const snapshot={binding:{expected_check_hash:'c'},accepted:[],dec:{},edits:{}};
  const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},api:()=>{calls++;return new Promise(r=>resolve=r)},document:{querySelectorAll:()=>[button],querySelector:()=>null},correctionSnapshots:{get:()=>snapshot},fdModeSelector:()=>null,drawFixes:()=>{throw Error('Apply started')},updateDownloads:()=>{},drawSide:()=>{throw Error('Decision started')}});
  vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile(')+between('  async function applyFixes(', '  // Take out extra copies')+between('  async function fdSendDecision(', '  function fdRefreshFoot('),ctx);
  const run=ctx.fdRecheck();assert.equal(button.disabled,true);await ctx.applyFixes([],{},{});await ctx.fdSendDecision({});assert.equal(calls,1);state.report={file_hash:'two'};state.selected='two';resolve({});await run;assert.equal(button.disabled,false);assert.equal(state.rechecking,false);
+});
+
+test('recheck releases newly rendered report controls without replacing typed decision forms',async()=>{
+ let resolve,refresh=0;const old={disabled:false,isConnected:true},current={disabled:true,removeAttribute(){this.released=true}},typed={value:'Keep this typed reason'};
+ const state={report:{file_hash:'one'},selected:'one'};
+ const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},api:()=>new Promise(r=>resolve=r),fdModeSelector:r=>{assert.equal(r.file_hash,'two');return {}},document:{querySelectorAll:s=>s==='[data-recheck-disabled]'?[current]:[old],querySelector:()=>({replaceWith:()=>refresh++})}});
+ vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile('),ctx);const run=ctx.fdRecheck();old.isConnected=false;state.report={file_hash:'two'};state.selected='two';resolve({});await run;
+ assert.equal(current.disabled,false);assert.equal(current.released,true);assert.equal(refresh,1);assert.equal(typed.value,'Keep this typed reason');
 });
