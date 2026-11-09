@@ -35,7 +35,7 @@ test('coverage dominates status ledger even when stored categories add up',()=>{
 
 test('recheck waits for pending decisions and never reloads a different report after navigation',async()=>{
  let resolve,calls=0,reloads=0;const state={report:{file_hash:'one'},selected:'one',decisionPending:true};
- const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},api:()=>{calls++;return new Promise(r=>resolve=r)},openReport:()=>{reloads++},loadList:()=>{}});
+ const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},document:{querySelectorAll:()=>[]},api:()=>{calls++;return new Promise(r=>resolve=r)},openReport:()=>{reloads++},loadList:()=>{}});
  vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile('),ctx);
  await ctx.fdRecheck();assert.equal(calls,0);state.decisionPending=false;
  const running=ctx.fdRecheck();await ctx.fdRecheck();assert.equal(calls,1);state.report={file_hash:'two'};state.selected='two';resolve({});await running;
@@ -44,7 +44,7 @@ test('recheck waits for pending decisions and never reloads a different report a
 
 test('successful explicit recheck refreshes recovery controls after releasing its lock',async()=>{
  const state={report:{file_hash:'one'},selected:'one'};let refreshed=0;
- const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},api:async()=>({}),openReport:async()=>{state.report={file_hash:'one'}},loadList:()=>{},fdModeSelector:()=>{assert.equal(state.rechecking,false);return {}},document:{querySelector:()=>({replaceWith:()=>refreshed++})}});
+ const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},api:async()=>({}),openReport:async()=>{state.report={file_hash:'one'}},loadList:()=>{},fdModeSelector:()=>{assert.equal(state.rechecking,false);return {}},document:{querySelectorAll:()=>[],querySelector:()=>({replaceWith:()=>refreshed++})}});
  vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile('),ctx);await ctx.fdRecheck();assert.equal(refreshed,1);assert.equal(state.rechecking,false);
 });
 
@@ -53,4 +53,12 @@ test('queue summary never calls known incomplete finding coverage clear',()=>{
  assert.equal(ctx.note({status:'clear',counts:{},coverage:{truncated:true}}),'Finding coverage incomplete');
  assert.equal(ctx.note({status:'clear',counts:{},page:{complete:false}}),'Finding coverage incomplete');
  assert.equal(ctx.note({status:'hold',counts:{high:1}}),'1 high-severity finding');
+});
+
+test('recheck-first blocks later apply and decision requests and restores controls after navigation',async()=>{
+ let resolve,calls=0;const button={disabled:false,isConnected:true};const state={report:{file_hash:'one'},selected:'one'};
+ const snapshot={binding:{expected_check_hash:'c'},accepted:[],dec:{},edits:{}};
+ const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},api:()=>{calls++;return new Promise(r=>resolve=r)},document:{querySelectorAll:()=>[button],querySelector:()=>null},correctionSnapshots:{get:()=>snapshot},fdModeSelector:()=>null,drawFixes:()=>{throw Error('Apply started')},updateDownloads:()=>{},drawSide:()=>{throw Error('Decision started')}});
+ vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile(')+between('  async function applyFixes(', '  // Take out extra copies')+between('  async function fdSendDecision(', '  function fdRefreshFoot('),ctx);
+ const run=ctx.fdRecheck();assert.equal(button.disabled,true);await ctx.applyFixes([],{},{});await ctx.fdSendDecision({});assert.equal(calls,1);state.report={file_hash:'two'};state.selected='two';resolve({});await run;assert.equal(button.disabled,false);assert.equal(state.rechecking,false);
 });

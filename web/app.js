@@ -854,7 +854,7 @@
       + (linked > 1 ? `. ${linked} findings share this cell change; their selections stay together.` : '');
   }
   function fdModeSelector(r) {
-    const binding = reviewBinding(r), mode = fdMode(), busy = state.aiFixing || state.busy;
+    const binding = reviewBinding(r), mode = fdMode(), busy = state.aiFixing || state.busy || state.rechecking;
     const found = allIssues(r.review).filter(i => i.severity !== 'info').length;
     const recommended = state.fixes ? fdRecommended() : [];
     const cov = r.review.coverage || {}, incomplete = cov.truncated || cov.not_listed || r.review.page?.complete === false;
@@ -1083,12 +1083,12 @@
           h('span', {class: 'fd-gtitle'}, g.unresolved ? '' : icon('ok', 14), g.unresolved ? '' : ' ', g.title),
           h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'item')} · ${plural(g.records, 'record')}${g.unresolved ? ` · ${g.unresolved} unresolved` : ''}`)),
         fdOccurrenceList(g),
-        r.review.page?.complete !== false && g.tier !== 'format' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', disabled: state.decisionPending || null,
+        r.review.page?.complete !== false && g.tier !== 'format' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', disabled: state.decisionPending || state.rechecking || state.busy || null,
           onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'open'}; drawSide(); }}, `Keep ${g.open} as recorded…`) : null,
         r.review.page?.complete !== false && g.items[0].state === 'claude' ? h('div', {class: 'fd-cardacts'},
-          h('button', {type: 'button', class: 'btn small', disabled: state.decisionPending || null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'claude',
+          h('button', {type: 'button', class: 'btn small', disabled: state.decisionPending || state.rechecking || state.busy || null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'claude',
             reason: 'Agreed with Claude: ' + (g.items[0].issue?.claude?.reason || g.items[0].issue?.verdict_reason || '')}; drawSide(); }}, `Agree with Dex for ${g.items.length}…`),
-          h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reopen', which: 'claude'}; drawSide(); }}, `Put ${g.items.length} back for review…`)) : null,
+          h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || state.rechecking || state.busy || null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reopen', which: 'claude'}; drawSide(); }}, `Put ${g.items.length} back for review…`)) : null,
         state.fdBatch && state.fdBatch.group === g.key ? fdBatchForm(g) : null);
     })));
     appendHistory();
@@ -1228,7 +1228,7 @@
       : it.state === 'kept_earlier' ? `Kept as is by an earlier record (kept unchanged): “${it.issue?.legacy_record?.reason || it.issue?.verdict_reason || ''}”`
       : it.state === 'corrected' ? `${it.issue?.verdict_reason || 'Changed in a later version.'}`
       : it.state === 'rejected' ? `Suggestion rejected${by}` : it.state === 'selected' ? 'Selected for preview' : null;
-    const finding = !!it.issue && !it.fix, busy = state.decisionPending || null;
+    const finding = !!it.issue && !it.fix, busy = state.decisionPending || state.rechecking || state.busy || null;
     return h('article', {class: 'fd-card ' + it.tier, 'aria-label': 'Selected correction', id: 'fd-card'},
       h('div', {class: 'fd-cardtop'}, icon(it.tier === 'blocker' ? 'x' : it.tier === 'format' ? 'note' : 'warn', 20),
         h('div', {}, h('h3', {}, it.cell ? `Cell ${it.cell}` : it.row ? `Row ${it.row}` : 'Report finding'), h('p', {title: it.sheet || ''}, `Item ${pos + 1} of ${inGroup.length}${it.item ? ' · source item ' + it.item : ''}`)),
@@ -1415,7 +1415,7 @@
         : h('p', {class: 'fd-hint'}, 'Only this finding is decided. The cell is not changed' + (it.report === '' ? ': a blank stays blank (not recorded, not zero).' : '.')),
       h('div', {class: 'fd-chips'}, (REASONS[f.action] || []).map(t => h('button', {type: 'button', class: 'chip', onclick: () => { reason.value = t; }}, t))),
       reason, owner, evidence,
-      h('div', {class: 'fd-cardacts'}, h('button', {type: 'submit', class: 'btn primary', disabled: state.decisionPending || null}, defer ? 'Save: awaiting source owner' : 'Save: keep as recorded'),
+      h('div', {class: 'fd-cardacts'}, h('button', {type: 'submit', class: 'btn primary', disabled: state.decisionPending || state.rechecking || state.busy || null}, defer ? 'Save: awaiting source owner' : 'Save: keep as recorded'),
         h('button', {type: 'button', class: 'btn subtle', onclick: () => { state.fdForm = null; drawSide(); }}, 'Cancel')));
   }
   // one reason for a precisely listed batch: every finding in it is shown and can be unticked first
@@ -1438,13 +1438,13 @@
       h('ul', {class: 'fd-scope'}, open.map(x => h('li', {}, h('label', {}, h('input', {type: 'checkbox', checked: !b.off.has(x.key) || null,
         onchange: e => { e.target.checked ? b.off.delete(x.key) : b.off.add(x.key); b.reason = reason.value; drawSide(); }}), ' ', `${x.sheet || ''} ${x.cell || (x.row ? 'row ' + x.row : 'whole report')}`.trim())))),
       reopen ? null : h('div', {class: 'fd-chips'}, REASONS.reject.map(t => h('button', {type: 'button', class: 'chip', onclick: () => { reason.value = t; }}, t))), reason,
-      h('div', {class: 'fd-cardacts'}, h('button', {type: 'submit', class: 'btn primary', disabled: state.decisionPending || null}, `Save for ${picked.length}`),
+      h('div', {class: 'fd-cardacts'}, h('button', {type: 'submit', class: 'btn primary', disabled: state.decisionPending || state.rechecking || state.busy || null}, `Save for ${picked.length}`),
         h('button', {type: 'button', class: 'btn subtle', onclick: () => { state.fdBatch = null; drawSide(); }}, 'Cancel')));
   }
   // Pending -> saved / failed. A lost answer is reconciled (was it saved?) before anything is retried, and the same
   // request ID is reused, so a retry can never record a decision twice.
   async function fdSendDecision(req) {
-    if (state.decisionPending || !state.report) return;
+    if (state.decisionPending || state.busy || state.rechecking || !state.report) return;
     const binding = req.file_hash ? req : req.from ? findingBinding([req.from]) : null;
     if (!binding) { toast('Reload this review before deciding.', true); return; }
     const hash = binding.file_hash;
@@ -1600,7 +1600,9 @@
   async function fdRecheck() {
     if (state.decisionPending || state.busy || state.rechecking) { toast('Wait for the current save or operation to finish before re-checking.', true); return; }
     const report = state.report, hash = report?.file_hash; if (!hash) return;
-    state.rechecking = true;
+    const operation = {}; state.rechecking = operation;
+    const controls = [...document.querySelectorAll('#side button, #fd-preview-btn, .fd-mode-selector button, dialog .primary')].map(node => [node, node.disabled]);
+    controls.forEach(([node]) => { node.disabled = true; });
     const name = myName() || 'Reviewer';
     toast('Re-checking with the current checks…');
     try { const out = await api('/api/spreadsheets/recheck', {file_hash: hash, apply: true, by: name});
@@ -1609,7 +1611,9 @@
       await openReport(hash, true); loadList();
     } catch (e) { if (state.report === report) toast(e.message, true); }
     finally {
+      if (state.rechecking !== operation) return;
       state.rechecking = false;
+      controls.forEach(([node, disabled]) => { if (node.isConnected) node.disabled = disabled; });
       if (state.selected === hash && state.report?.file_hash === hash) document.querySelector('.fd-mode-selector')?.replaceWith(fdModeSelector(state.report));
     }
   }
@@ -1638,7 +1642,7 @@
       add(`${word} · ${plural((x.ids || []).length, 'finding')}`,
         `${x.by || 'A reviewer'} ${when2(x.at) || ''}${x.owner ? ' · asked ' + x.owner : ''}${x.reason ? ' · “' + x.reason + '”' : ''}${(x.evidence || []).length ? ' · evidence: ' + x.evidence.join('; ') : ''}`
           + ` · ${cells.slice(0, 30).join(', ')}${cells.length > 30 ? ` and ${cells.length - 30} more` : ''}${x.undo_of ? ' (undid an earlier decision)' : ''}`,
-        x.action !== 'undo' && !undone.has(x.decision_id) && !r.approval ? h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || null,
+        x.action !== 'undo' && !undone.has(x.decision_id) && !r.approval ? h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || state.rechecking || state.busy || null,
           onclick: () => fdSendDecision({...binding, action: 'undo', undo_of: x.decision_id, reason: 'Undone from the history'})}, 'Undo') : undone.has(x.decision_id) ? h('span', {class: 'muted'}, 'undone') : null);
     }
     if (r.approval) add(rv.approval_current ? 'Internally approved' : 'Approved on an earlier check run', `${r.approval.by} ${when2(r.approval.at) || ''}${r.approval.note ? ': ' + r.approval.note : ''}. Not sent.`);
@@ -2402,7 +2406,7 @@
     if (!captured?.binding?.expected_check_hash) { toast('Reopen the correction preview before applying.', true); return null; }
     ({accepted, dec, edits} = captured);
     const binding = captured.binding;
-    if (state.busy) return; state.busy = true; drawFixes(); updateDownloads();
+    if (state.busy || state.decisionPending || state.rechecking) return; state.busy = true; drawFixes(); updateDownloads();
     toast('Building the fixed copy with your changes…');
     try {
       const changes = accepted.map(f => {
