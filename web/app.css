@@ -1748,3 +1748,17 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-linkbtn{border:0;background:none;padding:2px 0;color:#1f5e4f;text-decoration:underline;cursor:pointer;font:inherit;font-size:13px}
 .fd-airun{border-radius:10px;padding:10px 12px;margin:8px 0;background:#eef5f2;border:1px solid #b8d4c9}.fd-airun p{margin:2px 0}
 .fd-airun.good{background:#e9f6ee;border-color:#9fd1b3}.fd-airun.bad{background:#fdecea;border-color:#f0b4ad}
+/* side panel: app name, error count, quick summary, SharePoint box, then the errors */
+.fd-apphead{padding:12px 16px 4px}.fd-apphead h2{margin:0;font-size:20px;letter-spacing:.2px}
+.fd-errcount{margin:2px 0 0;font-size:16px;font-weight:600;color:#b4462f}
+.fd-comparison{margin:8px 16px;border:1px solid var(--line,#ccd5d2);border-radius:10px;padding:8px 12px;background:#f6f8f7}
+.fd-comparison > summary{font-weight:600;cursor:pointer;display:flex;gap:6px;align-items:center}
+.fd-comparison.ok{background:#e9f6ee;border-color:#9fd1b3}.fd-comparison.bad{background:#fdecea;border-color:#f0b4ad}.fd-comparison.unknown{background:#fff6e5;border-color:#f0d49a}
+.fd-comparison .fd-difference-list{max-height:220px;overflow:auto}
+/* fix manually, one error at a time */
+.fd-manual{border:2px solid #1f5e4f;border-radius:10px;padding:10px 12px;margin:8px 0 12px;background:#fff}
+.fd-manual-top{display:flex;justify-content:space-between;align-items:center}.fd-manual-where{font-weight:600;margin:6px 0 2px}
+.fd-manual-form{display:flex;gap:8px;margin:8px 0}.fd-manual-form input{flex:1;min-width:0;padding:8px;font-size:15px;border:1px solid #8c98a5;border-radius:6px}
+/* above the spreadsheet: download or email the working copy */
+.fd-sheetbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;margin-bottom:8px;border:1px solid var(--line,#ccd5d2);border-radius:10px;background:#fff}
+.fd-sheetbar-what{flex:1;min-width:180px;font-size:13px;color:#5d6f69}

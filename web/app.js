@@ -938,10 +938,10 @@
       if (state.fdSummaryAuto[autoKey] || !current() || !owner.isConnected) return;
       const button = owner.querySelector('.fd-summary-request');
       if (button && state.aiOn && button.disabled && !state.aiProposalOperation && !state.busy && !state.rechecking && !state.decisionPending) button.disabled = false; // drawn before AI was reported on
-      if (!state.aiOn || !button || button.disabled || state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending) { if (++tries < 40) setTimeout(attempt, 500); return; }
+      if (!state.aiOn || !button || button.disabled || !state.fixes || state.fdAutoRecheckWaiting || state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending) { if (++tries < 40) setTimeout(attempt, 500); return; }
       state.fdSummaryAuto[autoKey] = true; button.click();
     }; setTimeout(attempt, 0); }
-    owner.append(h('summary', {}, 'What happened on this report', h('small', {class: 'fd-summary-disclosure'}, state.aiOn ? 'Summary by Dex' : 'AI is off')),
+    owner.append(h('summary', {}, 'Quick summary', h('small', {class: 'fd-summary-disclosure'}, state.aiOn ? 'by Dex' : 'AI is off')),
       fdSummaryPanel(r, binding, owner, current, true),
       h('div', {class: 'fd-cardacts', hidden: true},
         h('button', {type: 'button', class: 'btn', disabled: busy || !eligible.length, onclick: () => { if (current()) fdPreviewRecommended(binding); }}, `Accept All · ${eligible.length} proposed changes`),
@@ -1061,12 +1061,15 @@
       try {
         const answer = await api('/api/spreadsheets/review-summary', {scope: 'available_findings', file_hash: binding.file_hash,
           expected_check_hash: binding.expected_check_hash, expected_rev: binding.expected_rev, run: binding.expected_run});
-        if (!active()) { if (owner.isConnected && !stillCurrent()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); return; }
+        // The panel may have been redrawn while Dex was writing: keep the answer for the same report version and show it there.
+        const live = active();
+        if (!live && !(stillCurrent() && state.aiProposalOperation === operation)) { if (owner.isConnected && !stillCurrent()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); return; }
         if (!answer || answer.read_only !== true || answer.file_hash !== binding.file_hash || answer.check_hash !== binding.expected_check_hash ||
             answer.expected_rev !== binding.expected_rev || JSON.stringify(answer.run) !== JSON.stringify(binding.expected_run) || typeof answer.reply !== 'string' || typeof answer.notice !== 'string' || typeof answer.coverage?.label !== 'string' || typeof answer.narrative_notice !== 'string') throw new Error('The summary did not match the current report review. Reload before trying again.');
         const inventory = fdSummaryInventory(answer, new Set(issues.map(i => i.key)));
         state.fdSummaryCache = {key: JSON.stringify(binding), context, report, answer};
-        renderAnswer(answer, inventory);
+        if (live) renderAnswer(answer, inventory);
+        else if (compact) { const shown = document.querySelector('.fd-report-summary'); if (shown && state.report === report) shown.replaceWith(fdReportSummary(report)); }
       } catch (error) { if (active()) output.replaceChildren(h('p', {role: 'alert'}, `Summary unavailable: ${error.message}. The recorded findings and actions below are unchanged.`)); else if (owner.isConnected && !stillCurrent()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); }
       finally { operation.cancel(); }
     }}, state.aiOn ? 'Ask AI to summarize available findings' : 'AI summary unavailable: AI is off');
@@ -1306,7 +1309,7 @@
     document.body.append(dlg); draw(); dlg.showModal(); dlg.querySelector('h2').focus();
     if (Array.isArray(initialScope) && initialAction) { const keys = new Set(initialScope.map(it => it.key)); act(items.filter(it => keys.has(it.key)), initialAction); }
   }
-  function fdDirectControls(scope, run = (items, action) => action === 'ai' ? fdAIFixNow(items) : fdReviewDialog(items, action), listed = false) {
+  function fdDirectControls(scope, run = (items, action) => action === 'ai' ? fdAIFixNow(items) : action === 'manual' ? fdManualStart(items) : fdReviewDialog(items, action), listed = false) {
     const ai = state.aiOn && scope.some(it => it.fp && it.state === 'open');
     const ignore = scope.length > 0 && scope.length <= 1000 && scope.every(it => it.fp && ['open', 'claude'].includes(it.state)) && !(scope.length > 1 && scope.some(it => it.issue?.severity === 'high'));
     return h('div', {class: 'fd-direct-actions'},
@@ -1334,67 +1337,6 @@
       h('ul', {}, shown.map(line)),
       scope.length > max ? h('button', {type: 'button', class: 'fd-linkbtn', onclick: () => { state.fdShowAll[showKey] = !all; drawSide(); }},
         all ? 'Show fewer' : `Show all ${scope.length}`) : null);
-  }
-  // One selection, shared by the errors panel and the review window.
-  function fdPicked(items) {
-    const key = JSON.stringify(reviewBinding(state.report)), saved = state.fdReviewSelection;
-    const keys = new Set(saved?.binding === key ? saved.keys : []);
-    return items.filter(it => keys.has(it.key));
-  }
-  function fdTick(list, on) {
-    if (!state.report) return;
-    const key = JSON.stringify(reviewBinding(state.report)), saved = state.fdReviewSelection;
-    const keys = new Set(saved?.binding === key ? saved.keys : []);
-    list.forEach(it => on ? keys.add(it.key) : keys.delete(it.key));
-    state.fdReviewSelection = {binding: key, keys: [...keys]};
-    const focus = document.activeElement?.getAttribute?.('data-tick');
-    drawSide();
-    if (focus) document.querySelector(`#side [data-tick="${CSS.escape(focus)}"]`)?.focus();
-  }
-  // AI fix: Dex fixes every selected error it can and saves a new version (the earlier one is kept).
-  // The report reloads on the new version, so fixed errors drop off and only what is left stays listed.
-  async function fdAIFixNow(scope) {
-    const report = state.report; if (!report) return;
-    if (!state.aiOn) { toast('AI fix is off.', true); return; }
-    const binding = reviewBinding(report), hash = report.file_hash;
-    const todo = scope.filter(it => it.fp && it.state === 'open');
-    if (!todo.length) { toast('Dex can only fix errors that are still open. Fix these manually or ignore them.', true); return; }
-    document.querySelectorAll('dialog.fd-review-dialog[open]').forEach(d => d.close());
-    state.fdAIRun = {hash, total: todo.length, running: true}; drawSide();
-    for (let i = 0; state.aiProposalOperation && i < 200; i++) await new Promise(r => setTimeout(r, 300)); // let the summary finish first
-    const proposals = [], skipped = [];
-    try {
-      if (state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || state.report !== report) throw new Error('Another step is still running. Try again in a moment.');
-      for (let i = 0; i < todo.length; i += 120) {
-        const chunk = todo.slice(i, i + 120);
-        const answer = await new Promise(resolve => {
-          fdPrepareAI(chunk, binding, {owner: document.body, active: () => state.report === report, pending: () => {}, failure: error => resolve({error}), success: a => resolve(a)}).then(() => resolve(null));
-        });
-        if (!answer) throw new Error('Dex could not start. Nothing was changed.');
-        if (answer.error) throw answer.error;
-        proposals.push(...answer.proposals); skipped.push(...(answer.skipped || []));
-      }
-      const cells = new Set(), accepted = proposals.filter(p => { const k = p.sheet + '!' + p.cell; if (cells.has(k)) return false; cells.add(k); return true; });
-      if (!accepted.length) { state.fdAIRun = {hash, done: true, fixed: 0, tried: todo.length, skipped}; return; }
-      const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
-      const capture = captureCorrections(accepted, dec, {}, binding, report);
-      state.fdAIRun = {hash, total: todo.length, running: true, saving: accepted.length}; drawSide();
-      const next = await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true});
-      if (!next) throw new Error('The fixes could not be saved. Nothing was changed.');
-      state.fdReviewSelection = null;
-      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, tried: todo.length, skipped, from: revisionOf(report)};
-    } catch (e) { state.fdAIRun = {hash, done: true, error: e?.message || String(e)}; }
-    finally { if (state.report?.file_hash === state.fdAIRun?.hash) drawSide(); }
-  }
-  function fdAIRunBanner(run, left) {
-    const dismiss = h('button', {type: 'button', class: 'btn small subtle', onclick: () => { state.fdAIRun = null; drawSide(); }}, 'OK');
-    if (run.running) return h('div', {class: 'fd-airun', role: 'status'}, h('span', {class: 'spin'}), run.saving ? ` Saving ${plural(run.saving, 'fix', 'fixes')}…` : ` Dex is fixing ${plural(run.total, 'error')}…`);
-    if (run.error) return h('div', {class: 'fd-airun bad', role: 'alert'}, h('p', {}, `AI fix did not finish: ${run.error}`), dismiss);
-    const why = (run.skipped || []).length ? h('details', {}, h('summary', {}, 'Why some were not fixed'), h('ul', {}, run.skipped.slice(0, 50).map(x => h('li', {}, x.reason)))) : null;
-    if (!run.fixed) return h('div', {class: 'fd-airun', role: 'status'}, h('p', {}, `Dex could not fix ${run.tried === 1 ? 'this error' : `these ${run.tried} errors`}. Nothing was changed. Fix ${run.tried === 1 ? 'it' : 'them'} manually or ignore ${run.tried === 1 ? 'it' : 'them'}.`), why, dismiss);
-    return h('div', {class: 'fd-airun good', role: 'status'},
-      h('p', {}, h('b', {}, `Dex fixed ${plural(run.fixed, 'cell')}.`), ` Saved as version ${(run.from || 1) + 1}; version ${run.from || 1} is kept.`),
-      h('p', {}, left ? `${plural(left, 'error')} left to fix. ${left === 1 ? 'It is' : 'They are'} listed below.` : 'No errors left to fix.'), why, dismiss);
   }
   function fdOccurrenceList(g) {
     const eligible = fdRecommended(g.items), picked = eligible.filter(it => it.state === 'selected');
@@ -1460,6 +1402,26 @@
     if (!counts || counts.matched_unique_items == null || counts.report_rows == null) return `${status} · matched count unavailable`;
     return `${status} · ${counts.matched_unique_items} unique source items matched / ${counts.report_rows} report rows${verified ? '' : ' in the recorded capture'}`;
   }
+  // Download the copy being worked on (it already has Dex's and your saved changes), or email it to the client.
+  function fdSheetBar(r) {
+    const name = r.filename, href = '/api/spreadsheets/download?id=' + r.file_hash;
+    const download = () => { const a = h('a', {href, download: name}); document.body.append(a); a.click(); a.remove(); };
+    const email = () => {
+      const rv = r.review || {}, client = (r.assignment && SETTLED.includes(r.assignment.status)) ? r.assignment.client : '';
+      const n = v => v == null ? '—' : Number(v).toLocaleString('en-US');
+      const subject = `${client ? client + ' · ' : ''}${rv.job || name} end-of-shift report${rv.day ? ' · ' + dayLabel(rv.day) : ''}`;
+      const body = [`Hello,`, '', `Attached is the end-of-shift report for ${dayLabel(rv.day)}.`, '', `Parts inspected: ${n(rv.inspected)}`,
+        rv.certified != null ? `Accepted: ${n(rv.certified)}` : null, `Rejected: ${n(rv.rejected)}`, '', 'Thank you,'].filter(x => x !== null).join('\n');
+      download();
+      location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+      toast('Your email opened with the report details. Attach the file that just downloaded, add the client, and send.');
+    };
+    const pending = readyChanges().total;
+    return h('div', {class: 'fd-sheetbar'},
+      h('span', {class: 'fd-sheetbar-what'}, `Working copy: version ${revisionOf(r)}${r.fixed_from ? ` · ${plural((r.fixed_from.changes || []).length, 'change')} saved` : ' · original'}${pending ? ` · ${pending} typed, not saved yet` : ''}`),
+      h('button', {type: 'button', class: 'btn', onclick: download}, 'Download'),
+      h('button', {type: 'button', class: 'btn primary', onclick: email}, 'Email to client'));
+  }
   function drawReport() {
     const r = state.report, rv = r.review;
     document.body.classList.add('reportmode');
@@ -1503,6 +1465,7 @@
     else {
       main = h('div', {class: 'fd-work' + (state.fdAsideHidden ? ' aside-hidden' : ''), id: 'fd-work'},
         h('section', {class: 'fd-sheet', 'aria-label': 'Spreadsheet'},
+          fdSheetBar(r),
           h('div', {class: 'sheetpane', id: 'sheet-block'}, h('p', {class: 'note fd-loading'}, h('span', {class: 'spin'}), ' Loading the spreadsheet…')),
           h('div', {id: 'fd-gallery-host'}),
           h('div', {id: 'fd-evidence'})),
@@ -1566,7 +1529,7 @@
     const items = state.fdItems = fdItems(), groups = fdGroups(items);
     const tier = state.fdTier && groups.some(g => g.tier === state.fdTier) ? state.fdTier : (groups.find(g => g.open)?.tier || groups[0]?.tier || 'blocker');
     state.fdTier = tier;
-    body.append(h('div', {class: 'fd-panelhead'}, h('p', {class: 'fd-panel-intro'}, 'For each error: let AI fix it, fix it yourself in the spreadsheet, or ignore it.'),
+    body.append(h('div', {class: 'fd-panelhead'}, h('p', {class: 'fd-panel-intro'}, 'Tick errors, then choose AI fix, Fix manually or Ignore.'),
       h('button', {type: 'button', class: 'fd-iconbtn fd-collapse', 'aria-label': 'Hide the errors panel', title: 'Hide panel', onclick: () => { state.fdAsideHidden = true; $('fd-work')?.classList.add('aside-hidden'); }}, icon('panel', 18))));
     const approvalHolds = r.holds || []; // Advisory holds also exclude bulk selection and must remain inspectable.
     if (approvalHolds.length && st.next !== 'recheck') { const action = fdHoldAction(r, st); if (action) body.append(action); }
@@ -1575,18 +1538,22 @@
     // Every error in the report is reviewed: a saved check that listed fewer than it found is checked again once, by itself.
     if ((cov.truncated || cov.not_listed) && !r.approval && !(r.sent || []).some(x => x.sent)) {
       state.fdAutoRecheck ||= {};
-      if (!state.fdAutoRecheck[r.file_hash]) { state.fdAutoRecheck[r.file_hash] = true; globalThis.setTimeout?.(() => { if (state.report === r && !state.rechecking) fdRecheck(); }, 0); }
-      body.append(h('p', {class: 'fd-hint', role: 'status'}, state.rechecking ? 'Checking the whole report again so every error is listed…' : 'Some errors were not listed by the last check. Recheck this report to list them all.'));
+      if (!state.fdAutoRecheck[r.file_hash] && !state.fdAutoRecheckWaiting) { state.fdAutoRecheckWaiting = true; let tries = 0; const attempt = () => {
+        if (state.report !== r || state.fdAutoRecheck[r.file_hash]) { state.fdAutoRecheckWaiting = false; return; }
+        if (state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || state.gridDraft) { if (++tries < 120) globalThis.setTimeout?.(attempt, 500); else state.fdAutoRecheckWaiting = false; return; }
+        state.fdAutoRecheck[r.file_hash] = true; state.fdAutoRecheckWaiting = false; fdRecheck();
+      }; globalThis.setTimeout?.(attempt, 0); }
+      body.append(h('p', {class: 'fd-hint', role: 'status'}, state.fdAutoRecheck[r.file_hash] && !state.rechecking ? 'Some errors were not listed by the last check. Recheck this report to list them all.' : 'Checking the whole report again so every error is listed…'));
     }
     body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length, 'error')} to fix · ${c.applied} fixed in this version · ${c.kept} ignored`));
     const statuses = [['To fix', ['open', 'selected']], ['Waiting on the SharePoint owner', ['deferred']],
       ['Confirmed, to fix', ['confirmed']], ['Ignored', ['kept', 'rejected']],
       ['Ignored earlier', ['kept_earlier']], ['AI says fine', ['claude']], ['Fixed in a later version', ['corrected']]];
-    body.append(h('details', {class: 'fd-recon'}, h('summary', {}, 'Possible errors'),
+    const recon = h('details', {class: 'fd-recon'}, h('summary', {}, 'Possible errors by status'),
       h('div', {class: 'fd-cardacts'}, statuses.map(([label, states]) => {
         const scope = items.filter(it => states.includes(it.state));
         return scope.length ? h('button', {type: 'button', class: 'btn', onclick: () => fdReviewDialog(scope, null, label)}, `${label} · ${scope.length}`) : null;
-      }))));
+      })));
     if (dc.stale) body.append(h('p', {class: 'fd-coverage', role: 'note'}, icon('warn', 14), ` ${plural(dc.stale, 'earlier decision')} no longer match${dc.stale === 1 ? 'es' : ''} what the finding says now, so ${dc.stale === 1 ? 'it is' : 'they are'} not applied. Decide again.`));
     if (state.decisionPending) body.append(h('p', {class: 'fd-saving', role: 'status'}, h('span', {class: 'spin'}), ' Saving your decision…'));
     if (state.decisionFailed) body.append(h('div', {class: 'fd-failed', role: 'alert'}, icon('warn', 14), ' ', state.decisionFailed.message,
@@ -1600,7 +1567,7 @@
     const historyRecommendations = historyGroups.filter(g => g.status === 'recommendation').reduce((n, g) => n + g.entries.length, 0);
     const appendHistory = () => { if (auto) body.append(h('details', {class: 'fd-history-overview'}, h('summary', {}, `History · ${plural(historyApplied, 'applied change')} · ${plural(historyRecommendations, 'AI recommendation')}`), auto)); };
     if (state.fdAIRun?.hash === r.file_hash) body.append(fdAIRunBanner(state.fdAIRun, items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length));
-    if (!items.length) { body.append(fdClean(r, st)); appendHistory(); return; }
+    if (!items.length) { body.append(fdClean(r, st), recon); appendHistory(); return; }
     const cur = items.find(x => x.key === state.fdCur) || null;
     const tierGroups = groups.filter(g => g.unresolved || (cur && cur.group === g.key));
     const fixable = tierGroups.flatMap(g => g.items).filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state));
@@ -1614,11 +1581,13 @@
         h('p', {class: 'fd-tickcount', role: 'status'}, ticked.length ? `${ticked.length} selected` : 'Tick the errors to fix, or select all.'),
         h('div', {class: 'fd-cardacts'},
           h('button', {type: 'button', class: 'btn primary', disabled: busyNow || !state.aiOn || !ticked.some(it => it.fp && it.state === 'open') || null, onclick: () => fdAIFixNow(fdPicked(fixable))}, 'AI fix'),
-          h('button', {type: 'button', class: 'btn', disabled: busyNow || !ticked.length || null, onclick: () => fdReviewDialog(fdPicked(fixable), 'manual')}, 'Fix manually'),
+          h('button', {type: 'button', class: 'btn', disabled: busyNow || !ticked.length || null, onclick: () => fdManualStart(fdPicked(fixable))}, 'Fix manually'),
           h('button', {type: 'button', class: 'btn', disabled: busyNow || !ticked.length || null, onclick: () => fdReviewDialog(fdPicked(fixable), 'ignore')}, 'Ignore'))));
     }
     if (!tierGroups.length) body.append(h('p', {class: 'fd-hint'}, 'No errors left to fix. Decided ones are under Possible errors above.'));
-    if (cur) body.append(h('p', {id: 'fd-correction-context', class: 'fd-grid-context', role: 'status'}, `Current correction: ${cur.sheet || 'Report'} · ${cur.cell || (cur.row ? 'row ' + cur.row : 'report-level')}. Filtering the sheet does not change this correction.`), fdCard(cur, groups));
+    const manual = fdManualList(items);
+    if (manual) body.append(fdManualCard(manual));
+    else if (cur) body.append(h('p', {id: 'fd-correction-context', class: 'fd-grid-context', role: 'status'}, `Current correction: ${cur.sheet || 'Report'} · ${cur.cell || (cur.row ? 'row ' + cur.row : 'report-level')}. Filtering the sheet does not change this correction.`), fdCard(cur, groups));
     body.append(h('div', {class: 'fd-groups'}, tierGroups.map(g => {
       const selectable = g.items.filter(x => x.selectable && x.state === 'open' && (x.evidence === 'source' || x.evidence === 'mechanical'));
       const gTicked = fdPicked(g.items).length, gBox = h('input', {type: 'checkbox', 'data-selection': 'true', 'data-tick': 'group:' + g.key, 'aria-label': 'Select every error in: ' + g.title,
@@ -1638,7 +1607,126 @@
           h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reopen', which: 'claude'}; drawSide(); }}, `Put ${g.items.length} back for review…`)) : null,
         state.fdBatch && state.fdBatch.group === g.key ? fdBatchForm(g) : null);
     })));
+    body.append(recon);
     appendHistory();
+  }
+  // One selection, shared by the errors panel and the review window.
+  function fdPicked(items) {
+    const key = JSON.stringify(reviewBinding(state.report)), saved = state.fdReviewSelection;
+    const keys = new Set(saved?.binding === key ? saved.keys : []);
+    return items.filter(it => keys.has(it.key));
+  }
+  function fdTick(list, on) {
+    if (!state.report) return;
+    const key = JSON.stringify(reviewBinding(state.report)), saved = state.fdReviewSelection;
+    const keys = new Set(saved?.binding === key ? saved.keys : []);
+    list.forEach(it => on ? keys.add(it.key) : keys.delete(it.key));
+    state.fdReviewSelection = {binding: key, keys: [...keys]};
+    const focus = document.activeElement?.getAttribute?.('data-tick');
+    drawSide();
+    if (focus) document.querySelector(`#side [data-tick="${CSS.escape(focus)}"]`)?.focus();
+  }
+  // AI fix: Dex fixes every selected error it can and saves a new version (the earlier one is kept).
+  // The report reloads on the new version, so fixed errors drop off and only what is left stays listed.
+  async function fdAIFixNow(scope) {
+    const report = state.report; if (!report) return;
+    if (!state.aiOn) { toast('AI fix is off.', true); return; }
+    const binding = reviewBinding(report), hash = report.file_hash;
+    const todo = scope.filter(it => it.fp && it.state === 'open');
+    if (!todo.length) { toast('Dex can only fix errors that are still open. Fix these manually or ignore them.', true); return; }
+    document.querySelectorAll('dialog.fd-review-dialog[open]').forEach(d => d.close());
+    state.fdAIRun = {hash, total: todo.length, running: true}; drawSide();
+    for (let i = 0; state.aiProposalOperation && i < 200; i++) await new Promise(r => setTimeout(r, 300)); // let the summary finish first
+    const proposals = [], skipped = [];
+    try {
+      if (state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || state.report !== report) throw new Error('Another step is still running. Try again in a moment.');
+      for (let i = 0; i < todo.length; i += 120) {
+        const chunk = todo.slice(i, i + 120);
+        const answer = await new Promise(resolve => {
+          fdPrepareAI(chunk, binding, {owner: document.body, active: () => state.report === report, pending: () => {}, failure: error => resolve({error}), success: a => resolve(a)}).then(() => resolve(null));
+        });
+        if (!answer) throw new Error('Dex could not start. Nothing was changed.');
+        if (answer.error) throw answer.error;
+        proposals.push(...answer.proposals); skipped.push(...(answer.skipped || []));
+      }
+      const cells = new Set(), accepted = proposals.filter(p => { const k = p.sheet + '!' + p.cell; if (cells.has(k)) return false; cells.add(k); return true; });
+      if (!accepted.length) { state.fdAIRun = {hash, done: true, fixed: 0, tried: todo.length, skipped}; return; }
+      const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
+      const capture = captureCorrections(accepted, dec, {}, binding, report);
+      state.fdAIRun = {hash, total: todo.length, running: true, saving: accepted.length}; drawSide();
+      const next = await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true});
+      if (!next) throw new Error('The fixes could not be saved. Nothing was changed.');
+      state.fdReviewSelection = null;
+      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, tried: todo.length, skipped, from: revisionOf(report)};
+    } catch (e) { state.fdAIRun = {hash, done: true, error: e?.message || String(e)}; }
+    finally { if (state.report?.file_hash === state.fdAIRun?.hash) drawSide(); }
+  }
+  // Fix manually: one error at a time, with its cell highlighted in the spreadsheet. Typed values are kept until
+  // "Save my changes", which saves them as a new version (the earlier one is kept).
+  function fdManualStart(scope) {
+    if (!state.report || !scope.length) return;
+    state.fdManual = {binding: JSON.stringify(reviewBinding(state.report)), keys: scope.map(it => it.key), at: 0};
+    state.fdCur = null; document.body.classList.add('fd-panel-open');
+    const first = (state.fdItems || fdItems()).find(it => it.key === scope[0].key);
+    if (first) fdOpen(first); else drawSide();
+    document.getElementById('side')?.scrollTo?.({top: 0});
+  }
+  function fdManualList(items) {
+    const m = state.fdManual;
+    if (!m || !state.report || m.binding !== JSON.stringify(reviewBinding(state.report))) return null;
+    const list = m.keys.map(k => items.find(it => it.key === k)).filter(Boolean);
+    return list.length ? {list, at: Math.min(m.at, list.length - 1)} : null;
+  }
+  function fdManualCard({list, at}) {
+    const it = list[at], edits = store.get(editsKey(), {}), mine = it.cell ? edits[editId(it.sheet, it.cell)] : null;
+    const pending = Object.keys(edits).length;
+    const go = n => { state.fdManual.at = n; const next = list[n]; if (next) fdOpen(next); else drawSide(); };
+    const end = () => { state.fdManual = null; state.fdCur = null; drawSide(); drawGrid(); };
+    const where = [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' · ') || 'Whole report';
+    const input = it.cell ? h('input', {class: 'fd-manual-input', 'aria-label': `New value for ${where}`,
+      value: mine ? mine.after : it.source != null ? String(it.source) : it.proposed != null ? String(it.proposed) : it.report ?? '',
+      placeholder: 'Type the correct value'}) : null;
+    const keep = () => {
+      if (!input || !state.report) return;
+      const before = it.report ?? '', value = input.value;
+      const all = store.get(editsKey(), {}), id = editId(it.sheet, it.cell);
+      if (value === String(before)) delete all[id];
+      else all[id] = {sheet: it.sheet, cell: it.cell, before, after: value, header: '', source: 'Your edit', reason: 'Typed by the reviewer'};
+      store.set(editsKey(), all);
+    };
+    const save = async () => {
+      keep(); const c = readyChanges();
+      if (!c.total) { toast('Nothing typed yet. Nothing was changed.'); return; }
+      const report = state.report, from = revisionOf(report);
+      state.fdManual = null;
+      const next = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding: c.binding});
+      if (next) state.fdAIRun = {hash: next, done: true, fixed: c.total, tried: c.total, from, manual: true};
+      if (state.report?.file_hash === next) drawSide();
+    };
+    setTimeout(() => { const el = document.querySelector('.fd-manual-input'); if (el && document.activeElement?.tagName !== 'INPUT') { el.focus(); el.select(); } }, 0);
+    return h('section', {class: 'fd-manual', 'aria-label': 'Fix manually'},
+      h('div', {class: 'fd-manual-top'}, h('b', {}, `Fix manually · ${at + 1} of ${list.length}`),
+        h('button', {type: 'button', class: 'fd-iconbtn', 'aria-label': 'Stop fixing manually', title: 'Close', onclick: end}, icon('x', 16))),
+      h('p', {class: 'fd-manual-where'}, where),
+      h('p', {}, it.text || it.reason || ''),
+      it.cell ? h('p', {class: 'fd-hint'}, `Now: ${it.report === '' || it.report == null ? 'blank' : '“' + it.report + '”'}${it.source != null ? ` · SharePoint: “${it.source}”` : ''}`) : null,
+      input ? h('form', {class: 'fd-manual-form', onsubmit: e => { e.preventDefault(); keep(); if (at < list.length - 1) go(at + 1); else save(); }},
+        input, h('button', {type: 'submit', class: 'btn primary'}, at < list.length - 1 ? 'Next' : 'Save my changes')) :
+        h('p', {class: 'fd-hint'}, 'This error is not one cell. Change it in the spreadsheet, or ignore it.'),
+      h('div', {class: 'fd-cardacts'},
+        h('button', {type: 'button', class: 'btn small', disabled: at === 0 || null, onclick: () => { keep(); go(at - 1); }}, 'Previous'),
+        at < list.length - 1 ? h('button', {type: 'button', class: 'btn small', onclick: () => { keep(); go(at + 1); }}, 'Skip') : null,
+        h('button', {type: 'button', class: 'btn small' + (at < list.length - 1 ? '' : ' subtle'), onclick: save}, `Save my changes${pending ? ` (${pending})` : ''}`)));
+  }
+  function fdAIRunBanner(run, left) {
+    const dismiss = h('button', {type: 'button', class: 'btn small subtle', onclick: () => { state.fdAIRun = null; drawSide(); }}, 'OK');
+    if (run.running) return h('div', {class: 'fd-airun', role: 'status'}, h('span', {class: 'spin'}), run.saving ? ` Saving ${plural(run.saving, 'fix', 'fixes')}…` : ` Dex is fixing ${plural(run.total, 'error')}…`);
+    if (run.error) return h('div', {class: 'fd-airun bad', role: 'alert'}, h('p', {}, `AI fix did not finish: ${run.error}`), dismiss);
+    const why = (run.skipped || []).length ? h('details', {}, h('summary', {}, 'Why some were not fixed'), h('ul', {}, run.skipped.slice(0, 50).map(x => h('li', {}, x.reason)))) : null;
+    if (!run.fixed) return h('div', {class: 'fd-airun', role: 'status'}, h('p', {}, `Dex could not fix ${run.tried === 1 ? 'this error' : `these ${run.tried} errors`}. Nothing was changed. Fix ${run.tried === 1 ? 'it' : 'them'} manually or ignore ${run.tried === 1 ? 'it' : 'them'}.`), why, dismiss);
+    return h('div', {class: 'fd-airun good', role: 'status'},
+      h('p', {}, h('b', {}, `${run.manual ? 'You changed' : 'Dex fixed'} ${plural(run.fixed, 'cell')}.`), ` Saved as version ${(run.from || 1) + 1}; version ${run.from || 1} is kept.`),
+      h('p', {}, left ? `${plural(left, 'error')} left to fix. ${left === 1 ? 'It is' : 'They are'} listed below.` : 'No errors left to fix.'), why, dismiss);
   }
   // ---------- the app fixes what it can by itself (new version, original kept), then shows only what needs a person
   function fdAutoEligible(r) {
@@ -2327,9 +2415,9 @@
     if (rows.report_rows != null && rows.matched_unique_items != null && rows.report_rows !== rows.matched_unique_items && differs)
       totals.push(`Records: ${value(rows.report_rows)} rows in the report, ${value(rows.matched_unique_items)} matched in SharePoint.`);
     if (rows.duplicate_report_rows) totals.push(`${rows.duplicate_report_rows} duplicate row${rows.duplicate_report_rows === 1 ? '' : 's'} in the report.`);
-    const answer = verified ? 'Yes' : differs ? 'No' : 'Not verified';
-    return h('details', {class: 'fd-comparison'},
-      h('summary', {}, `Match SharePoint? ${answer}`),
+    const answer = verified ? 'Matches SharePoint' : differs ? `Does not match SharePoint · ${differences.length}${rec.rows_truncated ? '+' : ''} ${differences.length === 1 ? 'difference' : 'differences'}` : 'Not checked against SharePoint yet';
+    return h('details', {class: 'fd-comparison ' + (verified ? 'ok' : differs ? 'bad' : 'unknown'), open: differs || null},
+      h('summary', {}, verified ? icon('ok', 15) : differs ? icon('x', 15) : icon('warn', 15), ' ', answer),
       verified ? h('p', {}, 'Every record and quantity in this report matches SharePoint.') : null,
       differs ? h('section', {}, h('h3', {}, `What is different (${differences.length}${rec.rows_truncated ? '+' : ''})`),
         totals.length ? h('ul', {class: 'fd-difference-totals'}, totals.map(t => h('li', {}, t))) : null,
@@ -2414,11 +2502,13 @@
     if (state.sideTab === 'facts') state.sideTab = 'fixes';
     const rv = r.review, tab = state.sideTab || 'fixes';
     const body = h('div', {class: 'sidebody', id: 'side-body'});
-    side.replaceChildren(fdReportSummary(r), h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
+    const open = state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
+    side.replaceChildren(h('header', {class: 'fd-apphead'}, h('h2', {}, 'Verification App'),
+        h('p', {class: 'fd-errcount'}, open == null ? 'Counting possible errors…' : plural(open, 'possible error'))),
+      fdReportSummary(r), fdComparison(r), h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
     drawSideTabs();
     if (tab === 'fixes') {
       fdCorrections(body);
-      body.append(fdComparison(r));
       body.append(h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors'));
       body.append(h('button', {type: 'button', class: 'btn', disabled: state.busy || state.rechecking || state.decisionPending || !!state.aiProposalOperation, onclick: fdRecheck}, 'Recheck this report'));
       body.append(h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'sources'; drawReport(); }}, 'Source evidence and coverage'));
