@@ -5,6 +5,8 @@ import hashlib, io, json, os, socket, subprocess, sys, threading
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 ROOT=Path(__file__).resolve().parents[1]
+WIDTH=int(sys.argv[1]) if len(sys.argv)>1 else 1200
+assert WIDTH in (1200,390), 'Only the two isolated test viewports are supported.'
 sys.path[:0]=[str(ROOT),str(ROOT/'tests')]
 for key in list(os.environ):
     if key.startswith(('MS_','ANTHROPIC_','OPENAI_','VERCEL','DATABASE_','PG','CI_PG_')):
@@ -49,7 +51,7 @@ class LocalHandler(handler):
 server=ThreadingHTTPServer(('127.0.0.1',0),LocalHandler);server.workspace_store=store
 threading.Thread(target=server.serve_forever,daemon=True).start()
 try:
-    result=subprocess.run(['node',str(ROOT/'tests/browser_recommended_apply.js'),f'http://127.0.0.1:{server.server_port}',original_hash],text=True,capture_output=True,
+    result=subprocess.run(['node',str(ROOT/'tests/browser_recommended_apply.js'),f'http://127.0.0.1:{server.server_port}',original_hash,str(WIDTH)],text=True,capture_output=True,
         env={k:os.environ[k] for k in ('HOME','PATH','LANG','PLAYWRIGHT_MODULE','CHROMIUM_EXECUTABLE') if k in os.environ},timeout=80)
     print(result.stdout);print(result.stderr,file=sys.stderr);assert result.returncode==0,result.returncode
     with store.session() as directory:
@@ -66,6 +68,6 @@ try:
         chosen=apply_requests[0]['changes'][0];assert diffs==[(chosen['sheet'],chosen['cell'],chosen['before'],chosen['after'])],diffs
         assert not new.get('approval') and not new.get('sent');assert len(apply_requests)==2 # one success and one unchanged replay rejection
         assert not external,external
-        print(json.dumps(dict(passed=True,actual_handler=True,original_byte_identical=True,one_corrected_version=True,revision=2,recorded_changes=1,exact_cell_differences=diffs,replay_created_no_version=True,no_provider_traffic=True,synthetic_only=True)))
+        print(json.dumps(dict(passed=True,width=WIDTH,actual_handler=True,original_byte_identical=True,one_corrected_version=True,revision=2,recorded_changes=1,exact_cell_differences=diffs,replay_created_no_version=True,no_provider_traffic=True,synthetic_only=True)))
 finally:
     server.shutdown();server.server_close()
