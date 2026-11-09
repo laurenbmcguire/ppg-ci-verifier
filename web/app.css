@@ -1762,3 +1762,5 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 /* above the spreadsheet: download or email the working copy */
 .fd-sheetbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;margin-bottom:8px;border:1px solid var(--line,#ccd5d2);border-radius:10px;background:#fff}
 .fd-sheetbar-what{flex:1;min-width:180px;font-size:13px;color:#5d6f69}
+.fd-fixed-list{margin:6px 0;padding-left:18px;max-height:200px;overflow:auto}.fd-fixed-list s{color:#5d6f69}
+.fd-apphead{display:grid;grid-template-columns:1fr auto;align-items:center;column-gap:8px}.fd-apphead h2,.fd-apphead .fd-errcount{grid-column:1}.fd-apphead #fd-open-review{grid-column:2;grid-row:1 / span 2}

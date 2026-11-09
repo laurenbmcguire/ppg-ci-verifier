@@ -80,7 +80,8 @@ def test_racing_state_discards_response(setup,monkeypatch,race):
     with pytest.raises(ValueError):ap.prepare(box,p,lambda:allowed[0],provider)
     assert not box.get(item['file_hash']).get('ai_fixes')
 
-@pytest.mark.parametrize('blocked',['hold','decision','no_cell','source'])
+# Nov 9: a report hold no longer blocks a requested cell suggestion (holds still block approval and sending).
+@pytest.mark.parametrize('blocked',['decision','no_cell','source'])
 def test_blocked_finding_explained_without_provider(setup,monkeypatch,blocked):
     box,item,issues,p,pv=setup
     if blocked=='hold':monkeypatch.setattr(box,'holds',lambda *a:[{'code':'hold'}])

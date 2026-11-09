@@ -100,9 +100,9 @@ def prepare(inbox, payload, authorize, provider=None):
     for issue in selected:
         key = issue['key']; cell = issue.get('cell'); sheet = issue.get('sheet')
         reason = None
-        if holds:
-            reason = 'Resolve the report holds before preparing cell changes.'
-        elif issue.get('source_value') is not None or str(issue.get('source') or '').startswith('SharePoint'):
+        # Holds keep blocking approval and sending; they no longer stop a reviewer from asking for a cell suggestion
+        # (the change is saved as a new version and the original is kept).
+        if issue.get('source_value') is not None or str(issue.get('source') or '').startswith('SharePoint'):
             reason = 'Review the verified source correction separately; AI cannot establish source authority.'
         elif issue.get('decision') or issue.get('previous_decision') or key in (item.get('review_decisions') or {}):
             reason = 'This finding has a review decision. Reopen it before requesting a change.'

@@ -1663,7 +1663,8 @@
       const next = await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true});
       if (!next) throw new Error('The fixes could not be saved. Nothing was changed.');
       state.fdReviewSelection = null;
-      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, tried: todo.length, skipped, from: revisionOf(report)};
+      const done = accepted.map(p => { const it = todo.find(x => x.key === p.finding_id); return {where: `${p.sheet} cell ${p.cell}`, text: it?.text || it?.reason || '', before: p.before, after: p.after}; });
+      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, tried: todo.length, skipped, from: revisionOf(report), items: done};
     } catch (e) { state.fdAIRun = {hash, done: true, error: e?.message || String(e)}; }
     finally { if (state.report?.file_hash === state.fdAIRun?.hash) drawSide(); }
   }
@@ -1706,7 +1707,8 @@
       const report = state.report, from = revisionOf(report);
       state.fdManual = null;
       const next = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding: c.binding});
-      if (next) state.fdAIRun = {hash: next, done: true, fixed: c.total, tried: c.total, from, manual: true};
+      if (next) state.fdAIRun = {hash: next, done: true, fixed: c.total, tried: c.total, from, manual: true,
+        items: Object.values(c.edits).map(e => ({where: `${e.sheet} cell ${e.cell}`, text: '', before: e.before, after: e.after}))};
       if (state.report?.file_hash === next) drawSide();
     };
     setTimeout(() => { const el = document.querySelector('.fd-manual-input'); if (el && document.activeElement?.tagName !== 'INPUT') { el.focus(); el.select(); } }, 0);
@@ -1737,6 +1739,8 @@
     if (!run.fixed) return h('div', {class: 'fd-airun', role: 'status'}, h('p', {}, `Dex could not fix ${run.tried === 1 ? 'this error' : `these ${run.tried} errors`}. Nothing was changed. Fix ${run.tried === 1 ? 'it' : 'them'} manually or ignore ${run.tried === 1 ? 'it' : 'them'}.`), why, dismiss);
     return h('div', {class: 'fd-airun good', role: 'status'},
       h('p', {}, h('b', {}, `${run.manual ? 'You changed' : 'Dex fixed'} ${plural(run.fixed, 'cell')}.`), ` Saved as version ${(run.from || 1) + 1}; version ${run.from || 1} is kept.`),
+      (run.items || []).length ? h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
+        h('s', {}, `${x.where}${x.text ? ': ' + String(x.text).slice(0, 120) : ''}`), ` ${x.before === '' ? 'blank' : '“' + x.before + '”'} → “${x.after}”`))) : null,
       h('p', {}, left ? `${plural(left, 'error')} left to fix. ${left === 1 ? 'It is' : 'They are'} listed below.` : 'No errors left to fix.'), why, dismiss);
   }
   // ---------- the app fixes what it can by itself (new version, original kept), then shows only what needs a person
@@ -2447,6 +2451,7 @@
     if (rows.duplicate_report_rows) totals.push(`${rows.duplicate_report_rows} duplicate row${rows.duplicate_report_rows === 1 ? '' : 's'} in the report.`);
     const checking = !verified && !differs && (state.fdReconciling || (typeof fdAutoReconcile === 'function' && state.report === r && fdAutoReconcile(r)));
     const possible = !verified && !differs && differences.length > 0;
+    const spIssues = typeof allIssues === 'function' && r.review ? allIssues(r.review).filter(i => String(i.source || '').startsWith('SharePoint') || String(i.code || '').startsWith('sharepoint_')) : [];
     const failed = state.fdAutoSPError?.key === r.file_hash + ':' + r.check_hash ? state.fdAutoSPError.message : null;
     const kinds = new Map(); for (const row of differences) kinds.set(row.status, (kinds.get(row.status) || 0) + 1);
     const kindText = {value_differs: 'values differ from SharePoint', export_value_differs: 'values differ from SharePoint', changed_since_export: 'changed on SharePoint since the export',
@@ -2454,8 +2459,8 @@
       item_listed_twice: 'duplicate rows', report_row_without_item_id: 'rows with no SharePoint item number', wrong_list: 'from a different SharePoint list'};
     const quick = [...kinds].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${kindText[k] || String(k).replace(/_/g, ' ')}`);
     const answer = verified ? 'Matches SharePoint' : differs ? `Does not match SharePoint · ${differences.length}${rec.rows_truncated ? '+' : ''} ${differences.length === 1 ? 'difference' : 'differences'}`
-      : checking ? 'Checking SharePoint…' : possible ? `${differences.length} possible ${differences.length === 1 ? 'difference' : 'differences'} from SharePoint` : failed ? 'SharePoint could not be checked' : 'SharePoint check is not complete';
-    return h('details', {class: 'fd-comparison ' + (verified ? 'ok' : differs ? 'bad' : 'unknown'), open: differs || possible || null},
+      : checking ? 'Checking SharePoint…' : possible ? `${differences.length} possible ${differences.length === 1 ? 'difference' : 'differences'} from SharePoint` : spIssues.length ? `${spIssues.length} ${spIssues.length === 1 ? 'difference' : 'differences'} from SharePoint` : failed ? 'SharePoint could not be checked' : 'SharePoint check is not complete';
+    return h('details', {class: 'fd-comparison ' + (verified ? 'ok' : differs || spIssues.length ? 'bad' : 'unknown'), open: differs || possible || (!verified && spIssues.length > 0) || null},
       h('summary', {}, verified ? icon('ok', 15) : differs ? icon('x', 15) : checking ? h('span', {class: 'spin'}) : icon('warn', 15), ' ', answer),
       (differs || possible) && quick.length ? h('p', {class: 'fd-sp-quick'}, quick.join(' · ') + '.') : null,
       failed && !checking ? h('p', {class: 'fd-hint'}, failed, ' ', h('button', {type: 'button', class: 'fd-linkbtn', onclick: () => { state.fdAutoSPError = null; fdReconcile(); }}, 'Try again')) : null,
@@ -2467,9 +2472,12 @@
         null) : null,
       !verified && !differs && !checking ? h('p', {class: 'fd-hint'}, current && rec.rows ? `SharePoint was read, but part of the comparison could not be confirmed${sp.message ? ': ' + String(sp.message).split('. ')[0] + '.' : '.'}`
         : (r.assignment || {}).needs_person ? 'Choose the client and job first; then SharePoint is checked automatically.' : 'SharePoint has not answered for this report yet.') : null,
-      !verified && !differs && differences.length ? h('details', {}, h('summary', {}, `Earlier comparison, not verified · ${differences.length} possible difference${differences.length === 1 ? '' : 's'}`),
-        h('p', {class: 'fd-hint'}, 'Not confirmed: these may not be real differences until the comparison is complete.'),
-        h('ul', {class: 'fd-difference-list'}, differences.map(row => h('li', {}, fdDifferenceText(row))))) : null,
+      possible ? h('section', {}, h('h3', {}, 'What is different'),
+        h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Differences from SharePoint'}, differences.map(row => h('li', {}, fdDifferenceText(row),
+          row.url ? [' ', h('a', {href: row.url, target: '_blank', rel: 'noopener'}, 'Open in SharePoint')] : null))),
+        h('p', {class: 'fd-hint'}, 'Earlier comparison, not verified: SharePoint could not be fully confirmed, so some of these may not be real differences.')) : null,
+      !verified && !differs && !possible && spIssues.length ? h('section', {}, h('h3', {}, 'What is different'),
+        h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Differences from SharePoint'}, spIssues.map(i => h('li', {}, [i.sheet, i.cell ? 'cell ' + i.cell : i.row ? 'row ' + i.row : null].filter(Boolean).join(' ') + ': ' + (i.text || i.message || ''))))) : null,
       fdSourceRecovery(r),
       sp.web_url ? h('a', {href: sp.web_url, target: '_blank', rel: 'noopener'}, 'Open the SharePoint list (read only)') : null,
       h('details', {class: 'fd-comparison-tech'}, h('summary', {}, 'Technical details'),
@@ -2545,12 +2553,12 @@
     const body = h('div', {class: 'sidebody', id: 'side-body'});
     const open = state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
     side.replaceChildren(h('header', {class: 'fd-apphead'}, h('h2', {}, 'Verification App'),
-        h('p', {class: 'fd-errcount'}, open == null ? 'Counting possible errors…' : plural(open, 'possible error'))),
+        h('p', {class: 'fd-errcount'}, open == null ? 'Counting possible errors…' : plural(open, 'possible error')),
+        h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors')),
       fdReportSummary(r), fdComparison(r), h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
     drawSideTabs();
     if (tab === 'fixes') {
       fdCorrections(body);
-      body.append(h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors'));
       body.append(h('button', {type: 'button', class: 'btn', disabled: state.busy || state.rechecking || state.decisionPending || !!state.aiProposalOperation, onclick: fdRecheck}, 'Recheck this report'));
       body.append(h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'sources'; drawReport(); }}, 'Source evidence and coverage'));
       const sc = shiftCard(rv); if (sc) body.append(h('div', {id: 'shiftfix'}, sc));
