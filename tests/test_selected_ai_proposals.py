@@ -117,3 +117,45 @@ def test_apply_rechecks_exact_check_binding(setup):
     with pytest.raises(ValueError,match='changed'):
         box.apply_fixes(item['file_hash'],result['proposals'],expected_check_hash=p['expected_check_hash'])
     assert box.list()['count']==1
+
+@pytest.mark.parametrize('value',['x' * (ap.MAX_CELL_BYTES + 1), '\U0001f600' * (ap.MAX_CELL_BYTES // 4 + 1)])
+def test_long_cells_never_transferred_or_truncated(setup,monkeypatch,value):
+    box,item,issues,p,pv=setup
+    monkeypatch.setattr(ap,'_cell_value',lambda *a:value)
+    result=ap.prepare(box,p,lambda:True,lambda rows:pytest.fail('Oversized cell sent'))
+    assert not result['proposals'] and len(result['skipped'])==2
+    assert all('not shortened' in x['reason'] for x in result['skipped'])
+
+
+def test_many_individually_bounded_cells_do_not_transfer_over_budget(setup,monkeypatch):
+    box,item,issues,p,pv=setup
+    issues[:]=[dict(key='check|typo|CSV|A'+str(i),fp=str(i),sheet='CSV',cell='A'+str(i),text='Synthetic') for i in range(2,82)]
+    p['ids']=[i['key'] for i in issues];p['seen']={i['key']:i['fp'] for i in issues}
+    monkeypatch.setattr(ap,'_cell_value',lambda *a:'x'*1000)
+    before=box.get(item['file_hash'])
+    result=ap.prepare(box,p,lambda:True,lambda rows:pytest.fail('Oversized aggregate sent'))
+    assert not result['proposals'] and len(result['skipped'])==80
+    assert all('Select fewer' in x['reason'] for x in result['skipped'])
+    assert box.get(item['file_hash'])==before
+
+
+def test_safe_request_preserves_exact_before_identity(setup):
+    box,item,issues,p,pv=setup;captured=[]
+    def provider(rows):
+        captured.extend(rows)
+        assert len(ap._canonical(rows).encode('utf-8'))<=ap.MAX_CANDIDATES_BYTES
+        return pv(rows)
+    ap.prepare(box,p,lambda:True,provider)
+    assert [r['before'] for r in captured]==['SYN-1','SYN-2']
+
+
+def test_provider_entry_independently_checks_cell_and_aggregate_bytes(monkeypatch):
+    monkeypatch.setattr(ap.ai_review,'_post',lambda *a,**k:pytest.fail('Oversized request sent'))
+    with pytest.raises(ValueError):ap.ask([{'before':'x'*(ap.MAX_CELL_BYTES+1)}])
+    with pytest.raises(ValueError):ap.ask([{'before':'x'*1000}]*80)
+
+
+def test_complete_serialized_request_budget_checked_before_transport(monkeypatch):
+    monkeypatch.setattr(ap,'MAX_REQUEST_BYTES',100)
+    monkeypatch.setattr(ap.ai_review,'_post',lambda *a,**k:pytest.fail('Oversized transport body sent'))
+    with pytest.raises(ValueError,match='serialized'):ap.ask([{'before':'safe'}])
