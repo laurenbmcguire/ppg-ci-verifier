@@ -36,6 +36,14 @@ def eligible(item):
     return None
 
 
+KEEP = ('id', 'sheet', 'cell', 'before', 'after', 'reason', 'source', 'kind', 'snapshot_id', 'captured_at', 'item', 'field', 'change_set', 'change_set_size')
+
+
+def _held_cells(item):
+    from hosting.spreadsheet_inbox import SpreadsheetInbox
+    return SpreadsheetInbox.held_cells(item)
+
+
 BATCH = 20        # issues per Claude call: each request stays well inside the function time limit
 MAX_ROUNDS = 15
 
@@ -60,6 +68,7 @@ def step(h, file_hash, phase):
     sure   - apply every source-backed / mechanical fix (one new version); start the summary
     ai     - Claude resolves the next batch of what is left (one new version when it changes something)
     finish - check the final version against SharePoint again and close the summary"""
+    raise AutoFixError('Automatic workbook changes are disabled pending atomic review safeguards. Review and apply cell corrections instead.')
     from api.index import ai_review_configured
     from hosting import ai_fix
     from hosting.public_api import _after_change
@@ -72,18 +81,19 @@ def step(h, file_hash, phase):
             if why_not:
                 raise AutoFixError(why_not)
             props = inbox.fix_proposals(file_hash)['proposals']
-            sure = [p for p in props if p.get('sure')]
+            held = _held_cells(item)
+            sure = [p for p in props if p.get('sure') and (p.get('sheet'), str(p.get('cell') or '').upper()) not in held]
             summary = dict(made_at=_now(), from_hash=file_hash, status='running', rounds=0, changed=[], removed=[], moved=[], fine=[], left=[], left_keys=[], notes=[])
             current = file_hash
             if sure:
-                current = inbox.apply_fixes(file_hash, [{k: p.get(k) for k in ('id', 'sheet', 'cell', 'before', 'after', 'reason', 'source', 'kind')} for p in sure])['file_hash']
+                current = inbox.apply_fixes(file_hash, [dict(p) for p in sure], expected_check_hash=item.get('check_hash'), automatic=True)['file_hash']
                 summary['changed'] = [dict(sheet=p['sheet'], cell=p['cell'], before=p['before'], after=p['after'], reason=p.get('only') or p.get('reason'),
                                            source=p.get('source'), by='app') for p in sure]
             if not ai_review_configured():
                 summary['notes'].append('Claude is not connected here, so only the source-backed and mechanical fixes were made.')
             inbox._update(file_hash, lambda r: r.update(auto_fix_tried=dict(at=_now(), to=current)))
             inbox._update(current, lambda r: r.update(auto_fixed=summary, auto_fix_tried=dict(at=_now(), to=current)))
-            more = ai_review_configured() and bool(_remaining(inbox, current, summary))
+            more = False  # AI write plans are disabled until they can be scoped and committed atomically.
             return dict(item=inbox.get(current), summary=summary, next='ai' if more else 'finish')
     with h.store().session() as directory:
         inbox = SpreadsheetInbox(directory)
@@ -135,6 +145,7 @@ def step(h, file_hash, phase):
 
 def revert(h, file_hash, cells=(), fine=(), by=''):
     """Undo chosen automatic changes (as a new version) and chosen "confirmed fine" decisions (on this version)."""
+    raise AutoFixError('Reverting automatic changes is disabled pending scoped, atomic review safeguards.')
     from hosting.public_api import _after_change
     from hosting.spreadsheet_inbox import SpreadsheetInbox
     with h.store().session() as directory:

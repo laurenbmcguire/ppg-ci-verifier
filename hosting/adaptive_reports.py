@@ -16,8 +16,8 @@ import re
 
 TEMPLATE_ID = 'adaptive-columns/1'
 SCAN_ROWS = 400
-MAX_FINDINGS = 300
-MAX_RECORDS_RETURNED = 500
+from hosting.limits import MAX_FINDINGS  # every finding is stored (bounded only against hostile files)
+from hosting.limits import MAX_RECORDS as MAX_RECORDS_RETURNED  # every row keeps its record identity
 
 _FILLER = {'total', 'totals', 'qty', 'quantity', 'quantities', 'pcs', 'pc', 'pieces', 'piece', 'parts', 'part',
            'count', 'counts', 'no', 'number', 'of', 'num', 'units', 'unit', 'amount', 'daily', 'sum', 'ea',

@@ -12,6 +12,7 @@ class AIFixError(ValueError):
 
 
 def run(h, file_hash, keys=None, opener=None, auto=False, after=True, merge=True):
+    raise AIFixError('AI workbook changes are disabled until scoped plans can be reviewed and committed atomically. Use reviewed cell corrections instead.')
     from hosting import ai_review
     from hosting.spreadsheet_inbox import SpreadsheetInbox, validate_changes
     from hosting.fixes import relocate_rows, FixError
@@ -35,10 +36,13 @@ def run(h, file_hash, keys=None, opener=None, auto=False, after=True, merge=True
     # a value SharePoint has may only become SharePoint's value; a must-fix issue is never "fine" on Claude's word
     guarded = []
     for c in plan['cells']:
-        src = (by_ref.get(c.get('ref')) or {}).get('source_value')
+        i = by_ref.get(c.get('ref')) or {}
+        src = i.get('source_value')
         if src is not None and str(c.get('after')) != str(src):
             guarded.append(dict(c, why='SharePoint has a different value'))
             continue
+        if src is not None:   # a SharePoint-backed value keeps the read, item and field it came from, checked again on apply
+            c = dict(c, snapshot_id=i.get('snapshot_id'), item=i.get('item'), field=i.get('field'))
         guarded.append(c)
     plan['cells'] = [c for c in guarded if 'why' not in c]
     # a must-fix issue counts as settled only when one of these changes is on its row (the same typo fixed once);
@@ -63,14 +67,14 @@ def run(h, file_hash, keys=None, opener=None, auto=False, after=True, merge=True
         with h.store().session() as directory:
             inbox = SpreadsheetInbox(directory)
             if cells:
-                current = inbox.apply_fixes(current, [dict(c, source='AI fix (asked)') for c in cells])['file_hash']
+                current = inbox.apply_fixes(current, [dict(c, source='AI fix (asked)') for c in cells], auto=True)['file_hash']   # Claude's choices: checked as automatic work
             if rows:
                 now = inbox.get(current)
                 _, data = inbox.original_bytes(current)
                 changes = relocate_rows(now['filename'], data, [(r['sheet'], r['row'], (r.get('to_sheet') or None)) for r in rows])
                 for c in changes:
                     c['reason'], c['source'] = 'Rows taken out or moved by Claude', 'Row taken out or moved (AI fix)'
-                current = inbox.apply_fixes(current, changes)['file_hash']
+                current = inbox.apply_fixes(current, changes, auto=True)['file_hash']
     except FixError as exc:
         raise AIFixError(f'Claude\'s changes could not be applied: {exc}') from None
     fine = [dict(code=by_ref[f['ref']].get('code'), sheet=by_ref[f['ref']].get('sheet'), row=by_ref[f['ref']].get('row'), cell=by_ref[f['ref']].get('cell'),

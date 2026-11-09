@@ -134,3 +134,53 @@ def inventory(raw, sources, dataset_selection=None):
     return dict(images=photos, image_count=len(photos), other_images=len(pics) - len(photos), linked_to_records=sum(1 for p in photos if p.get('item')),
                 links=links[:500], inaccessible_links=broken[:500], production=False,
                 note='Photos are evidence, never production. Original image bytes are kept unchanged in the stored file.')
+
+
+SAFE_SCHEMES = ('https://', 'http://', 'mailto:')
+
+
+def safe_url(url):
+    """A link a reviewer may click: http(s) or mailto only. javascript:, data:, file: and local paths are never clickable."""
+    u = str(url or '').strip()
+    return bool(u) and u.lower().startswith(SAFE_SCHEMES) and not re.search(r'[\x00-\x1f\s<>"]', u)
+
+
+def native_links(raw):
+    """[{sheet, cell, url, safe}] for every hyperlink Excel stores on a cell (the blue links), with its target."""
+    out = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            names = set(z.namelist())
+            if 'xl/workbook.xml' not in names:
+                return out
+            wb = ET.fromstring(z.read('xl/workbook.xml'))
+            wb_rels = _rels(z, 'xl/workbook.xml')
+            for sh in wb.findall('m:sheets/m:sheet', NS):
+                part = wb_rels.get(sh.get(f'{{{NS["r"]}}}id'))
+                if not part or part not in names:
+                    continue
+                folder, name = posixpath.split(part)
+                rel_path = posixpath.join(folder, '_rels', name + '.rels')
+                targets = {}
+                if rel_path in names:
+                    for r in ET.fromstring(z.read(rel_path)).findall('rel:Relationship', NS):
+                        if r.get('TargetMode', '').lower() == 'external':
+                            targets[r.get('Id')] = r.get('Target')
+                for hl in ET.fromstring(z.read(part)).iter(f'{{{NS["m"]}}}hyperlink'):
+                    url = targets.get(hl.get(f'{{{NS["r"]}}}id'))
+                    ref = (hl.get('ref') or '').split(':')[0]
+                    if url and ref:
+                        out.append(dict(sheet=sh.get('name'), cell=ref, url=url[:2000], safe=safe_url(url)))
+    except (zipfile.BadZipFile, ET.ParseError, KeyError, ValueError):
+        return out
+    return out
+
+
+def media_bytes(raw, media):
+    """The original bytes of one picture the workbook's drawings use (never any other part of the file)."""
+    if not isinstance(media, str) or not re.fullmatch(r'xl/media/[A-Za-z0-9_.-]{1,80}', media):
+        return None
+    if media not in {p['media'] for p in images(raw)}:
+        return None
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        return z.read(media)

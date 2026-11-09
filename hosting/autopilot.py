@@ -43,13 +43,19 @@ def _jobs(h, inbox, today):
 
 def clean(h, file_hash):
     """Corrected copy with only the sure fixes. Returns (new_file_hash or None, sure_count, left_for_a_person)."""
+    from hosting.fixes import FixError
     with h.store().session() as directory:
-        props = SpreadsheetInbox(directory).fix_proposals(file_hash)['proposals']
-    sure = [p for p in props if p.get('sure')]
+        inbox = SpreadsheetInbox(directory)
+        props = inbox.fix_proposals(file_hash)['proposals']
+        held = inbox.held_cells(inbox.get(file_hash))   # a person's "keep as recorded" or "waiting for the owner" stays
+    sure = [p for p in props if p.get('sure') and (p.get('sheet'), str(p.get('cell') or '').upper()) not in held]
     if not sure:
         return None, 0, len(props)
-    with h.store().session() as directory:
-        fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, [dict(p, source=f"{p.get('source') or 'Fix'} (autopilot)") for p in sure])
+    try:
+        with h.store().session() as directory:
+            fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, [dict(p, source=f"{p.get('source') or 'Fix'} (autopilot)") for p in sure], auto=True)
+    except FixError:
+        return None, 0, len(props)   # something changed under it (a decision, a SharePoint read): nothing applied, left for a person
     from hosting.public_api import _after_change
     _after_change(h, fixed['file_hash'])
     return fixed['file_hash'], len(sure), len(props) - len(sure)

@@ -17,7 +17,7 @@ from hosting.adaptive_reports import scan, near_miss, norm, shift_number
 FIELDS = ('inspected', 'rejected', 'certified')
 NAMES = {'inspected': 'Inspected', 'rejected': 'Rejected / NOK', 'certified': 'Certified / OK', 'part': 'Part number',
          'day': 'Date', 'shift': 'Shift'}
-MAX_FINDINGS = 300
+from hosting.limits import MAX_FINDINGS  # every finding is stored (bounded only against hostile files)
 
 
 class SourceError(ValueError):

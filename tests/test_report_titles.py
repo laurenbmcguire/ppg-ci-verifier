@@ -91,6 +91,8 @@ class ManyChanges(unittest.TestCase):
             inbox = SpreadsheetInbox(d)
             item = inbox.ingest('PPG_2207_Nov06_Provisional.xlsx', raw)
             changes = [dict(sheet='Shift 1', cell=f'M{r}', before='', after=f'note {r}', reason='test', source='test') for r in range(20, 720)]
-            fixed = inbox.apply_fixes(item['file_hash'], changes)
+            fixed = inbox.apply_fixes(item['file_hash'], changes, expected_check_hash=item['check_hash'])
+            self.assertEqual(inbox.original_bytes(item['file_hash'])[1], raw)
+            self.assertEqual(len(fixed['fixed_from']['changes']), 700)
             ws = load_workbook(io.BytesIO(inbox.original_bytes(fixed['file_hash'])[1]))['Shift 1']
             self.assertEqual(ws['M719'].value, 'note 719')

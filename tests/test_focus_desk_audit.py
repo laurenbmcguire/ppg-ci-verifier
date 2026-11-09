@@ -6,6 +6,7 @@ import unittest
 
 from openpyxl import load_workbook
 
+from tests.review_request_fixture import apply_displayed, approve_displayed
 from hosting import delivery, registry
 from hosting.fixes import FixError, apply_fixes, type_problem, _sources
 from hosting.review_summary import check_run, summarize
@@ -40,6 +41,45 @@ def reconciled(box, item, snapshot='snap-1', status='verified', rows=None):
     return box._update(item['file_hash'], lambda r: r.update(source_reconciliation=rec))
 
 
+def verified_fixture(box, item, snapshot='verified-synthetic-read'):
+    """Full synthetic source for the explicit values in this five-row fixture.
+
+    This is a test source capture, not a shortcut that labels a partial receipt verified.
+    Missing counts fail this helper; disagreement scenarios keep using reconciled().
+    """
+    from hosting.spreadsheets import report_and_export_records
+    from tests.test_reconcile import sp_item, snap, SITE, LIST
+    records, _ = report_and_export_records(item['filename'], box.download(item['file_hash'])[1])
+    assert len(records) == 5
+    source = []
+    for record in records:
+        values = record['values']
+        assert values.get('inspected') is not None and values.get('rejected') is not None
+        row = sp_item(int(record['source']['item']), inspected=float(values['inspected']))
+        row['fields'].update(QuantityOK=float(values['certified']), QtyNOK=float(values['rejected']))
+        source.append(row)
+    box.set_setting(registry.SNAPSHOT_KEY, [])  # no conflicting l-2214 discovery candidate
+    box.set_setting(registry.REGISTRY_KEY, [dict(client_key='SLAlabama', client='SL Alabama', job='2214',
+        site=SITE, site_id='site-1', list_id=LIST, verified=True)])
+    result = box.source_reconcile(item['file_hash'], snap([source]), '2026-11-06', expected_check_hash=box.get(item['file_hash'])['check_hash'])
+    assert result['source_reconciliation']['status'] == 'verified', result['source_reconciliation']
+    return box._update(item['file_hash'], lambda r: r['source_reconciliation'].update(snapshot_id=snapshot))
+
+
+def approval_fixture(box):
+    """A distinct complete report used only for approved-version guard tests.
+
+    Preserve a cosmetic H6 correction proposal, but make report and captured export
+    counts agree. The discrepant 72/80 fixtures remain for stale-review negatives.
+    """
+    wb = load_workbook(io.BytesIO(sl_daily(nok_blank=False)))
+    cell = wb['Inspection Detail']['H6']
+    cell.value = '  ' + str(cell.value) + ' '
+    raw = io.BytesIO()
+    wb.save(raw)
+    return verified_fixture(box, box.ingest(NAME, raw.getvalue()))
+
+
 class OneCheckRun(unittest.TestCase):
     """Finding 1: metrics, issues, AI explanations and approval all belong to the same report hash, snapshot and checker."""
 
@@ -57,14 +97,22 @@ class OneCheckRun(unittest.TestCase):
 
     def test_approval_is_tied_to_the_check_run_and_sending_refuses_a_stale_one(self):
         root, box = inbox()
-        item = reconciled(box, box.ingest(NAME, sl_daily()), 'snap-1')
-        box.approve(item['file_hash'], 'Reviewer', note='checked', override=True)
+        item = verified_fixture(box, box.ingest(NAME, sl_daily(nok_blank=False)), 'snap-1')
+        approve_displayed(box, item['file_hash'], 'Reviewer', note='checked', override=True)
         self.assertTrue(summarize(box.get(item['file_hash']))['approval_current'])
         reconciled(box, box.get(item['file_hash']), 'snap-2')               # SharePoint read again after approval
         self.assertFalse(summarize(box.get(item['file_hash']))['approval_current'])
         with self.assertRaises(ValueError) as e:
             delivery.send(_Store(root), item['file_hash'], dict(mode='draft', to=['nobody@example.com'], subject='x', body='x'))
-        self.assertIn('Approve it again', str(e.exception))
+        self.assertIn('paused', str(e.exception))
+
+    def test_missing_count_receipt_cannot_be_overridden_into_approval(self):
+        _, box = inbox()
+        item = approval_fixture(box)
+        box._update(item['file_hash'], lambda r: r['source_reconciliation'].pop('count_reconciliation'))
+        with self.assertRaisesRegex(ValueError, 'not fully verified'):
+            approve_displayed(box, item['file_hash'], 'Reviewer', note='checked', override=True)
+        self.assertFalse(box.get(item['file_hash']).get('approval'))
 
     def test_a_partial_result_is_never_called_verified(self):
         _, box = inbox()
@@ -139,15 +187,15 @@ class VersionLineage(unittest.TestCase):
         raw = sl_daily()   # built once: the workbook carries a save time
         v1 = box.ingest(NAME, raw)
         change = [dict(sheet='Inspection Detail', cell='B4', before=box.sheet_grid(v1['file_hash'], 'Inspection Detail')['rows'][3][1], after='CHANGED-1', source='Your edit', kind='text')]
-        v2 = box.apply_fixes(v1['file_hash'], change)
+        v2 = apply_displayed(box, v1['file_hash'], change)
         self.assertEqual(v2['revision'], 2)
         self.assertEqual(v2['root_hash'], v1['file_hash'])
         self.assertEqual(v2['fixed_from']['file_hash'], v1['file_hash'])
-        again = box.apply_fixes(v1['file_hash'], change)                     # the same changes once more
+        again = apply_displayed(box, v1['file_hash'], change)                     # the same changes once more
         self.assertTrue(again.get('already_applied'))
         self.assertEqual(again['file_hash'], v2['file_hash'])
         self.assertEqual(len(box.get(v1['file_hash'])['fixes_applied']), 1)  # recorded once
-        v3 = box.apply_fixes(v2['file_hash'], [dict(change[0], before='CHANGED-1', after='CHANGED-2')])
+        v3 = apply_displayed(box, v2['file_hash'], [dict(change[0], before='CHANGED-1', after='CHANGED-2')])
         self.assertEqual((v3['revision'], v3['root_hash']), (3, v1['file_hash']))
         self.assertEqual(box.download(v1['file_hash'])[1], raw)              # the original is untouched
 
@@ -158,16 +206,15 @@ class Decisions(unittest.TestCase):
     def test_decisions_are_saved_logged_and_survive_a_recheck(self):
         _, box = inbox()
         item = box.ingest(NAME, sl_daily(nok_blank=True))
-        box.record_decision(item['file_hash'], 'check:missing:1', 'keep', 'Rejects were not recorded on the tablet.', 'Reviewer')
-        box.record_decision(item['file_hash'], 'fix:abc', 'reject', '', 'Reviewer')
-        got = box.get(item['file_hash'])
-        self.assertEqual(got['review_decisions']['check:missing:1']['action'], 'keep')
-        self.assertEqual(len(got['review_decision_log']), 2)
-        after = box.apply_recheck(item['file_hash'], 'Reviewer')
-        self.assertEqual(set(after['review_decisions']), {'check:missing:1', 'fix:abc'})
-        self.assertEqual(after['release_status'], 'held')
-        with self.assertRaises(ValueError):
-            box.record_decision(item['file_hash'], 'x', 'approve', '', 'Reviewer')
+        before=box.get(item['file_hash'])
+        for action in ('keep','reject','approve'):
+            with self.assertRaisesRegex(ValueError,'finding decision controls'):
+                box.record_decision(item['file_hash'],'check:missing:1',action,'Synthetic reason','Reviewer')
+        self.assertEqual(box.get(item['file_hash']),before)
+        after=box.apply_recheck(item['file_hash'],'Reviewer')
+        self.assertFalse(after.get('review_decisions'))
+        self.assertEqual(after['release_status'],'held')
+
 
 
 class BlankIsNotZero(unittest.TestCase):
@@ -221,26 +268,16 @@ class AutoFix(unittest.TestCase):
 
     def test_fixes_go_into_a_new_version_and_each_can_be_reverted(self):
         from hosting import autofix
-        v2, summary = autofix.run(self.h, self.v1['file_hash'])
-        self.assertNotEqual(v2['file_hash'], self.v1['file_hash'])
-        self.assertEqual(self.box.download(self.v1['file_hash'])[1], self.raw)          # the original is unchanged
-        self.assertEqual(self.cell(v2['file_hash'], 'Inspection Detail', 'J5'), '80')    # SharePoint's value
-        changed = {(c['sheet'], c['cell']): c for c in summary['changed']}
-        self.assertIn(('Inspection Detail', 'J5'), changed)
-        self.assertIn(('Inspection Detail', 'H6'), changed)                              # spacing cleaned
-        with self.assertRaises(autofix.AutoFixError):                                    # never twice
-            autofix.run(self.h, self.v1['file_hash'])
-        v3 = autofix.revert(self.h, v2['file_hash'], cells=[dict(sheet='Inspection Detail', cell='J5')], by='Reviewer')
-        self.assertEqual(self.cell(v3['file_hash'], 'Inspection Detail', 'J5'), '72')    # back to the report's value
-        self.assertEqual(self.cell(v3['file_hash'], 'Inspection Detail', 'H6'), self.cell(v2['file_hash'], 'Inspection Detail', 'H6'))
-        rev = {(c['sheet'], c['cell']): c for c in v3['auto_fixed']['changed']}
-        self.assertTrue(rev[('Inspection Detail', 'J5')]['reverted'])
-        self.assertFalse(rev[('Inspection Detail', 'H6')].get('reverted'))
-        self.assertIsNotNone(autofix.eligible(v3))                                       # a reverted version is not re-fixed
-        self.assertEqual(v3['release_status'], 'held')                                   # nothing approved or sent
+        before=self.box.get(self.v1['file_hash'])
+        for phase in ('sure','ai','finish'):
+            with self.assertRaisesRegex(autofix.AutoFixError,'disabled'):
+                autofix.step(self.h,self.v1['file_hash'],phase)
+        self.assertEqual(self.box.get(self.v1['file_hash']),before)
+        self.assertEqual(self.box.download(self.v1['file_hash'])[1],self.raw)
 
     def test_an_approved_report_is_left_alone(self):
         from hosting import autofix
-        self.box.approve(self.v1['file_hash'], 'Reviewer', note='x', override=True)
+        self.v1 = approval_fixture(self.box)
+        approve_displayed(self.box, self.v1['file_hash'], 'Reviewer', note='x', override=True)
         with self.assertRaises(autofix.AutoFixError):
             autofix.run(self.h, self.v1['file_hash'])

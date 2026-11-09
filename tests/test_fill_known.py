@@ -47,12 +47,10 @@ class FillKnown(unittest.TestCase):
         self.assertEqual((p['after'], p['source'], p['sure']), ('80', 'SharePoint', True))
 
     def test_live_sharepoint_differences_become_issues_with_a_fix(self):
-        item = self.inbox.ingest(NAME, sl_daily())
-        rec = dict(status='discrepancies', rows=[dict(status='value_differs', item='433', field='inspected', report='80', sharepoint='72',
-                                                      sheet='Inspection Detail', row=5, url='https://sp/433')],
-                   proposed_corrections=[dict(item='433', sheet='Inspection Detail', row=5, column=10, field='inspected', before='80', after='72')])
-        rec['bound_to'] = dict(file_hash=item['file_hash'], checker_version=item['checker_version'])
-        self.inbox._update(item['file_hash'], lambda r: r.update(source_reconciliation=rec))
+        item = self.inbox.ingest(NAME, sl_daily(nok_blank=False))
+        from tests.test_reconcile import ALL, snap, sp_item
+        source_items=list(ALL);source_items[1]=sp_item(433,inspected=72)
+        self.inbox.source_reconcile(item['file_hash'],snap([source_items]),'2026-11-06', expected_check_hash=self.inbox.get(item['file_hash'])['check_hash'])
         fresh = self.inbox.get(item['file_hash'])
         issue = next(i for i in summarize(fresh)['issues'] if i['code'] == 'sharepoint_value_differs')
         self.assertEqual(issue['cell'], 'J5')
@@ -67,13 +65,16 @@ class FillKnown(unittest.TestCase):
         self.assertEqual(summarize(self.inbox.get(item['file_hash']))['sharepoint']['status'], 'stale')
 
     def test_the_old_daily_export_comparison_is_superseded(self):
-        item = self.inbox.ingest(NAME, sl_daily())
+        from tests.test_focus_desk_audit import verified_fixture
+        item = self.inbox.ingest(NAME, sl_daily(nok_blank=False))
         legacy = dict(status='differences', findings=[dict(code='differs_from_sharepoint', message='SL Alabama LLC: Shift is 3 in the report but 2 on SharePoint.')])
-        rec = dict(status='verified', rows=[], bound_to=dict(file_hash=item['file_hash'], checker_version=item['checker_version']))
-        self.inbox._update(item['file_hash'], lambda r: r.update(sharepoint=legacy, source_reconciliation=rec))
+        self.inbox._update(item['file_hash'], lambda r: r.update(sharepoint=legacy))
+        verified_fixture(self.inbox, self.inbox.get(item['file_hash']))
         rv = summarize(self.inbox.get(item['file_hash']))
         self.assertEqual(rv['sharepoint']['status'], 'match')
         self.assertFalse(any('Shift is 3' in i['text'] for i in rv['issues']))
+        self.inbox._update(item['file_hash'], lambda r: r['source_reconciliation'].pop('count_reconciliation'))
+        self.assertEqual(summarize(self.inbox.get(item['file_hash']))['sharepoint']['status'], 'unverified')
 
 
 if __name__ == '__main__':

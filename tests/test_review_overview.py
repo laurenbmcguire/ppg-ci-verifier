@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from eos_fixture import build, ROWS
 from hosting import overview
 
+from test_send import displayed_binding
+
 
 class ReviewOverviewTests(unittest.TestCase):
     def setUp(self):
@@ -15,6 +17,9 @@ class ReviewOverviewTests(unittest.TestCase):
         from legacy_storage_fake import PostgresWorkspace
         from test_vercel import FakeDatabase
         self.env = patch.dict(os.environ, {'CI_LOCAL_DEV': '1', 'VERCEL': '0'}); self.env.start()
+        assignments = patch('hosting.spreadsheet_inbox.SpreadsheetInbox.assignment_for', side_effect=lambda r,rv,ctx=None:
+                            dict(status='manual',job=rv['job'],business_date=rv['day'],client_key='synthetic',site_id='synthetic',list_id=rv['job']))
+        assignments.start(); self.addCleanup(assignments.stop)
         for k in ('MS_TENANT_ID', 'MS_CLIENT_ID', 'MS_CLIENT_SECRET', 'ANTHROPIC_API_KEY'):
             os.environ.pop(k, None)
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
@@ -51,7 +56,7 @@ class ReviewOverviewTests(unittest.TestCase):
         status, d = self.post('/api/spreadsheets/review', {'file_hash': h, 'action': 'send_back', 'by': 'Chris', 'note': 'Row 18 VIN is wrong'})
         self.assertEqual(d['item']['review_request']['status'], 'sent_back'); self.assertEqual(d['item']['review_request']['comment'], 'Row 18 VIN is wrong')
         self.post('/api/spreadsheets/review', {'file_hash': h, 'action': 'request', 'by': 'Lauren', 'note': 'Fixed'})
-        status, d = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Chris', 'override': True})
+        status, d = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Chris', 'override': True, 'note': 'Synthetic fixture reviewed', **displayed_binding(self.base, h)})
         rr = d['item']['review_request']
         self.assertEqual((rr['status'], rr['reviewer']), ('approved', 'Chris')); self.assertEqual([x['action'] for x in rr['history']], ['request', 'send_back', 'request', 'approve'])
 

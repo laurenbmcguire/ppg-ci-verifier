@@ -9,7 +9,9 @@ from openpyxl import load_workbook
 
 from hosting import photo_embed
 from hosting.spreadsheets import inspect_spreadsheet
-from tests.sl_daily_fixture import PNG, sl_daily
+from tests.sl_daily_fixture import PNG, sl_daily, SITE, LIST
+
+BINDING = dict(site_id="synthetic-site-id", list_url=f"https://ppg.sharepoint.com/sites/{SITE}/Lists/{LIST}")
 
 
 def fake_sharepoint(photo_for=('432', '434'), fail=None):
@@ -29,10 +31,15 @@ def fake_sharepoint(photo_for=('432', '434'), fail=None):
 
 
 class WithPhotos(unittest.TestCase):
+    def setUp(self):
+        host = patch("hosting.photo_embed._host", return_value="ppg.sharepoint.com")
+        host.start()
+        self.addCleanup(host.stop)
+
     def test_photos_are_embedded_in_their_rows_and_the_original_parts_are_kept(self):
         raw = sl_daily(photos=False)
         with patch('hosting.photo_embed._get', fake_sharepoint()):
-            name, data, info = photo_embed.build('SL Alabama - 2214 - 2026-11-06.xlsx', raw, 'SLAlabama_AlexanderCity', 'list-1')
+            name, data, info = photo_embed.build('SL Alabama - 2214 - 2026-11-06.xlsx', raw, SITE, 'list-1', **BINDING)
         self.assertEqual(name, 'SL Alabama - 2214 - 2026-11-06 (with photos).xlsx')
         self.assertEqual((info['with_photos'], info['embedded'], info['missing'], info['tab']), (2, 2, 1, 'Defect Photos'))
         wb = load_workbook(io.BytesIO(data))
@@ -49,20 +56,20 @@ class WithPhotos(unittest.TestCase):
 
     def test_the_copy_still_counts_the_same_production(self):
         with patch('hosting.photo_embed._get', fake_sharepoint()):
-            _, data, _ = photo_embed.build('r.xlsx', sl_daily(photos=False), 'S', 'L')
+            _, data, _ = photo_embed.build('r.xlsx', sl_daily(photos=False), SITE, 'L', **BINDING)
         r = inspect_spreadsheet('r.xlsx', data)
         self.assertEqual((r['record_count'], r['totals']['inspected']['total']), (5, '400'))
 
     def test_existing_defect_photos_tab_is_kept_and_a_new_tab_is_added(self):
         with patch('hosting.photo_embed._get', fake_sharepoint()):
-            _, data, info = photo_embed.build('r.xlsx', sl_daily(photos=True), 'S', 'L')
+            _, data, info = photo_embed.build('r.xlsx', sl_daily(photos=True), SITE, 'L', **BINDING)
         self.assertEqual(info['tab'], 'SharePoint Photos')
         self.assertIn('Defect Photos', load_workbook(io.BytesIO(data)).sheetnames)
 
     def test_refused_app_token_explains_the_admin_step(self):
         with patch('hosting.photo_embed._get', fake_sharepoint(fail=(401, 'Unsupported app only token.'))):
             with self.assertRaises(photo_embed.PhotoError) as caught:
-                photo_embed.build('r.xlsx', sl_daily(), 'S', 'L')
+                photo_embed.build('r.xlsx', sl_daily(), SITE, 'L', **BINDING)
         self.assertIn('certificate', str(caught.exception))
 
     def test_urls_sent_to_sharepoint_have_no_spaces(self):

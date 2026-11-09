@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 from eos_fixture import build, ROWS
-from test_send import FakeMail, ENV
+from test_send import FakeMail, ENV, displayed_binding
 from hosting import sharepoint
 
 NAME = '2230-OWENS-BASCO - EOS - 10.07.26.xlsx'
@@ -81,18 +81,19 @@ class ApiTests(unittest.TestCase):
         status, rep = self.call('POST', '/api/v1/reports', upload, key)
         self.assertEqual(status, 201, rep); rid = rep['id']
         self.assertEqual(rep['job'], '2230-OWENS-BASCO'); self.assertIn(rep['status'], ('hold', 'check', 'clear'))
-        # formatting-only fixes are made on upload: the report that comes back is the cleaned copy
-        self.assertTrue(rep['auto_formatting']['count']); self.assertTrue(rep['corrected_from'])
-        oid = rep['corrected_from']['id']
+        # Upload is observational: explicit reviewed corrections create the cleaned copy.
+        self.assertFalse(rep['auto_formatting']); self.assertFalse(rep['corrected_from'])
         status, again = self.call('POST', '/api/v1/reports', upload, key)
         self.assertEqual(status, 200); self.assertTrue(again['already_uploaded']); self.assertEqual(again['id'], rid)
         status, lst = self.call('GET', '/api/v1/reports?job=2230-OWENS-BASCO', key=key)
         self.assertEqual(lst['reports'][0]['id'], rid)
-        status, orig = self.call('GET', f'/api/v1/reports/{oid}', key=key)
-        self.assertEqual(orig['corrected_copy']['id'], rid)
         status, fx = self.call('GET', f'/api/v1/reports/{rid}/fixes', key=key)
-        self.assertEqual(status, 200); self.assertFalse([f for f in fx['fixes'] if f.get('sure')])   # nothing sure left to do
-        fixed = rep
+        self.assertEqual(status, 200); self.assertTrue([f for f in fx['fixes'] if f.get('sure')])
+        status, fixed = self.call('POST', f'/api/v1/reports/{rid}/fixes',
+                                 {'ids': [p['id'] for p in fx['fixes']], 'expected_check_hash': displayed_binding(self.base, rid)['expected_check_hash']}, key)
+        self.assertEqual(status, 201, fixed); self.assertEqual(fixed['corrected_from']['id'], rid)
+        status, orig = self.call('GET', f'/api/v1/reports/{rid}', key=key)
+        self.assertEqual(orig['corrected_copy']['id'], fixed['id'])
         status, body = self.call('GET', f'/api/v1/reports/{fixed["id"]}/download', key=key, raw=True)
         self.assertEqual(status, 200); self.assertTrue(body.startswith(b'PK'))
         # approve, preview, send
@@ -100,16 +101,19 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 403)                                              # this key cannot send
         sender = self.app('/api/keys/create', {'name': 'Sender', 'can_send': True})['key']['key']
         status, sent = self.call('POST', f'/api/v1/reports/{fixed["id"]}/send', {'mode': 'send'}, sender)
-        self.assertEqual(status, 409); self.assertIn('Approve', sent['error'])
-        status, ok = self.call('POST', f'/api/v1/reports/{fixed["id"]}/approve', {'approver': 'Chris', 'override': True}, key)
+        self.assertEqual(status, 409); self.assertIn('paused', sent['error'])
+        status, ok = self.call('POST', f'/api/v1/reports/{fixed["id"]}/approve', {'approver': 'Chris', 'override': True, 'note': 'Synthetic fixture reviewed', **displayed_binding(self.base, fixed['id'])}, key)
         self.assertEqual(status, 200, ok); self.assertEqual(ok['approval']['by'], 'Chris')
         status, prev = self.call('GET', f'/api/v1/reports/{fixed["id"]}/send', key=key)
-        self.assertEqual(prev['to'], ['buyer@client.com']); self.assertEqual(prev['attachment']['name'], NAME)   # no "(fixed)"
-        status, sent = self.call('POST', f'/api/v1/reports/{fixed["id"]}/send', {'mode': 'send'}, sender)
-        self.assertEqual(status, 200, sent)
-        self.assertTrue(sent['record']['reply_all']); self.assertEqual(sent['record']['via'], 'api:Sender')
-        self.assertEqual(sent['record']['to'], ['buyer@client.com'])
-        self.assertEqual(self.call('POST', f'/api/v1/reports/{fixed["id"]}/send', {'mode': 'send'}, sender)[0], 409)
+        self.assertEqual(prev['to'], []); self.assertTrue(prev['delivery_paused']); self.assertFalse(prev['enabled']); self.assertEqual(prev['attachment']['name'], NAME)   # no "(fixed)"
+        before = displayed_binding(self.base, fixed['id']); calls = list(self.fake.calls)
+        with patch('hosting.delivery.mailer.deliver') as provider:
+            for mode in ('send', 'draft'):
+                status, sent = self.call('POST', f'/api/v1/reports/{fixed["id"]}/send', {'mode': mode}, sender)
+                self.assertEqual(status, 409, sent); self.assertIn('paused', sent['error'])
+            provider.assert_not_called()
+        self.assertEqual(self.fake.calls, calls)
+        self.assertEqual(displayed_binding(self.base, fixed['id']), before)
         # revoke
         kid = [k for k in self.app('/api/keys', {})['keys'] if k['name'] == 'Power Automate'][0]['id']
         self.app('/api/keys/revoke', {'id': kid})

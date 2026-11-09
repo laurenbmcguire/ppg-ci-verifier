@@ -59,11 +59,11 @@ class Autopilot(unittest.TestCase):
                                                         'content_base64': base64.b64encode(build(rows)).decode()})
         self.assertEqual(st, 200, up)
         h = up['item']['file_hash']
-        self.assertEqual(up['item']['auto_formatting']['count'], 1)       # formatting is fixed on upload already
-        self.assertEqual(up['item']['auto_formatting']['examples'][0]['kind'], 'extra spaces')
+        self.assertNotIn('auto_formatting', up['item'])  # even opt-in cleanup cannot bypass reviewed cell corrections
+        self.assertFalse(up['item'].get('fixed_from'))
         st, props = self.call('/api/spreadsheets/fixes', {'file_hash': h})
         self.assertTrue(all('sure' in p for p in props['proposals']))
-        self.assertFalse(any(p['sure'] for p in props['proposals']))
+        self.assertTrue(any(p['sure'] for p in props['proposals']))  # suggestions remain available for review
         st, off = self.call('/api/autopilot', {'run': True})
         self.assertEqual((st, off['ran']), (200, False))                  # off by default: nothing happens
         self.assertTrue(self.call('/api/autopilot', {'on': True})[1]['on'])
@@ -94,10 +94,11 @@ class Autopilot(unittest.TestCase):
             dups = [i for i in json.loads(r.read())['review']['issues'] if i['code'] == 'duplicate_row']
         self.assertEqual(len(dups), 1)
         st, out = self.call('/api/spreadsheets/remove-rows', {'file_hash': h, 'rows': [{'sheet': dups[0]['sheet'], 'row': dups[0]['row']}]})
-        self.assertEqual(st, 200, out)
-        with urllib.request.urlopen(self.base + '/api/spreadsheet?id=' + out['item']['file_hash'], timeout=30) as r:
+        self.assertEqual(st, 409, out)
+        self.assertIn('disabled',out['error'])
+        with urllib.request.urlopen(self.base + '/api/spreadsheet?id=' + h, timeout=30) as r:
             after = json.loads(r.read())['review']['issues']
-        self.assertFalse([i for i in after if i['code'] == 'duplicate_row'])      # the extra copy is gone
+        self.assertEqual(len([i for i in after if i['code'] == 'duplicate_row']),1)  # no unreviewed row changes
         self.assertEqual(self.call('/api/spreadsheets/remove-rows', {'file_hash': h, 'rows': []})[0], 409)
 
 

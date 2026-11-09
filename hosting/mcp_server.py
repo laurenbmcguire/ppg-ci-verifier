@@ -3,8 +3,8 @@
 Address: /mcp/<api key>. Claude's custom connectors cannot send extra headers, so the key is part of
 the address; while the app is behind Vercel sign-in the address also carries Vercel's automation
 bypass (?x-vercel-protection-bypass=...). The app builds the full link on its API page.
-Every tool uses the same operations and rules as the screen and the HTTP API: sending email needs a
-key made with "Can send to clients" and an approved report.
+Every tool uses the same operations and rules as the screen and the HTTP API.
+Sending and draft creation are paused; internal approval does not authorize delivery.
 """
 import json
 
@@ -14,14 +14,14 @@ from hosting.spreadsheet_inbox import SpreadsheetInbox
 
 VERSIONS = ('2025-06-18', '2025-03-26', '2024-11-05')
 INSTRUCTIONS = (
-    'PPG Verifier checks PPG end-of-shift reports (the Excel files sent to clients) against SharePoint, '
-    'the job\'s usual day and AI review, suggests cell fixes, and sends the approved report to the client '
-    'from data@ppgquality.com as a Reply All on the job\'s last report email. Start with list_reports or '
-    'get_report. A corrected copy is a new report id; the original is never changed. Never approve or send '
-    'unless the person asked you to in this conversation; prefer mode "draft" for sending unless they clearly '
-    'said to send. Never put scan times, inspector names or internal check results in a client email.')
+    'PPG Verifier checks PPG end-of-shift workbooks against the exact assigned source when configured, '
+    'shows evidence and suggests corrections for a person to review. Start with list_reports or get_report. '
+    'A corrected copy is a new report id; the original is never changed. Record internal approval only '
+    'when the person explicitly asked. Approval does not establish source verification or authorize '
+    'delivery. Sending and draft creation remain paused.')
 
 S = lambda **props: {'type': 'object', 'properties': props, 'additionalProperties': False}
+SOURCE = S(site={'type':'string'}, site_id={'type':'string'}, list_id={'type':'string'})
 ID = {'type': 'string', 'description': 'The 64-character report id from list_reports.'}
 TOOLS = [
     dict(name='list_reports', title='List reports',
@@ -30,13 +30,13 @@ TOOLS = [
                        job={'type': 'string', 'description': 'Part of a job number or filename, e.g. HANDS or 2219.'}),
          annotations=dict(readOnlyHint=True)),
     dict(name='build_report', title='Build a report from SharePoint',
-         description='Build the end-of-shift report for a job and day straight from its SharePoint scans (client-safe: no scan times or inspector names), save it in the verifier and run every check. Each scan goes on the shift its scan time falls in; after-midnight 3rd-shift scans count toward the day the shift started. Refuses while the shift may still be running (until 45 minutes after the last scan) unless force is true. Nothing is sent to the client.',
+         description='Build a provisional legacy EOS workbook from a verified SharePoint site/list and business date. Preserves recorded shifts and blanks; no inactivity interval proves completion. Ambiguous sources require explicit verified source selection. This is not the selected-template/photo workflow. Nothing is sent to a client.',
          inputSchema=dict(S(job={'type': 'string', 'description': 'Job number, e.g. SLAL-HYMOBAL-2221.'},
                             day={'type': 'string', 'description': 'YYYY-MM-DD; default today (plant time).'},
-                            force={'type': 'boolean', 'description': 'Build even if the last scan was under 45 minutes ago.'}), required=['job'])),
+                            source=SOURCE, force={'type': 'boolean', 'description': 'Compatibility option; builds remain provisional.'}), required=['job'])),
     dict(name='nexus_numbers', title='Nexus shift numbers',
          description='A job\'s day split into Nexus\'s three shifts by plant-time window (Shift 1 6:00a-2:30p, Shift 2 2:30p-10:30p, Shift 3 10:00p-6:30a): scans, inspected, rejected and certified per shift, for entering into Nexus.',
-         inputSchema=dict(S(job={'type': 'string'}, day={'type': 'string', 'description': 'YYYY-MM-DD; default today.'}), required=['job']),
+         inputSchema=dict(S(job={'type': 'string'}, day={'type': 'string', 'description': 'YYYY-MM-DD; default today.'}, source=SOURCE), required=['job']),
          annotations=dict(readOnlyHint=True)),
     dict(name='get_report', title='Get a report',
          description='One report: status, numbers (scans, inspected, rejected), every issue with sheet/cell, SharePoint and usual-day comparison, approval and send history, corrected copy.',
@@ -49,7 +49,7 @@ TOOLS = [
          inputSchema=dict(S(id=ID), required=['id']), annotations=dict(readOnlyHint=True)),
     dict(name='apply_fixes', title='Make a corrected copy',
          description='Writes a corrected copy with the chosen fixes and checks it again. Returns the NEW report (new id). The original file is never changed.',
-         inputSchema=dict(S(id=ID, accept_all={'type': 'boolean', 'description': 'Apply every suggested fix.'},
+         inputSchema=dict(S(id=ID, expected_check_hash={'type': 'string', 'description': 'Exact check_hash returned with the reviewed report.'}, accept_all={'type': 'boolean', 'description': 'Paused: automatic accept-all is disabled. Select reviewed fix ids instead.'},
                             ids={'type': 'array', 'items': {'type': 'string'}, 'description': 'Fix ids from get_fixes to apply.'},
                             changes={'type': 'array', 'description': 'Your own cell changes.', 'items': {
                                 'type': 'object', 'required': ['sheet', 'cell', 'after'], 'properties': {
@@ -57,26 +57,26 @@ TOOLS = [
                                     'after': {'type': 'string'}, 'before': {'type': 'string', 'description': 'Current value, to be safe.'},
                                     'reason': {'type': 'string'}}}}), required=['id']),
          annotations=dict(destructiveHint=False, idempotentHint=False)),
-    dict(name='fix_shifts', title='Put rows on the right shift',
-         description='Moves every row that is on the wrong shift by its scan time (using the shift times set in the app) to its shift\'s tab, or takes it out when the workbook has no tab for that shift. Returns the NEW corrected report; the original is never changed.',
+    dict(name='fix_shifts', title='Shift changes (paused)',
+         description='Row relocation is paused pending atomic reviewed-plan safety checks. This tool refuses changes.',
          inputSchema=dict(S(id=ID), required=['id']), annotations=dict(destructiveHint=False, idempotentHint=False)),
     dict(name='draft_ai_fixes', title='Ask Claude in the app for fixes',
          description='Has the verifier\'s AI draft fixes for the open issues. Then call get_fixes to see them.',
-         inputSchema=dict(S(id=ID), required=['id']), annotations=dict(destructiveHint=False)),
+         inputSchema=dict(S(id=ID, expected_check_hash={'type': 'string', 'description': 'Exact displayed check_hash.'}), required=['id', 'expected_check_hash']), annotations=dict(destructiveHint=False)),
     dict(name='recheck_report', title='Check again',
          description='Runs the SharePoint comparison and/or usual-day comparison and/or AI review again.',
          inputSchema=dict(S(id=ID, checks={'type': 'array', 'items': {'type': 'string', 'enum': ['sharepoint', 'baseline', 'ai']}}), required=['id']),
          annotations=dict(destructiveHint=False, idempotentHint=True)),
-    dict(name='approve_report', title='Approve as final',
-         description='Records that a named person approved this exact version as the final report. Needed before sending. override approves even with must-fix issues open; withdraw removes an approval that was not sent.',
-         inputSchema=dict(S(id=ID, approver={'type': 'string', 'description': 'Name of the person approving.'},
+    dict(name='approve_report', title='Record internal approval',
+         description='Record internal approval for the exact reviewed version. This does not establish source verification or authorize delivery. An override never bypasses hard source or review holds; withdraw removes an unsent approval.',
+         inputSchema=dict(S(id=ID, expected_check_hash={'type': 'string', 'description': 'Exact check_hash returned with the reviewed report.'}, expected_run={'type': 'object', 'description': 'Exact run returned with the reviewed report.'}, approver={'type': 'string', 'description': 'Name of the person approving.'},
                             note={'type': 'string'}, override={'type': 'boolean'}, withdraw={'type': 'boolean'}), required=['id']),
          annotations=dict(destructiveHint=False)),
     dict(name='preview_client_email', title='Preview the client email',
-         description='Shows the email that would go to the client: Reply All recipients from the job\'s last report email, Cc, subject, message, attachment name. Sends nothing.',
+         description='Returns local approval/download details and delivery_paused=true. Does not read a mailbox or send anything.',
          inputSchema=dict(S(id=ID), required=['id']), annotations=dict(readOnlyHint=True, openWorldHint=True)),
-    dict(name='send_to_client', title='Send the report to the client',
-         description='Emails the approved report to the client from data@ppgquality.com. mode "draft" saves it in Drafts for a person to review and send; mode "send" sends it now. to, cc, subject and body default to preview_client_email. A second real send needs again=true. Only with the person\'s go-ahead in this conversation.',
+    dict(name='send_to_client', title='Delivery (paused)',
+         description='Sending and draft creation are paused pending durable delivery safety checks. This tool refuses all send and draft requests, including retries.',
          inputSchema=dict(S(id=ID, mode={'type': 'string', 'enum': ['draft', 'send']},
                             to={'type': 'array', 'items': {'type': 'string'}}, cc={'type': 'array', 'items': {'type': 'string'}},
                             subject={'type': 'string'}, body={'type': 'string'}, again={'type': 'boolean'}), required=['id', 'mode']),
@@ -133,9 +133,9 @@ def _call(h, key, name, a):
     if name == 'list_reports':
         return ops.op_list(h, a.get('status'), a.get('job'))
     if name == 'build_report':
-        return ops.op_build(h, a.get('job'), a.get('day'), a.get('force') is True)
+        return ops.op_build(h, a.get('job'), a.get('day'), a.get('force') is True, source=a.get('source'))
     if name == 'nexus_numbers':
-        return ops.op_nexus(h, a.get('job'), a.get('day'))
+        return ops.op_nexus(h, a.get('job'), a.get('day'), source=a.get('source'))
     if name == 'get_report':
         return ops.op_get(h, a.get('id'))
     if name == 'find_vin':
@@ -143,15 +143,15 @@ def _call(h, key, name, a):
     if name == 'get_fixes':
         return ops.op_fixes(h, a.get('id'))
     if name == 'apply_fixes':
-        return ops.op_apply(h, a.get('id'), 'all' if a.get('accept_all') else None, a.get('ids'), a.get('changes'))
+        return ops.op_apply(h, a.get('id'), 'all' if a.get('accept_all') else None, a.get('ids'), a.get('changes'), a.get('expected_check_hash'))
     if name == 'fix_shifts':
         return ops.op_shift_fix(h, a.get('id'))
     if name == 'draft_ai_fixes':
-        return ops.op_ai_fixes(h, a.get('id'))
+        return ops.op_ai_fixes(h, a.get('id'), a.get('expected_check_hash'))
     if name == 'recheck_report':
         return ops.op_recheck(h, a.get('id'), a.get('checks'))
     if name == 'approve_report':
-        return ops.op_approve(h, a.get('id'), a.get('approver'), a.get('note'), a.get('override') is True, a.get('withdraw') is True)
+        return ops.op_approve(h, a.get('id'), a.get('approver'), a.get('note'), a.get('override') is True, a.get('withdraw') is True, expected_check_hash=a.get('expected_check_hash'), expected_run=a.get('expected_run'))
     if name == 'preview_client_email':
         return ops.op_send_preview(h, a.get('id'))
     if name == 'send_to_client':

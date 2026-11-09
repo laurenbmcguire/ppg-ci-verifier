@@ -42,7 +42,7 @@ async function harness(development_demo = true) {
     'development-message'].forEach(id => { nodes[id] = new Element('div'); });
   nodes['development-lab'].hidden = true;
   const calls = [], imports = [], comparisons = [], lists = [];
-  const context = vm.createContext({document: {
+  const context = vm.createContext({window: {}, document: {
     getElementById: id => nodes[id], createElement: tag => new Element(tag)
   }, fetch: (url, options) => {
     calls.push({url, options});

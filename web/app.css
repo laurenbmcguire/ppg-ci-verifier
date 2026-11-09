@@ -1551,3 +1551,84 @@ body.reportmode .btn.subtle{border-color:transparent;background:none}
 .fd-own{display:flex;gap:6px;flex-wrap:wrap}
 .fd-own input{flex:1 1 140px;min-width:0;font:inherit;font-size:13px;padding:8px 10px;border:1px solid #b5c8c1;border-radius:6px;min-height:40px}
 .fd-askai{justify-self:start}
+/* review decisions: saved on the server, with scope, reason and state */
+.fd-coverage{display:flex;gap:6px;align-items:flex-start;font-size:12.5px;color:var(--fd-amber);background:var(--fd-amber-bg);border-radius:8px;padding:8px 10px;margin:6px 0}
+.fd-saving{font-size:13px;color:var(--fd-muted);display:flex;align-items:center;gap:6px;margin:6px 0}
+.fd-failed{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:13px;color:var(--fd-red);background:var(--fd-red-bg);border-radius:8px;padding:8px 10px;margin:6px 0}
+.fd-decide{display:grid;gap:8px;border:1px solid var(--fd-line);border-radius:10px;padding:12px;margin:10px 0;background:#fafcfb}
+.fd-decide textarea,.fd-decide input:not([type=checkbox]){width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:7px 9px;border:1px solid var(--fd-line);border-radius:7px}
+.fd-decide-head{margin:0;font-size:13.5px}
+.fd-chips{display:flex;flex-wrap:wrap;gap:6px}
+.fd-chips .chip{font:inherit;font-size:12px;border:1px solid var(--fd-line);background:#fff;border-radius:999px;padding:4px 10px;cursor:pointer;color:var(--fd-ink)}
+.fd-chips .chip:hover{border-color:var(--fd-green);color:var(--fd-green)}
+.fd-scope{list-style:none;margin:0;padding:0;max-height:180px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:2px 10px;font-size:12.5px}
+.fd-incl{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--fd-muted);margin:8px 0 0}
+.fd-field{display:grid;gap:4px;font-size:12.5px;color:var(--fd-muted)}
+.fd-decided p{margin:2px 0}
+.fd-recon{font-size:12.5px;margin:6px 0;border:1px solid var(--fd-line);border-radius:8px;padding:6px 10px}
+.fd-recon summary{cursor:pointer;font-weight:600}
+.fd-recon .fd-kv{display:grid;grid-template-columns:1fr auto;gap:2px 12px;margin:6px 0 0}
+.fd-recon dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.cell-link{color:#14532d;text-decoration:underline}
+.cell-link.unsafe{color:var(--fd-red);text-decoration:line-through dotted}
+td.has-pic{position:relative}
+.cell-pic img{display:block;max-height:56px;max-width:100%;object-fit:contain;margin-top:2px;border:1px solid var(--fd-line);border-radius:4px;background:#fff}
+.fd-gallery{margin:8px 0;font-size:12.5px}
+.fd-gallery summary{cursor:pointer;font-weight:600}
+.fd-gallery ul{list-style:none;padding:0;margin:8px 0 0;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+.fd-gallery li{display:grid;gap:4px;border:1px solid var(--fd-line);border-radius:8px;padding:6px}
+.fd-gallery li.historical{border-style:dashed;background:var(--fd-amber-bg)}
+.fd-gallery img{width:100%;height:110px;object-fit:contain;background:#f6f8f7;border-radius:4px}
+.fd-tabs button.loading{opacity:.6;cursor:progress}
+.gridwrap.loading{opacity:.45;transition:opacity .15s}
+#queue-list .item.older{margin-left:14px;opacity:.85}
+#queue-list .older-toggle{font-size:12px;margin:0 0 6px 14px}
+.uploading.receipt{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;font-size:12.5px}
+.uploading.receipt small{display:block;color:var(--fd-muted)}
+
+/* Preview location and controls must remain readable under the strict CSP. */
+.fd-prevlist .fd-preview-location{min-width:10rem}
+.fd-preview-sheet{display:block;overflow-wrap:anywhere}
+.fd-preview-cell{display:block;white-space:nowrap;word-break:normal}
+.fd-prevlist .fd-preview-remove{white-space:nowrap;word-break:normal;min-width:max-content}
+
+.fd-mode-selector{padding:12px 20px;border-bottom:1px solid #ddd}
+/* Keep values readable on phones; the preview region scrolls horizontally. */
+.fd-prevlist table{min-width:50rem}
+.fd-prevlist th:nth-child(2),.fd-prevlist td:nth-child(2),
+.fd-prevlist th:nth-child(3),.fd-prevlist td:nth-child(3){min-width:9rem}
+.fd-prevlist th:nth-child(4),.fd-prevlist td:nth-child(4){min-width:14rem}
+
+/* Lossless summaries: native details provide keyboard and touch expansion. */
+.fd-history-category h3{font-size:14px;margin:14px 0 6px}
+.fd-history-group,.fd-occurrences{border:1px solid var(--fd-line);border-radius:8px;margin:6px 0}
+.fd-history-group summary,.fd-occurrences summary{padding:10px;cursor:pointer;min-height:44px;box-sizing:border-box}
+.fd-history-group summary span,.fd-history-group summary small{display:block;margin:4px 0 0;overflow-wrap:anywhere}
+.fd-history-group ul,.fd-occurrences ul{padding:0 12px 0 28px}
+.fd-history-group li,.fd-occurrences li{padding:8px 0;overflow-wrap:anywhere}
+.fd-occurrences li button{min-height:44px;white-space:normal;text-align:left}
+.fd-occurrences li span{display:block;margin-top:4px}
+.fd-history-group summary:focus-visible,.fd-occurrences summary:focus-visible{outline:3px solid #246a50;outline-offset:2px}
+@media(min-width:901px){.fd-modal{max-width:min(1000px,94vw)}}
+@media(max-width:600px){.fd-prevlist:before{content:'Scroll sideways to review every column';display:block;position:sticky;left:0;width:260px;max-width:90%;padding:8px;font-size:12px;color:var(--fd-muted)}}
+
+.fd-comparison{border:1px solid var(--fd-line);border-radius:8px;padding:10px;margin:8px 0;font-size:13px;overflow-wrap:anywhere}
+.fd-comparison summary{min-height:44px;cursor:pointer}
+.fd-comparison dt{font-weight:700;margin-top:8px}.fd-comparison dd{margin:4px 0 10px}
+.fd-comparison small{display:block}
+
+/* Keep large history groups compact without dropping any occurrence. */
+.fd-history-range{margin:8px 10px;font-size:13px}
+.fd-history-pages{display:flex;flex-wrap:wrap;gap:6px;margin:8px 10px}
+.fd-history-pages button{min-height:44px}
+.fd-history-notice{margin:8px 10px}
+.fd-history-page{max-height:55vh;overflow:auto;overscroll-behavior:contain}
+.fd-history-range:focus-visible,.fd-history-page:focus-visible{outline:3px solid #246a50;outline-offset:2px}
+
+.fd-history-overview{margin-top:12px;border-top:1px solid var(--fd-line)}
+.fd-history-overview>summary{padding:10px 0;min-height:44px;cursor:pointer;box-sizing:border-box}
+
+.statistics-notes{margin:12px 0;padding:10px;border:1px solid var(--line);border-radius:8px;overflow-wrap:anywhere}
+.statistics-notes summary{cursor:pointer;min-height:32px}.statistics-notes dt{font-weight:700}.statistics-notes dd{margin:4px 0 12px}
+.ktable td small{display:block;min-width:160px;font-size:11px;white-space:normal}
+.fd-panel-status{max-width:100%;white-space:normal;margin:4px 0 8px}

@@ -5,6 +5,7 @@ is stored with the report and listed in the records, so there is always a copy o
 """
 import hashlib
 import io
+import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -23,6 +24,56 @@ def _chain(inbox, file_hash):
     return out[::-1]
 
 
+def source_receipt(item, day, assignment=None, mapping_state=None):
+    """Fail closed: a successful check must identify this exact workbook and checker."""
+    rec = item.get('source_reconciliation') or {}
+    bound = rec.get('bound_to') or {}
+    reasons = []
+    from hosting.spreadsheets import CHECKER_VERSION
+    if item.get('checker_version') != CHECKER_VERSION:
+        reasons.append('The saved checker is outdated; recheck before source verification.')
+    if not rec: reasons.append('No item-by-item source check is recorded.')
+    if rec.get('stale'): reasons.append('The source check is stale.')
+    for key in ('file_hash', 'checker_version'):
+        if not item.get(key) or bound.get(key) != item.get(key):
+            reasons.append(f'Missing or mismatched {key} binding.')
+    if not day or rec.get('day') != day: reasons.append('Business date is not bound.')
+    for key in ('site_id', 'list_id', 'snapshot_id', 'captured_at'):
+        if not rec.get(key): reasons.append(f'Missing {key}.')
+    from hosting.registry import RESOLVED
+    assignment = assignment or {}
+    for key in ('site_id', 'list_id'):
+        if not assignment.get(key) or assignment.get(key) != rec.get(key):
+            reasons.append(f'Current assignment {key} is missing or differs from the checked source.')
+    if assignment.get('needs_person') or assignment.get('status') not in RESOLVED:
+        reasons.append('Current client/job assignment is unresolved.')
+    mapping = rec.get('mapping_binding') or {}
+    if not mapping or mapping.get('legacy_requires_confirmation') or any(not mapping.get(k) or mapping.get(k) != rec.get(k) for k in ('site_id','list_id')):
+        reasons.append('Exact-source column mapping is missing or requires reconfirmation.')
+    if mapping_state is not None and mapping != mapping_state:
+        reasons.append('Source columns changed after this comparison; compare again.')
+    cov = rec.get('coverage') or {}
+    if cov.get('complete') is not True or any(cov.get(k) for k in ('denied','throttled','failed_pages','truncated','unknown_schema','undated','date_fallbacks')):
+        reasons.append('Source coverage is incomplete or unavailable.')
+    from hosting.reconcile import counts_verified
+    if not counts_verified(rec):
+        reasons.append('Inspection and rejection count/quantity evidence is incomplete or differs.')
+    if not isinstance(rec.get('report_rows'), int) or rec.get('report_rows') != rec.get('sharepoint_items_for_day'):
+        reasons.append('Source/report row counts are missing or unequal.')
+    if not {'inspected', 'rejected'} <= set(rec.get('fields_checked') or []):
+        reasons.append('Both inspected and rejected fields must have been checked.')
+    passed = not reasons and rec.get('status') == 'verified' and rec.get('verified') is True and not rec.get('rows') and not rec.get('rows_truncated') and not rec.get('not_verified_because')
+    check_hash = hashlib.sha256(json.dumps(rec, sort_keys=True, default=str).encode()).hexdigest() if rec else None
+    mapping_sha256 = hashlib.sha256(json.dumps(mapping_state if mapping_state is not None else mapping, sort_keys=True, default=str).encode()).hexdigest()
+    return dict(mapping_sha256=mapping_sha256, status='verified' if passed else 'held', reasons=reasons, check_sha256=check_hash,
+                workbook_sha256=item.get('file_hash'), checker_version=item.get('checker_version'),
+                source_status=rec.get('status'), snapshot_id=rec.get('snapshot_id'), site_id=rec.get('site_id'),
+                list_id=rec.get('list_id'), captured_at=rec.get('captured_at'), day=rec.get('day'),
+                report_rows=rec.get('report_rows'), source_rows=rec.get('sharepoint_items_for_day'),
+                fields_checked=rec.get('fields_checked') or [], differences=rec.get('rows') or [],
+                corrections_applied=rec.get('corrections_applied'))
+
+
 def collect(inbox, file_hash, catalog=None):
     from hosting.review_summary import summarize
     from hosting import sharepoint_jobs
@@ -30,6 +81,14 @@ def collect(inbox, file_hash, catalog=None):
     first, final = versions[0], versions[-1]
     rv_first, rv_final = summarize(first), summarize(final)
     job = rv_final.get('job') or rv_first.get('job')
+    day = rv_final.get('day') or rv_first.get('day')
+    assignment = inbox.assignment_for(final, rv_final)
+    rec = final.get('source_reconciliation') or {}
+    try:
+        mapping_state = inbox.source_mapping(rec.get('site_id'), rec.get('list_id'))
+    except ValueError:
+        mapping_state = {}
+    receipt = source_receipt(final, day, assignment, mapping_state)
     sp = first.get('sharepoint') or {}
     sp_final = final.get('sharepoint') or {}
     changes, rows = [], []
@@ -50,15 +109,29 @@ def collect(inbox, file_hash, catalog=None):
         if moved_cells and not listed:
             listed = [dict(what='Rows taken out or moved', where=f'{moved_cells} cells shifted', why=next((c.get('reason') for c in (v.get('fixed_from') or {}).get('changes') or [] if is_row_move(str(c.get('source') or ''))), ''), how='By a person')]
         rows += listed
-    fine = [dict(text=a.get('text'), reason=a.get('reason')) for a in (final.get('accepted_issues') or [])]
-    open_issues = [i for i in rv_final['issues'] if i['severity'] != 'info']
+    # what a person decided on the final version (never an earlier version's decisions, never Claude's): the summary
+    # is made from the exact version it describes, and says which check run and which SharePoint read that was
+    where = lambda i: i.get('where') or (f"{i.get('sheet')} row {i.get('row')}" if i.get('row') else i.get('sheet') or '')
+    fine = [dict(text=f"{where(i)}: {i.get('text')}", reason=f"{(i.get('decision') or {}).get('reason')} ({(i.get('decision') or {}).get('by') or 'a reviewer'})")
+            for i in rv_final['dismissed'] if i.get('dismissed_by') == 'person']
+    earlier = [dict(text=f"{where(i)}: {i.get('text')}", reason=i.get('verdict_reason')) for i in rv_final['dismissed'] if i.get('dismissed_by') == 'person_legacy']
+    claude = [dict(text=f"{where(i)}: {i.get('text')}", reason=i.get('verdict_reason')) for i in rv_final['dismissed'] if str(i.get('dismissed_by')).startswith('claude')]
+    deferred = [dict(text=f"{where(i)}: {i.get('text')}", reason=f"Waiting for {(i.get('decision') or {}).get('owner') or 'the source owner'}: {(i.get('decision') or {}).get('reason')}")
+                for i in rv_final['issues'] if (i.get('decision') or {}).get('action') == 'defer']
+    open_issues = [i for i in rv_final['issues'] if i['severity'] != 'info' and (i.get('decision') or {}).get('action') != 'defer']
     job_check = sharepoint_jobs.lookup(job, catalog)
     differences = [f.get('message') for f in (sp.get('findings') or []) if f.get('message')]
-    return dict(job=job, day=rv_final.get('day') or rv_first.get('day'), file_hash=final['file_hash'], first_hash=first['file_hash'],
+    action_snapshot = dict(versions=versions, assignment=assignment, source_receipt=receipt)
+    action_hash = hashlib.sha256(json.dumps(action_snapshot, sort_keys=True, default=str).encode()).hexdigest()
+    return dict(source_receipt=receipt, action_snapshot_sha256=action_hash, job=job, day=rv_final.get('day') or rv_first.get('day'), file_hash=final['file_hash'], first_hash=first['file_hash'],
                 first_filename=first.get('filename'), final_filename=final.get('filename'), versions=len(versions),
                 job_check=job_check, sharepoint_first=dict(status=sp.get('status'), message=sp.get('message'), matched=sp.get('matched_rows'),
                                                          report_rows=sp.get('report_rows'), sharepoint_rows=sp.get('sharepoint_rows')),
-                sharepoint_final=dict(status=sp_final.get('status'), message=sp_final.get('message'), findings=len(sp_final.get('findings') or [])),
+                sharepoint_final=dict(status=(rv_final.get('sharepoint') or {}).get('status') or sp_final.get('status'),
+                                      message=(rv_final.get('sharepoint') or {}).get('message') or sp_final.get('message'),
+                                      captured_at=(rv_final.get('sharepoint') or {}).get('captured_at'), findings=len(sp_final.get('findings') or [])),
+                run=rv_final.get('run'), revision=final.get('revision') or 1, reconcile=rv_final.get('reconcile'),
+                earlier=earlier, claude=claude, deferred=deferred,
                 differences=differences, changes=changes, rows=rows, fine=fine, open=[dict(severity=i['severity'], where=i.get('where') or (f"{i.get('sheet')} row {i.get('row')}" if i.get('row') else i.get('sheet') or ''), text=i.get('text')) for i in open_issues],
                 approval=final.get('approval'), sent=[s for s in (final.get('sent') or []) if s.get('sent')],
                 inspected=rv_final.get('inspected'), rejected=rv_final.get('rejected'), source_document=(final.get('source_document') or {}).get('filename'))
@@ -66,7 +139,7 @@ def collect(inbox, file_hash, catalog=None):
 
 def differs(data):
     """True when the report did not simply match SharePoint as uploaded."""
-    return bool(data['differences'] or data['changes'] or data.get('rows') or data['open'] or data['job_check'].get('status') in ('differs', 'not_found', 'ambiguous'))
+    return bool(data.get('source_receipt', {}).get('status') != 'verified' or data['changes'] or data.get('rows') or data['open'])
 
 
 def render(data, made_by=None):
@@ -101,33 +174,37 @@ def render(data, made_by=None):
                      f"<br/>Final version: {e(data['final_filename'])} ({data['versions']} version{'s' if data['versions'] != 1 else ''})", S)]
     # the outcome in one paragraph
     n_changes, n_open, n_rows = len(data['changes']), len(data['open']), len(data.get('rows') or [])
-    why = {'differs': 'the job number is written differently from SharePoint', 'not_found': 'the job is not in the SharePoint job list',
-           'ambiguous': 'the job is on more than one SharePoint site'}.get(jc.get('status'))
-    diff = [f"{len(data['differences'])} difference{'s' if len(data['differences']) != 1 else ''} from the SharePoint scans" if data['differences'] else None, why]
+    diff = []  # Legacy upload/catalog differences cannot override the current source receipt.
     did = [f"{n_changes} cell{'s' if n_changes != 1 else ''} changed" if n_changes else None, f"{n_rows} row{'s' if n_rows != 1 else ''} taken out or moved" if n_rows else None,
-           f"{len(data['fine'])} flagged item{'s' if len(data['fine']) != 1 else ''} checked and found fine" if data['fine'] else None]
+           f"{len(data['fine'])} prior accepted finding decision(s) recorded" if data['fine'] else None]
     diff, did = [x for x in diff if x], [x for x in did if x]
     verdict = ('Matched SharePoint and needed no changes.' if not differs(data) else
                (f"Did not match SharePoint: {'; '.join(diff)}. " if diff else '') + (f"{'; '.join(did).capitalize()}. " if did else 'Nothing was changed. ')
                + (f"{n_open} item{'s' if n_open != 1 else ''} still open at the end." if n_open else 'Nothing left open at the end.'))
+    receipt = data.get('source_receipt') or {}
+    if receipt.get('status') != 'verified':
+        verdict = 'HOLD: current exact-version source verification is unavailable or has unresolved concerns. ' + verdict
     appr = data.get('approval')
     out += [Paragraph('Summary', H2), Paragraph(e(verdict), P)]
     if appr:
-        out.append(Paragraph(f"Approved as final by {e(appr.get('by'))} on {e(str(appr.get('at') or '')[:10])}." + (' Sent to the client.' if data['sent'] else ' Not sent yet.'), P))
-    # SharePoint
-    sp = data['sharepoint_first']
-    out += [Paragraph('SharePoint check', H2), Paragraph('<b>Job:</b> ' + e(jc.get('message')), P)]
-    if sp.get('status'):
-        rows_line = f"{sp.get('matched')} of {sp.get('report_rows')} report rows matched SharePoint scans ({sp.get('sharepoint_rows')} scans on SharePoint)." if sp.get('report_rows') is not None else ''
-        out.append(Paragraph('<b>Rows, as uploaded:</b> ' + e(sp.get('message') or rows_line or sp.get('status')), P))
-    else:
-        out.append(Paragraph('<b>Rows:</b> not compared with SharePoint scans (SharePoint was not reachable for this report).', P))
-    if data['sharepoint_final'].get('status'):
-        out.append(Paragraph('<b>Rows, final version:</b> ' + e(data['sharepoint_final'].get('message') or data['sharepoint_final'].get('status')), P))
-    if data['differences']:
-        out += [Spacer(1, 4), table(['Different from SharePoint (as uploaded)'], [[d] for d in data['differences'][:80]], [7.1 * inch])]
-        if len(data['differences']) > 80:
-            out.append(Paragraph(f"…and {len(data['differences']) - 80} more.", S))
+        out.append(Paragraph(f"Recorded approval by {e(appr.get('by'))} on {e(str(appr.get('at') or '')[:10])}." + (' Sent to the client.' if data['sent'] else ' Not sent yet.'), P))
+    # Current source receipt takes precedence over legacy upload-time checks and catalogs.
+    out += [Paragraph('Current SharePoint check', H2),
+            Paragraph('<b>Status:</b> ' + e(receipt.get('status') or 'unavailable'), P)]
+    for label, key in [('Workbook SHA-256','workbook_sha256'), ('Checker version','checker_version'),
+                       ('Check SHA-256','check_sha256'), ('Snapshot ID','snapshot_id'),
+                       ('Site ID','site_id'), ('List ID','list_id'), ('Captured at','captured_at'), ('Business date','day')]:
+        out.append(Paragraph(f'<b>{label}:</b> ' + e(receipt.get(key) or 'unavailable'), S))
+    out.append(Paragraph('<b>Rows:</b> ' + e(f"{receipt.get('report_rows')} report / {receipt.get('source_rows')} source; fields checked: {', '.join(receipt.get('fields_checked') or []) or 'unavailable'}"), P))
+    for reason in receipt.get('reasons') or []:
+        out.append(Paragraph(e(reason), P))
+    if receipt.get('differences'):
+        out.append(Paragraph(f"{len(receipt['differences'])} current source discrepancies recorded. Report remains on hold.", P))
+    out.append(Paragraph('<b>Report/check/action snapshot SHA-256:</b> ' + e(data.get('action_snapshot_sha256') or 'unavailable'), S))
+    out.append(Paragraph('Prior accepted findings and approvals below are historical decisions, not proof of current source completeness or permission to release.', S))
+    if data.get('differences'):
+        out.append(Paragraph('Historical upload-time differences (not the current verdict)', H2))
+        out.append(table(['Previously recorded difference'], [[v] for v in data['differences'][:80]], [7.1 * inch]))
     # changes
     out.append(Paragraph('Changes made', H2))
     if data['changes']:
@@ -142,7 +219,19 @@ def render(data, made_by=None):
         out += [Paragraph('Rows taken out or moved', H2), table(['Row', 'What', 'Why', 'Done by'], [[r['where'], r['what'], r['why'], r['how']] for r in data['rows'][:200]],
                                                                 [1.3 * inch, 1.2 * inch, 3.4 * inch, 1.2 * inch]), Paragraph('Rows below each one moved up; totals and formulas were not touched.', S)]
     if data['fine']:
-        out += [Paragraph('Checked and fine as is', H2), table(['Flagged', 'Why it is fine'], [[f['text'], f['reason']] for f in data['fine'][:100]], [3.4 * inch, 3.7 * inch])]
+        out += [Paragraph('Kept as recorded by a reviewer (this version)', H2), table(['Flagged', 'Reason (who)'], [[f['text'], f['reason']] for f in data['fine'][:100]], [3.4 * inch, 3.7 * inch])]
+    if data.get('deferred'):
+        out += [Paragraph('Waiting on the source owner (report on hold)', H2), table(['Flagged', 'Waiting for'], [[f['text'], f['reason']] for f in data['deferred'][:100]], [3.4 * inch, 3.7 * inch])]
+    if data.get('earlier'):
+        out += [Paragraph('Kept by an earlier record', H2), Paragraph(f"{len(data['earlier'])} finding(s) settled by an older “fine as is” record.", P)]
+    if data.get('claude'):
+        out += [Paragraph('Set aside by Claude (recommendations, not decisions)', H2), Paragraph(f"{len(data['claude'])} finding(s). Each is listed with Claude's reason in the app.", P)]
+    rc = data.get('reconcile') or {}
+    if rc:
+        out.append(Paragraph(f"All {rc.get('total')} findings on v{data.get('revision')}: {rc.get('open')} open, {rc.get('deferred')} waiting, {rc.get('confirmed')} confirmed, "
+                             f"{rc.get('kept_by_person')} kept by a reviewer, {rc.get('kept_earlier_record')} kept by earlier records, {rc.get('set_aside_by_claude')} set aside by Claude, "
+                             f"{rc.get('corrected')} corrected later, {rc.get('informational')} for information. Check run: {e(str((data.get('run') or {}).get('file_hash') or '')[:12])}… "
+                             f"checker {e(str((data.get('run') or {}).get('checker_version') or ''))}, SharePoint read {e(str((data.get('run') or {}).get('snapshot_id') or 'none'))}.", S))
     out.append(Paragraph('Still open at the end', H2))
     out.append(table(['Severity', 'Where', 'What'], [[{'high': 'Must fix', 'medium': 'Check', 'low': 'Minor'}.get(o['severity'], o['severity']), o['where'], o['text']] for o in data['open'][:150]], [0.8 * inch, 1.3 * inch, 5.0 * inch])
                if data['open'] else Paragraph('Nothing.', P))
@@ -165,16 +254,35 @@ def make(h, file_hash, made_by=None, reason='requested', only_if_differs=False):
     made = datetime.now(timezone.utc).isoformat()
     rid = hashlib.sha256((data['file_hash'] + made).encode()).hexdigest()[:20]
     path = f'uploads/summary-{rid}.pdf'
-    record = dict(id=rid, file_hash=data['file_hash'], first_hash=data['first_hash'], job=data['job'], day=data['day'], made_at=made, by=made_by, reason=reason,
+    record = dict(source_receipt=data.get('source_receipt'), action_snapshot_sha256=data.get('action_snapshot_sha256'), pdf_sha256=hashlib.sha256(pdf).hexdigest(), id=rid, file_hash=data['file_hash'], first_hash=data['first_hash'], job=data['job'], day=data['day'], made_at=made, by=made_by, reason=reason,
                   differed=differs(data), differences=len(data['differences']), changes=len(data['changes']), rows=len(data.get('rows') or []), open=len(data['open']),
                   job_check=data['job_check'].get('status'), path=path, size=len(pdf),
                   filename=f"Change summary {data['job'] or 'report'} {data['day'] or ''}.pdf".replace('  ', ' '))
     with h.store().session() as directory:
         inbox = SpreadsheetInbox(directory)
-        files_for(inbox.root).put(path, pdf)
-        recs = inbox.setting(RECORDS, []) or []
-        inbox.set_setting(RECORDS, ([record] + recs)[:3000])
-        inbox._update(data['file_hash'], lambda r: r.update(change_summaries=([dict(id=rid, made_at=made, by=made_by, reason=reason)] + (r.get('change_summaries') or []))[:50]))
+        # Lock the immutable lineage in the same deterministic order as correction
+        # writers. Settings include assignment/source mappings and the shared PDF
+        # index, so serialize those writers too before the final snapshot read.
+        hashes = sorted({v['file_hash'] for v in _chain(inbox, file_hash)})
+        with inbox.connect() as db:
+            if inbox.pg is not None:
+                for version_hash in hashes:
+                    inbox._begin(db, version_hash)
+                db.execute('LOCK TABLE settings IN SHARE ROW EXCLUSIVE MODE')
+            else:
+                inbox._begin(db, file_hash)
+            from contextlib import nullcontext
+            from copy import copy
+            locked = copy(inbox)
+            locked.connect = lambda: nullcontext(db)
+            latest = collect(locked, file_hash, locked.setting(sharepoint_jobs.KEY))
+            if latest['action_snapshot_sha256'] != data['action_snapshot_sha256']:
+                raise ValueError('Report or review changed while the summary was prepared; generate a fresh summary.')
+            files_for(inbox.root).put(path, pdf)
+            recs = locked.setting(RECORDS, []) or []
+            locked.set_setting(RECORDS, ([record] + recs)[:3000])
+            # Artifact bookkeeping is not report state. Never invalidate a valid
+            # approval merely by generating an internal PDF of that exact state.
     return record
 
 

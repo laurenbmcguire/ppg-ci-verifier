@@ -28,12 +28,14 @@ def _rec(title, why, priority='medium', kind='check', who='you', do=None, target
 # ---------------------------------------------------------------- facts (what Claude sees) and rules (no AI)
 def report_facts(item, rv, fixes_waiting):
     sp = item.get('sharepoint') or {}
+    one = rv.get('sharepoint') or {}   # the one source verdict the header shows (item-by-item reconciliation when there is one)
     bl = item.get('baseline') or {}
     tl = sp.get('timeline') or {}
     return dict(job=rv.get('job'), day=rv.get('day'), status=rv['status'], counts=rv['counts'],
                 numbers={k: rv.get(k) for k in ('scans', 'inspected', 'rejected', 'rejected_unit')},
                 issues=[{k: i.get(k) for k in ('severity', 'source', 'where', 'text', 'code', 'verdict') if i.get(k)} for i in rv.get('issues', [])[:40]],
-                sharepoint=dict(status=sp.get('status'), message=sp.get('message'), matched=sp.get('matched_rows'), report_rows=sp.get('report_rows'),
+                sharepoint=dict(status=one.get('status') or sp.get('status'), message=one.get('message') or sp.get('message'), captured_at=one.get('captured_at'),
+                                matched=one.get('matched') if one.get('matched') is not None else sp.get('matched_rows'), report_rows=sp.get('report_rows'),
                                 sharepoint_rows=sp.get('sharepoint_rows'), wrong_shift=sp.get('wrong_shift'), missing_from_report=sp.get('missing_from_report'),
                                 not_on_sharepoint=sp.get('not_on_sharepoint')),
                 timeline_flags=tl.get('flags') or [], usual_day=dict(status=bl.get('status'), message=bl.get('message')),
@@ -62,7 +64,7 @@ def report_rules(f):
         n = f['changes_in_this_copy']
         out.append(_rec(f'Make the same {n} change{"s" if n != 1 else ""} in the SharePoint list', 'Clients are sometimes given SharePoint access, so it must match what was emailed. Ask before editing live data.', 'medium', 'follow_up', 'you'))
     sp = f['sharepoint']
-    if sp.get('status') in (None, 'not_checked', 'not_found', 'error'):
+    if sp.get('status') in (None, 'not_checked', 'not_found', 'error', 'stale'):
         out.append(_rec('Check SharePoint again', sp.get('message') or 'The report has not been compared with the SharePoint scans yet.', 'medium', 'check', 'you', 'recheck_sharepoint'))
     elif sp.get('missing_from_report'):
         out.append(_rec(f'Find {_n(sp["missing_from_report"], "scan")} missing from the report', 'They are on SharePoint for this day and shift but not in the report: the list may not have fully loaded, or scans came after the export.', 'high', 'check', 'you'))
@@ -115,23 +117,28 @@ def overview_rules(o):
     for c in o['categories'][:2]:
         tip = TIPS.get(c['reason'])
         if tip:
-            out.append(_rec(f'Most common catch: {c["reason"]} ({c["count"]})', tip, 'medium', 'process', 'site lead'))
+            out.append(_rec(f'Common listed finding: {c["reason"]} ({c["count"]})', tip, 'medium', 'process', 'site lead'))
     holds = sorted([j for j in o['jobs'] if j['open']], key=lambda j: -j['open'])
     if holds:
         out.append(_rec(f'{_n(sum(j["open"] for j in holds), "daily report")} still on Hold', ', '.join(f'{j["job"]} ({j["open"]})' for j in holds[:4]), 'high', 'fix', 'you'))
+    if t.get('rejected_missing_reports') or t.get('inspected_missing_reports'):
+        out.append(_rec('Overall reject rate is unknown', 'Some selected reports have missing, partial, or incompatible quantities. Review the coverage before using a percentage.', 'high', 'fix', 'you'))
     if t['on_time_pct'] is not None and t['on_time_pct'] < 90:
-        out.append(_rec(f'Only {t["on_time_pct"]:.0f}% of reports went out on time', 'On time means sent by the day after the shift. Look at the jobs with the lowest on-time count.', 'medium', 'process', 'manager'))
+        timed = t['sent'] - t.get('on_time_unknown', 0)
+        out.append(_rec(f'{t["on_time_pct"]:.1f}% of recorded sends with known timing were on time',
+                        f'{t["on_time"]} of {timed} recorded sends with known timing were sent by the day after the report date. External sends are not included.',
+                        'medium', 'process', 'manager'))
     rated = [j for j in o['jobs'] if j['rate'] is not None and j['days'] >= 2]
     if len(rated) >= 2:
         worst = max(rated, key=lambda j: j['rate'])
         avg = sum(j['rejected'] for j in rated) / max(1, sum(j['inspected'] for j in rated)) * 100
         if worst['rate'] > avg * 1.5:
-            out.append(_rec(f'{worst["job"]} rejects far more than the other jobs', f'{worst["rate"]:.1f}% against {avg:.1f}% across jobs. Worth a look at the defect reasons with the client.', 'medium', 'follow_up', 'manager', 'open_week', worst['job']))
+            out.append(_rec(f'{worst["job"]} has a higher reported reject rate', f'{worst["rate"]:.2f}% against {avg:.2f}% across jobs with complete quantities. Review the underlying records before drawing conclusions.', 'medium', 'follow_up', 'manager', 'open_week', worst['job']))
     unsent = t['reports'] - t['sent']
     if unsent:
-        out.append(_rec(f'{_n(unsent, "daily report")} not sent from the verifier', 'Sending from the verifier records who approved and sent what, which these numbers rely on.', 'low', 'process', 'you'))
+        out.append(_rec(f'{_n(unsent, "daily report")} without a recorded verifier send', 'External sending and what a client saw are unknown. Do not interpret a missing send record as proof the client never received it.', 'low', 'process', 'you'))
     if not out:
-        out.append(_rec('Nothing stands out', 'Keep going: every report was checked and sent.', 'low', 'process', 'you'))
+        out.append(_rec('Review the saved evidence', 'These statistics describe saved reports. They do not establish complete source accuracy or what clients saw.', 'low', 'process', 'you'))
     return out[:8]
 
 
@@ -184,7 +191,7 @@ def make(facts, scope, rules, use_ai):
             if items:
                 return dict(items=items, source='ai', made_at=datetime.now(timezone.utc).isoformat())
         except Exception as exc:  # AI trouble never leaves the panel empty
-            return dict(items=rules(facts), source='rules', note=f'Claude could not be reached ({str(exc)[:120]}); these come from the checks.',
+            return dict(items=rules(facts), source='rules', note=f'Dex could not be reached ({str(exc)[:120]}); these come from the checks.',
                         made_at=datetime.now(timezone.utc).isoformat())
     return dict(items=rules(facts), source='rules', made_at=datetime.now(timezone.utc).isoformat())
 
@@ -197,7 +204,8 @@ def period_facts(p):
 
 
 def overview_facts(o):
-    return dict(label=o['label'], totals=o['totals'], jobs=o['jobs'][:40], categories=o['categories'])
+    return dict(label=o['label'], totals=o['totals'], jobs=o['jobs'][:40], categories=o['categories'], statistics=o.get('statistics'),
+                evidence_limit='Client exposure is unknown. Missing quantities and rates are unknown, not zero. Listed findings are not confirmed unique errors. Corrections are saved records, not proof of prevention.')
 
 
 def fingerprint(facts):
@@ -216,5 +224,5 @@ def answer(cached, facts, rules, scope, ai_wanted, ai_on):
         return dict(cached['recs'], ai_on=ai_on), None
     out = make(facts, scope, rules, False)
     if cached:
-        out['note'] = "The data changed since Claude's last look. Ask Claude again for fresh recommendations."
+        out['note'] = "The data changed since Dex's last look. Ask Dex again for fresh recommendations."
     return dict(out, ai_on=ai_on), None

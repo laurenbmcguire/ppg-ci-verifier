@@ -84,11 +84,52 @@ class IntakeHTTPTests(unittest.TestCase):
         self.assertEqual(self.server.inbox.get(self.sample['report_id'], self.sample['version'])['status'], 'matched_supplied_snapshot')
 
     def test_import_requires_local_session_token(self):
-        self.assertEqual(self.request('/api/reports/import', self.sample, token=False)[0], 403)
+        code, raw, headers = self.request('/api/reports/import', self.sample, token=False)
+        self.assertEqual(code, 403)
+        self.assertEqual(json.loads(raw), {'error': 'Local session token required'})
+        self.assertEqual(int(headers['Content-Length']), len(raw))
+        self.assertEqual(headers['Connection'], 'close')
         self.assertEqual(self.server.inbox.list_reports(), [])
 
     def test_cross_origin_import_rejected(self):
-        self.assertEqual(self.request('/api/reports/import', self.sample, headers={'Origin': 'https://example.com'})[0], 403)
+        code, raw, headers = self.request('/api/reports/import', self.sample, headers={'Origin': 'https://example.com'})
+        self.assertEqual(code, 403)
+        self.assertEqual(json.loads(raw), {})
+        self.assertEqual(int(headers['Content-Length']), len(raw))
+        self.assertEqual(headers['Connection'], 'close')
+        self.assertEqual(self.server.inbox.list_reports(), [])
+
+    def test_rejected_post_is_framed_before_the_request_body_is_sent(self):
+        import socket
+        # Do not send the declared body: authorization must reject immediately,
+        # without parsing or waiting for potentially hostile request bytes.
+        for token, origin in ((False, self.base), (True, 'https://example.invalid')):
+            with self.subTest(token=token, origin=origin):
+                connection = socket.create_connection(('127.0.0.1', self.server.server_port), timeout=2)
+                try:
+                    request = f'POST /api/reports/import HTTP/1.1\r\nHost: 127.0.0.1:{self.server.server_port}\r\nOrigin: {origin}\r\nContent-Length: 1048576\r\n'
+                    if token:
+                        request += f'X-Review-Token: {self.server.token}\r\n'
+                    connection.sendall((request + '\r\n').encode())
+                    response = connection.makefile('rb')
+                    try:
+                        self.assertIn(b' 403 ', response.readline())
+                        headers = {}
+                        while line := response.readline():
+                            if line == b'\r\n':
+                                break
+                            key, value = line.decode().split(':', 1)
+                            headers[key.lower()] = value.strip()
+                        self.assertEqual(headers['connection'], 'close')
+                        length = int(headers['content-length'])
+                        body = response.read(length)
+                        self.assertEqual(len(body), length)
+                        self.assertIsInstance(json.loads(body), dict)
+                    finally:
+                        response.close()
+                finally:
+                    connection.close()
+                self.assertEqual(self.server.inbox.list_reports(), [])
 
     def test_foreign_host_rejected(self):
         self.assertEqual(self.request('/api/reports', headers={'Host': 'untrusted.example'})[0], 403)

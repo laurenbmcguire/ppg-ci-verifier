@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 from test_api import seeded, NAME
-from test_send import FakeMail, ENV
+from test_send import FakeMail, ENV, displayed_binding
 from hosting import sharepoint
 
 
@@ -76,7 +76,8 @@ class McpTests(unittest.TestCase):
         init = self.rpc(url, 'initialize', dict(protocolVersion='2025-06-18', capabilities={}, clientInfo=dict(name='claude-ai', version='1')))
         self.assertEqual(init['result']['protocolVersion'], '2025-06-18')
         self.assertEqual(init['result']['serverInfo']['name'], 'ppg-verifier')
-        self.assertIn('data@ppgquality.com', init['result']['instructions'])
+        self.assertIn('Sending and draft creation remain paused', init['result']['instructions'])
+        self.assertIn('does not establish source verification or authorize delivery', init['result']['instructions'])
         self.assertEqual(self.post(url, dict(jsonrpc='2.0', method='notifications/initialized'))[0], 202)
         names = {t['name'] for t in self.rpc(url, 'tools/list')['result']['tools']}
         self.assertTrue({'search', 'fetch', 'list_reports', 'get_report', 'apply_fixes', 'approve_report', 'send_to_client'} <= names)
@@ -97,21 +98,26 @@ class McpTests(unittest.TestCase):
         err, rep = self.tool(url, 'get_report', id=rid)                             # Claude style
         self.assertEqual(rep['id'], rid)
         err, fx = self.tool(url, 'get_fixes', id=rid); self.assertTrue(fx['fixes'])
-        err, fixed = self.tool(url, 'apply_fixes', id=rid, accept_all=True)
+        err, fixed = self.tool(url, 'apply_fixes', id=rid, ids=[p['id'] for p in fx['fixes']], expected_check_hash=displayed_binding(self.base, rid)['expected_check_hash'])
         self.assertFalse(err, fixed); self.assertEqual(fixed['corrected_from']['id'], rid)
         err, msg = self.tool(url, 'send_to_client', id=fixed['id'], mode='draft')
         self.assertTrue(err); self.assertIn('cannot send', msg)                    # read-only connector
         self.assertEqual(self.tool(url, 'get_report', id='zz')[0], True)
         sender = self.connector(can_send=True)
         err, msg = self.tool(sender, 'send_to_client', id=fixed['id'], mode='draft')
-        self.assertTrue(err); self.assertIn('Approve', msg)
-        err, ok = self.tool(sender, 'approve_report', id=fixed['id'], approver='Lauren', override=True)
+        self.assertTrue(err); self.assertIn('paused', msg)
+        err, ok = self.tool(sender, 'approve_report', id=fixed['id'], approver='Lauren', override=True, note='Synthetic fixture reviewed', **displayed_binding(self.base, fixed['id']))
         self.assertFalse(err, ok)
         err, prev = self.tool(sender, 'preview_client_email', id=fixed['id'])
-        self.assertEqual(prev['to'], ['buyer@client.com'])
-        err, out = self.tool(sender, 'send_to_client', id=fixed['id'], mode='draft')
-        self.assertFalse(err, out); self.assertFalse(out['record']['sent']); self.assertEqual(out['record']['via'], 'connector:Claude')
-        self.assertFalse(any(u.endswith('/send') for _, u, _ in self.fake.calls))   # draft only, nothing sent
+        self.assertEqual(prev['to'], []); self.assertTrue(prev['delivery_paused']); self.assertFalse(prev['enabled'])
+        before = displayed_binding(self.base, fixed['id']); calls = list(self.fake.calls)
+        with patch('hosting.delivery.mailer.deliver') as provider:
+            for mode in ('send', 'draft'):
+                err, out = self.tool(sender, 'send_to_client', id=fixed['id'], mode=mode)
+                self.assertTrue(err, out); self.assertIn('paused', out)
+            provider.assert_not_called()
+        self.assertEqual(self.fake.calls, calls)
+        self.assertEqual(displayed_binding(self.base, fixed['id']), before)
 
 
 if __name__ == '__main__':

@@ -19,8 +19,8 @@ MAX_UNCOMPRESSED = 4 * 1024 * 1024 * 1024
 MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
-MAX_FINDINGS = 200
-CHECKER_VERSION = '2026-11-07-source-identity-v12'
+from hosting.limits import MAX_FINDINGS  # every finding is stored (bounded only against hostile files)
+CHECKER_VERSION = '2026-11-08-exact-source-v18'
 
 
 class SpreadsheetError(ValueError):
@@ -76,7 +76,8 @@ def formula_flags(formula):
 
 
 def _part_label(name):
-    return PurePosixPath(name).stem
+    stem = PurePosixPath(name).stem
+    return stem[:-4] if stem.endswith('.xml') else stem   # xl/worksheets/_rels/sheet2.xml.rels is about sheet2
 
 
 def _xlsx_rows(raw, notes=None):
@@ -136,6 +137,15 @@ def _xlsx_rows(raw, notes=None):
                         if kind in ('oleobject', 'package', 'control', 'activexcontrol', 'attachedtemplate'):
                             raise SpreadsheetError('Linked OLE/ActiveX objects are not supported. Save a copy without embedded or linked objects.')
                         notes.append(('external_hyperlink' if kind == 'hyperlink' else 'external_workbook_link', _part_label(member.filename)))
+                    if tag == 'hyperlink' and member.filename.startswith('xl/worksheets/'):   # one finding per linked cell, not per sheet
+                        rid = next((v for k, v in element.attrib.items() if k.endswith('}id')), None)
+                        if rid and element.attrib.get('ref'):
+                            notes.append(('_hyperlink_cell', _part_label(member.filename), element.attrib['ref']))
+                    if tag == 'sheet' and member.filename == 'xl/workbook.xml':
+                        rid = next((v for k, v in element.attrib.items() if k.endswith('}id')), None)
+                        notes.append(('_sheet_rid', rid, element.attrib.get('name')))
+                    if tag == 'Relationship' and member.filename == 'xl/_rels/workbook.xml.rels':
+                        notes.append(('_rid_target', element.attrib.get('Id'), element.attrib.get('Target', '')))
                     if tag in ('oleObject', 'control'):
                         raise SpreadsheetError('Embedded OLE objects or ActiveX controls are not supported. Save a copy without them.')
                     if tag in ('ddeLink', 'oleLink'):
@@ -200,7 +210,39 @@ def inspect_spreadsheet(filename: str, raw: bytes, keep_records: bool = False) -
             _attach_photos(result, raw)
         except Exception:
             result.setdefault('limitations', []).append('Embedded photos could not be listed for this file.')
+    _attach_observed_values(result, filename, raw)
     return result
+
+
+def _attach_observed_values(result, filename, raw):
+    """Bind local checks to typed source data, including generic messages.
+
+    Findings without a precise cell bind to the whole row, or conservatively to
+    the file if no row exists. Never infer observed values from a source service.
+    """
+    local_codes = {'missing_cell', 'number_stored_as_text', 'invalid_numeric_value', 'negative_count_or_quantity', 'fractional_count'}
+    wanted = {}
+    for f in result.get('findings') or []:
+        if f.get('code') not in local_codes:
+            f['observed'] = {'file_sha256': result['file_sha256']}
+            continue
+        if f.get('sheet') and isinstance(f.get('row'), int) and f['row'] > 0:
+            wanted.setdefault((f['sheet'], f['row']), []).append(f)
+        else:
+            f['observed'] = {'file_sha256': result['file_sha256']}
+    sources = [('CSV', csv.reader(io.StringIO(raw.decode('utf-8-sig'), newline=''), strict=True))] if filename.lower().endswith('.csv') else _xlsx_rows(raw, [])
+    for title, rows in sources:
+        for number, row in enumerate(rows, 1):
+            for f in wanted.pop((title, number), []):
+                col = f.get('column')
+                vals = [row[col - 1] if col <= len(row) else None] if isinstance(col, int) and col > 0 else row
+                if any(isinstance(v, str) and v.startswith('=') for v in vals):
+                    f['observed'] = {'file_sha256': result['file_sha256']}
+                else:
+                    f['observed'] = [{'type': type(v).__name__, 'value': str(v) if v is not None else None} for v in vals]
+    for pending in wanted.values():
+        for f in pending:
+            f['observed'] = {'file_sha256': result['file_sha256']}
 
 
 def _attach_photos(result, raw):
@@ -527,16 +569,35 @@ def _exact_or_adaptive(strict, sources, pristine, raw):
 
 
 def _attach_external(result, notes):
-    """Add external/active-content findings (one per code and location) to any result shape."""
+    """Add external/active-content findings to any result shape. Hyperlinks are listed one per linked cell (with
+    the sheet's own name), so every one of them can be seen and reviewed; other kinds once per code and location."""
+    rid_name = {n[1]: n[2] for n in notes if n[0] == '_sheet_rid'}
+    target_label = {n[1]: _part_label(n[2]) for n in notes if n[0] == '_rid_target'}
+    label_name = {target_label[r]: name for r, name in rid_name.items() if r in target_label}
+    cells = [n for n in notes if n[0] == '_hyperlink_cell']
+    linked_parts = {n[1] for n in cells}
     seen = set()
     counts = Counter()
-    for code, where in notes:
-        counts[code] += 1
-        if (code, where) in seen:
+    for note in notes:
+        code, where = note[0], note[1]
+        if code.startswith('_') and code != '_hyperlink_cell':
             continue
-        seen.add((code, where))
+        if code == 'external_hyperlink' and where in linked_parts:
+            continue   # counted cell by cell below
+        row = column = None
+        if code == '_hyperlink_cell':
+            code = 'external_hyperlink'
+            m = re.fullmatch(r'([A-Z]+)([0-9]+)(?::[A-Z]+[0-9]+)?', str(note[2]))
+            if m:
+                column = sum((ord(ch) - 64) * 26 ** i for i, ch in enumerate(reversed(m.group(1))))
+                row = int(m.group(2))
+        sheet = label_name.get(where, where)
+        counts[code] += 1
+        if (code, sheet, row, column) in seen:
+            continue
+        seen.add((code, sheet, row, column))
         if len(result.setdefault('findings', [])) < MAX_FINDINGS:
-            result['findings'].append(dict(code=code, sheet=where, row=None, column=None))
+            result['findings'].append(dict(code=code, sheet=sheet, row=row, column=column))
         else:
             result['findings_truncated'] = True
     if counts:
@@ -544,6 +605,7 @@ def _attach_external(result, notes):
         for code, n in counts.items():
             merged[code] = merged.get(code, 0) + n
         result['finding_counts'] = merged
+        result['finding_count'] = sum(merged.values())
         result['external_content'] = sorted(counts)
         result.setdefault('limitations', []).append('External links, web functions and DDE/macro-call formulas were recorded as findings. They were never executed or followed.')
         # Plain hyperlinks (e.g. photo links) are listed for information only; links that pull in

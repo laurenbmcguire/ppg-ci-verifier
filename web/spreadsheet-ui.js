@@ -300,7 +300,7 @@
     box.append(make('strong', 'AI review — possible issues'));
     if (ai.status === 'done') {
       const c = ai.counts || {};
-      box.append(make('p', ai.summary || ''), make('p', ai.issues.length ? `${ai.issues.length} possible issue(s): ${c.high || 0} high · ${c.medium || 0} medium · ${c.low || 0} low.` : 'Claude did not spot anything beyond the automatic checks.', 'hint'));
+      box.append(make('p', ai.summary || ''), make('p', ai.issues.length ? `${ai.issues.length} possible issue(s): ${c.high || 0} high · ${c.medium || 0} medium · ${c.low || 0} low.` : 'Dex did not spot anything beyond the automatic checks.', 'hint'));
       ai.issues.forEach(issue => {
         const item = make('div', '', 'ai-issue ai-' + issue.severity);
         const where = [issue.sheet, issue.cell || (issue.row ? `row ${issue.row}` : '')].filter(Boolean).join(' · ');
@@ -309,7 +309,7 @@
         if (issue.check) item.append(make('p', 'Check: ' + issue.check, 'hint'));
         box.append(item);
       });
-      if (ai.sheet_text_truncated) box.append(make('p', 'This workbook is very large, so Claude read only the first part of it.', 'hint'));
+      if (ai.sheet_text_truncated) box.append(make('p', 'This workbook is very large, so Dex read only the first part of it.', 'hint'));
       box.append(make('small', `${ai.notice || 'AI suggestions to double-check.'} Reviewed ${new Date(ai.reviewed_at).toLocaleString()} · ${ai.model}.`));
     } else if (ai.status) {
       box.append(make('p', ai.message || 'AI review did not run.', ai.status === 'error' ? 'intake-error' : 'hint'));
@@ -321,7 +321,7 @@
     run.addEventListener('click', async () => {
       if (pending) return; setBusy(true);
       try {
-        message('Claude is reading the report… this can take up to a minute.');
+        message('Dex is reading the report… this can take up to a minute.');
         const answer = await post('/api/spreadsheets/ai-review', {file_hash: result.file_hash});
         ++selectionVersion; selected = answer.item.file_hash; detail(answer.item); await refresh();
         const r = answer.item.ai_review || {};

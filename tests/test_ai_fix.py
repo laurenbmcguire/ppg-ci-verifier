@@ -41,62 +41,30 @@ class AIFix(test_autopilot.Autopilot):
         with urllib.request.urlopen(self.base + '/api/spreadsheet?id=' + h, timeout=30) as r:
             return [i for i in json.loads(r.read())['review']['issues'] if i['severity'] != 'info']
 
-    def test_fix_picked_then_all(self):
-        before = self.issues(self.h)
-        typo = [i['key'] for i in before if '8O139189' in i['text']]
-        self.assertTrue(typo)
-        with patch.object(ai_review, '_post', fake_post):
-            st, out = self.call('/api/spreadsheets/ai-fix', {'file_hash': self.h, 'keys': typo})
-            self.assertEqual(st, 200, out)
-            s = out['ai_fixed']
-            self.assertEqual([(c['before'], c['after']) for c in s['changed']], [('8O139189', '80139189')])
-            self.assertEqual(s['left'], [])
-            h2 = out['item']['file_hash']; self.assertNotEqual(h2, self.h)
-            self.assertFalse([i for i in self.issues(h2) if '8O139189' in i['text']])
-            st, out = self.call('/api/spreadsheets/ai-fix', {'file_hash': h2})            # everything that is left
-            self.assertEqual(st, 200, out)
-            s = out['ai_fixed']
-            self.assertTrue(s['removed']); self.assertEqual(s['left'], [])
-            self.assertEqual(self.issues(out['item']['file_hash']), [])                   # nothing left: fixed or confirmed fine
+    def test_picked_all_and_automatic_ai_changes_fail_before_model_calls(self):
+        before=self.issues(self.h)
+        for fields in ({'keys':[before[0]['key']]},{},{'keys':[]},{'auto':True}):
+            with self.subTest(fields=fields), patch.object(ai_review,'_post',side_effect=AssertionError('No model calls')) as model:
+                st,out=self.call('/api/spreadsheets/ai-fix',dict(file_hash=self.h,**fields))
+                self.assertEqual(st,409,out)
+                self.assertIn('disabled',out['error'])
+                model.assert_not_called()
+                self.assertEqual(self.issues(self.h),before)
 
-    def test_automatic_batches_keep_one_record(self):
-        keys = [i['key'] for i in self.issues(self.h)]
-        self.assertGreater(len(keys), 1)
-        with patch.object(ai_review, '_post', fake_post):
-            st, out = self.call('/api/spreadsheets/ai-fix', {'file_hash': self.h, 'keys': keys[:1], 'auto': True})
-            self.assertEqual(st, 200, out); first = out['ai_fixed']; self.assertTrue(first['auto'])
-            h2 = out['item']['file_hash']
-            rest = [i['key'] for i in self.issues(h2)]
-            st, out = self.call('/api/spreadsheets/ai-fix', {'file_hash': h2, 'keys': rest, 'auto': True})
-            self.assertEqual(st, 200, out); s = out['ai_fixed']
-            self.assertTrue(s['auto']); self.assertEqual(s['rounds'], 2)
-            self.assertEqual(s['asked'], 1 + len(rest)); self.assertEqual(s['from_hash'], self.h)
-            self.assertEqual(s['changed'][:len(first['changed'])], first['changed'])   # round one is still listed
-            self.assertEqual(self.issues(out['item']['file_hash']), [])
+    def test_opening_legacy_report_never_automatically_rewrites_it(self):
+        os.environ.pop('PPG_AUTOFORMAT',None)
+        before=self.issues(self.h)
+        st,out=self.call('/api/spreadsheets/auto-clean',{'file_hash':self.h})
+        self.assertEqual(st,200,out)
+        self.assertFalse(out['changed'])
+        self.assertEqual(self.issues(self.h),before)
 
-    def test_older_report_cleans_itself_when_opened(self):
-        os.environ.pop('PPG_AUTOFORMAT', None)                              # this upload was made with the cleanup off, like an older report
-        st, out = self.call('/api/spreadsheets/auto-clean', {'file_hash': self.h})
-        self.assertEqual(st, 200, out); self.assertTrue(out['changed'])
-        self.assertTrue(out['item']['auto_formatting']['count']); self.assertNotEqual(out['item']['file_hash'], self.h)
-        st, again = self.call('/api/spreadsheets/auto-clean', {'file_hash': out['item']['file_hash']})
-        self.assertEqual(st, 200, again); self.assertFalse(again['changed'])   # nothing left to clean
-
-    def test_fine_as_is_holds_on_later_versions(self):
-        issue = next(i for i in self.issues(self.h) if i.get('code') != 'duplicate_row')
-        st, out = self.call('/api/spreadsheets/mark-fine', {'file_hash': self.h, 'by': 'Lauren', 'issues': [{k: issue.get(k) for k in ('code', 'sheet', 'row', 'text')}]})
-        self.assertEqual(st, 200, out)
-        self.assertNotIn(issue['text'], [i['text'] for i in self.issues(self.h)])
-        os.environ.pop('PPG_AUTOFORMAT', None)
-        st, out = self.call('/api/spreadsheets/auto-clean', {'file_hash': self.h})   # a new version
-        self.assertEqual(st, 200, out); h2 = out['item']['file_hash']; self.assertNotEqual(h2, self.h)
-        self.assertNotIn(issue['text'], [i['text'] for i in self.issues(h2)])
-
-    def test_nothing_picked_and_ai_off(self):
-        st, out = self.call('/api/spreadsheets/ai-fix', {'file_hash': self.h, 'keys': []})
-        self.assertEqual(st, 409); self.assertIn('Pick', out['error'])
-        st, out = self.call('/api/spreadsheets/ai-fix', {'file_hash': self.h})
-        self.assertEqual(st, 409)                                                        # no AI key in tests: a clear message, nothing changed
+    def test_legacy_fine_as_is_cannot_bypass_fingerprint_review(self):
+        before=self.issues(self.h)
+        issue=before[0]
+        st,out=self.call('/api/spreadsheets/mark-fine',{'file_hash':self.h,'by':'Reviewer','issues':[issue]})
+        self.assertEqual(st,409,out)
+        self.assertEqual(self.issues(self.h),before)
 
 
 if __name__ == '__main__':

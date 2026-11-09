@@ -115,10 +115,32 @@ class SpreadsheetTests(unittest.TestCase):
         self.assertEqual(inspect_spreadsheet('wide.csv', wide_ok)['sheets'][0]['header_column_count'], 151)
 
     def test_result_bounded(self):
+        from hosting.limits import MAX_FINDINGS
         result = inspect_spreadsheet('test.csv', b'a,b\n' + b',\n' * 500)
-        self.assertEqual(len(result['findings']), 200)
+        self.assertEqual(len(result['findings']), sum(result['finding_counts'].values()))   # every finding is stored, not the first 200
+        self.assertEqual(result['finding_counts']['missing_cell'], 1000)
+        self.assertFalse(result['findings_truncated'])
+        with patch('hosting.spreadsheets.MAX_FINDINGS', 300):       # the safety bound still holds and says so
+            result = inspect_spreadsheet('test.csv', b'a,b\n' + b',\n' * 500)
+        self.assertEqual(len(result['findings']), 300)
         self.assertTrue(result['findings_truncated'])
         self.assertEqual(result['finding_counts']['missing_cell'], 1000)
+        self.assertGreaterEqual(MAX_FINDINGS, 20000)
+
+    def test_a_report_past_the_limit_is_held_from_approval(self):
+        """Reaching the bound never hides findings silently: the report is held until a person looks."""
+        import tempfile
+        from hosting.spreadsheet_inbox import SpreadsheetInbox
+        box = SpreadsheetInbox(tempfile.mkdtemp())
+        with patch('hosting.spreadsheets.MAX_FINDINGS', 300), patch('hosting.limits.MAX_FINDINGS', 300):
+            item = box.ingest('big.csv', b'a,b\n' + b',\n' * 500)
+            self.assertTrue(item['findings_truncated'])
+            holds = {h['code']: h for h in box.holds(item)}
+        self.assertTrue(holds['findings_incomplete']['hard'])
+        self.assertIn('701 cannot be reviewed', holds['findings_incomplete']['text'])
+        self.assertIn('safety limit', holds['findings_incomplete']['text'])
+        with self.assertRaises(ValueError):
+            box.approve(item['file_hash'], 'Reviewer')
 
     def test_empty_encoding_and_malformed(self):
         for name, raw in [('empty.csv', b''), ('bad.csv', b'\xff'), ('bad.csv', b'\x00'), ('bad.csv', b'"unterminated'), ('bad.xlsm', b'hi')]:

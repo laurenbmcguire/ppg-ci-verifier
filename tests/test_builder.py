@@ -5,7 +5,7 @@ from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
-from test_shifts import FakeGraph, JOB, LATE, ENV
+from test_shifts import FakeGraph, JOB, LATE, ENV, seed_verified_source
 from hosting import builder, sharepoint, shifts
 from hosting.spreadsheets import inspect_spreadsheet
 from hosting.review_summary import summarize
@@ -23,16 +23,16 @@ class BuilderUnit(unittest.TestCase):
         self.env.stop(); reset()
 
     def test_rows_shifts_and_client_safe_file(self):
-        rows, info = builder.day_rows(JOB, '2026-10-07', shifts.DEFAULT, opener=FakeGraph())
+        rows, info = builder.day_rows(JOB, '2026-10-07', shifts.DEFAULT, opener=FakeGraph(), site_id='site-Owens', list_id='L1')
         by = {r['identifier']: r for r in rows}
-        self.assertEqual(by[LATE]['shift'], '2')                  # 4:00 PM scan goes on 2nd shift, whatever was picked
+        self.assertEqual(by[LATE]['shift'], '1')                  # Recorded shift is authoritative; clock time is only a suggestion
         self.assertEqual(by['NIGHT1']['shift'], '3')               # 1:15 AM on the 8th counts toward the 7th
         self.assertNotIn('NEXTDAY', by)
         self.assertEqual(by[LATE]['certified'], by[LATE]['inspected'] - by[LATE]['rejected'])
         raw = builder.build_xlsx(JOB, '2026-10-07', rows, shifts.DEFAULT, {'customer': 'Owens Corning'})
         from openpyxl import load_workbook
         wb = load_workbook(io.BytesIO(raw))
-        self.assertEqual(wb.sheetnames, ['Summary', '1st Shift', '2nd Shift', '3rd Shift', 'Rejects'])
+        self.assertEqual(wb.sheetnames, ['Summary', '1st Shift', '3rd Shift', 'Rejects'])
         text = ' '.join(str(c.value) for ws in wb for row in ws.iter_rows() for c in row if c.value is not None)
         for internal in ('Scan time', 'Picked shift', 'AM', 'PM', 'Auditor'):
             self.assertNotIn(internal, text)
@@ -43,18 +43,52 @@ class BuilderUnit(unittest.TestCase):
         self.assertEqual(rv['rejected'], sum(r['rejected'] for r in rows))
         self.assertFalse([i for i in rv['issues'] if 'total' in (i['code'] or '')])
 
-    def test_readiness_waits_45_minutes(self):
+    def test_inactivity_never_proves_shift_completion(self):
         last = '2026-10-07T14:00:00'
-        self.assertEqual(builder.readiness(last, now=datetime(2026, 10, 7, 14, 30))['state'], 'running')
-        self.assertEqual(builder.readiness(last, now=datetime(2026, 10, 7, 14, 30))['minutes_left'], 15)
-        self.assertEqual(builder.readiness(last, now=datetime(2026, 10, 7, 14, 45))['state'], 'ready')
+        for now in (datetime(2026, 10, 7, 14, 30), datetime(2026, 10, 7, 14, 45), datetime(2026, 10, 8)):
+            ready = builder.readiness(last, now=now)
+            self.assertEqual(ready['state'], 'provisional')
+            self.assertFalse(ready['shift_end_confirmed'])
+            self.assertIsNone(ready['ready_at'])
         self.assertEqual(builder.readiness(None)['state'], 'no_scans')
+
+    def test_build_requires_exact_source_and_recorded_evidence(self):
+        with self.assertRaisesRegex(builder.BuildError, 'verified site_id and list_id'):
+            builder.day_rows(JOB, '2026-10-07', shifts.DEFAULT, opener=FakeGraph())
+        from test_shifts import items
+        for field in ('Date', 'Shift'):
+            rows = items()
+            rows[0]['fields'].pop(field)
+            with patch('test_shifts.items', return_value=rows), self.assertRaises(builder.BuildError):
+                builder.day_rows(JOB, '2026-10-07', shifts.DEFAULT, opener=FakeGraph(), site_id='site-Owens', list_id='L1')
+
+    def test_missing_counts_remain_unknown_not_inferred(self):
+        row = builder._row({'n': 8, 'bad': 1}, {'n': 'inspected', 'bad': 'rejected'})
+        self.assertEqual(row['inspected'], 8)
+        self.assertEqual(row['rejected'], 1)
+        self.assertIsNone(row['certified'])
+        self.assertIsNone(builder._row({}, {})['rejected'])
 
     def test_nexus_windows(self):
         mk = lambda h, m, n=10, rej=1: dict(time=datetime(2026, 10, 7, h, m), inspected=n, rejected=rej, certified=n - rej)
         out = builder.nexus_split([mk(6, 0), mk(14, 29), mk(14, 30), mk(22, 15), mk(22, 40), mk(5, 0), dict(time=None)])
         self.assertEqual([s['scans'] for s in out['shifts']], [2, 2, 2])  # 10:15 PM is in both 2 and 3: the first window wins
-        self.assertEqual(out['total']['inspected'], 60); self.assertEqual(out['unplaced'], 1)
+        self.assertEqual(sum(s['inspected'] for s in out['shifts']), 60)
+        self.assertIsNone(out['total']['inspected'])
+        self.assertEqual(out['total']['scans'], 7)
+        self.assertEqual(out['unplaced'], 1)
+        self.assertEqual(out['coverage'], dict(complete=False, source_records=7, placed_records=6))
+        self.assertEqual(out['status'], 'held')
+
+    def test_known_unplaced_quantities_remain_in_overall_totals(self):
+        rows = [dict(time=datetime(2026, 10, 7, 8), inspected=10, rejected=1, certified=9),
+                dict(time=None, inspected=7, rejected=2, certified=5)]
+        out = builder.nexus_split(rows)
+        self.assertEqual(out['total'], dict(scans=2, inspected=17, rejected=3, certified=14))
+        self.assertEqual(sum(s['inspected'] for s in out['shifts']), 10)
+        self.assertEqual(out['unplaced'], 1)
+        self.assertEqual(out['coverage'], dict(complete=False, source_records=2, placed_records=1))
+        self.assertEqual(out['status'], 'held')
 
     def test_column_roles_drop_people_and_times(self):
         roles = builder.column_roles({'Title': 'VIN', 'Auditor': 'Auditor', 'Created': 'Date', 'Qty_x0020_NOK': 'Qty NOK', 'Defect': 'Defect', 'Photo': 'Picture File'})
@@ -73,6 +107,7 @@ class BuildRoutes(unittest.TestCase):
         self.graph = patch('hosting.sharepoint._open', lambda request, opener=None: fake(request)); self.graph.start()
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
         self.server.workspace_store = PostgresWorkspace('postgresql://test.invalid/x', FakeDatabase().connect)
+        seed_verified_source(self.server.workspace_store)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f'http://127.0.0.1:{self.server.server_port}'
 
@@ -99,15 +134,17 @@ class BuildRoutes(unittest.TestCase):
         self.assertEqual(item['sharepoint']['status'], 'match', item['sharepoint'].get('message'))   # built from SharePoint, so it matches
         status, n = self.call('/api/nexus', {'file_hash': rid})
         self.assertEqual(status, 200, n); self.assertEqual(n['total']['inspected'], item['built']['nexus']['total']['inspected'])
-        self.assertEqual(self.call('/api/settings/report-header', {'job': JOB})[1]['header']['customer'], 'Owens')
+        from hosting.spreadsheet_inbox import SpreadsheetInbox
+        with self.server.workspace_store.session() as directory:
+            self.assertEqual(SpreadsheetInbox(directory).setting('report_header|site-Owens|L1')['customer'], 'Owens')
         self.assertEqual(self.call('/api/build', {'job': 'NO-SUCH-JOB', 'day': '2026-10-07'})[0], 409)
 
-    def test_build_waits_for_shift_end(self):
-        from hosting import public_api
-        with patch('hosting.builder.readiness', return_value=dict(state='running', ready_at='2026-10-08T02:00', minutes_left=20)):
-            status, out = self.call('/api/build', {'job': JOB, 'day': '2026-10-07'})
-            self.assertEqual(status, 409); self.assertIn('Build anyway', out['error'])
-            self.assertEqual(self.call('/api/build', {'job': JOB, 'day': '2026-10-07', 'force': True})[0], 200)
+    def test_build_is_provisional_even_when_forced(self):
+        for force in (False, True):
+            status, out = self.call('/api/build', {'job': JOB, 'day': '2026-10-07', 'force': force})
+            self.assertEqual(status, 200, out)
+            self.assertFalse(out['built']['shift_end_confirmed'])
+            self.assertEqual(out['built']['ready']['state'], 'provisional')
 
     def test_build_over_api_and_connector(self):
         status, k = self.call('/api/keys/create', {'name': 'Scheduled task'})

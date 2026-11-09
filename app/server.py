@@ -16,6 +16,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header('Content-Type',ctype); self.send_header('Cache-Control','no-store'); self.send_header('X-Content-Type-Options','nosniff')
         self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'")
         for k,v in (extra or {}).items(): self.send_header(k,v)
+        # Rejections can leave POST bytes unread. Frame the response explicitly so
+        # clients do not wait for EOF (which can arrive as a TCP reset on close).
+        self.send_header('Content-Length',str(len(data)))
+        self.send_header('Connection','close')
+        self.close_connection=True
         self.end_headers(); self.wfile.write(data)
     def valid_host(self): return self.headers.get('Host') in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}')
     def do_GET(self):

@@ -1,4 +1,4 @@
-"""Shift times: scans put on a shift by time (midnight rule), wrong-shift rows found and moved, settings and AI rules."""
+"""Recorded business dates and shifts remain authoritative; time suggestions never authorize changes."""
 import base64, io, json, os, sys, threading, unittest, urllib.error, urllib.request
 from datetime import datetime
 from http.server import ThreadingHTTPServer
@@ -9,7 +9,7 @@ from eos_fixture import build, ROWS
 from hosting import sharepoint, shifts
 
 JOB, NAME = '2230-OWENS-BASCO', '2230-OWENS-BASCO - EOS - 10.07.26.xlsx'
-LATE = '8010808537'                      # scanned at 4:00 PM Central: 2nd shift, but listed on the 1st Shift tab
+LATE = '8010808537'                      # Clock suggests shift 2, but recorded Shift remains authoritative
 
 
 def items():
@@ -18,16 +18,18 @@ def items():
         stamp = '2026-10-07T21:00:00Z' if ident == LATE else f'2026-10-07T{13 + n % 5:02d}:10:00Z'
         out.append({'id': str(n), 'createdDateTime': stamp, 'lastModifiedDateTime': stamp,
                     'fields': {'Identifier': ident, 'PartNumber': part, 'QuantityInspected': ins, 'QtyNOK': rej,
-                               'Shift': '1', 'Date0': stamp}})
-    # a 3rd-shift scan at 1:15 AM on the 8th belongs to the 7th; a 7:00 AM scan on the 8th does not
-    out.append({'id': '98', 'createdDateTime': '2026-10-08T06:15:00Z', 'fields': {'Identifier': 'NIGHT1', 'Shift': '3', 'Date0': '2026-10-08T06:15:00Z', 'QuantityInspected': 1}})
-    out.append({'id': '99', 'createdDateTime': '2026-10-08T12:00:00Z', 'fields': {'Identifier': 'NEXTDAY', 'Shift': '1', 'Date0': '2026-10-08T12:00:00Z', 'QuantityInspected': 1}})
+                               'Shift': '1', 'Date': '2026-10-07', 'Date0': stamp, 'QuantityCertified': ins - rej}})
+    # Explicit business dates place the overnight record on the 7th and the next record on the 8th
+    out.append({'id': '98', 'createdDateTime': '2026-10-08T06:15:00Z', 'fields': {'Identifier': 'NIGHT1', 'Shift': '3', 'Date': '2026-10-07', 'QtyNOK': 0, 'QuantityCertified': 1, 'Date0': '2026-10-08T06:15:00Z', 'QuantityInspected': 1}})
+    out.append({'id': '99', 'createdDateTime': '2026-10-08T12:00:00Z', 'fields': {'Identifier': 'NEXTDAY', 'Shift': '1', 'Date': '2026-10-08', 'QtyNOK': 0, 'QuantityCertified': 1, 'Date0': '2026-10-08T12:00:00Z', 'QuantityInspected': 1}})
     return out
 
 
 COLS = [{'name': 'Identifier', 'displayName': 'Identifier'}, {'name': 'PartNumber', 'displayName': 'Part Number'},
         {'name': 'QuantityInspected', 'displayName': 'Qty Inspected'}, {'name': 'QtyNOK', 'displayName': 'Qty NOK'},
-        {'name': 'Shift', 'displayName': 'Shift'}, {'name': 'Date0', 'displayName': 'Date'}]
+        {'name': 'QuantityCertified', 'displayName': 'Quantity Certified'},
+        {'name': 'Date', 'displayName': 'Business Date', 'dateTime': {'format': 'dateOnly'}},
+        {'name': 'Shift', 'displayName': 'Shift'}, {'name': 'Date0', 'displayName': 'Submission time'}]
 
 
 class FakeGraph:
@@ -40,6 +42,8 @@ class FakeGraph:
             return ok({'id': 'site-' + url.rsplit('/', 1)[1]})
         if url.endswith('/lists?$select=id,displayName,webUrl,lastModifiedDateTime&$top=500'):
             return ok({'value': [{'id': 'L1', 'displayName': f'Data #{JOB}', 'webUrl': 'https://x/lists/data'}]})
+        if url.endswith('/sites/site-Owens/lists/L1'):
+            return ok({'id': 'L1', 'displayName': f'Data #{JOB}', 'webUrl': 'https://x/sites/Owens/Lists/data'})
         if '/lists/L1/columns' in url:
             return ok({'value': COLS})
         if '/lists/L1/items' in url:
@@ -50,6 +54,16 @@ class FakeGraph:
 ENV = {'MS_TENANT_ID': 't', 'MS_CLIENT_ID': 'c', 'MS_CLIENT_SECRET': 's', 'SHAREPOINT_SITES': 'Owens'}
 
 
+def seed_verified_source(store):
+    """Synthetic, reviewer-verified assignment; a job label alone is not source proof."""
+    from hosting.spreadsheet_inbox import SpreadsheetInbox
+    from hosting import registry
+    with store.session() as directory:
+        SpreadsheetInbox(directory).set_setting(registry.REGISTRY_KEY, [dict(
+            client_key='Owens', client='Owens Corning', site='Owens', site_id='site-Owens',
+            job=JOB, list_id='L1', verified=True)])
+
+
 class ShiftUnitTests(unittest.TestCase):
     def setUp(self):
         sharepoint._token.update(value=None, expires=0); sharepoint._list_cache.clear(); sharepoint._site_ids.clear()
@@ -58,7 +72,7 @@ class ShiftUnitTests(unittest.TestCase):
     def tearDown(self):
         self.env.stop(); sharepoint._list_cache.clear(); sharepoint._token.update(value=None, expires=0); sharepoint._site_ids.clear()
 
-    def test_midnight_rule_and_time_based_shift(self):
+    def test_business_date_and_recorded_shift_are_preserved(self):
         name, raw, meta = sharepoint.list_day(JOB, '2026-10-07', opener=FakeGraph(), schedule=shifts.DEFAULT)
         text = raw.decode()
         self.assertIn('NIGHT1', text); self.assertNotIn('NEXTDAY', text)
@@ -66,9 +80,9 @@ class ShiftUnitTests(unittest.TestCase):
         self.assertEqual(meta['scan_shifts'][LATE]['picked'], '1')
         self.assertEqual(meta['scan_shifts']['NIGHT1']['shift'], '3')
         self.assertIn('Picked shift', text.splitlines()[0])
-        # without shift times the old calendar-day split still applies
+        # Explicit business date remains authoritative with or without a schedule.
         _, raw2, meta2 = sharepoint.list_day(JOB, '2026-10-07', opener=FakeGraph())
-        self.assertNotIn('NIGHT1', raw2.decode()); self.assertNotIn('scan_shifts', meta2)
+        self.assertIn('NIGHT1', raw2.decode()); self.assertNotIn('scan_shifts', meta2)
 
     def test_clean_rejects_overlaps_and_bad_times(self):
         with self.assertRaises(shifts.ShiftError):
@@ -92,6 +106,7 @@ class ShiftRouteTests(unittest.TestCase):
         self.graph = patch('hosting.sharepoint._open', lambda request, opener=None: fake(request)); self.graph.start()
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
         self.server.workspace_store = PostgresWorkspace('postgresql://test.invalid/x', FakeDatabase().connect)
+        seed_verified_source(self.server.workspace_store)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f'http://127.0.0.1:{self.server.server_port}'
 
@@ -108,21 +123,30 @@ class ShiftRouteTests(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
 
-    def test_wrong_shift_found_and_moved(self):
-        status, data = self.post('/api/spreadsheets/import', {'filename': NAME, 'content_base64': base64.b64encode(build()).decode()})
+    def test_wrong_shift_found_but_unreviewed_move_is_paused(self):
+        raw = build()
+        recorded = items()
+        next(it for it in recorded if it['fields']['Identifier'] == LATE)['fields']['Shift'] = '2'
+        with patch('test_shifts.items', return_value=recorded):
+            status, data = self.post('/api/spreadsheets/import', {'filename': NAME, 'content_base64': base64.b64encode(raw).decode()})
         self.assertEqual(status, 200, data); item = data['item']
         sp = item['sharepoint']
         wrong = [f for f in sp['findings'] if f['code'] == 'wrong_shift']
         self.assertEqual(len(wrong), 1, sp['findings']); self.assertIn(LATE, wrong[0]['message'])
         self.assertIn('2nd shift (2:30 PM to 10:30 PM)', wrong[0]['message'])
         self.assertFalse([f for f in sp['findings'] if f['code'] == 'missing_from_report' and 'NIGHT1' in f['message']])  # other shifts left out
-        status, out = self.post('/api/spreadsheets/shift-fix', {'file_hash': item['file_hash']})
-        self.assertEqual(status, 200, out); self.assertEqual(out['moved'], 1)
-        fixed = out['item']
-        self.assertEqual(fixed['fixed_from']['file_hash'], item['file_hash'])
-        self.assertFalse([f for f in (fixed.get('sharepoint') or {}).get('findings') or [] if f['code'] == 'wrong_shift'])
-        status, again = self.post('/api/spreadsheets/shift-fix', {'file_hash': fixed['file_hash']})
-        self.assertEqual(status, 409)
+        with patch('hosting.public_api._after_change', side_effect=AssertionError('No external recheck')) as recheck:
+            status, out = self.post('/api/spreadsheets/shift-fix', {'file_hash': item['file_hash']})
+        self.assertEqual(status, 409, out)
+        self.assertIn('disabled', out['error'])
+        recheck.assert_not_called()
+        from hosting.spreadsheet_inbox import SpreadsheetInbox
+        with self.server.workspace_store.session() as directory:
+            box = SpreadsheetInbox(directory)
+            current = box.get(item['file_hash'])
+            self.assertEqual(box.original_bytes(item['file_hash'])[1], raw)
+            self.assertFalse(current.get('fixes_applied'))
+            self.assertEqual([f for f in current['sharepoint']['findings'] if f['code'] == 'wrong_shift'], wrong)
 
     def test_settings_shifts_and_rules(self):
         status, s = self.post('/api/settings', {})

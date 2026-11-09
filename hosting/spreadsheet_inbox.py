@@ -1,5 +1,5 @@
 """Immutable originals and versioned internal-check results, inside the durable workspace."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -37,6 +37,10 @@ def _known_details(filename, raw):
         return out
     except Exception:
         return {}
+
+
+class _NoChange(Exception):
+    pass
 
 
 class SpreadsheetInbox:
@@ -95,7 +99,17 @@ class SpreadsheetInbox:
             result['source_document'] = doc
         file_hash = hashlib.sha256(raw).hexdigest()
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
+            self._begin(db, file_hash)
+            result = self._store_new(db, filename, raw, result, file_hash)
+        if not result.get('duplicate'):
+            try:
+                self.index_vins(file_hash)
+            except Exception:
+                pass  # search falls back to indexing later
+        return result
+    def _store_new(self, db, filename, raw, result, file_hash):
+        """Store a checked upload inside the caller's transaction (which holds the lock on ``file_hash``)."""
+        if True:
             found = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (file_hash,)).fetchone()
             if found:
                 old=self.latest(db,file_hash,json.loads(found['result_json']))
@@ -115,10 +129,6 @@ class SpreadsheetInbox:
             db.execute('INSERT INTO spreadsheets(file_hash,filename,version,result_json) VALUES(?,?,?,?)',
                        (file_hash, filename, version, json.dumps(result, allow_nan=False)))
             result=self.save_check(db,result)
-        try:
-            self.index_vins(file_hash)
-        except Exception:
-            pass  # search falls back to indexing later
         return dict(result, idempotent=False)
     def store_part(self, upload_id, index, raw):
         if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < 100000:
@@ -162,7 +172,7 @@ class SpreadsheetInbox:
         source_rows = parse_export(source_name, source_raw)
         self.get(file_hash)  # make sure the report's own checks are current before layering the comparison
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
+            self._begin(db, file_hash)
             original, raw = self._original(db, file_hash)
             rows = report_records(original['filename'], raw)
             if not rows:
@@ -178,29 +188,97 @@ class SpreadsheetInbox:
             if comparison['status'] != 'match':
                 result['internal_check_status'] = 'findings'
             return self.save_check(db, result)
-    def source_reconcile(self, file_hash, snap, day):
+    def source_reconcile(self, file_hash, snap, day, *, expected_check_hash=None, expected_assignment=None):
         """Compare the stored original (record rows and its own captured export) with a SharePoint snapshot, item by
         item. Saved as a new check revision; the workbook is not changed and no correction is applied."""
         from hosting import reconcile
         from hosting.spreadsheets import report_and_export_records
+        if not isinstance(expected_check_hash, str) or not expected_check_hash:
+            raise ValueError('The displayed check hash from before source capture is required.')
         with self.connect() as db:
             original, raw = self._original(db, file_hash)
         records, exports = report_and_export_records(original['filename'], raw)
-        confirmed = self.setting(f'column_map|{(snap.get("list") or {}).get("id") or snap.get("list_id")}', None)
+        mapping_state = self.source_mapping(snap.get('site_id'), snap.get('list_id'))
+        confirmed = mapping_state['mapping']
         current = self.get(file_hash)
         found = reconcile.compare(day, records, exports, snap, confirmed=confirmed,
                                   report=dict(file_hash=file_hash, checker_version=current.get('checker_version')))
-        return self._update(file_hash, lambda r: r.update(source_reconciliation=found))
-    def confirm_columns(self, list_id, mapping, by):
-        """A person confirms which SharePoint column holds each quantity for one list (kept with who and when)."""
+        found['mapping_binding'] = mapping_state
+        if mapping_state['legacy_requires_confirmation']:
+            found.update(status='unverified', verified=False)
+            found['not_verified_because'].append('A legacy list-only column mapping requires confirmation for this exact site and list.')
+            for field, detail in (found.get('column_mapping') or {}).items():
+                if detail.get('column') and detail.get('status') in ('single', 'confirmed'):
+                    detail.update(status='needs_confirmation', evidence=f'Confirm {detail["column"]} as {field} for this exact site and list; the earlier mapping was list-only.')
+        def persist(result):
+            if self.source_mapping(snap.get('site_id'), snap.get('list_id')) != mapping_state:
+                raise ValueError('The source column mapping changed during capture. Compare again using the current mapping.')
+            if result.get('check_hash') != expected_check_hash or result.get('checker_version') != CHECKER_VERSION:
+                raise ValueError('The report checks changed during source capture. Recheck the current report.')
+            if expected_assignment is not None:
+                from hosting.review_summary import summarize
+                assigned = self.assignment_for(result, summarize(result, with_issues=False))
+                keys = ('status', 'site', 'site_id', 'list_id', 'job', 'needs_person')
+                if any(assigned.get(k) != expected_assignment.get(k) for k in keys):
+                    raise ValueError('The source assignment changed during capture. Read the newly assigned source.')
+            result['source_reconciliation'] = found
+        return self._update(file_hash, persist, lock_settings=True)
+    @staticmethod
+    def source_mapping_key(site_id, list_id):
+        if not isinstance(site_id, str) or not site_id.strip() or not isinstance(list_id, str) or not list_id.strip():
+            raise ValueError('Exact site_id and list_id are required to confirm source columns.')
+        if len(site_id) > 512 or len(list_id) > 128:
+            raise ValueError('Source identity is too long.')
+        return 'column_map_v2|' + hashlib.sha256(json.dumps([site_id, list_id]).encode()).hexdigest()
+    def source_mapping(self, site_id, list_id):
+        key = self.source_mapping_key(site_id, list_id)
+        saved = self.setting(key, None)
+        return dict(site_id=site_id, list_id=list_id, mapping=dict((saved or {}).get('mapping') or {}),
+                    revision=(saved or {}).get('revision'),
+                    legacy_requires_confirmation=bool(saved is None and self.setting(f'column_map|{list_id}', None)))
+    def confirm_columns(self, list_id, mapping, by, *, site_id=None, expected_mapping_revision=Ellipsis, file_hash=None, expected_check_hash=None, expected_snapshot_id=None):
+        """Confirm only an exact source pair. Old list-only records remain unchanged."""
+        key = self.source_mapping_key(site_id, list_id)
+        if expected_mapping_revision is Ellipsis:
+            raise ValueError('The displayed mapping revision is required, including null for an unconfirmed source.')
         clean = {k: str(v)[:120] for k, v in (mapping or {}).items() if k in ('inspected', 'certified', 'rejected', 'reworked') and v}
-        if not clean or not list_id:
+        if not clean:
             raise ValueError('Choose the list and its columns.')
-        saved = dict(self.setting(f'column_map|{list_id}', {}) or {}, **clean)
-        self.set_setting(f'column_map|{list_id}', saved)
-        log = list(self.setting('column_map_log', []) or [])
-        log.append(dict(list_id=list_id, mapping=clean, by=by, at=datetime.now(timezone.utc).isoformat()))
-        self.set_setting('column_map_log', log[-500:])
+        from contextlib import nullcontext
+        from copy import copy
+        from uuid import uuid4
+        with self.connect() as db:
+            if file_hash:
+                self._begin(db, file_hash)
+            elif self.pg is None:
+                db.execute('BEGIN IMMEDIATE')
+            if self.pg is not None:
+                db.execute('LOCK TABLE settings IN SHARE ROW EXCLUSIVE MODE')
+            locked = copy(self); locked.connect = lambda: nullcontext(db)
+            if file_hash:
+                from hosting import registry, reconcile
+                from hosting.review_summary import summarize
+                current = locked.get(file_hash)
+                rec = reconcile.current(current) or {}
+                if current.get('checker_version') != CHECKER_VERSION or not rec:
+                    raise ValueError('The displayed source comparison changed. Recheck and compare before confirming columns.')
+                assigned = locked.assignment_for(current, summarize(current, with_issues=False))
+                if not expected_check_hash or current.get('check_hash') != expected_check_hash or not expected_snapshot_id or rec.get('snapshot_id') != expected_snapshot_id:
+                    raise ValueError('The displayed source comparison changed. Reload before confirming columns.')
+                if any(rec.get(k) != value or assigned.get(k) != value for k, value in (('site_id',site_id),('list_id',list_id))) or assigned.get('status') not in registry.RESOLVED or assigned.get('needs_person'):
+                    raise ValueError('The current assigned source differs from this confirmation.')
+                if any(column not in ((rec.get('column_mapping') or {}).get(field) or {}).get('candidates', []) for field,column in clean.items()):
+                    raise ValueError('Confirm only columns present in the displayed source capture.')
+            previous = locked.setting(key, {}) or {}
+            if previous.get('revision') != expected_mapping_revision:
+                raise ValueError('The source column mapping changed after it was displayed. Reload before confirming.')
+            saved = dict(previous.get('mapping') or {}, **clean)
+            state = dict(site_id=site_id, list_id=list_id, mapping=saved, revision=uuid4().hex,
+                         by=by, at=datetime.now(timezone.utc).isoformat())
+            locked.set_setting(key, state)
+            log = list(locked.setting('column_map_log', []) or [])
+            log.append(dict(state, confirmed=clean))
+            locked.set_setting('column_map_log', log[-500:])
         return saved
     def holds(self, item, review=None):
         """Why this report must stay on hold, beyond its open issues. hard=True cannot be overridden."""
@@ -217,18 +295,53 @@ class SpreadsheetInbox:
         sel = item.get('dataset_selection') or {}
         if sel.get('status') == 'ambiguous':
             out.append(dict(code='record_set_ambiguous', hard=False, text='It is not certain which sheet holds the records. ' + ' '.join(sel.get('notes') or [])))
+        if review is None or 'decisions' not in review:
+            from hosting.review_summary import summarize
+            review = summarize(item, with_issues=False)
+        cov = review.get('coverage') or {}
+        if cov.get('not_listed') or cov.get('truncated'):   # unlisted findings cannot be reviewed, so they cannot be approved past
+            from hosting import limits as _limits   # stored count at the bound: the file itself is too big; below it: an older, shorter check
+            fix = ('This file goes past the safety limit of stored findings, so a re-check stores no more: split the file or review '
+                   'it outside the app before approving.' if (cov.get('findings_listed') or 0) >= _limits.MAX_FINDINGS
+                   else 'Re-check the report (it stores every finding now) before approving.')
+            out.append(dict(code='findings_incomplete', hard=True, text=f'The checks found {cov.get("findings_total")} things but only '
+                            f'{cov.get("findings_listed")} were stored, so {cov.get("not_listed")} cannot be reviewed. ' + fix))
+        waiting = (review.get('decisions') or {}).get('deferred') or 0
+        if waiting:   # a question sent to the source owner keeps the report on hold until it is answered
+            ds = [d for d in (item.get('finding_decisions') or {}).values() if d.get('action') == 'defer']
+            d = ds[-1] if ds else {}
+            out.append(dict(code='awaiting_source_owner', hard=True, text=f'{waiting} finding{"s are" if waiting != 1 else " is"} waiting for an answer'
+                            + (f' from {d["owner"]}' if d.get('owner') else '') + (f': {d.get("reason")}' if d.get('reason') else '.')))
         rec = item.get('source_reconciliation') or {}
-        if rec.get('status') == 'incomplete':
-            out.append(dict(code='source_coverage_incomplete', hard=False, text='The SharePoint snapshot was incomplete: ' + ' '.join((rec.get('coverage') or {}).get('notes') or [])))
+        if rec:
+            from hosting import reconcile, registry
+            current = reconcile.current(item)
+            counts = rec.get('count_reconciliation') or {}
+            if not current or not reconcile.evidence_verified(rec):
+                out.append(dict(code='source_coverage_incomplete' if rec.get('status') == 'incomplete' else 'source_evidence_incomplete', hard=True,
+                                text='Source comparison is not fully verified: ' + ' '.join(rec.get('not_verified_because') or (rec.get('coverage') or {}).get('notes') or ['Current complete inspection and rejection evidence is required.'])))
+            try:
+                if rec.get('mapping_binding') != self.source_mapping(rec.get('site_id'), rec.get('list_id')):
+                    out.append(dict(code='source_mapping_changed', hard=True, text='Source columns changed or need exact-source confirmation. Compare again with the current mapping.'))
+            except ValueError:
+                out.append(dict(code='source_mapping_changed', hard=True, text='Exact source identity is missing from the column mapping.'))
+            try:
+                assigned = self.assignment_for(item, review)
+                if assigned.get('status') not in registry.RESOLVED or assigned.get('needs_person') or any(not assigned.get(k) or assigned.get(k) != rec.get(k) for k in ('site_id','list_id')):
+                    out.append(dict(code='source_assignment_changed', hard=True, text='The current source assignment does not match this comparison. Reconcile the assigned source again.'))
+            except Exception:
+                out.append(dict(code='source_assignment_unavailable', hard=True, text='Current source assignment could not be verified.'))
         return out
     def record_lookup(self, file_hash, status, message, job=None, day=None):
         self.get(file_hash)
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
+            self._begin(db, file_hash)
             original, _ = self._original(db, file_hash)
             result = dict(self.latest(db, file_hash, original))
             if (result.get('sharepoint') or {}).get('status') in ('match', 'differences'):
-                return result  # keep the last real comparison
+                result['previous_sharepoint_comparison'] = result['sharepoint']
+            if result.get('source_reconciliation'):
+                result['source_reconciliation'] = dict(result['source_reconciliation'], stale=True, stale_reason='The latest source capture did not complete: ' + str(message))
             result.pop('check_hash', None); result.pop('checked_at', None)
             result['sharepoint'] = dict(status=status, message=message, job=job, day=day)
             return self.save_check(db, result)
@@ -239,7 +352,7 @@ class SpreadsheetInbox:
     def record_ai_review(self, file_hash, ai_review):
         """Save Claude's suggestions with the current check. They never change findings or status."""
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
+            self._begin(db, file_hash)
             original, _ = self._original(db, file_hash)
             result = dict(self.latest(db, file_hash, original))
             if ai_review.get('status') != 'done' and (result.get('ai_review') or {}).get('status') == 'done':
@@ -254,66 +367,226 @@ class SpreadsheetInbox:
         _, raw = self.original_bytes(file_hash)
         out = summarize(item, use_verdicts=not include_dismissed)
         decided = item.get('review_decisions') or {}   # what a person already decided is never re-decided by Claude
-        return item, raw, [i for i in out['issues'] if i['severity'] != 'info' and i['key'] not in decided]
-    def _update(self, file_hash, change):
-        with self.connect() as db:
+        return item, raw, [i for i in out['issues'] if i['severity'] != 'info' and i['key'] not in decided and not i.get('decision') and not i.get('previous_decision')]
+    def _begin(self, db, file_hash):
+        """Serialize writers of one report. SQLite: BEGIN IMMEDIATE locks the file. Postgres: pg_tables skips BEGIN IMMEDIATE,
+        so take a transaction-scoped advisory lock on this report's hash; it is released at commit or rollback."""
+        if self.pg is not None:
+            db.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ('check:' + file_hash,))
+        else:
             db.execute('BEGIN IMMEDIATE')
+    def _update(self, file_hash, change, *, lock_settings=False):
+        """Read the latest check of this report, let ``change`` modify it and save it, all under the report's lock.
+        ``change`` sees the state it is about to overwrite, so every check it makes is made against what is saved.
+        If the change alters any decision on an approved (unsent) version, the approval is withdrawn in the same save."""
+        from hosting.review_summary import decisions_basis
+        with self.connect() as db:
+            self._begin(db, file_hash)
+            if lock_settings and self.pg is not None:
+                db.execute('LOCK TABLE settings IN SHARE ROW EXCLUSIVE MODE')
             original, _ = self._original(db, file_hash)
             result = dict(self.latest(db, file_hash, original))
-            result.pop('check_hash', None); result.pop('checked_at', None)
+            before = decisions_basis(result)
             change(result)
+            if result.get('approval') and decisions_basis(result) != before and not any(x.get('sent') for x in result.get('sent') or []):
+                was = result.pop('approval')
+                result['approval_withdrawn'] = dict(at=datetime.now(timezone.utc).isoformat(), by=None, version=was.get('version'),
+                                                    reason='The decisions on this report changed after it was approved, so the approval no longer applies. Approve it again.')
+            result.pop('check_hash', None); result.pop('checked_at', None)
             return self.save_check(db, result)
-    def approve(self, file_hash, approver, note='', override=False, withdraw=False):
-        """Record that a reviewer approved this exact file version as final (or withdraw it). Sending requires it."""
-        from hosting.review_summary import summarize
-        item = self.get(file_hash)
-        if withdraw:
-            if any(x.get('sent') for x in item.get('sent') or []):
-                raise ValueError('This report was already sent to the client, so its approval stays on record.')
-            def undo(r):   # keep a record of the withdrawal (it also keeps this revision distinct from the pre-approval one)
-                was = r.pop('approval', None)
-                r['approval_withdrawn'] = dict(at=datetime.now(timezone.utc).isoformat(), by=' '.join(str(approver or '').split())[:80] or None,
-                                               version=(was or {}).get('version'))
-            return self._update(file_hash, undo)
+    @staticmethod
+    def _approval_state(result):
+        from hosting.review_summary import approved_state_fingerprint
+        return approved_state_fingerprint(result)
+    def approve(self, file_hash, approver, note='', override=False, withdraw=False, *, expected_check_hash=None, expected_run=None):
+        """Validate and approve the exact displayed revision under the report writer lock."""
+        from hosting.review_summary import summarize, same_run
         approver = ' '.join(str(approver or '').split())[:80]
-        if not approver:
-            raise ValueError('Type your name to approve the report.')
-        rv = summarize(item, with_issues=False)
-        must = (rv.get('counts') or {}).get('high', 0)
-        holds = self.holds(item, rv)
-        hard = [x for x in holds if x['hard']]
-        if hard:
-            raise ValueError(hard[0]['text'])
-        soft = [x for x in holds if not x['hard']]
-        if soft and not override:
-            raise ValueError(soft[0]['text'] + ' Resolve it first, or tick "Approve anyway" and say why in the note.')
-        if soft and override and not ' '.join(str(note or '').split()):
-            raise ValueError('Say why you are approving anyway in the note.')
-        if must and not override:
-            raise ValueError(f'{must} must-fix issue{"s are" if must != 1 else " is"} still open. Fix them first, or tick "Approve anyway".')
-        if must and override and not ' '.join(str(note or '').split()):
-            raise ValueError('Say why you are approving with must-fix issues open; the reason is kept with the approval.')
-        newer = (item.get('fixes_applied') or [])
-        if newer and not override:
-            raise ValueError(f'A corrected copy of this report exists ("{newer[-1]["fixed_filename"]}"). Approve that version instead, or tick "Approve anyway".')
-        record = dict(by=approver, note=' '.join(str(note or '').split())[:500], at=datetime.now(timezone.utc).isoformat(),
-                      status=rv['status'], open_must_fix=must, open_to_check=(rv['counts'].get('medium', 0) + rv['counts'].get('low', 0)),
-                      overridden=bool((must or soft) and override), holds_overridden=[x['code'] for x in soft],
-                      filename=item['filename'], version=item.get('version'), run=rv.get('run'))
         def change(r):
+            if any(x.get('sent') for x in r.get('sent') or []) or r.get('send_pending') or r.get('send_in_progress'):
+                raise ValueError('This report was sent or is being sent; its approval stays on record.')
+            if withdraw:
+                was = r.pop('approval', None)
+                r['approval_withdrawn'] = dict(at=datetime.now(timezone.utc).isoformat(), by=approver or None, version=(was or {}).get('version'))
+                return
+            if r.get('checker_version') != CHECKER_VERSION:
+                raise ValueError('Re-check this report with the current checker before approving.')
+            prior = r.get('approval') or {}
+            if expected_check_hash and prior.get('reviewed_check_hash') == expected_check_hash and same_run(prior.get('run'), r) and prior.get('approved_state_hash') == self._approval_state(r):
+                # Some holds derive from shared assignment settings, outside the report JSON.
+                replay_holds = self.holds(r, summarize(r, with_issues=False))
+                if any(h['hard'] or h['code'] not in (prior.get('holds_overridden') or []) for h in replay_holds):
+                    raise ValueError('The approval holds changed. Reload and review before approving.')
+                raise _NoChange()
+            if not expected_check_hash or expected_check_hash != r.get('check_hash') or not same_run(expected_run, r):
+                raise ValueError('This report changed after it was displayed. Reload and review it before approving.')
+            if not approver:
+                raise ValueError('Type your name to approve the report.')
+            rv = summarize(r, with_issues=False)
+            must = (rv.get('counts') or {}).get('high', 0)
+            holds = self.holds(r, rv)
+            hard = [x for x in holds if x['hard']]
+            if hard:
+                raise ValueError(hard[0]['text'])
+            soft = [x for x in holds if not x['hard']]
+            if soft and not override:
+                raise ValueError(soft[0]['text'] + ' Resolve it first, or tick "Approve anyway" and say why in the note.')
+            if soft and override and not ' '.join(str(note or '').split()):
+                raise ValueError('Say why you are approving anyway in the note.')
+            if must and not override:
+                raise ValueError(f'{must} must-fix issue{"s are" if must != 1 else " is"} still open. Fix them first, or tick "Approve anyway".')
+            if must and override and not ' '.join(str(note or '').split()):
+                raise ValueError('Say why you are approving with must-fix issues open; the reason is kept with the approval.')
+            newer = (r.get('fixes_applied') or [])
+            if newer and not override:
+                raise ValueError(f'A corrected copy of this report exists ("{newer[-1]["fixed_filename"]}"). Approve that version instead, or tick "Approve anyway".')
+            record = dict(by=approver, note=' '.join(str(note or '').split())[:500], at=datetime.now(timezone.utc).isoformat(),
+                          status=rv['status'], open_must_fix=must, open_to_check=(rv['counts'].get('medium', 0) + rv['counts'].get('low', 0)),
+                          overridden=bool((must or soft) and override), holds_overridden=[x['code'] for x in soft],
+                          filename=r['filename'], version=r.get('version'), run=rv.get('run'))
+            from hosting.review_summary import decisions_basis
+            record.update(decisions_basis=decisions_basis(r), decisions_rev=int(r.get('finding_decisions_rev') or 0), assignment=self._assignment_key(r, rv))
+            record['reviewed_check_hash'] = expected_check_hash
             r['approval'] = record
             if (r.get('review_request') or {}).get('status') in ('waiting', 'sent_back'):
                 rr = dict(r['review_request'])
                 rr.update(status='approved', reviewer=approver, answered_at=record['at'])
                 rr['history'] = (rr.get('history') or []) + [dict(action='approve', by=approver, note=record['note'], at=record['at'])]
                 r['review_request'] = rr
+            record['approved_state_hash'] = self._approval_state(r)
+        try:
+            return self._update(file_hash, change)
+        except _NoChange:
+            return self.get(file_hash)
+    def _assignment_key(self, r, rv):
+        try:
+            a = self.assignment_for(r, rv)
+            return dict(status=a.get('status'), label=a.get('label'), job=a.get('job'), client=a.get('client'))
+        except Exception:
+            return None
+    SEND_HOLD_SECONDS = 300
+    def verify_for_delivery(self, file_hash, mode='send', again=False):
+        """Immediately before a report goes to the client, under the report's lock, and reserve it for this send.
+        It must carry an approval made on this check run and these exact decisions; the checker must be current; no
+        hard hold, no more must-fix issues than were approved, no corrected copy made after the approval, the same
+        client and job; and no other send in progress. Returns (the saved state that was checked, reservation token).
+        Pair with record_send(token=...) or release_send(token) whatever happens to the message."""
+        raise ValueError('Sending and draft creation are paused pending delivery safety checks.')
+        import uuid
+        from hosting.review_summary import summarize, approval_current
+        out = {}
+        def check(r):
+            if not r.get('approval'):
+                raise ValueError('Approve the report before sending it to the client.')
+            if r.get('checker_version') != CHECKER_VERSION or not approval_current(r):
+                raise ValueError('The checks or decisions changed after this report was approved (re-checked, compared with SharePoint again, a '
+                                 'decision changed, or approved before approvals recorded their decisions). Approve it again before sending.')
+            busy = r.get('send_in_progress') or {}
+            if busy and (datetime.now(timezone.utc) - datetime.fromisoformat(busy['at'])).total_seconds() < self.SEND_HOLD_SECONDS:
+                raise ValueError('This report is already being sent. Wait a moment and check its history before sending again.')
+            done = [x for x in r.get('sent') or [] if x.get('sent')]
+            if done and mode == 'send' and not again:
+                raise ValueError(f'This report was already sent to the client on {done[-1].get("at", "")[:10]}. Tick "Send again" (again: true) to send it anyway.')
+            appr = r['approval']
+            later = [f for f in r.get('fixes_applied') or [] if str(f.get('applied_at') or '') > str(appr.get('at') or '')]
+            if later:
+                raise ValueError(f'A corrected copy ("{later[-1].get("fixed_filename")}") was made after this version was approved. Send that version instead.')
+            rv = summarize(r, with_issues=False)
+            hard = [x for x in self.holds(r, rv) if x['hard']]
+            if hard:
+                raise ValueError('Not sent: ' + hard[0]['text'])
+            must = (rv.get('counts') or {}).get('high', 0)
+            if must > int(appr.get('open_must_fix') or 0):
+                raise ValueError(f'{must} must-fix issue{"s are" if must != 1 else " is"} open now, more than when it was approved. Approve it again before sending.')
+            if appr.get('assignment') and self._assignment_key(r, rv) != appr['assignment']:
+                raise ValueError('The client or job this report belongs to changed after it was approved. Approve it again before sending.')
+            out['token'] = uuid.uuid4().hex
+            r['send_in_progress'] = dict(token=out['token'], at=datetime.now(timezone.utc).isoformat())
+            out['item'] = dict(r)
+        self._update(file_hash, check)
+        return out['item'], out['token']
+    def release_send(self, file_hash, token):
+        """The message did not go (an error): end the reservation without recording a send."""
+        def change(r):
+            if (r.get('send_in_progress') or {}).get('token') == token:
+                was = r.pop('send_in_progress')
+                # the failed attempt is kept (it also keeps this revision distinct from the one before the reservation)
+                r['send_attempts_failed'] = (r.get('send_attempts_failed') or [])[-19:] + [dict(started=was.get('at'), ended=datetime.now(timezone.utc).isoformat())]
+            else:
+                raise _NoChange()
+        try:
+            self._update(file_hash, change)
+        except _NoChange:
+            pass
+    @staticmethod
+    def _check_frozen(r):
+        """Decisions never change on a version that was sent, or that is approved (withdraw the approval first)."""
+        from hosting import review_decisions
+        if any(x.get('sent') for x in r.get('sent') or []):
+            raise review_decisions.DecisionConflict('This version was sent to the client; its decisions stay as they were.')
+        if r.get('approval'):
+            raise review_decisions.DecisionConflict('This version is approved; withdraw the approval before changing decisions.')
+        if r.get('send_in_progress'):
+            raise review_decisions.DecisionConflict('This version is being sent right now; its decisions stay as they are.')
+    def _check_shown(self, r, keys, seen, run):
+        """Under the report's lock: the request was made on this check run, and each finding it names still reads as it
+        did on the reviewer's screen. Keys that are not findings (suggestion IDs) are bound by the run alone."""
+        from hosting import review_decisions
+        from hosting.review_summary import summarize, same_run, check_run
+        if run is not None and not same_run(run, r):
+            raise review_decisions.DecisionConflict('This report was checked again or SharePoint was read again after you opened it, so '
+                                                    'what you saw may be out of date. Nothing was saved. Reload and decide again.',
+                                                    current_run=check_run(r))
+        if seen is None:
+            return
+        rv = summarize(r)
+        current = {x['key']: x for x in rv['issues'] + rv['dismissed']}
+        changed = [k for k in keys if k in current and str((seen or {}).get(k)) != str(current[k].get('fp'))]
+        if changed:
+            raise review_decisions.DecisionConflict(f'{len(changed)} of these findings changed after you looked at them (for example a new '
+                                                    'SharePoint value). Nothing was saved. Reload to see what they say now, then decide again.',
+                                                    changed=[dict(id=k, now=current[k].get('text')) for k in changed])
+    def mark_fine(self, file_hash, add, seen=None, run=None):
+        """Older "fine as is" records, checked against what the reviewer saw under the report's lock."""
+        raise ValueError('Use scoped finding decisions with current fingerprints.')
+        def change(r):
+            self._check_frozen(r)
+            self._check_shown(r, [a.get('key') for a in add if a.get('key')], seen, run)
+            r['accepted_issues'] = (r.get('accepted_issues') or []) + add
         return self._update(file_hash, change)
+    def decide_findings(self, file_hash, *, ids=(), action, reason='', by='', owner='', evidence=(), request_id='', expected_rev=None, undo_of=None, expected_fps=None, expected_run=None, seen=None, run=None):
+        """A reviewer's reject / defer / confirm / undo on findings of this exact version, in one transaction: all of the
+        batch is saved, or none of it. Returns (item, log entry)."""
+        from hosting import review_decisions
+        from hosting.review_summary import summarize, check_run
+        expected_fps = expected_fps if expected_fps is not None else seen
+        expected_run = expected_run if expected_run is not None else run
+        out = {}
+        def change(r):
+            # Replay the original successful click even when the report was subsequently locked.
+            replay = review_decisions._clean(request_id, 80) in (r.get('finding_requests') or {})
+            if not replay and (r.get('approval') or r.get('send_pending') or r.get('send_in_progress') or any(x.get('sent') for x in r.get('sent') or [])):
+                raise review_decisions.DecisionConflict('This version is approved, sent, or being sent; its decisions cannot change.')
+            if not replay and (not isinstance(expected_run, dict) or expected_run != check_run(r)):
+                raise review_decisions.DecisionConflict('The check run changed. Reload and decide again.')
+            rv = summarize(r)
+            current = {x['key']: x for x in rv['issues'] + rv['dismissed']}
+            out['entry'] = review_decisions.decide(r, current, ids=ids, action=action, reason=reason, by=by, owner=owner, evidence=evidence,
+                                                   request_id=request_id, expected_rev=expected_rev, undo_of=undo_of, expected_fps=expected_fps, expected_run=expected_run)
+            if out['entry'].get('replayed'):
+                raise _NoChange()
+        try:
+            new = self._update(file_hash, change)
+        except _NoChange:
+            new = self.get(file_hash)
+        return new, out['entry']
     DECISIONS = ('keep', 'reject', 'note', 'reopen')
     def record_decision(self, file_hash, key, action, note, by):
         return self.record_decisions(file_hash, [key], action, note, by)
-    def record_decisions(self, file_hash, keys, action, note, by):
+    def record_decisions(self, file_hash, keys, action, note, by, seen=None, run=None):
         """A reviewer's decision on issues or suggestions, kept with this version and logged (one save for a group). A
         decision never clears a blocker by itself: keeping a blank that has no source value keeps the report on hold."""
+        raise ValueError('Use the finding decision controls with the displayed revision and fingerprints.')
         keys, note, by = [k.strip()[:300] for k in keys if k and k.strip()], ' '.join(note.split())[:1000], ' '.join(by.split())[:80]
         if not keys:
             raise ValueError('Which issue or suggestion?')
@@ -323,6 +596,8 @@ class SpreadsheetInbox:
             raise ValueError('Type the note first.')
         at = datetime.now(timezone.utc).isoformat()
         def change(r):
+            self._check_frozen(r)
+            self._check_shown(r, keys, seen, run)
             d = dict(r.get('review_decisions') or {})
             for key in keys:
                 if action == 'reopen':
@@ -356,8 +631,19 @@ class SpreadsheetInbox:
             rr['history'] = hist[-20:]
             r['review_request'] = rr
         return self._update(file_hash, change)
-    def record_send(self, file_hash, record):
-        return self._update(file_hash, lambda r: r.__setitem__('sent', (r.get('sent') or []) + [record]))
+    def record_send(self, file_hash, record, token=None):
+        raise ValueError('Sending and draft creation are paused pending delivery safety checks.')
+        """Record a delivery and end its reservation. The message has already left, so it is always recorded; if the
+        approval stopped being current while it was on its way, the record says so."""
+        from hosting.review_summary import approval_current
+        def change(r):
+            rec = dict(record)
+            if not approval_current(r):
+                rec['approval_changed_during_send'] = True
+            if token and (r.get('send_in_progress') or {}).get('token') == token:
+                r.pop('send_in_progress', None)
+            r['sent'] = (r.get('sent') or []) + [rec]
+        return self._update(file_hash, change)
     def contacts_for(self, job):
         if not job:
             return {}
@@ -626,28 +912,48 @@ class SpreadsheetInbox:
         return self._key_row(r['id'])
     def record_ai_verify(self, file_hash, record):
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
+            self._begin(db, file_hash)
             original, _ = self._original(db, file_hash)
             result = dict(self.latest(db, file_hash, original))
             result.pop('check_hash', None); result.pop('checked_at', None)
             from hosting.review_summary import check_run
             result['ai_verify'] = dict(record, run=check_run(result))
             return self.save_check(db, result)
-    def record_ai_fixes(self, file_hash, record):
+    @staticmethod
+    def _check_proposal_state(result, expected_check_hash):
+        if result.get('checker_version') != CHECKER_VERSION:
+            raise ValueError('Re-check this report before preparing suggestions.')
+        if not expected_check_hash or expected_check_hash != result.get('check_hash'):
+            raise ValueError('This report changed after review. Reload before preparing suggestions.')
+        if result.get('approval') or result.get('send_pending') or result.get('send_in_progress') or result.get('fixes_applied') or any(x.get('sent') for x in result.get('sent') or []):
+            raise ValueError('This version is approved, sent, or superseded. Suggestions cannot change it.')
+    def proposal_inputs(self, file_hash, expected_check_hash):
+        from hosting.review_summary import summarize
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
+            self._begin(db, file_hash)
+            original, raw = self._original(db, file_hash)
+            item = dict(self.latest(db, file_hash, original))
+            self._check_proposal_state(item, expected_check_hash)
+            review = summarize(item)
+            decided = item.get('review_decisions') or {}
+            issues = [i for i in review['issues'] if i['severity'] != 'info' and i['key'] not in decided and not i.get('decision') and not i.get('previous_decision')]
+            return item, raw, issues
+    def record_ai_fixes(self, file_hash, record, *, expected_check_hash=None):
+        with self.connect() as db:
+            self._begin(db, file_hash)
             original, _ = self._original(db, file_hash)
             result = dict(self.latest(db, file_hash, original))
+            self._check_proposal_state(result, expected_check_hash)
             result.pop('check_hash', None); result.pop('checked_at', None)
             from hosting.review_summary import check_run
             result['ai_fixes'] = record = dict(record, run=check_run(result))
             self.save_check(db, result)
         return record
-    def ai_fixes(self, file_hash, opener=None):
+    def ai_fixes(self, file_hash, opener=None, *, expected_check_hash=None):
         """Ask Claude to write cell changes for the open issues; keep only changes that fit the file exactly."""
-        item, raw, issues = self.ai_fix_inputs(file_hash)
+        item, raw, issues = self.proposal_inputs(file_hash, expected_check_hash)
         record = make_ai_fixes(item, raw, issues, opener)
-        return self.record_ai_fixes(file_hash, record) if record['status'] == 'done' else record
+        return self.record_ai_fixes(file_hash, record, expected_check_hash=expected_check_hash) if record['status'] == 'done' else record
     def history_for(self, job, day, exclude_hash=None):
         """Day totals of earlier saved reports for the same job (latest version per file, one entry per day)."""
         from hosting.source_compare import identify
@@ -670,7 +976,7 @@ class SpreadsheetInbox:
         return [{k: v for k, v in h.items() if k != 'received_at'} for h in out]
     def record_baseline(self, file_hash, baseline):
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
+            self._begin(db, file_hash)
             original, _ = self._original(db, file_hash)
             result = dict(self.latest(db, file_hash, original))
             result.pop('check_hash', None); result.pop('checked_at', None)
@@ -706,55 +1012,279 @@ class SpreadsheetInbox:
                     ai=dict(status=ai.get('status') or 'not_run', made_at=ai.get('made_at'), count=len(ai.get('fixes') or []),
                             skipped=ai.get('skipped') or [], dropped=ai.get('dropped') or 0, message=ai.get('message')))
     def sheet_grid(self, file_hash, sheet=None):
+        """The sheet as shown, with its clickable links and the pictures anchored on it, each labelled with its record,
+        field, purpose and business date (a picture whose caption marks it as an earlier reference says so)."""
         from hosting.fixes import sheet_grid
+        from hosting import photos
         item = self.get(file_hash)
         _, raw = self.original_bytes(file_hash)
-        return sheet_grid(item['filename'], raw, sheet)
+        g = sheet_grid(item['filename'], raw, sheet)
+        if not item['filename'].lower().endswith('.xlsx'):
+            return g
+        name = g['sheet']
+        links = {x['cell']: dict(url=x['url'], safe=x['safe'], kind='hyperlink') for x in photos.native_links(raw) if x['sheet'] == name}
+        for r_i, row in enumerate(g['rows']):   # web addresses typed into cells are links too
+            for c_i, v in enumerate(row):
+                ref = f'{photos._col(c_i)}{r_i + 1}'
+                if ref not in links and isinstance(v, str) and re.match(r'(?i)^(https?://|mailto:|javascript:|data:|file:)', v.strip()):
+                    links[ref] = dict(url=v.strip()[:2000], safe=photos.safe_url(v), kind='text')
+        recs = {(r.get('sheet'), r.get('row')): r for r in item.get('records') or []}
+        known = {(x.get('sheet'), x.get('cell')): x.get('item') for x in (item.get('photos') or {}).get('images') or []}
+        by_item = {str((r.get('source') or {}).get('item')): r for r in item.get('records') or [] if (r.get('source') or {}).get('item')}
+        day = item.get('report_day')
+        header_row = next((i for i, row in enumerate(g['rows'][:15]) if sum(1 for v in row if str(v).strip()) >= 3), None)
+        pics = []
+        for p in photos.images(raw):
+            if p['sheet'] != name:
+                continue
+            row = p.get('row') or 0
+            col = sum((ord(ch) - 64) * 26 ** i for i, ch in enumerate(reversed(re.sub(r'\d', '', p.get('cell') or 'A')))) - 1
+            line = g['rows'][row - 1] if 0 < row <= len(g['rows']) else []
+            text = ' '.join(str(v) for v in line if str(v).strip())
+            m = re.search(r'\b(20\d\d)-(\d\d)-(\d\d)\b', text)
+            pic_day = m.group(0) if m else None
+            p = dict(p, item=p.get('item') or known.get((name, p.get('cell'))))
+            rec = recs.get((name, row)) or by_item.get(str(p.get('item'))) or {}
+            field = g['rows'][header_row][col] if header_row is not None and col < len(g['rows'][header_row]) and header_row < row - 1 else None
+            historical = bool(re.search(r'(?i)reference|historical|earlier|previous', text)) or bool(pic_day and day and pic_day != day)
+            pics.append(dict(cell=p.get('cell'), row=row, media=p['media'], sha256=p['sha256'], bytes=p['bytes'], missing=p['missing'],
+                             item=p.get('item') or (rec.get('source') or {}).get('item'), field=field or None,
+                             purpose='defect' if re.search(r'(?i)defect|nok|broken', f'{name} {field or ""} {text}') else 'label' if re.search(r'(?i)label', f'{field or ""} {text}') else 'photo',
+                             business_date=rec.get('day') or pic_day or day, historical=historical,
+                             note=(f'Reference only ({pic_day or "earlier"}): it cannot show the outcome on {day}.' if historical else None)))
+        g['links'] = links
+        g['images'] = pics
+        g['image_summary'] = dict(placements=len(pics), unique=len({p['sha256'] for p in pics if p['sha256']}), missing=sum(1 for p in pics if p['missing']))
+        return g
     def row_cells(self, file_hash, sheet, row):
         from hosting.fixes import row_cells
         item = self.get(file_hash)
         _, raw = self.original_bytes(file_hash)
         return row_cells(item['filename'], raw, sheet, row)
-    def apply_fixes(self, file_hash, approved):
-        """Write a corrected copy with the approved changes as a new upload; the original is untouched."""
-        from hosting.fixes import apply_fixes, fixed_filename
+    @staticmethod
+    def _validate_correction_batch(approved):
+        """Atomic membership is batch metadata, not source provenance."""
+        addresses = [(c.get('sheet'), str(c.get('cell') or '').upper()) for c in approved]
+        if len(set(addresses)) != len(addresses):
+            raise ValueError('A correction batch cannot contain the same cell twice.')
+        sets = {}
+        for c in approved:
+            name = c.get('change_set')
+            if name is not None and (not isinstance(name, str) or not name.strip() or len(name) > 300):
+                raise ValueError('Each atomic change set requires a nonempty text identifier of at most 300 characters.')
+            if name is not None:
+                size = c.get('change_set_size')
+                if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+                    raise ValueError('Each atomic change set requires an explicit positive integer size. Nothing was applied.')
+                sets.setdefault(c['change_set'], []).append(size)
+        for name, sizes in sets.items():
+            if any(size != len(sizes) for size in sizes):
+                raise ValueError(f'Change set {name} is incomplete ({len(sizes)} of its cells were sent). Nothing was applied.')
+
+    def apply_fixes(self, file_hash, approved, *, auto=False, automatic=False, expected_check_hash=None):
+        """Write a corrected copy with the approved changes as a new upload; the original is untouched.
+        Source freshness, change sets and (for the automatic pass, ``auto=True``) a person's decisions are checked under
+        the report's lock, and the new version is created in the same transaction: a SharePoint read or decision that
+        lands in between refuses the whole set and no corrected version is made."""
+        from hosting.fixes import apply_fixes, fixed_filename, FixError
         if not isinstance(approved, list) or not approved or not all(isinstance(c, dict) for c in approved):
             raise ValueError('Send at least one approved change.')
+        self._validate_correction_batch(approved)
+        # A typed value is the person's proposal, never a claim about source evidence.
+        # Copy first so the immutable displayed request and caller-owned objects stay unchanged.
+        approved = [dict(c) for c in approved]
+        for c in approved:
+            label = str(c.get('source') or '').strip()
+            if label.casefold().startswith('reverted'):
+                raise ValueError('Revert workbook changes are disabled pending safety review.')
+            if label.casefold() in ('your edit', 'manual edit'):
+                c['source'] = 'Your edit'
+                for key in ('snapshot_id', 'item', 'field'):
+                    c.pop(key, None)
+            elif not c.get('snapshot_id') and not label.startswith('SharePoint'):
+                # Partial caller metadata cannot assert source authority. Real source
+                # proposals retain their complete identity and are proved below.
+                for key in ('item', 'field'):
+                    c.pop(key, None)
+        if auto or automatic:
+            raise ValueError('Automatic workbook changes are disabled pending safety review.')
         item = self.get(file_hash)
         _, raw = self.original_bytes(file_hash)
-        fixed = apply_fixes(item['filename'], raw, approved)
-        new_item = self.ingest(fixed_filename(item['filename']), fixed)
-        if new_item.get('duplicate'):
-            # the same changes give byte-identical output: that version already exists, so it is opened, never
-            # recorded a second time (this is how one report once showed many "fixed" entries for a single file)
-            if any(x.get('fixed_file_hash') == new_item['file_hash'] for x in item.get('fixes_applied') or []) or \
-                    (new_item.get('fixed_from') or {}).get('file_hash') == file_hash:
-                return dict(new_item, already_applied=True)
-        revision = int(item.get('revision') or 1) + 1
-        record = dict(fixed_file_hash=new_item['file_hash'], fixed_filename=new_item['filename'], revision=revision,
-                      applied_at=datetime.now(timezone.utc).isoformat(),
-                      changes=[{k: c.get(k) for k in ('sheet', 'cell', 'before', 'after', 'reason', 'source')} for c in approved])
+        self._check_changes(item, approved, auto, raw=raw)  # repeated under the lock
+        fixed = apply_fixes(item['filename'], raw, approved)  # the original file never changes, so this can be built first
+        new_name = fixed_filename(item['filename'])
+        new_hash = hashlib.sha256(fixed).hexdigest()
+        new_check = inspect_spreadsheet(new_name, fixed)
+        record = dict(fixed_file_hash=new_hash, fixed_filename=new_name, applied_at=datetime.now(timezone.utc).isoformat(),
+                      changes=[{k: c.get(k) for k in ('sheet', 'cell', 'before', 'after', 'reason', 'source', 'snapshot_id', 'item', 'field', 'change_set', 'change_set_size') if c.get(k) is not None or k in ('before', 'after')} for c in approved])
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
+            if self.pg is not None:   # both reports, always in the same order: two corrections in opposite directions cannot deadlock
+                for hh in sorted({file_hash, new_hash}):
+                    self._begin(db, hh)
+            else:
+                self._begin(db, file_hash)
+            if self.pg is not None:
+                db.execute('LOCK TABLE settings IN SHARE ROW EXCLUSIVE MODE')
             original, _ = self._original(db, file_hash)
             result = dict(self.latest(db, file_hash, original))
+            if result.get('approval') or result.get('send_pending') or any(x.get('sent') for x in result.get('sent') or []):
+                raise ValueError('Approved or sent versions cannot be corrected; withdraw approval first.')
+            if not expected_check_hash or expected_check_hash != result.get('check_hash'):
+                raise ValueError('This report changed after the corrections were reviewed. Nothing was applied.')
+            if automatic:
+                from hosting.autofix import eligible
+                why = eligible(result)
+                if why:
+                    raise ValueError(why)
+                if not expected_check_hash:
+                    raise ValueError('Automatic corrections require the reviewed check revision.')
+                if self.holds(result):
+                    raise ValueError('This report has unresolved source or review holds. Nothing was applied.')
+                if result.get('finding_decisions') or result.get('review_decisions') or result.get('accepted_issues'):
+                    raise ValueError('A person has reviewed this report; automatic corrections are disabled.')
+            # Never silently rewrite rejected or deferred data, even through a manual batch.
+            for decision in (result.get('finding_decisions') or {}).values():
+                if decision.get('action') not in ('reject', 'defer'):
+                    continue
+                for c in approved:
+                    if (not decision.get('sheet') or decision.get('sheet') == c.get('sheet')) and (not decision.get('cell') or str(decision['cell']).upper() == str(c.get('cell') or '').upper()):
+                        raise ValueError('Reopen the rejected or deferred finding before correcting its data.')
+            self._validate_correction_batch(approved)
+
+            self._check_changes(result, approved, auto, raw=raw)  # against the state being saved
+            new_item = self._store_new(db, new_name, fixed, new_check, new_hash)
+            if new_item.get('duplicate'):
+                # the same changes give byte-identical output: that version already exists, so it is opened, never
+                # recorded a second time (this is how one report once showed many "fixed" entries for a single file)
+                if any(x.get('fixed_file_hash') == new_hash for x in result.get('fixes_applied') or []) or \
+                        (new_item.get('fixed_from') or {}).get('file_hash') == file_hash:
+                    return dict(new_item, already_applied=True)
+                raise ValueError('The corrected content already exists as another version; open it instead.')
+            revision = int(result.get('revision') or 1) + 1
+            record = dict(record, fixed_filename=new_item['filename'], revision=revision)
             result.pop('check_hash', None); result.pop('checked_at', None)
             result['fixes_applied'] = (result.get('fixes_applied') or []) + [record]
             self.save_check(db, result)
             fixed_original, _ = self._original(db, new_item['file_hash'])
             fixed_result = dict(self.latest(db, new_item['file_hash'], fixed_original))
             fixed_result.pop('check_hash', None); fixed_result.pop('checked_at', None)
-            fixed_result['fixed_from'] = dict(file_hash=file_hash, filename=item['filename'], version=item.get('version'), revision=int(item.get('revision') or 1),
+            fixed_result['fixed_from'] = dict(file_hash=file_hash, filename=result['filename'], version=result.get('version'), revision=int(result.get('revision') or 1),
                                               changes=record['changes'], applied_at=record['applied_at'])
             # one lineage per report: v1 is the upload, each saved set of changes is the next revision with its own hash and checks
             fixed_result['revision'] = revision
-            fixed_result['root_hash'] = item.get('root_hash') or file_hash
+            fixed_result['root_hash'] = result.get('root_hash') or file_hash
             if result.get('source_document'): fixed_result['source_document'] = result['source_document']   # still came from that PDF / Word file
-            if result.get('accepted_issues'): fixed_result['accepted_issues'] = result['accepted_issues']     # still confirmed fine
+            # Unbound historical acceptances never follow changed workbook bytes.
             for k in ('auto_formatting', 'ai_fixed', 'review_decisions'):   # what was already fixed or decided stays on the report as it moves on
                 if result.get(k) and k not in fixed_result: fixed_result[k] = result[k]
+            # a person's finding decisions go along, marked as made on the earlier version; each one is only applied to a
+            # finding that still says exactly the same thing (same cell, message and values), never to changed data
+            if result.get('finding_decisions') and 'finding_decisions' not in fixed_result:
+                fixed_result['finding_decisions'] = {k: dict(d, carried_from=d.get('carried_from') or file_hash) for k, d in result['finding_decisions'].items()
+                                                     if d.get('action') in ('reject', 'defer')}
             new_item = self.save_check(db, fixed_result)
+        try:
+            self.index_vins(new_item['file_hash'])
+        except Exception:
+            pass  # search falls back to indexing later
         return new_item
+    @staticmethod
+    def held_cells(item, auto=True):
+        """(sheet, CELL) a person decided on (kept as recorded or deferred), plus, for automatic work, those whose
+        earlier decision no longer matches. Automatic paths leave these out; apply_fixes refuses them in any case."""
+        from hosting.review_summary import summarize
+        rv = summarize(item)
+        return {(x.get('sheet'), str(x.get('cell') or '').upper()) for x in rv['issues'] + rv['dismissed'] if x.get('cell') and (
+            (x.get('decision') or {}).get('action') in ('reject', 'defer') or (auto and x.get('previous_decision')))}
+    def _check_changes(self, result, approved, auto, raw=None):
+        """Refuse (FixError) a change that would override a person or use stale or unidentified source data. Every path
+        that makes a corrected version comes through here (review screen, automatic pass, Claude, clean-up, autopilot,
+        public API), and it runs again under the report's lock.
+        - A finding a person kept as recorded or deferred is never changed (reopen it first). Reverts of
+          earlier automatic changes are also paused pending safety review.
+        - auto=True (anything a person did not type or pick cell by cell): also not a finding whose earlier decision no
+          longer matches, and not an approved, sent or already-corrected version.
+        - A SharePoint value must name the read it came from (live reconciliation snapshot, classic comparison, or the
+          export inside this file), and that read must still be the current one. The automatic paths may only write
+          SharePoint's own value, for the same item and field."""
+        from hosting import reconcile
+        from hosting.fixes import FixError
+        from hosting.review_summary import summarize, source_check_id
+        snap = (reconcile.current(result) or {}).get('snapshot_id')
+        if any(c.get('snapshot_id') and not str(c['snapshot_id']).startswith(('classic:', 'export:')) for c in approved):
+            rec = reconcile.current(result) or {}
+            try:
+                mapping_current = self.source_mapping(rec.get('site_id'), rec.get('list_id'))
+            except ValueError:
+                raise FixError('The source column mapping has no exact identity. Compare the assigned source again.') from None
+            if rec.get('mapping_binding') != mapping_current or mapping_current['legacy_requires_confirmation']:
+                raise FixError('The source column mapping changed after these corrections were reviewed. Compare again before applying.')
+        classic = 'classic:' + str(source_check_id(result))
+        export = 'export:' + str(result.get('file_hash'))
+        rv = summarize(result)
+        everything = rv['issues'] + rv['dismissed']
+        sp = {(x.get('sheet'), str(x.get('cell') or '').upper()): x for x in everything if x.get('source') == 'SharePoint' and x.get('cell')}
+        if auto:
+            if result.get('approval') or any(x.get('sent') for x in result.get('sent') or []):
+                raise FixError('This version is approved or sent; it is left exactly as it is.')
+            if result.get('fixes_applied'):
+                raise FixError('A newer version of this report exists; it was not fixed automatically.')
+        held = {}
+        for x in everything:
+            if not x.get('cell'):
+                continue
+            act = (x.get('decision') or {}).get('action')
+            if act in ('reject', 'defer') or (auto and x.get('previous_decision')):
+                held[(x.get('sheet'), str(x.get('cell') or '').upper())] = act or 'stale'
+        for c in approved:
+            if str(c.get('source') or '').strip().casefold().startswith('reverted'):
+                raise FixError('Revert workbook changes are disabled pending safety review.')
+            why = held.get((c.get('sheet'), str(c.get('cell') or '').upper()))
+            if why:
+                why = {'reject': 'a person decided to keep it as recorded', 'defer': 'it is waiting for the source owner'}.get(
+                    why, 'an earlier decision on it no longer matches and needs a person')
+                raise FixError(f'{c.get("sheet")}!{c.get("cell")} was not changed: {why}. Reopen it first. Nothing was applied.')
+        source_proposals = None
+        for c in approved:
+            where = (c.get('sheet'), str(c.get('cell') or '').upper())
+            src = str(c.get('source') or '')
+            person = src == 'Your edit'
+            backed = src.startswith('SharePoint') or c.get('snapshot_id') or (where in sp and not person)
+            if not backed:
+                continue
+            sid = c.get('snapshot_id')
+            if not (sid and c.get('item') and c.get('field')):
+                raise FixError(f'The correction for {where[0]}!{where[1]} does not say which SharePoint read, item and field it came from, so it '
+                               'cannot be checked against SharePoint. Nothing was applied. Review it again.')
+            if sid not in (snap, classic, export):
+                raise FixError('SharePoint was read again or its comparison changed after this correction was reviewed. Nothing was applied. Review it again.')
+            if not person:
+                if source_proposals is None:
+                    from hosting.fixes import proposals
+                    if raw is None:
+                        _, raw = self.original_bytes(result['file_hash'])
+                    source_proposals = proposals(result, result['filename'], raw)
+                fields = ('sheet', 'cell', 'snapshot_id', 'item', 'field', 'before', 'after', 'change_set', 'change_set_size')
+                if not any(all(str(c.get(k) if c.get(k) is not None else '') == str(p.get(k) if p.get(k) is not None else '') for k in fields) for p in source_proposals):
+                    raise FixError('The source-backed change does not match the current source proposal. Review it again or make an explicit manual edit.')
+            if str(sid).startswith('classic:'):
+                if sid != classic:
+                    raise FixError(f'The SharePoint comparison was run again after {where[0]}!{where[1]} was reviewed. Nothing was applied. '
+                                   'Review the corrections against the current comparison.')
+                continue
+            if str(sid).startswith('export:'):
+                if sid != export:
+                    raise FixError(f'The correction for {where[0]}!{where[1]} came from another version of this report. Nothing was applied.')
+                continue
+            if sid != snap:
+                raise FixError(f'SharePoint was read again after {where[0]}!{where[1]} was reviewed, so that correction may be out of date. '
+                               'Nothing was applied. Review the corrections against the current SharePoint data.')
+            x = sp.get(where)
+            if not person:
+                if not x or str(x.get('item')) != str(c['item']) or str(x.get('field')) != str(c['field']):
+                    raise FixError(f'SharePoint no longer reports a difference for item {c["item"]} {c["field"]} at {where[0]}!{where[1]}. Nothing was applied.')
+                if str(c.get('after')) != str(x.get('source_value')):
+                    raise FixError(f'{where[0]}!{where[1]} may only be changed to SharePoint\'s value ({x.get("source_value")}). Nothing was applied.')
     def download(self, file_hash):
         with self.connect() as db:
             original, raw = self._original(db, file_hash)
@@ -809,7 +1339,8 @@ class SpreadsheetInbox:
                         recheck=dict(available=True, checked_with=result.get('checker_version'), current=CHECKER_VERSION))
         return result
     RECHECK_KEEP = ('approval','sent','fixes_applied','fixed_from','review_request','source_document','accepted_issues','auto_formatting','ai_fixed',
-                    'source_reconciliation','approval_withdrawn','recheck_applied','review_decisions','review_decision_log','revision','root_hash')
+                    'source_reconciliation','approval_withdrawn','recheck_applied','review_decisions','review_decision_log','revision','root_hash',
+                    'finding_decisions','finding_decision_log','finding_decisions_rev','finding_requests')
     def _fresh_checks(self, file_hash):
         with self.connect() as db:
             original, raw = self._original(db, file_hash)
@@ -859,7 +1390,7 @@ class SpreadsheetInbox:
             by=by, at=datetime.now(timezone.utc).isoformat(), from_version=current.get('checker_version'), to_version=fresh.get('checker_version'),
             from_check=current.get('check_hash'), changes=(proposal or {}).get('changes'))]
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
+            self._begin(db, file_hash)
             saved = self.save_check(db, fresh)
         previous = current.get('sharepoint') or {}
         if previous.get('status') in ('match','differences') and previous.get('source_sha256') and not current.get('source_reconciliation'):
@@ -886,7 +1417,7 @@ class SpreadsheetInbox:
         return dict(result,idempotent=False)
     def reconcile(self,file_hash,source):
         with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
+            self._begin(db, file_hash)
             row=db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?',(file_hash,)).fetchone()
             if not row:raise ValueError('Spreadsheet version not found.')
             original=json.loads(row['result_json']);raw=files_for(self.root).get(original['original_path'])

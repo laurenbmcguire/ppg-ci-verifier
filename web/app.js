@@ -12,7 +12,7 @@
     for (const [k, v] of Object.entries(attrs || {})) {
       if (v == null || v === false) continue;
       if (k === 'class') el.className = v;
-      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else if (k.startsWith('on')) el[k] = v; // Refreshes replace this handler instead of stacking listeners.
       else if (v === true) el.setAttribute(k, '');
       else el.setAttribute(k, v);
     }
@@ -164,19 +164,35 @@
     }
     const dayOf = r => r.review?.day || (r.received_at || '').slice(0, 10);
     rows = [...rows].sort((a, b) => dayOf(b).localeCompare(dayOf(a)) || (b.received_at || '').localeCompare(a.received_at || ''));   // newest report day first, one heading per day
-    let lastDay = null;
-    for (const r of rows) {
-      const day = dayOf(r);
-      if (day !== lastDay) { list.append(h('div', {class: 'day'}, dayLabel(day))); lastDay = day; }
+    // one line per client / job / business day: the latest version, with earlier versions behind a toggle
+    // (each keeps its own decisions; nothing from an older version is applied to a newer one)
+    const groupKey = r => [r.assignment?.client || '', r.review?.job || (r.filename || '').replace(/\s*\(fixed\)|\.(xlsx|xlsm|xls|csv)$/gi, ''), dayOf(r)].join('|');
+    const groups = new Map();
+    for (const r of rows) { const k = groupKey(r); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+    state.openGroups ||= new Set();
+    const line = (r, older) => {
       const rv = r.review || {status: 'check', counts: {}};
       const c = rv.counts || {};
       const count = rv.status === 'clear' ? 'Clear' : rv.status === 'hold' ? `${c.high} to fix` : `${(c.medium || 0) + (c.low || 0)} to look at`;
-      list.append(h('button', {type: 'button', class: 'item' + (r.file_hash === state.selected ? ' sel' : ''), onclick: () => select(r.file_hash),
-        'aria-label': `${rv.job || r.filename}, ${STATUS[rv.status] || 'Check'}, ${count}`},
+      return h('button', {type: 'button', class: 'item' + (r.file_hash === state.selected ? ' sel' : '') + (older ? ' older' : ''), onclick: () => select(r.file_hash),
+        'aria-label': `${rv.job || r.filename}${older ? ', earlier version' : ''}, ${STATUS[rv.status] || 'Check'}, ${count}`},
         h('span', {class: 'tag tag-' + rv.status}, STATUS[rv.status] || 'Check'),
         h('span', {class: 'job', title: rv.job ? null : 'No job number was found in this file. The file name is shown instead.'}, (rv.job || r.filename.replace(/\.(xlsx|xlsm|xls|csv)$/i, '').replace(/\s*\(fixed\)/g, ''))), rv.fixed_from ? h('span', {class: 'vtag', title: 'A corrected copy; the original upload is kept too'}, 'corrected') : null,
+        older ? h('span', {class: 'vtag'}, 'earlier') : null,
         h('span', {class: 'count'}, rv.sent_at ? 'Sent' : rv.approved ? 'Approved' : rv.review_state === 'waiting' ? 'For review' : rv.review_state === 'sent_back' ? 'Sent back' : count),
-        h('span', {class: 'file'}, (r.assignment ? (SETTLED.includes(r.assignment.status) ? `${r.assignment.client} → ` : 'Needs client · ') : '') + `${r.filename} · v${r.version} · ${ago(r.received_at)}`)));
+        h('span', {class: 'file'}, (r.assignment ? (SETTLED.includes(r.assignment.status) ? `${r.assignment.client} → ` : 'Needs client · ') : '') + `${r.filename} · v${r.version} · ${ago(r.received_at)}`));
+    };
+    let lastDay = null;
+    for (const [k, members] of groups) {
+      const latest = members[0], day = dayOf(latest), older = members.slice(1);
+      if (day !== lastDay) { list.append(h('div', {class: 'day'}, dayLabel(day))); lastDay = day; }
+      list.append(line(latest, false));
+      if (older.length) {
+        const open = state.openGroups.has(k), left = older.filter(r => r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
+        list.append(h('button', {type: 'button', class: 'linkish older-toggle', 'aria-expanded': String(open), onclick: () => { open ? state.openGroups.delete(k) : state.openGroups.add(k); drawQueue(); }},
+          `${open ? 'Hide' : 'Show'} ${older.length} earlier version${older.length === 1 ? '' : 's'}${left ? ` (${left} with open items)` : ''}`));
+        if (open) for (const r of older) list.append(line(r, true));
+      }
     }
   }
   // Enter in a one-line add box (job to watch, rule, key name...) presses that box's button
@@ -347,6 +363,20 @@
     await openReport(m[1]);
   }
   const emptyState = $('empty');
+  // A very large report sends its findings in pages; every page is loaded before the corrections are drawn, so nothing
+  // the counts include is missing from the lists (the counts themselves always come from the server, over all findings)
+  async function fillPages(data) {
+    const rv = data?.review, pg = rv?.page; if (!pg) return data;
+    for (const [list, total] of [['issues', pg.issues_total], ['dismissed', pg.dismissed_total]]) {
+      while ((rv[list] || []).length < total) {
+        const out = await api('/api/spreadsheets/findings', {file_hash: data.file_hash, list, offset: rv[list].length, limit: pg.size});
+        if (!out.items.length) break;
+        rv[list] = [...rv[list], ...out.items];
+      }
+    }
+    pg.complete = rv.issues.length >= pg.issues_total && rv.dismissed.length >= pg.dismissed_total;
+    return data;
+  }
   function showEmpty() { $('report').replaceChildren(emptyState); }
 
   // ---------------------------------------------------------------- report detail
@@ -354,7 +384,7 @@
     const report = $('report');
     if (!keepScroll) report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Opening report…')));
     try {
-      const data = await api('/api/spreadsheet?id=' + hash);
+      const data = await fillPages(await api('/api/spreadsheet?id=' + hash));
       if (state.selected !== hash) return;
       if (state.report?.file_hash !== hash) { state.fdView = 'review'; state.fdCur = null; state.fdTier = null; state.gridSearch = ''; state.sheetScroll = {}; state.gridOnlyMarked = false; state.gridRow = null; document.body.classList.remove('fd-panel-open'); }
       state.report = data; state.fixes = null; state.showAll = false;
@@ -369,18 +399,6 @@
   }
 
   // Reports uploaded before the automatic cleanup: make the sure fixes the first time one is opened, then say what changed
-  async function autoCleanOlder(r) {
-    const tried = store.get('rd-autoclean', []);
-    if (r.auto_formatting || r.approval || (r.sent || []).some(x => x.sent) || tried.includes(r.file_hash)) return;
-    store.set('rd-autoclean', [...tried, r.file_hash].slice(-500));
-    try {
-      const out = await api('/api/spreadsheets/auto-clean', {file_hash: r.file_hash});
-      if (!out.changed || state.selected !== r.file_hash) return;
-      const a = out.item.auto_formatting || {};
-      toast(`Fixed ${a.count} formatting issue${a.count === 1 ? '' : 's'} automatically. What changed is listed at the top.`);
-      await loadList(); select(out.item.file_hash);
-    } catch (e) { /* the offer box still lets the person do it */ }
-  }
   // Totals only, ready to paste into the client email. Never scan times, inspector names or internal check results.
   async function copyClientSummary() {
     const r = state.report, rv = r.review || {}, n = v => v == null ? '—' : Number(v).toLocaleString('en-US');
@@ -396,19 +414,9 @@
   // formatting-only fixes the app made by itself on upload
   // Fix with AI: Claude resolves the picked issues (any number, or all) and the changes go into a new version
   async function aiFix(keys, btn) {
-    if (!keys.length) return toast('Pick at least one issue.', true);
-    const hash = state.report.file_hash, label = btn?.textContent;
-    if (btn) { btn.disabled = true; btn.textContent = `Claude is fixing ${keys.length === 1 ? 'it' : keys.length}…`; }
-    toast(`Claude is working on ${keys.length === 1 ? 'this issue' : `${keys.length} issues`}. This takes a moment.`);
-    try {
-      const out = await api('/api/spreadsheets/ai-fix', {file_hash: hash, keys});
-      const s = out.ai_fixed || {}, did = (s.changed || []).length + (s.removed || []).length + (s.moved || []).length, ok = (s.fine || []).length, left = (s.left || []).length;
-      toast(`Done. ${[did ? `${did} change${did === 1 ? '' : 's'} made` : '', ok ? `${ok} confirmed fine` : '', left ? `${left} left for you` : ''].filter(Boolean).join(', ')}. See what Claude did at the top.`, !!left && !did && !ok);
-      await loadList();
-      if (out.item.file_hash !== hash) select(out.item.file_hash); else if (state.selected === hash) openReport(hash);
-    } catch (e) { toast(e.message, true); if (btn) { btn.disabled = false; btn.textContent = label; } }
+    toast('AI workbook changes are paused. Review and apply cell corrections instead.', true);
   }
-  function aiFixedBanner(r) {   // a short summary of what Claude did; every single change is one click away
+  function aiFixedBanner(r) {   // a short summary of what Dex did; every single change is one click away
     const s = r.ai_fixed; if (!s) return null;
     const plural = (n, w) => `${fmt(n)} ${w}${n === 1 ? '' : 's'}`;
     const norm = t => String(t || '').replace(/"[^"]*"|“[^”]*”/g, '"…"').replace(/\b[A-Za-z0-9-]*\d[A-Za-z0-9-]*\b/g, '#').replace(/\s+/g, ' ').trim();
@@ -431,8 +439,8 @@
     const item = (title, rows, f) => rows.length ? h('div', {class: 'aifx-group'}, h('b', {}, title), h('ul', {}, rows.map(x => h('li', {class: x.check ? 'check' : ''}, f(x), x.check ? h('em', {class: 'checkme'}, ' please double-check') : null)))) : null;
     return h('div', {class: 'aifixed'},
       h('div', {class: 'autofmt-top'}, h('span', {class: 'autofmt-mark ai', 'aria-hidden': 'true'}, 'AI'),
-        h('div', {}, h('b', {}, [did ? `Claude fixed ${plural(did, 'thing')}` : '', fine.length ? `checked ${fmt(fine.length)} and found ${fine.length === 1 ? 'it' : 'them'} fine` : '', left.length ? `left ${fmt(left.length)} for you` : ''].filter(Boolean).join(', ').replace(/^./, c => c.toUpperCase()) || 'Claude looked at this report'),
-          h('span', {}, `${s.auto ? 'Done automatically' : `${plural(s.asked, 'issue')} you picked`}, ${ago(s.made_at)}.` + (checks ? ` ${plural(checks, 'change')} ${checks === 1 ? 'is' : 'are'} Claude's best judgment: please double-check ${checks === 1 ? 'it' : 'them'}.` : ''))),
+        h('div', {}, h('b', {}, [did ? `Dex fixed ${plural(did, 'thing')}` : '', fine.length ? `checked ${fmt(fine.length)} and found ${fine.length === 1 ? 'it' : 'them'} fine` : '', left.length ? `left ${fmt(left.length)} for you` : ''].filter(Boolean).join(', ').replace(/^./, c => c.toUpperCase()) || 'Dex looked at this report'),
+          h('span', {}, `${s.auto ? 'Done automatically' : `${plural(s.asked, 'issue')} you picked`}, ${ago(s.made_at)}.` + (checks ? ` ${plural(checks, 'change')} ${checks === 1 ? 'is' : 'are'} Dex's best judgment: please double-check ${checks === 1 ? 'it' : 'them'}.` : ''))),
         s.from_hash && s.from_hash !== r.file_hash ? h('button', {type: 'button', class: 'linkish small', onclick: () => select(s.from_hash)}, 'Open the version before') : null),
       h('ul', {class: 'aifx-summary'}, lines),
       did + fine.length + left.length > lines.length ? h('details', {class: 'autofmt-all'}, h('summary', {}, `See every change (${fmt(did + fine.length + left.length)})`),
@@ -528,9 +536,10 @@
     const c = x.coverage || {};
     const rows = x.rows || [];
     const stale = (r.review?.sharepoint || {}).status === 'stale';
-    const verified = x.status === 'verified' && !stale;
-    const label = stale ? 'Re-check needed: this check was made for an earlier version' : REC[x.status] || x.status;
+    const verified = r.review?.sharepoint?.source_verified === true && x.status === 'verified' && !stale && !(r.holds || []).some(hold => String(hold.code || '').startsWith('source_'));
+    const label = stale ? 'Re-check needed: this check was made for an earlier version' : verified ? REC[x.status] || x.status : r.review?.sharepoint?.message || 'Current exact-source verification is unavailable';
     const confirm = Object.entries(x.column_mapping || {}).filter(([, m]) => m.status === 'needs_confirmation' || m.status === 'conflict');
+    const mappingRequest = Object.freeze({file_hash: r.file_hash, expected_check_hash: r.check_hash, expected_snapshot_id: x.snapshot_id, expected_mapping_revision: x.mapping_binding?.revision ?? null, site_id: x.site_id, list_id: x.list_id || x.list?.id, mapping: Object.freeze(Object.fromEntries(confirm.map(([f, m]) => [f, m.column])))});
     return h('div', {class: 'spjob ' + (verified ? 'ok' : 'warn')},
       h('span', {class: 'spjob-tag'}, verified ? 'Source ✓' : 'Source'),
       h('b', {}, label),
@@ -538,10 +547,12 @@
         + ((x.fields_not_checked || []).length ? ` · not checked: ${x.fields_not_checked.join(', ')}` : '') + ` · ${c.pages || 0} page(s) read · captured ${ago(x.captured_at)}`
         + ((x.not_verified_because || []).length ? ' · ' + x.not_verified_because.join(' ') : '') + (c.notes?.length ? ' · ' + c.notes.join(' ') : '')),
       btn,
-      confirm.length && x.list?.id ? h('button', {type: 'button', class: 'btn small', onclick: async e => {
+      confirm.length && mappingRequest.list_id ? h('button', {type: 'button', class: 'btn small', disabled: !mappingRequest.site_id, title: mappingRequest.site_id ? 'Confirm columns for this exact site and list' : 'Source site identity is missing. Reconcile the exact source before confirming columns.', onclick: async e => {
+        if (!mappingRequest.site_id) { toast('Source site identity is missing. Reconcile the exact source first.', true); return; }
         e.target.disabled = true;
-        try { await api('/api/sharepoint/confirm-columns', {list_id: x.list.id, mapping: Object.fromEntries(confirm.map(([f, m]) => [f, m.column]))}); await run({target: e.target}); }
+        try { await api('/api/sharepoint/confirm-columns', mappingRequest); await run({target: e.target}); }
         catch (err) { toast(err.message, true); e.target.disabled = false; } }}, `Confirm ${confirm.map(([f, m]) => `${f} = ${m.column}`).join(', ')}`) : null,
+      confirm.length && !mappingRequest.site_id ? h('p', {class: 'note'}, 'Column confirmation unavailable: exact source site identity is missing.') : null,
       rows.length ? h('details', {class: 'recrows', open: ''}, h('summary', {}, `${rows.length} difference${rows.length === 1 ? '' : 's'} from SharePoint` + (x.proposed_corrections?.length ? ' · the fixes are in the issues below' : '')),
         h('table', {}, h('thead', {}, h('tr', {}, ...['What', 'Item', 'Where', 'Field', 'Report', 'SharePoint'].map(t => h('th', {}, t)))),
           h('tbody', {}, ...rows.slice(0, 300).map(d => h('tr', {},
@@ -631,7 +642,7 @@
   function fixedLog(r) {   // everything fixed automatically, folded into one line you can open
     const a = r.auto_formatting?.count || 0, s = r.ai_fixed || {}, ai = (s.changed || []).length + (s.removed || []).length + (s.moved || []).length, fine = (s.fine || []).length;
     if (!a && !ai && !fine) return null;
-    const parts = [a ? `${a} cleaned up` : '', ai ? `${ai} fixed by Claude` : '', fine ? `${fine} checked and fine` : ''].filter(Boolean);
+    const parts = [a ? `${a} cleaned up` : '', ai ? `${ai} fixed by Dex` : '', fine ? `${fine} checked and fine` : ''].filter(Boolean);
     const checks = [...(s.changed || []), ...(s.removed || []), ...(s.moved || [])].filter(x => x.check).length;
     return h('details', {class: 'fixedlog'}, h('summary', {}, h('span', {class: 'autofmt-mark', 'aria-hidden': 'true'}, '✓'),
         h('b', {}, 'Fixed automatically: '), parts.join(', '), checks ? h('span', {class: 'checkme'}, ` · ${checks} to double-check`) : null, h('span', {class: 'quiet'}, ' · see what changed')),
@@ -662,7 +673,7 @@
     return h('div', {class: 'docbanner'},
       h('div', {}, h('b', {}, `Read from a ${d.type} file: ${d.filename}`),
         h('span', {}, `Found ${found}${d.pages ? ` on ${plural(d.pages, 'page')}` : ''}. ` +
-          (d.tables ? `They are checked like any report. Fixes come back as an Excel copy; your ${d.type} file is not changed.` : 'There is nothing to check as a table, but you can read the text below or ask Claude about it.'))),
+          (d.tables ? `They are checked like any report. Fixes come back as an Excel copy; your ${d.type} file is not changed.` : 'There is nothing to check as a table, but you can read the text below or ask Dex about it.'))),
       d.text ? h('details', {}, h('summary', {}, `Show the ${d.type} text`), h('pre', {class: 'doctext'}, d.text + (d.text_truncated ? '\n…' : ''))) : null);
   }
   // ================================================================ Focus Desk: spreadsheet in the middle, corrections on the right
@@ -697,24 +708,43 @@
   }
 
   // ---------- corrections: issues and suggested changes joined, grouped by root cause, in three tiers
-  const TIERS = [['blocker', 'Blockers'], ['review', 'Needs review'], ['format', 'Formatting']];
+  const TIERS = [['blocker', 'Blockers'], ['review', 'Needs review'], ['format', 'Formatting'], ['aside', 'Set aside']];
+  // why a finding is off the open list when no person decided it on this version: a recommendation or an older record
+  const ASIDE = {claude_verify: 'claude', claude_fix: 'claude', person_legacy: 'kept_earlier', corrected: 'corrected'};
+  // Snapshots belong to the rendered control, never to whichever report is current at click time.
+  function reviewBinding(r) {
+    return Object.freeze({file_hash: r.file_hash, expected_rev: r.review?.decisions?.rev ?? 0,
+      expected_run: JSON.parse(JSON.stringify(r.review?.run || null)), expected_check_hash: r.check_hash});
+  }
+  function findingBinding(items) {
+    const first = items[0];
+    if (!first?.binding || items.some(x => JSON.stringify(x.binding) !== JSON.stringify(first.binding))) throw new Error('Review these findings again before deciding.');
+    return {...first.binding, expected_fps: Object.freeze(Object.fromEntries(items.map(x => [x.key, x.fp])))};
+  }
   function fdItems() {
     const r = state.report, rv = r.review, dec = store.get(decisionsKey(), {}), decided = r.review_decisions || {}, edits = store.get(editsKey(), {});
-    const issues = allIssues(rv).filter(i => i.severity !== 'info'), fixes = state.fixes || [], used = new Set(), items = [];
+    // findings a person kept as recorded are listed too (from the server's decisions), so they can be seen and undone
+    const issues = [...allIssues(rv), ...(rv.dismissed || []).filter(i => !i.restored)].filter(i => i.severity !== 'info'), fixes = state.fixes || [], used = new Set(), items = [];
     const make = (i, f) => {
-      const key = i ? i.key : 'fix:' + f.id, d = decided[key] || (f ? decided['fix:' + f.id] : null);
+      const key = i ? i.key : 'fix:' + f.id, fd = i?.decision || null, d = fd || decided[key] || (f ? decided['fix:' + f.id] : null);
       const fmt = f && fmtKind(f);
-      const tier = i && i.severity === 'high' ? 'blocker' : fmt && (!i || i.only) ? 'format' : 'review';
+      const aside = i && !i.decision ? ASIDE[i.dismissed_by] : null;
+      const tier = aside ? 'aside' : i && i.severity === 'high' ? 'blocker' : fmt && (!i || i.only) ? 'format' : 'review';
       const cell = f ? String(f.cell).toUpperCase() : i.cell && splitCell(i.cell) ? String(i.cell).toUpperCase() : null;
       const row = cell ? splitCell(cell)[1] : i?.row ? Number(i.row) : null;
       const src = i?.source_value != null ? i.source_value : f?.source === 'SharePoint' ? f.after : null;
       const kind = i ? i : {text: f.reason || '', code: 'fix:' + (fmt || f.source)};
-      const group = tier + '|' + (fmt ? 'fmt:' + fmt : i ? sameKey(i) : 'fix:' + f.source);
+      const col = (String(i?.cell || '').match(/^[A-Z]+/) || [''])[0];
+      const group = aside ? `aside|${aside}|${sameKey(i)}` : i?.legacy_note ? `${tier}|legacy|${i.code}|${col}` : tier + '|' + (fmt ? 'fmt:' + fmt : i ? sameKey(i) : 'fix:' + f.source);
       const own = cell && edits[editId(f?.sheet || i?.sheet, cell)];
-      const stateNow = own || (f && dec[f.id]?.state === 'accepted') ? 'selected' : (d?.action === 'reject' || (f && dec[f.id]?.state === 'rejected')) ? 'rejected' : d?.action === 'keep' ? 'kept' : 'open';
+      const stateNow = own || (f && dec[f.id]?.state === 'accepted') ? 'selected'
+        : aside ? aside
+        : fd ? ({reject: 'kept', defer: 'deferred', confirm: 'confirmed', reopen: 'open'}[fd.action] || 'open')
+        : (d?.action === 'reject' || (f && dec[f.id]?.state === 'rejected')) ? 'rejected' : d?.action === 'keep' ? 'kept' : 'open';
       const evidence = f ? (f.source === 'SharePoint' || i?.source_value != null ? 'source' : isSureFix(f) ? 'mechanical' : f.source === 'AI fix' ? 'ai' : 'guess') : i?.source_value != null ? 'source_only' : 'none';
-      return {key, issue: i, fix: f, tier, group, cell, row, sheet: f?.sheet || i?.sheet || null, kind, fmt, state: stateNow, note: d?.note || '', decidedBy: d?.by,
-        report: f ? f.before : i?.report_value ?? null, source: src, proposed: own ? own.after : f ? (dec[f.id]?.after ?? f.after) : null, own: own || null,
+      return {binding: reviewBinding(r), fp: i?.fp, key, issue: i, fix: f, tier, group: JSON.stringify([group, f?.sheet || i?.sheet || null, evidence, stateNow, i?.severity || null, f?.source || i?.source || null, i?.code || null, fd?.action || d?.action || null]), cell, row, sheet: f?.sheet || i?.sheet || null, kind, fmt, state: stateNow, note: d?.note || d?.reason || '', decidedBy: d?.by,
+        decision: fd, legacyNote: i?.legacy_note || null, previous: i?.previous_decision || null,
+        report: f ? f.before : i?.report_value ?? (cell && Array.isArray(i?.observed) && i.observed.length === 1 ? (i.observed[0].type === 'NoneType' ? '' : i.observed[0].value) : null), source: src, proposed: own ? own.after : f ? (dec[f.id]?.after ?? f.after) : null, own: own || null,
         reason: fmt ? `Only ${fmt} change; the value itself stays the same.` : f?.only || f?.reason || i?.why || i?.text || '',
         text: i?.text || f?.reason || '', url: i?.url || null, item: i?.item || null, evidence,
         selectable: !!f && evidence !== 'none' && stateNow !== 'rejected'};
@@ -725,19 +755,28 @@
     for (const f of fixes) if (!used.has(f.id)) items.push(make(null, f));
     return items;
   }
+  function fdRecordCount(items) {
+    return new Set(items.map(x => x.sheet && x.row ? JSON.stringify([x.sheet, x.row]) : x.key)).size;
+  }
   function fdGroups(items) {
     const by = new Map();
     for (const it of items) { if (!by.has(it.group)) by.set(it.group, {key: it.group, tier: it.tier, items: []}); by.get(it.group).items.push(it); }
-    const rank = {blocker: 0, review: 1, format: 2};
+    const rank = {blocker: 0, review: 1, format: 2, aside: 3};
     return [...by.values()].map(g => {
       const [one, many] = kindNames(g.items[0].kind), n = g.items.length, first = g.items[0];
       // one item: its own plain sentence; several: the plural name of the shared cause
       const own = String(first.issue?.text || first.text || '').replace(/\s*\(Day-level comparison[^)]*\)/, '');
       const generic = /…/.test(one) || !one;
       g.title = (generic ? (n === 1 ? own : `${own.slice(0, 70)}${own.length > 70 ? '…' : ''} (and ${n - 1} more like it)`) : n === 1 ? one : (many || one)).replace(/^./, c => c.toUpperCase());
+      const ac = first.state === 'claude' ? 'Set aside by Dex (a recommendation): ' : first.state === 'kept_earlier' ? 'Kept as is by an earlier record: ' : first.state === 'corrected' ? 'Corrected in a later version: ' : '';
+      if (ac) g.title = ac + g.title.replace(/^./, c => c.toLowerCase());
+      if (first.issue?.legacy_note && !ac) g.title = `Earlier “fine as is” did not say which cell: ${(String(first.cell || '').match(/^[A-Z]+/) || ['?'])[0] ? 'column ' + (String(first.cell || '').match(/^[A-Z]+/) || ['?'])[0] : first.issue.code}, review again`;
       if (g.title.length > 120) g.title = g.title.slice(0, 117) + '…';
-      g.records = new Set(g.items.map(x => x.sheet && x.row ? x.sheet + '!' + x.row : x.key)).size;
+      g.title += ` · ${first.sheet || 'Whole report'} · ${{open: 'Needs review', selected: 'Selected, not applied', deferred: 'Waiting on source', confirmed: 'Correction confirmed', kept: 'Kept as recorded', rejected: 'Excluded'}[first.state] || first.state}`;
+      g.records = fdRecordCount(g.items);
       g.open = g.items.filter(x => x.state === 'open').length;
+      g.unresolved = g.items.filter(x => ['open', 'selected', 'deferred', 'confirmed'].includes(x.state)).length;
+      g.deferred = g.items.filter(x => x.state === 'deferred').length;
       return g;
     }).sort((a, b) => rank[a.tier] - rank[b.tier] || b.items.length - a.items.length);
   }
@@ -747,11 +786,57 @@
     const c = readyChanges();
     return {detected: allIssues(state.report.review).filter(i => i.severity !== 'info').length, suggestions: (state.fixes || []).length,
       selected: c.total, applied: (state.report.fixed_from?.changes || []).length,
-      blockers: items.filter(x => x.tier === 'blocker' && x.state !== 'rejected').length + (state.report.holds || []).filter(x => x.hard).length,
+      blockers: items.filter(x => x.tier === 'blocker' && x.state !== 'rejected' && x.state !== 'kept').length + (state.report.holds || []).filter(x => x.hard && x.code !== 'awaiting_source_owner').length,
+      kept: items.filter(x => x.state === 'kept').length, deferred: items.filter(x => x.state === 'deferred').length, confirmed: items.filter(x => x.state === 'confirmed').length,
       review: open.filter(x => x.tier === 'review').length, format: open.filter(x => x.tier === 'format').length};
   }
 
+  const fdMode = () => store.get('rd-mode:' + state.report.file_hash, null);
+  function fdChooseMode(mode, binding) {
+    if (state.report?.file_hash !== binding.file_hash || state.report?.check_hash !== binding.expected_check_hash) {
+      toast('The report changed. Review the current version before choosing.', true); return;
+    }
+    store.set('rd-mode:' + binding.file_hash, mode);
+    if (mode === 'unchanged') {
+      store.set(decisionsKey(), {}); store.set(editsKey(), {});
+      toast('File left unchanged. Findings and approval holds remain.');
+    }
+    drawReport();
+    if (mode === 'ai') runAiFixes(false, binding);
+  }
+  function fdModeSelector(r) {
+    const binding = reviewBinding(r), mode = fdMode(), busy = state.aiFixing || state.busy;
+    return h('section', {class: 'fd-mode-selector', 'aria-label': 'Choose how to review'},
+      h('b', {}, 'How would you like to review this report?'),
+      h('div', {class: 'fd-cardacts'},
+        h('button', {type: 'button', class: 'btn', disabled: busy || !state.aiOn, 'aria-pressed': String(mode === 'ai'), onclick: () => fdChooseMode('ai', binding)}, state.aiFixing ? 'Preparing suggestions…' : 'AI prepares suggestions'),
+        h('button', {type: 'button', class: 'btn', disabled: busy, 'aria-pressed': String(mode === 'manual'), onclick: () => fdChooseMode('manual', binding)}, 'Review manually'),
+        h('button', {type: 'button', class: 'btn', disabled: busy, 'aria-pressed': String(mode === 'unchanged'), onclick: () => fdChooseMode('unchanged', binding)}, 'Leave file unchanged')),
+      h('p', {class: 'fd-hint'}, mode === 'unchanged' ? 'No changes are selected. You can still inspect the spreadsheet. Existing findings and holds remain.' :
+        'Review each suggestion on the right, include or remove it, then preview the selected changes. Nothing is applied automatically.'),
+      !state.aiOn ? h('p', {class: 'fd-hint'}, 'AI preparation is not configured. Manual review is available.') : null);
+  }
+
   // ---------- the page
+  function fdGlobalStatus(st) { return st.next === 'blockers' ? 'Review blocked' : st.next === 'review' ? 'Review needed' : st.text; }
+  function fdPanelStatus(r, st) {
+    const findings = (state.fdItems || []).filter(item => item.tier === 'blocker' && !['rejected', 'kept'].includes(item.state)).length;
+    const holds = (r.holds || []).filter(hold => hold.hard).length;
+    return findings || holds ? [findings ? plural(findings, 'blocker') : null, holds ? plural(holds, 'approval hold') : null].filter(Boolean).join(' · ') : st.text;
+  }
+  function fdSourceVerified(r) {
+    const rec = r.source_reconciliation || {}, sp = r.review?.sharepoint || {}, bound = rec.bound_to || {};
+    return sp.source_verified === true && sp.status === 'match' && rec.verified === true && rec.coverage?.complete === true &&
+      rec.count_reconciliation?.status === 'verified' && !rec.stale && bound.file_hash === r.file_hash &&
+      !!bound.checker_version && bound.checker_version === r.checker_version && !(r.holds || []).some(hold => String(hold.code || '').startsWith('source_'));
+  }
+  function fdSourceSummary(r) {
+    const rec = r.source_reconciliation || {}, sp = r.review?.sharepoint || {}, counts = rec.count_reconciliation?.record_counts;
+    const verified = fdSourceVerified(r);
+    const status = verified ? 'Source verified' : rec.coverage?.complete === false || sp.status === 'incomplete' ? 'Source comparison incomplete' : 'Source not verified';
+    if (!counts || counts.matched_unique_items == null || counts.report_rows == null) return `${status} · matched count unavailable`;
+    return `${status} · ${counts.matched_unique_items} unique source items matched / ${counts.report_rows} report rows${verified ? '' : ' in the recorded capture'}`;
+  }
   function drawReport() {
     const r = state.report, rv = r.review;
     document.body.classList.add('reportmode');
@@ -761,15 +846,14 @@
     const close = e => e.target.closest('details')?.removeAttribute('open');
     const more = h('details', {class: 'more-menu'}, h('summary', {class: 'btn'}, 'More'),
       h('div', {class: 'menu'},
-        !r.approval && (r.review_request || {}).status !== 'waiting' ? h('button', {type: 'button', onclick: e => { close(e); reviewForm('request'); }}, 'Send for review') : null,
+        !r.approval && (r.review_request || {}).status !== 'waiting' ? h('button', {type: 'button', onclick: e => { close(e); reviewForm('request'); }}, 'Request internal review') : null,
         h('button', {type: 'button', onclick: e => { close(e); copyClientSummary(); }}, 'Copy client summary for an email'),
         h('button', {type: 'button', onclick: e => { close(e); makeChangeSummary(); }}, 'Change summary (PDF)'),
         r.filename.toLowerCase().endsWith('.xlsx') ? h('button', {type: 'button', onclick: e => { close(e); downloadWithPhotos(r); }}, 'Download with SharePoint photos') : null,
         h('a', {href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename, onclick: close}, `Download this version (v${revisionOf(r)})`),
-        r.approval && rv.approval_current ? h('button', {type: 'button', onclick: e => { close(e); openSend(); }}, 'Send to client…') : null));
+        r.approval && rv.approval_current ? h('button', {type: 'button', onclick: e => { close(e); openSend(); }}, 'Approval details…') : null));
     const crumb = [a.client || h('em', {}, 'Client not settled'), rv.job || r.filename, rv.day ? shortDay(rv.day) : 'No business date'];
-    const recordsChecked = sp.status === 'match' || sp.status === 'differences' || sp.status === 'incomplete' || sp.status === 'unverified'
-      ? `${sp.matched ?? '?'} of ${rv.scans ?? '?'} records checked against SharePoint` : sp.status === 'day_level' ? 'Day totals only (not record by record)' : 'Not compared with SharePoint';
+    const recordsChecked = fdSourceSummary(r);
     const head = h('header', {class: 'fd-head'},
       h('div', {class: 'fd-title'},
         h('p', {class: 'fd-eyebrow'}, 'Review workspace'),
@@ -781,8 +865,8 @@
           (sp.fields_checked || []).length ? h('span', {title: (sp.fields_not_checked || []).length ? 'Not checked: ' + sp.fields_not_checked.join(', ') : null},
             `Fields checked: ${sp.fields_checked.join(', ')}${(sp.fields_not_checked || []).length ? ` · not checked: ${sp.fields_not_checked.join(', ')}` : ''}`) : null)),
       h('div', {class: 'fd-actions'},
-        h('div', {class: `fd-status ${st.tone}`, role: 'status'}, icon(st.icon, 16), h('span', {}, st.text)),
-        more, h('button', {type: 'button', class: 'btn dl-changes', onclick: downloadWithChanges}, 'Download')));
+        h('div', {class: `fd-status fd-global-status ${st.tone}`, role: 'status'}, icon(st.icon, 16), h('span', {}, fdGlobalStatus(st))),
+        more, h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download this version')));
     const metrics = fdMetrics(r);
     const rail = h('nav', {class: 'fd-rail', 'aria-label': 'Report'},
       h('button', {type: 'button', class: 'fd-railbtn', onclick: () => { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }, 'aria-label': 'Back to all reports', title: 'All reports'}, icon('back', 22), h('span', {}, 'Reports')),
@@ -806,8 +890,8 @@
       h('span', {class: 'fd-foot-state'}, icon('lock', 16), h('b', {id: 'fd-selcount'}, sel ? plural(sel, 'change') + ' selected' : 'No changes selected'),
         h('span', {class: 'fd-foot-note'}, `Original v1 is kept unchanged${r.fixed_from ? '; this is v' + revisionOf(r) : ''}`)),
       h('button', {type: 'button', class: 'btn fd-mobile-panel', onclick: () => document.body.classList.toggle('fd-panel-open'), 'aria-controls': 'side'}, 'Corrections', h('i', {id: 'fd-mobile-count'}, String(fdCounts().blockers + fdCounts().review || ''))),
-      h('button', {type: 'button', class: 'btn ' + (sel ? 'primary' : ''), id: 'fd-preview-btn', disabled: !sel || state.busy, onclick: fdPreview}, icon('eye', 16), ' Preview selected changes'));
-    $('report').replaceChildren(h('div', {class: 'fd'}, rail, h('div', {class: 'fd-main'}, head, metrics, main), foot));
+      h('button', {type: 'button', class: 'btn ' + (sel ? 'primary' : ''), id: 'fd-preview-btn', disabled: !sel || state.busy, onclick: correctionAction(fdPreview)}, icon('eye', 16), ' Preview selected changes'));
+    $('report').replaceChildren(h('div', {class: 'fd'}, rail, h('div', {class: 'fd-main'}, head, fdModeSelector(r), metrics, main), foot));
     const w = store.get('fd-aside-w', null); if (w) fdAsideWidth(w);
     if (state.fdView !== 'review') return;
     state.grid = state.grid?.hash === r.file_hash ? state.grid : null;
@@ -851,21 +935,48 @@
     state.fdTier = tier;
     body.append(h('div', {class: 'fd-panelhead'}, h('h2', {}, 'Corrections'),
       h('button', {type: 'button', class: 'fd-iconbtn fd-collapse', 'aria-label': 'Hide the corrections panel', title: 'Hide panel', onclick: () => { state.fdAsideHidden = true; $('fd-work')?.classList.add('aside-hidden'); }}, icon('panel', 18))));
-    body.append(h('p', {class: 'fd-countline'}, `${plural(c.detected, 'issue')} detected · ${plural(c.suggestions, 'suggestion')} · ${c.selected} selected · ${c.applied} applied in this version`));
+    body.append(h('div', {class: `fd-status fd-panel-status ${st.tone}`, role: 'status'}, icon(st.icon, 16), h('span', {}, fdPanelStatus(r, st))));
+    const nextStep = fdNextStep(r, st);
+    if (nextStep) body.append(nextStep);
+    const hardHolds = (r.holds || []).filter(hold => hold.hard);
+    if (hardHolds.length) body.append(h('p', {class: 'fd-coverage', role: 'alert'}, `${plural(hardHolds.length, 'approval hold')}: ${hardHolds.slice(0, 2).map(hold => hold.text || hold.code).join(' ')}${hardHolds.length > 2 ? ` (${hardHolds.length - 2} more listed below.)` : ''}`));
+    if (hardHolds.length > 2) body.append(h('details', {class: 'fd-hold-details'}, h('summary', {}, `Show all ${hardHolds.length} approval holds`), h('ul', {}, hardHolds.map(hold => h('li', {}, hold.text || hold.code)))));
+    const cov = r.review.coverage || {}, dc = r.review.decisions || {};
+    body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(c.detected, 'open issue')}${r.review.counts?.info ? ` (+${r.review.counts.info} for information)` : ''} · ${c.kept} kept as recorded · ${c.deferred} waiting on the source · ${c.confirmed} confirmed · ${plural(c.suggestions, 'suggestion')} · ${c.selected} selected · ${c.applied} applied in this version`));
+    const rc = r.review.reconcile;
+    if (rc) body.append(h('details', {class: 'fd-recon'}, h('summary', {}, `All ${fmt(rc.total)} findings, accounted for ${rc.adds_up ? '✓' : '(do not add up: report this)'}`),
+      h('dl', {class: 'fd-kv'}, ...[['Open, need a decision', rc.open], ['Waiting on the source owner', rc.deferred], ['Confirmed, need a correction', rc.confirmed],
+        ['Kept as recorded by a person on this version', rc.kept_by_person], ['Kept by an earlier record (no cell named on some)', rc.kept_earlier_record],
+        ['Set aside by Dex (recommendation, not a decision)', rc.set_aside_by_claude], ['Corrected in a later version', rc.corrected], ['For information only', rc.informational]]
+        .flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, fmt(v))])),
+      rc.ambiguous_earlier_records ? h('p', {class: 'fd-hint'}, `${rc.ambiguous_earlier_records} open findings sit on rows where an earlier “fine as is” did not say which cell; they are open until reviewed again.`) : null));
+    if (cov.truncated || cov.not_listed) body.append(h('p', {class: 'fd-coverage', role: 'alert'}, icon('lock', 14),
+      ` The checks found ${fmt(cov.findings_total)} things but this version stored only ${fmt(cov.findings_listed)}, so ${fmt(cov.not_listed)} cannot be reviewed here `
+      + `(${Object.entries(cov.by_code || {}).filter(([, v]) => v.total > v.listed).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${fmt(v.listed)} of ${fmt(v.total)} stored`).join('; ')}). `
+      + 'Approval is blocked until the report is re-checked; re-checking stores every finding.'));
+    if (dc.stale) body.append(h('p', {class: 'fd-coverage', role: 'note'}, icon('warn', 14), ` ${plural(dc.stale, 'earlier decision')} no longer match${dc.stale === 1 ? 'es' : ''} what the finding says now, so ${dc.stale === 1 ? 'it is' : 'they are'} not applied. Decide again.`));
+    if (state.decisionPending) body.append(h('p', {class: 'fd-saving', role: 'status'}, h('span', {class: 'spin'}), ' Saving your decision…'));
+    if (state.decisionFailed) body.append(h('div', {class: 'fd-failed', role: 'alert'}, icon('warn', 14), ' ', state.decisionFailed.message,
+      state.decisionFailed.retry ? h('button', {type: 'button', class: 'btn small', onclick: () => fdSendDecision(state.decisionFailed.retry)}, 'Try again') : null,
+      h('button', {type: 'button', class: 'btn small subtle', onclick: () => { state.decisionFailed = null; drawSide(); }}, 'Dismiss')));
     const step = c.selected ? 2 : 1;
     body.append(h('ol', {class: 'fd-steps', 'aria-label': 'Steps'}, ['Compare', 'Preview', 'Recheck'].map((t, n) => h('li', {class: n + 1 === step ? 'on' : n + 1 < step ? 'done' : '', 'aria-current': n + 1 === step ? 'step' : null}, `${n + 1} ${t}`))));
     // a report that is not ready says why, with one clear next step
-    const auto = fdAutoSummary(r); if (auto) body.append(auto);
-    const nextStep = fdNextStep(r, st);
-    if (nextStep) body.append(nextStep);
-    if (!items.length) { body.append(fdClean(r, st)); return; }
+    if (r.review.page && !r.review.page.complete) body.append(h('p', {class: 'fd-coverage', role: 'alert'}, `Only ${(r.review.issues || []).length} of ${r.review.page.issues_total} active and ${(r.review.dismissed || []).length} of ${r.review.page.dismissed_total} set-aside findings loaded. Counts below cover loaded occurrences only. Reopen the report to load the rest; do not treat missing items as resolved.`));
+    const auto = fdAutoSummary(r);
+    const historyGroups = auto ? fdHistoryGroups(r.auto_fixed) : [];
+    const historyApplied = historyGroups.filter(g => ['applied', 'removed', 'moved'].includes(g.status)).reduce((n, g) => n + g.entries.length, 0);
+    const historyRecommendations = historyGroups.filter(g => g.status === 'recommendation').reduce((n, g) => n + g.entries.length, 0);
+    const appendHistory = () => { if (auto) body.append(h('details', {class: 'fd-history-overview'}, h('summary', {}, `History · ${plural(historyApplied, 'applied change')} · ${plural(historyRecommendations, 'AI recommendation')}`), auto)); };
+    if (!items.length) { body.append(fdClean(r, st)); appendHistory(); return; }
     body.append(h('div', {class: 'fd-tiers', role: 'tablist', 'aria-label': 'Kinds of correction'}, TIERS.map(([id, label]) => {
-      const gs = groups.filter(g => g.tier === id), recs = gs.reduce((n, g) => n + g.records, 0);
+      const gs = groups.filter(g => g.tier === id), recs = fdRecordCount(gs.flatMap(g => g.items));
       return h('button', {type: 'button', role: 'tab', class: id === tier ? 'on' : '', 'aria-selected': String(id === tier), disabled: !gs.length,
         onclick: () => { state.fdTier = id; state.fdCur = null; drawSide(); }},
-        h('span', {}, label), h('b', {'aria-label': 'open'}, String(gs.reduce((n, g) => n + g.open, 0))),
-        h('small', {}, gs.length ? `${plural(gs.length, 'group')} · ${plural(recs, 'record')}${gs.some(g => g.open < g.items.length) ? ` · ${gs.reduce((n, g) => n + g.items.length - g.open, 0)} decided` : ''}` : 'none'));
+        h('span', {}, label), id === 'aside' ? h('b', {'aria-label': 'set aside'}, String(gs.reduce((n, g) => n + g.items.length, 0))) : h('b', {'aria-label': 'unresolved'}, String(gs.reduce((n, g) => n + g.unresolved, 0))),
+        h('small', {}, gs.length ? `${plural(gs.length, 'group')} · ${plural(recs, 'record')}${gs.some(g => g.unresolved < g.items.length) ? ` · ${gs.reduce((n, g) => n + g.items.length - g.unresolved, 0)} set aside` : ''}` : 'none'));
     })));
+    if (!fdMode() || fdMode() === 'unchanged') { body.append(h('p', {class: 'fd-hint'}, 'Choose Review manually or AI prepares suggestions above to select corrections.')); appendHistory(); return; }
     const tierGroups = groups.filter(g => g.tier === tier);
     const cur = items.find(x => x.key === state.fdCur) || null;
     if (cur) body.append(fdCard(cur, groups));
@@ -873,14 +984,22 @@
       const selectable = g.items.filter(x => x.selectable && x.state === 'open' && (x.evidence === 'source' || x.evidence === 'mechanical'));
       return h('section', {class: 'fd-group' + (cur && cur.group === g.key ? ' cur' : '')},
         h('button', {type: 'button', class: 'fd-grouphead', 'aria-expanded': String(!!cur && cur.group === g.key), onclick: () => fdOpen(g.items.find(x => x.state === 'open') || g.items[0])},
-          h('span', {class: 'fd-gtitle'}, g.open ? '' : icon('ok', 14), g.open ? '' : ' ', g.title),
-          h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'item')} · ${plural(g.records, 'record')}${g.open < g.items.length ? ` · ${g.items.length - g.open} decided` : ''}`)),
-        selectable.length > 1 || (selectable.length === 1 && g.items.length === 1 && g.tier === 'format') ? h('button', {type: 'button', class: 'btn small fd-selectall', onclick: () => fdSelect(selectable, true)},
-          `Select ${selectable.length === 1 ? 'it' : 'all ' + selectable.length} for preview`) : null,
-        g.tier === 'review' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', onclick: () => fdDecideAll(g.items.filter(x => x.state === 'open'), 'keep')},
-          `Keep all ${g.open} as recorded`) : null);
+          h('span', {class: 'fd-gtitle'}, g.unresolved ? '' : icon('ok', 14), g.unresolved ? '' : ' ', g.title),
+          h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'item')} · ${plural(g.records, 'record')}${g.unresolved ? ` · ${g.unresolved} unresolved` : ''}`)),
+        h('details', {class: 'fd-occurrences'}, h('summary', {}, `Show ${plural(g.items.length, 'occurrence')}`),
+          h('ul', {}, g.items.map(it => h('li', {'data-finding-id': it.key},
+            h('button', {type: 'button', class: 'btn small', onclick: () => fdOpen(it)}, `${it.sheet || 'Report'}${it.cell ? ' · ' + it.cell : it.row ? ' · row ' + it.row : ''} · ${it.state}`),
+            h('span', {}, it.text || it.reason))))),
+        r.review.page?.complete !== false && g.tier !== 'format' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', disabled: state.decisionPending || null,
+          onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'open'}; drawSide(); }}, `Keep ${g.open} as recorded…`) : null,
+        r.review.page?.complete !== false && g.items[0].state === 'claude' ? h('div', {class: 'fd-cardacts'},
+          h('button', {type: 'button', class: 'btn small', disabled: state.decisionPending || null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'claude',
+            reason: 'Agreed with Claude: ' + (g.items[0].issue?.claude?.reason || g.items[0].issue?.verdict_reason || '')}; drawSide(); }}, `Agree with Dex for ${g.items.length}…`),
+          h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || null, onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reopen', which: 'claude'}; drawSide(); }}, `Put ${g.items.length} back for review…`)) : null,
+        state.fdBatch && state.fdBatch.group === g.key ? fdBatchForm(g) : null);
     })));
     if (tier === 'blocker' && (r.holds || []).some(x => x.hard)) body.append(h('div', {class: 'fd-hold'}, icon('lock', 16), h('span', {}, 'Internal approval blocked', h('small', {}, (r.holds || []).filter(x => x.hard).map(x => x.text).join(' ')))));
+    appendHistory();
   }
   // ---------- the app fixes what it can by itself (new version, original kept), then shows only what needs a person
   function fdAutoEligible(r) {
@@ -889,67 +1008,82 @@
     const open = allIssues(r.review).filter(i => i.severity !== 'info').length;
     return open > 0 || (state.fixes || []).some(f => f.sure);
   }
-  async function fdMaybeAutoFix(hash) {
-    const r = state.report; if (!r || r.file_hash !== hash) return;
-    const resume = r.auto_fixed?.status === 'running' && !r.approval;
-    if (!resume && !fdAutoEligible(r)) return;
-    (state.autoTried ||= new Set()); if (state.autoTried.has(hash) || state.autoFixing) return; state.autoTried.add(hash);
-    fdAutoLoop(hash, resume ? 'ai' : 'sure');
-  }
   // the pass runs as short steps (sure fixes, then Claude in batches, then one SharePoint check), so no request runs
   // long and the rest of the page keeps loading; the reviewer can keep reading while it works
   async function fdAutoLoop(hash, phase) {
-    const chain = new Set([hash]); let cur = hash, out = null, round = 0;
-    state.autoFixing = hash; state.autoChain = chain;
-    const say = text => { state.autoProgress = text; if (state.sideTab === 'fixes' && chain.has(state.selected)) drawSide(); };
-    try {
-      while (phase) {
-        say(phase === 'sure' ? 'Applying the SharePoint values and clean-ups…' : phase === 'ai' ? `Claude is working through the rest (batch ${++round})…` : 'Checking the fixed version against SharePoint…');
-        out = await api('/api/spreadsheets/auto-fix', {file_hash: cur, phase});
-        cur = out.item.file_hash; chain.add(cur); state.autoFixing = cur; phase = out.next;
-      }
-      const s = out.auto_fixed || {}, n = (s.changed || []).length + (s.removed || []).length + (s.moved || []).length, fine = (s.fine || []).length;
-      state.autoFixing = null;
-      toast(n || fine ? `Fixed ${plural(n, 'thing')}${fine ? ` and confirmed ${fine} fine` : ''} automatically. Every fix can be reverted.` : 'Nothing could be fixed automatically; what is left needs a person.');
-      loadList();
-      if (chain.has(state.selected)) { if (state.selected !== cur) select(cur); else openReport(cur, true); }
-    } catch (e) {
-      state.autoFixing = null;
-      if (chain.has(state.selected)) { toast(`The automatic pass stopped: ${e.message} What it already fixed is kept.`, true); loadList(); if (state.selected !== cur) select(cur); else drawSide(); }
+    toast('Automatic changes are paused. Review and apply cell corrections instead.', true);
+  }
+  // Group recorded history without changing, deduplicating or reclassifying any occurrence.
+  function fdHistoryGroups(summary) {
+    const groups = new Map();
+    for (const [list, category] of [['changed', 'applied'], ['fine', 'recommendation'], ['removed', 'removed'], ['moved', 'moved']]) {
+      (summary[list] || []).forEach((entry, index) => {
+        const blank = v => v === '' || v == null;
+        const action = category === 'applied' ? (blank(entry.before) && !blank(entry.after) ? 'Blank cells filled' : !blank(entry.before) && blank(entry.after) ? 'Cells cleared' : 'Cell values changed')
+          : category === 'recommendation' ? 'AI recommendations to keep as recorded' : category === 'removed' ? 'Rows removed' : 'Rows moved';
+        const rule = entry.rule_id || entry.rule || entry.code || entry.reason || 'Unspecified recorded reason';
+        const status = entry.reverted ? 'reverted' : category;
+        const key = JSON.stringify([category, status, rule, entry.sheet || null, entry.to_sheet || null, action,
+          entry.source || null, entry.by || null, entry.severity || null, entry.risk || null, entry.kind || null,
+          entry.decision || null, entry.held || false, entry.hold || null]);
+        if (!groups.has(key)) groups.set(key, {key, category, status, action, rule, sheet: entry.sheet || null, entries: []});
+        groups.get(key).entries.push({id: `${list}:${index}`, entry});
+      });
     }
+    return [...groups.values()].map(group => ({...group,
+      cells: new Set(group.entries.filter(x => x.entry.sheet && x.entry.cell).map(x => JSON.stringify([x.entry.sheet, String(x.entry.cell).toUpperCase()]))).size,
+      rows: new Set(group.entries.filter(x => x.entry.sheet && (x.entry.row || /[0-9]+$/.test(x.entry.cell || '')))
+        .map(x => JSON.stringify([x.entry.sheet, Number(x.entry.row || String(x.entry.cell).match(/[0-9]+$/)[0])]))).size}));
+  }
+  function fdHistoryGroup(g) {
+    const pageSize = 25, total = g.entries.length;
+    let page = 0;
+    const summary = h('summary', {}, h('b', {}, `${g.action} · ${plural(total, 'occurrence')}`),
+      h('span', {}, `${g.sheet || 'Report-level'} · ${plural(g.cells, 'distinct cell')} · ${plural(g.rows, 'distinct row')}`),
+      h('small', {}, String(g.rule)));
+    const range = h('p', {class: 'fd-history-range', tabindex: '-1', 'aria-live': 'polite'});
+    const list = h('ul', {class: 'fd-history-page', tabindex: '0', 'aria-label': 'Recorded occurrences on this page'});
+    const previous = h('button', {type: 'button', class: 'btn small', onclick: () => { if (page > 0) { page--; render(true); } }}, 'Previous');
+    const next = h('button', {type: 'button', class: 'btn small', onclick: () => { if ((page + 1) * pageSize < total) { page++; render(true); } }}, 'Next');
+    const group = h('details', {class: 'fd-history-group', 'data-history-key': g.key}, summary,
+      h('p', {class: 'fd-hint fd-history-notice'}, g.status === 'reverted' ? 'Already reverted in the recorded history.' : g.category === 'recommendation'
+        ? 'This recommendation does not resolve a source hold. Use the individual finding controls below to review it.'
+        : 'Automatic reversal is paused. Review a new manual correction against the current cells, or open the earlier version.'),
+      range, h('nav', {class: 'fd-history-pages', 'aria-label': 'Occurrence pages'}, previous, next,
+        h('button', {type: 'button', class: 'btn small', onclick: () => { group.open = false; summary.focus(); }}, 'Collapse')), list);
+    function render(focus) {
+      const start = page * pageSize;
+      range.textContent = `Occurrences ${start + 1}–${Math.min(start + pageSize, total)} of ${total} · ${pageSize} per page`;
+      previous.disabled = page === 0; next.disabled = start + pageSize >= total;
+      list.replaceChildren(...g.entries.slice(start, start + pageSize).map(({id, entry: x}) => h('li', {'data-history-id': id},
+        h('div', {}, h('b', {}, x.sheet ? `${x.sheet}${x.cell ? ' · ' + x.cell : x.row ? ' · row ' + x.row : ''}` : 'Report-level occurrence'),
+          g.category === 'applied' ? h('p', {}, `${showWs(x.before)} → ${showWs(x.after)}`) : h('p', {}, x.text || (x.to_sheet ? `Moved to ${x.to_sheet}` : g.action)),
+          h('small', {}, [x.source, x.by, x.reason !== g.rule ? x.reason : null].filter(Boolean).join(' · '))))));
+      list.scrollTop = 0;
+      if (focus) range.focus();
+    }
+    render(false);
+    return group;
   }
   function fdAutoSummary(r) {
-    if (state.autoFixing && state.autoChain?.has(r.file_hash)) return h('div', {class: 'fd-auto working', role: 'status'}, h('span', {class: 'spin'}), h('div', {}, h('b', {}, 'Fixing what can be fixed…'),
-      h('p', {}, state.autoProgress || 'Starting…'), h('p', {}, 'You can keep reading the sheet. Your original stays as it is; every fix can be reverted.')));
     const s = r.auto_fixed; if (!s) return null;
-    if (s.status === 'running' && !state.autoFixing) return h('div', {class: 'fd-auto working'}, icon('warn', 18), h('div', {}, h('b', {}, 'The automatic pass stopped part way'),
-      h('p', {}, `${plural((s.changed || []).length, 'fix', 'fixes')} so far are kept.`), h('button', {type: 'button', class: 'btn small', onclick: () => { state.autoTried?.delete(r.file_hash); fdAutoLoop(r.file_hash, 'ai'); }}, 'Continue fixing')));
-    const changed = (s.changed || []).filter(c => !c.reverted), fine = (s.fine || []).filter(f => !f.reverted), rows = [...(s.removed || []), ...(s.moved || [])];
-    const left = fdCounts(), todo = (left.blockers || 0) + (left.review || 0);
-    const total = changed.length + fine.length + rows.length;
-    const revert = async (cells, fineTexts, label) => {
-      toast(`Reverting ${label}…`);
-      try { const out = await api('/api/spreadsheets/revert-fix', {file_hash: r.file_hash, cells, fine: fineTexts, by: myName()});
-        toast(`Reverted ${label}.${cells.length ? ' Saved as a new version; the checks ran again.' : ' It is back on your list.'}`);
-        await loadList(); if (out.item.file_hash !== r.file_hash) select(out.item.file_hash); else openReport(r.file_hash, true);
-      } catch (e) { toast(e.message, true); }
-    };
-    const line = (what, why, by, act) => h('li', {}, h('div', {}, h('b', {}, what), h('small', {}, [by, why].filter(Boolean).join(' · '))), act);
-    return h('section', {class: 'fd-auto', 'aria-label': 'Fixed for you'},
+    const groups = fdHistoryGroups(s);
+    const applied = groups.filter(g => g.status === 'applied' || g.status === 'removed' || g.status === 'moved').reduce((n, g) => n + g.entries.length, 0);
+    const recommendations = groups.filter(g => g.status === 'recommendation').reduce((n, g) => n + g.entries.length, 0);
+    const categories = [['applied', 'Applied cell changes'], ['recommendation', 'AI recommendations, not human decisions'], ['removed', 'Applied row removals'], ['moved', 'Applied row moves'], ['reverted', 'Previously reverted records']];
+    return h('section', {class: 'fd-auto', 'aria-label': 'Recorded changes and recommendations'},
       h('div', {class: 'fd-autohead'}, icon('ok', 18), h('div', {},
-        h('b', {}, total ? `Fixed for you: ${plural(total, 'item')}` : 'Nothing was changed automatically'),
-        h('p', {}, todo ? `${plural(todo, 'item')} left that only a person can decide.` : 'Nothing is left that needs a person.'))),
-      total ? h('details', {class: 'fd-autolist', open: total <= 6 ? true : null}, h('summary', {}, 'What was done'),
-        h('ul', {},
-          changed.map(c => line(`${c.sheet}!${c.cell}: ${showWs(c.before)} → ${showWs(c.after)}`, c.reason, c.by === 'Claude' ? 'Claude' : c.source,
-            h('button', {type: 'button', class: 'btn small', onclick: () => revert([{sheet: c.sheet, cell: c.cell}], [], `${c.sheet}!${c.cell}`)}, 'Revert'))),
-          fine.map(f => line(`Confirmed fine: ${f.text}`, f.reason, 'Claude',
-            h('button', {type: 'button', class: 'btn small', onclick: () => revert([], [f.text], 'that decision')}, 'Revert'))),
-          rows.map(x => line(x.to_sheet ? `${x.sheet} row ${x.row} moved to ${x.to_sheet}` : `${x.sheet} row ${x.row} taken out`, x.reason, 'Claude', null))),
-        h('div', {class: 'fd-autoacts'},
-          changed.length + fine.length > 1 ? h('button', {type: 'button', class: 'btn small', onclick: () => revert(changed.map(c => ({sheet: c.sheet, cell: c.cell})), fine.map(f => f.text), 'all automatic fixes')}, 'Revert all') : null,
-          s.from_hash ? h('a', {href: '#r=' + s.from_hash}, 'Open the version before these fixes') : null)) : null,
-      (s.notes || []).length ? h('p', {class: 'fd-hint'}, s.notes.join(' ')) : null);
+        h('b', {}, `${plural(applied, 'recorded applied change')} · ${plural(recommendations, 'AI recommendation')}`),
+        h('p', {}, 'History only. Suggested changes and unresolved findings are reviewed separately below. Existing holds still apply.'))),
+      s.status === 'running' ? h('p', {class: 'fd-coverage', role: 'note'}, 'This earlier automatic pass stopped part way. Only recorded occurrences are shown; automatic continuation is paused.') : null,
+      ...categories.map(([status, title]) => {
+        const selected = groups.filter(g => g.status === status); if (!selected.length) return null;
+        const count = selected.reduce((n, g) => n + g.entries.length, 0);
+        return h('section', {class: 'fd-history-category', 'data-history-status': status}, h('h3', {}, `${title} · ${plural(count, 'occurrence')}`),
+          ...selected.map(fdHistoryGroup));
+      }),
+      s.from_hash ? h('a', {href: '#r=' + s.from_hash}, 'Open the version before these changes') : null,
+      (s.notes || []).length ? h('details', {}, h('summary', {}, 'Recorded notes'), h('p', {}, s.notes.join(' '))) : null);
   }
   function fdNextStep(r, st) {
     const box = (title, text, button) => h('div', {class: 'fd-next ' + st.tone}, h('b', {}, title), text ? h('p', {}, text) : null, button);
@@ -971,47 +1105,68 @@
         li(!(sp.fields_not_checked || []).length, (sp.fields_not_checked || []).length ? `Not checked: ${sp.fields_not_checked.join(', ')} (no SharePoint column)` : `Fields checked: ${(sp.fields_checked || []).join(', ')}`),
         li(rv.rejected != null, rv.rejected == null ? 'Rejects not recorded: the rate is shown as unavailable' : `Rejects recorded: ${fmt(rv.rejected)}`),
         (sel.authoritative || []).length ? li(true, `One record set: ${(sel.authoritative || []).join(', ')}; summary and photo tabs are not added again`) : null),
-      approved ? h('p', {class: 'fd-hint'}, `Approved by ${r.approval.by} ${ago(r.approval.at)}. Sending to the client is a separate step (More → Send to client…).`)
+      approved ? h('p', {class: 'fd-hint'}, `Approved by ${r.approval.by} ${ago(r.approval.at)}. Sending is paused. Use More → Approval details to review or withdraw approval.`)
         : h('div', {class: 'fd-approve'},
           h('label', {}, 'Your name', h('input', {id: 'fd-approver', value: myName(), autocomplete: 'name'})),
-          h('button', {type: 'button', class: 'btn primary', id: 'fd-approve-btn', onclick: fdApprove}, 'Approve internally'),
+          h('button', {type: 'button', class: 'btn primary', id: 'fd-approve-btn', onclick: (() => { const binding = reviewBinding(r); return () => fdApprove(binding); })()}, 'Approve internally'),
           h('p', {class: 'fd-hint'}, 'Internal approval only. Nothing is emailed; sending to the client is a separate step.')));
   }
   function fdCard(it, groups) {
     const g = groups.find(x => x.key === it.group), inGroup = g.items, pos = inGroup.indexOf(it);
-    const flat = groups.filter(x => x.tier === it.tier).flatMap(x => x.items), at = flat.indexOf(it);
-    const cmp = (label, value, cls) => h('div', {class: 'fd-cmp ' + (cls || '')}, h('b', {}, label), h('span', {}, value == null ? '—' : showWs(value)));
+    // Previous / Next go through what still needs a decision; "include decided" also walks the history
+    const all = groups.filter(x => x.tier === it.tier).flatMap(x => x.items);
+    const flat = state.fdIncludeDecided ? all : all.filter(x => x.state === 'open' || x === it), at = flat.indexOf(it);
+    const cmp = (label, value, cls) => h('div', {class: 'fd-cmp ' + (cls || '')}, h('b', {}, label), h('span', {}, value == null ? (label === 'Report' ? 'No cell value linked' : label === 'Source' ? 'Not available' : 'No change proposed') : showWs(value)));
     const conf = {source: ['Source-backed', 'SharePoint has this value for the same site, list and item.'], mechanical: ['Mechanical', 'Only how the value is written changes.'],
-      ai: ['Claude\'s suggestion', 'Not from a source: check it before selecting.'], guess: ['Needs your judgement', 'Worked out from the rest of the report, not from a source.'],
+      ai: ['Dex\'s suggestion', 'Not from a source: check it before selecting.'], guess: ['Needs your judgement', 'Worked out from the rest of the report, not from a source.'],
       source_only: ['Source value, no change prepared', 'SharePoint has a value, but no safe cell to change was found. Correct it by hand or keep it on hold.'],
       none: ['No source value', 'Nothing supports a change, so the value stays as recorded and the issue stays open.']}[it.evidence];
     const where = [it.sheet, it.cell || (it.row ? 'row ' + it.row : null), it.item ? 'SharePoint item ' + it.item : null].filter(Boolean).join(' · ');
-    const decided = it.state === 'kept' ? `Kept as recorded${it.decidedBy ? ' by ' + it.decidedBy : ''}` : it.state === 'rejected' ? `Suggestion rejected${it.decidedBy ? ' by ' + it.decidedBy : ''}` : it.state === 'selected' ? 'Selected for preview' : null;
+    const dd = it.decision, by = dd ? ` by ${dd.by || 'a reviewer'} ${when2(dd.at) || ''}` : it.decidedBy ? ' by ' + it.decidedBy : '';
+    const decided = it.state === 'kept' ? `Kept as recorded${by}${it.report === '' ? ' (blank stays blank: not recorded, not zero)' : ''}`
+      : it.state === 'deferred' ? `Waiting for ${dd.owner || 'the source owner'}${by}. The finding stays open and the report stays on hold.`
+      : it.state === 'confirmed' ? `Confirmed: needs a correction${by}`
+      : it.state === 'claude' ? `Set aside by Dex${it.issue?.claude?.at ? ' ' + when2(it.issue.claude.at) : ''}. This is Dex's recommendation, not a person's decision: “${it.issue?.claude?.reason || it.issue?.verdict_reason || 'no reason given'}”`
+      : it.state === 'kept_earlier' ? `Kept as is by an earlier record (kept unchanged): “${it.issue?.legacy_record?.reason || it.issue?.verdict_reason || ''}”`
+      : it.state === 'corrected' ? `${it.issue?.verdict_reason || 'Changed in a later version.'}`
+      : it.state === 'rejected' ? `Suggestion rejected${by}` : it.state === 'selected' ? 'Selected for preview' : null;
+    const finding = !!it.issue && !it.fix, busy = state.decisionPending || null;
     return h('article', {class: 'fd-card ' + it.tier, 'aria-label': 'Selected correction', id: 'fd-card'},
       h('div', {class: 'fd-cardtop'}, icon(it.tier === 'blocker' ? 'x' : it.tier === 'format' ? 'note' : 'warn', 20),
-        h('div', {}, h('h3', {}, g.title), h('p', {}, `${where || 'Whole report'} · item ${pos + 1} of ${inGroup.length}`)),
+        h('div', {}, h('h3', {}, it.cell ? `Cell ${it.cell}` : it.row ? `Row ${it.row}` : 'Report finding'), h('p', {title: it.sheet || ''}, `Item ${pos + 1} of ${inGroup.length}${it.item ? ' · source item ' + it.item : ''}`)),
         h('button', {type: 'button', class: 'fd-iconbtn', 'aria-label': 'Close this correction', onclick: () => { state.fdCur = null; drawSide(); }}, icon('x', 16))),
       it.text && it.text !== g.title ? h('p', {class: 'fd-text'}, it.text) : null,
       h('div', {class: 'fd-cmps'}, cmp('Report', it.report ?? (it.fix ? '' : null)), cmp('Source', it.source, it.source == null ? 'empty' : ''), cmp('Proposed', it.proposed, it.proposed == null ? 'empty' : 'prop')),
       h('p', {class: 'fd-reason'}, it.reason),
+      it.fix && !it.fp ? h('p', {class: 'fd-hint'}, 'Unselected suggestions stay unchanged. Only selected changes are included in your preview.') : null,
       h('p', {class: 'fd-conf ' + it.evidence}, h('b', {}, conf[0]), ' ', conf[1]),
-      decided ? h('p', {class: 'fd-decided'}, icon('ok', 14), ' ', decided, it.note ? ` · “${it.note}”` : '') : null,
+      it.legacyNote ? h('p', {class: 'fd-coverage'}, icon('warn', 14), ' ', it.legacyNote) : null,
+      it.previous ? h('p', {class: 'fd-coverage'}, icon('warn', 14), ` ${it.previous.note} (Earlier: ${it.previous.action} by ${it.previous.by || 'a reviewer'}${it.previous.reason ? ', “' + it.previous.reason + '”' : ''}.)`) : null,
+      decided ? h('div', {class: 'fd-decided'}, h('p', {}, icon('ok', 14), ' ', decided),
+        it.note ? h('p', {}, `Reason: “${it.note}”`) : null,
+        dd && (dd.evidence || []).length ? h('p', {}, 'Evidence: ' + dd.evidence.join('; ')) : null,
+        dd && dd.carried_from ? h('p', {}, 'Decided on an earlier version of this report; it still says exactly the same thing here.') : null) : null,
+      state.fdForm && state.fdForm.key === it.key ? fdDecisionForm(it) : null,
       h('div', {class: 'fd-cardacts'},
-        it.selectable ? h('button', {type: 'button', class: 'btn ' + (it.state === 'selected' ? '' : 'primary'), onclick: () => fdSelect([it], it.state !== 'selected')},
-          it.state === 'selected' ? 'Remove from preview' : 'Select for preview') : null,
-        it.fix && it.state !== 'rejected' ? h('button', {type: 'button', class: 'btn', onclick: () => fdDecide(it, 'reject')}, 'Reject suggestion') : null,
-        it.state !== 'kept' ? h('button', {type: 'button', class: 'btn', onclick: () => fdDecide(it, 'keep')}, it.report === '' || it.report == null ? 'Keep blank' : 'Keep as recorded') : null,
-        it.state === 'open' && !it.fix && inGroup.filter(x => x.state === 'open').length > 1 ? h('button', {type: 'button', class: 'btn', onclick: () => fdDecideAll(inGroup.filter(x => x.state === 'open'), 'keep')},
-          `${it.report === '' || it.report == null ? 'Keep all' : 'Keep all'} ${inGroup.filter(x => x.state === 'open').length} ${it.report === '' || it.report == null ? 'blank' : 'as recorded'}`) : null,
-        it.state !== 'open' ? h('button', {type: 'button', class: 'btn subtle', onclick: () => fdDecide(it, 'reopen')}, 'Undo decision') : null,
-        h('button', {type: 'button', class: 'btn subtle', onclick: () => fdEvidence(it)}, icon('db', 15), ' Source evidence')),
-      it.cell && it.state !== 'kept' ? fdOwnValueForm(it) : null,
-      !it.fix && !it.own && it.cell ? h('button', {type: 'button', class: 'btn subtle fd-askai', disabled: state.aiFixing || null, onclick: () => { toast('Claude is drafting fixes for the open items…'); runAiFixes(false); }},
-        state.aiFixing ? 'Claude is drafting fixes…' : 'Ask Claude to suggest a fix') : null,
-      h('details', {class: 'fd-notebox', open: it.note ? true : null}, h('summary', {}, icon('note', 14), ' Note'),
+        (it.selectable || it.own) ? h('button', {type: 'button', class: 'btn ' + (it.state === 'selected' ? '' : 'primary'), onclick: () => fdSelect([it], it.state !== 'selected')},
+          it.state === 'selected' ? 'Remove from preview' : 'Include in preview') : null,
+        h('details', {class: 'fd-source-review'}, h('summary', {class: 'btn subtle'}, 'Source review'),
+        it.fix && it.fp && it.state !== 'kept' ? h('button', {type: 'button', class: 'btn', onclick: () => fdDecide(it, 'keep')}, it.report === '' ? 'Keep blank' : 'Keep as recorded') : null,
+        finding && it.state === 'open' ? h('button', {type: 'button', class: 'btn', disabled: busy, onclick: () => { state.fdForm = {item: it, key: it.key, action: 'reject'}; drawSide(); }},
+          it.report === '' ? 'Keep blank…' : 'Keep as recorded…') : null,
+        finding && it.state === 'open' ? h('button', {type: 'button', class: 'btn', disabled: busy, onclick: () => { state.fdForm = {item: it, key: it.key, action: 'defer'}; drawSide(); }}, 'Await source owner…') : null,
+        finding && it.state === 'open' ? h('button', {type: 'button', class: 'btn subtle', disabled: busy, onclick: () => fdSendDecision({ids: [it.key], action: 'confirm', from: it})}, 'Confirm it needs a correction') : null,
+        dd ? h('button', {type: 'button', class: 'btn subtle', disabled: busy, onclick: () => fdSendDecision({action: 'undo', undo_of: dd.decision_id, from: it})}, 'Undo source decision') : null,
+        it.state === 'claude' ? h('button', {type: 'button', class: 'btn', disabled: busy, onclick: () => { state.fdForm = {item: it, key: it.key, action: 'reject', reason: 'Agreed with Claude: ' + (it.issue?.claude?.reason || it.issue?.verdict_reason || '')}; drawSide(); }}, 'Agree with Dex…') : null,
+        it.state === 'claude' || it.state === 'kept_earlier' ? h('button', {type: 'button', class: 'btn subtle', disabled: busy, onclick: () => fdSendDecision({ids: [it.key], action: 'reopen', reason: 'Put back for review', from: it})}, it.state === 'claude' ? 'Put back for review' : 'Review again') : null,
+        it.state === 'corrected' && it.issue?.corrected?.file_hash ? h('a', {class: 'btn subtle', href: '#r=' + it.issue.corrected.file_hash}, `Open v${it.issue.corrected.revision || ''}`) : null,
+        h('button', {type: 'button', class: 'btn subtle', onclick: () => fdEvidence(it)}, icon('db', 15), ' Source evidence'))),
+      fdConflict(it) ? fdCoordinatedForm(it) : it.cell && it.state !== 'kept' ? h('details', {class: 'fd-edit-value'}, h('summary', {class: 'btn subtle'}, 'Edit value'), fdOwnValueForm(it)) : null,
+      finding ? null : h('details', {class: 'fd-notebox', open: it.note ? true : null}, h('summary', {}, icon('note', 14), ' Note'),
         h('textarea', {id: 'fd-note', 'aria-label': 'Review note', rows: '2', placeholder: 'Why you kept, rejected or changed this…'}, it.note || ''),
         h('button', {type: 'button', class: 'btn small', onclick: () => fdDecide(it, 'note', $('fd-note').value)}, 'Save note')),
-      it.tier === 'blocker' && it.evidence === 'none' ? h('p', {class: 'fd-holdnote'}, icon('lock', 14), ' Keeping it as recorded does not clear the hold; the report stays blocked until the source question is settled.') : null,
+      it.tier === 'blocker' && it.evidence === 'none' ? h('p', {class: 'fd-holdnote'}, icon('lock', 14), ' A blocker can only be kept as recorded with evidence of what you checked. While it waits for the source owner the report stays on hold.') : null,
+      h('label', {class: 'fd-incl'}, h('input', {type: 'checkbox', checked: state.fdIncludeDecided || null, onchange: e => { state.fdIncludeDecided = e.target.checked; drawSide(); }}), ' Include decided items in Previous / Next'),
       h('div', {class: 'fd-nav'},
         h('button', {type: 'button', class: 'btn small', disabled: at <= 0, onclick: () => fdOpen(flat[at - 1]), 'aria-keyshortcuts': 'k'}, icon('prev', 15), ' Previous'),
         h('span', {}, `${at + 1} of ${flat.length}`),
@@ -1021,30 +1176,45 @@
   async function fdOpen(it) {
     if (!it) return;
     state.fdCur = it.key; state.fdTier = it.tier;
-    if (it.sheet && (!state.grid || state.grid.sheet !== it.sheet)) { fdKeepScroll(); await loadGrid(it.sheet, true); }
+    if (it.sheet && (it.cell || it.row) && (!state.grid || state.grid.sheet !== it.sheet)) { fdKeepScroll(); await loadGrid(it.sheet, true); }
     state.gridCell = it.cell || (it.row ? `A${it.row}` : null); state.gridRow = it.row || null;
     drawSide(); drawGrid();
     const td = state.gridCell && document.querySelector(`#sheet-block td[data-cell="${state.gridCell}"]`), wrap = document.querySelector('#sheet-block .gridwrap');
     if (td && wrap) reveal(wrap, td, true);
     if (document.body.classList.contains('fd-narrow')) document.body.classList.add('fd-panel-open');
-    $('fd-card')?.querySelector('h3')?.setAttribute('tabindex', '-1');
+    const card = $('fd-card');
+    card?.querySelector('h3')?.setAttribute('tabindex', '-1');
+    card?.scrollIntoView({block: 'nearest', behavior: 'smooth'});
   }
   function fdSelect(list, on) {
-    const dec = store.get(decisionsKey(), {});
-    for (const it of list) if (it.fix) { if (on) dec[it.fix.id] = {state: 'accepted', after: it.proposed}; else delete dec[it.fix.id]; }
-    store.set(decisionsKey(), dec);
+    if (list.some(it => it.binding && (it.binding.file_hash !== state.report?.file_hash || it.binding.expected_check_hash !== state.report?.check_hash))) { toast('The report changed. Review this correction again.', true); return; }
+    const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
+    for (const it of list) {
+      if (on) { if (it.fix) dec[it.fix.id] = {state: 'accepted', after: it.proposed}; }
+      else {
+        if (it.fix) delete dec[it.fix.id];
+        if (it.sheet && it.cell) {
+          delete edits[editId(it.sheet, it.cell)];
+          for (const f of state.fixes || []) if (f.sheet === it.sheet && String(f.cell).toUpperCase() === String(it.cell).toUpperCase()) delete dec[f.id];
+        }
+      }
+    }
+    store.set(decisionsKey(), dec); store.set(editsKey(), edits);
     toast(on ? `${plural(list.length, 'change')} selected for preview. Nothing changes until you preview and apply.` : 'Removed from the preview.');
     fdRefresh();
   }
+  // what the reviewer is looking at, sent with every decision: the check run, and the exact reading of each finding
+  function shownFor(keys) {
+    const rv = state.report.review || {};
+    const all = new Map([...(rv.issues || []), ...(rv.dismissed || [])].map(x => [x.key, x.fp]));
+    return {run: rv.run || {}, seen: Object.fromEntries(keys.filter(k => all.has(k)).map(k => [k, all.get(k)]))};
+  }
   async function fdDecide(it, action, note) {
-    try {
-      const by = myName();
-      const out = await api('/api/spreadsheets/decision', {file_hash: state.report.file_hash, key: it.key, action, note: note || '', by});
-      state.report.review_decisions = out.decisions;
-      if (it.fix) { const dec = store.get(decisionsKey(), {}); if (action === 'reject') dec[it.fix.id] = {state: 'rejected'}; else if (action === 'reopen' || action === 'keep') delete dec[it.fix.id]; store.set(decisionsKey(), dec); }
-      if (action === 'note' || action === 'reopen') toast(action === 'note' ? 'Note saved with this version.' : 'Decision undone.');
-      if (action === 'reject' || action === 'keep') fdAdvance(it); else fdRefresh();
-    } catch (e) { toast(e.message, true); }
+    if (!it.fp || action === 'note') { toast('Use the finding review controls to record a decision with evidence.', true); return; }
+    if (action === 'keep' || action === 'reject') {
+      state.fdForm = {item: it, key: it.key, action: 'reject', reason: note || ''}; drawSide(); return;
+    }
+    return fdSendDecision({...findingBinding([it]), ids: [it.key], action, from: it});
   }
   // after a decision: the next open item in the same group, then the next group of the same kind, then the next kind;
   // the toast says how many are left so every click visibly moves forward
@@ -1066,35 +1236,175 @@
   }
   // the reviewer's own value for a cell: goes into the preview like any other change, applied only with the others
   function fdOwnValueForm(it) {
+    const at = splitCell(it.cell), grid = state.grid;
+    it = {...it, editBefore: grid?.sheet === it.sheet && at ? grid.rows[at[1] - 1]?.[at[0]] ?? it.report ?? '' : it.report ?? ''};
     const input = h('input', {value: it.own ? it.own.after : '', placeholder: it.fix ? 'Or type a different value' : 'Type the correct value', 'aria-label': `New value for ${it.sheet}!${it.cell}`});
     return h('form', {class: 'fd-own', onsubmit: e => { e.preventDefault(); fdOwnValue(it, input.value); }},
-      input, h('button', {type: 'submit', class: 'btn ' + (it.fix ? '' : 'primary')}, it.own ? 'Update value' : 'Use this value'),
-      it.own ? h('button', {type: 'button', class: 'btn subtle', onclick: () => fdOwnValue(it, null)}, 'Remove') : null);
+      input, h('button', {type: 'submit', class: 'btn primary'}, 'Use this value'));
   }
   function fdOwnValue(it, value) {
+    if (it.binding.file_hash !== state.report?.file_hash || it.binding.expected_check_hash !== state.report?.check_hash) { toast('The report changed. Review this cell again.', true); return; }
     const edits = store.get(editsKey(), {}), id = editId(it.sheet, it.cell), dec = store.get(decisionsKey(), {});
     if (value === null) { delete edits[id]; store.set(editsKey(), edits); toast('Your value was removed from the preview.'); fdRefresh(); return; }
-    const g = state.grid, at = splitCell(it.cell), shown = g && g.sheet === it.sheet && at ? g.rows[at[1] - 1]?.[at[0]] : undefined;
-    edits[id] = {sheet: it.sheet, cell: it.cell, before: shown ?? it.report ?? '', after: value, header: '', source: 'Your edit', reason: 'Typed by the reviewer' + (it.note ? ': ' + it.note : '')};
+    edits[id] = {sheet: it.sheet, cell: it.cell, before: it.editBefore ?? it.report ?? '', after: value, header: '', source: 'Your edit', reason: 'Typed by the reviewer' + (it.note ? ': ' + it.note : '')};
     if (it.fix) delete dec[it.fix.id];
     store.set(editsKey(), edits); store.set(decisionsKey(), dec);
     toast(`${it.sheet}!${it.cell} will be ${value === '' ? 'blank' : '“' + value + '”'} in the new version. Preview to apply.`);
-    fdAdvance(it);
+    fdRefresh();
   }
   async function fdDecideAll(list, action) {
+    toast('Open the finding group and use its scoped batch review form.', true);
+  }
+  // A source conflict (a comment says "1 broken clip" while OK, NOK, Condition and Recorded defect say nothing went
+  // wrong) is never fixed one cell at a time: once the source owner has confirmed the outcome (the finding is marked
+  // "Confirm it needs a correction"), the reviewer types the confirmed values for every affected field together and
+  // they go into the preview as one change set. Nothing is filled in for them.
+  const CONFLICT_FIELDS = [['OK', /^(qty\.?\s*)?ok$|^certified|^good$/i], ['NOK', /^(qty\.?\s*)?nok$|^rejected$|^reject(ed)? qty/i], ['Condition', /^condition$/i], ['Recorded defect', /^recorded defect|^defect$/i]];
+  const fdConflict = it => !!it.issue && !it.fix && it.row && /conflict|broken|comment/i.test(`${it.issue.code || ''} ${it.text || ''}`) && it.issue.severity === 'high';
+  function fdRowFields(sheet, row) {
+    const g = state.grid; if (!g || g.sheet !== sheet) return null;
+    for (let r = 0; r < Math.min(15, g.rows.length); r++) {
+      const head = (g.rows[r] || []).map(v => String(v ?? '').trim());
+      const found = CONFLICT_FIELDS.map(([label, re]) => { const c = head.findIndex(v => re.test(v)); return c >= 0 ? {label, cell: colName(c) + row, value: g.rows[row - 1]?.[c] ?? ''} : null; });
+      if (found.filter(Boolean).length >= 2) return found.filter(Boolean);
+    }
+    return null;
+  }
+  function fdCoordinatedForm(it) {
+    const fields = fdRowFields(it.sheet, it.row);
+    if (it.state !== 'confirmed') return h('p', {class: 'fd-hint'}, icon('lock', 14), ' No single-cell fix is offered for a source conflict. Record the source owner\'s answer first (Await source owner…), then mark it "Confirm it needs a correction" to prepare one change set for every affected field.');
+    if (!fields) return h('p', {class: 'fd-hint'}, 'Open the sheet this finding is on to prepare the change set.');
+    const inputs = fields.map(f => h('input', {'aria-label': `${f.label} (${f.cell})`, placeholder: `${f.label}: now ${f.value === '' ? '(blank)' : f.value}`}));
+    return h('form', {class: 'fd-decide', onsubmit: e => { e.preventDefault();
+        if (it.binding.file_hash !== state.report?.file_hash || it.binding.expected_check_hash !== state.report?.check_hash) { toast('The report changed. Review the source conflict again.', true); return; }
+        const edits = store.get(editsKey(), {}), changed = [];
+        fields.forEach((f, n) => { const v = inputs[n].value.trim(); if (v === '') return; changed.push(f);
+          edits[editId(it.sheet, f.cell)] = {sheet: it.sheet, cell: f.cell, before: f.value, after: v, header: f.label, source: 'Your edit', change_set: 'set-' + it.row + '-' + it.sheet,
+            reason: `Confirmed by the source owner (${it.key}); one change set with ${fields.map(x => x.label).join(', ')}`}; });
+        if (!changed.length) { toast('Type the confirmed values first.', true); return; }
+        for (const f of changed) edits[editId(it.sheet, f.cell)].change_set_size = changed.length;   // applied together or not at all
+        store.set(editsKey(), edits); toast(`${plural(changed.length, 'cell')} added to the preview as one change set. Nothing is applied until you preview it.`); fdRefresh(); }},
+      h('p', {class: 'fd-decide-head'}, h('b', {}, 'Coordinated correction'), ` · ${it.sheet} row ${it.row}`),
+      h('p', {class: 'fd-hint'}, 'Type the values the source owner confirmed. Leave a field empty to keep it as recorded.'),
+      ...fields.map((f, n) => h('label', {class: 'fd-field'}, `${f.label} · ${f.cell} · now ${f.value === '' ? '(blank)' : f.value}`, inputs[n])),
+      h('button', {type: 'submit', class: 'btn primary'}, 'Add the change set to the preview'));
+  }
+  // ---------- a reviewer's decision on findings: saved on the server first, shown only once it is saved
+  const REASONS = {reject: ['Not a field in the captured source', 'Not recorded at the source; keep it blank (unknown, not zero)', 'Checked against the source: the value is correct'],
+    defer: ['Comment and quantities disagree; the source has the same conflict', 'Needs the source owner to confirm the outcome']};
+  function fdDecisionForm(it) {
+    it = state.fdForm.item || it;
+    const f = state.fdForm, defer = f.action === 'defer', high = it.issue?.severity === 'high';
+    const reason = h('textarea', {rows: '2', required: true, 'aria-label': 'Reason', placeholder: defer ? 'What is being waited for, and why' : 'Why it stays as recorded'}, f.reason || '');
+    const owner = defer ? h('input', {'aria-label': 'Who is asked', placeholder: 'Who is asked (e.g. the SharePoint list owner)', value: f.owner || ''}) : null;
+    const evidence = h('input', {'aria-label': 'Evidence', placeholder: high || defer ? 'Evidence (e.g. SharePoint item 6190, Inspection Detail row 19)' : 'Evidence (optional)', value: f.evidence || ''});
+    const send = () => {
+      const why = reason.value.trim(), ev = evidence.value.split(';').map(x => x.trim()).filter(Boolean);
+      if (!why) { reason.focus(); toast('Say why first. The reason is kept with the decision.', true); return; }
+      if (!defer && high && !ev.length) { evidence.focus(); toast('A blocker can only be kept as recorded with evidence of what you checked.', true); return; }
+      fdSendDecision({ids: [it.key], action: f.action, reason: why, owner: owner ? owner.value.trim() : '', evidence: ev, from: it});
+    };
+    return h('form', {class: 'fd-decide', onsubmit: e => { e.preventDefault(); send(); }},
+      h('p', {class: 'fd-decide-head'}, h('b', {}, defer ? 'Await the source owner' : it.report === '' ? 'Keep this cell blank' : 'Keep the value as recorded'),
+        ` · ${it.sheet || ''} ${it.cell || (it.row ? 'row ' + it.row : '')}`.trim()),
+      defer ? h('p', {class: 'fd-hint'}, 'The finding stays open and the report stays on hold until the answer and its evidence are recorded. Nothing in the report changes.')
+        : h('p', {class: 'fd-hint'}, 'Only this finding is decided. The cell is not changed' + (it.report === '' ? ': a blank stays blank (not recorded, not zero).' : '.')),
+      h('div', {class: 'fd-chips'}, (REASONS[f.action] || []).map(t => h('button', {type: 'button', class: 'chip', onclick: () => { reason.value = t; }}, t))),
+      reason, owner, evidence,
+      h('div', {class: 'fd-cardacts'}, h('button', {type: 'submit', class: 'btn primary', disabled: state.decisionPending || null}, defer ? 'Save: awaiting source owner' : 'Save: keep as recorded'),
+        h('button', {type: 'button', class: 'btn subtle', onclick: () => { state.fdForm = null; drawSide(); }}, 'Cancel')));
+  }
+  // one reason for a precisely listed batch: every finding in it is shown and can be unticked first
+  function fdBatchForm(g) {
+    const b = state.fdBatch, which = b.which || 'open', open = b.items.filter(x => x.state === which), picked = open.filter(x => !b.off.has(x.key));
+    const reopen = b.action === 'reopen', agree = which === 'claude' && !reopen;
+    const reason = h('textarea', {rows: '2', 'aria-label': 'Reason for these findings', placeholder: reopen ? 'Why they go back on the list (optional)' : 'Why these stay as recorded'}, b.reason || '');
+    const cells = new Set(open.map(x => (x.cell || '').replace(/\d+/g, ''))), mixed = cells.size > 1 || new Set(open.map(x => x.issue?.code)).size > 1;
+    const head = reopen ? `Put ${picked.length} of ${open.length} back for review` : agree ? `Agree with Dex for ${picked.length} of ${open.length}` : `Keep ${picked.length} of ${open.length} as recorded`;
+    return h('form', {class: 'fd-decide fd-batch', onsubmit: e => { e.preventDefault();
+        const why = reason.value.trim(); if (!why && !reopen) { reason.focus(); toast('Say why first. One reason is kept for exactly these findings.', true); return; }
+        if (!picked.length) { toast('Tick at least one finding.', true); return; }
+        if (!reopen && picked.some(x => x.issue?.severity === 'high')) { toast('Blockers are decided one at a time, with evidence.', true); return; }
+        fdSendDecision({...findingBinding(picked), ids: picked.map(x => x.key), action: b.action || 'reject', reason: why, from: picked[0], batch: true}); }},
+      h('p', {class: 'fd-decide-head'}, h('b', {}, head), mixed ? ' · this group mixes columns or kinds: check each one' : ''),
+      h('p', {class: 'fd-hint'}, reopen ? 'Dex\'s recommendation stays on record with its reason; these findings go back on the open list for a person.'
+        : agree ? 'This records your own decision (with your name and reason) on exactly the ticked findings. Dex\'s recommendation stays on record separately. Nothing in the report changes; blanks stay blank.'
+        : 'Only the ticked findings are decided. Nothing in the report changes; blanks stay blank. Findings in other groups, even on the same rows, are not touched.'),
+      g.items[0].issue?.legacy_records?.length ? h('p', {class: 'fd-hint'}, `On record from earlier (kept unchanged): “${g.items[0].issue.legacy_records[0].reason}” for ${g.items[0].issue.legacy_records[0].sheet} row ${g.items[0].issue.legacy_records[0].row}, with no cell named.`) : null,
+      h('ul', {class: 'fd-scope'}, open.map(x => h('li', {}, h('label', {}, h('input', {type: 'checkbox', checked: !b.off.has(x.key) || null,
+        onchange: e => { e.target.checked ? b.off.delete(x.key) : b.off.add(x.key); b.reason = reason.value; drawSide(); }}), ' ', `${x.sheet || ''} ${x.cell || (x.row ? 'row ' + x.row : 'whole report')}`.trim())))),
+      reopen ? null : h('div', {class: 'fd-chips'}, REASONS.reject.map(t => h('button', {type: 'button', class: 'chip', onclick: () => { reason.value = t; }}, t))), reason,
+      h('div', {class: 'fd-cardacts'}, h('button', {type: 'submit', class: 'btn primary', disabled: state.decisionPending || null}, `Save for ${picked.length}`),
+        h('button', {type: 'button', class: 'btn subtle', onclick: () => { state.fdBatch = null; drawSide(); }}, 'Cancel')));
+  }
+  // Pending -> saved / failed. A lost answer is reconciled (was it saved?) before anything is retried, and the same
+  // request ID is reused, so a retry can never record a decision twice.
+  async function fdSendDecision(req) {
+    if (state.decisionPending || !state.report) return;
+    const binding = req.file_hash ? req : req.from ? findingBinding([req.from]) : null;
+    if (!binding) { toast('Reload this review before deciding.', true); return; }
+    const hash = binding.file_hash;
+    if (!req.file_hash) Object.assign(req, binding);
+    req.request_id ||= 'q-' + (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+    const body = {file_hash: hash, ids: req.ids || [], action: req.action, reason: req.reason || '', owner: req.owner || '', evidence: req.evidence || [],
+      request_id: req.request_id, expected_rev: req.expected_rev, expected_run: req.expected_run, expected_fps: req.expected_fps, undo_of: req.undo_of || null, by: myName()};
+    state.decisionPending = true; state.decisionFailed = null; drawSide();
+    let response = null, data = {};
     try {
-      const out = await api('/api/spreadsheets/decision', {file_hash: state.report.file_hash, keys: list.map(x => x.key), action, by: myName()});
-      state.report.review_decisions = out.decisions;
-      toast(`${plural(list.length, 'item')} kept as recorded. Saved with this version.`);
-      if (list[0]) fdAdvance(list[0]); else fdRefresh();
-    } catch (e) { toast(e.message, true); }
+      response = await fetch('/api/spreadsheets/decide', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Review-Token': 'same-origin'}, body: JSON.stringify(body)});
+      try { data = await response.json(); } catch (e) { data = {}; }
+    } catch (e) { response = null; }
+    if (response && response.status === 401 && data.signin) { state.decisionPending = false; showSignIn(); return; }
+    if (!response || response.status >= 500 || (response.ok && !data.report)) {   // no clear answer: ask whether it was saved
+      let known = null;
+      try { known = await api('/api/spreadsheets/decision-status', {file_hash: hash, request_id: req.request_id}); } catch (e) { known = null; }
+      state.decisionPending = false;
+      if (known && known.saved) { toast('Your decision was saved (the first answer was lost on the way).'); state.fdForm = null; state.fdBatch = null; await openReport(hash, true); return; }
+      state.decisionFailed = {message: known ? 'Not saved: the server did not answer. Nothing was changed.' : 'Could not reach the server, so it is not known yet whether this was saved. Try again: it will not be recorded twice.', retry: req};
+      drawSide(); return;
+    }
+    state.decisionPending = false;
+    if (!response.ok) {   // refused (409 stale / unknown findings, 400 missing reason, 403 not allowed): nothing was saved
+      state.decisionFailed = {message: 'Not saved: ' + (data.error || `the server answered ${response.status}.`), retry: null};
+      if (response.status === 409) { toast('Not saved. The report changed; showing its current state.', true); await openReport(hash, true); state.decisionFailed = {message: 'Not saved: ' + (data.error || 'the report changed.'), retry: null}; drawSide(); }
+      else drawSide();
+      return;
+    }
+    if (state.selected !== hash) return;
+    await fillPages(data.report);
+    state.report = {...state.report, ...data.report};    // the one state for header, panel, sheet badges and history
+    state.fdForm = null; state.fdBatch = null;
+    const e = data.entry || {}, n = (e.ids || []).length;
+    const words = {reject: 'kept as recorded', defer: 'waiting for the source owner', confirm: 'confirmed as needing a correction', reopen: 'back on the list for review', undo: 'put back as it was'}[e.action] || 'saved';
+    if (req.from) fdAdvanceAfter(req.from, `${n === 1 ? '1 finding' : n + ' findings'} ${words}. Saved.`);
+    else { drawReport(); toast(`Saved: ${words}.`); }
+  }
+  function fdAdvanceAfter(done, msg) {
+    state.fdItems = fdItems();
+    const groups = fdGroups(state.fdItems), g = groups.find(x => x.key === done.group);
+    const order = [...groups.filter(x => x.tier === done.tier), ...groups.filter(x => x.tier !== done.tier)];
+    const start = g ? order.indexOf(g) : 0, rotated = [...order.slice(Math.max(start, 0)), ...order.slice(0, Math.max(start, 0))];
+    let next = g ? g.items.find(x => x.state === 'open') : null;
+    if (!next) for (const x of rotated) { next = x.items.find(y => y.state === 'open'); if (next) break; }
+    const left = state.fdItems.filter(x => x.state === 'open').length;
+    toast(`${msg} ${left ? `${left} still need a decision.` : 'Nothing left to decide.'}`);
+    refreshHeadFd();
+    if (next) { fdOpen(next); return; }
+    state.fdCur = null; drawSide(); drawGrid();
+  }
+  // the header (status, metrics) redrawn from the same report state as the panel
+  function refreshHeadFd() {
+    fdRefreshFoot();
+    const mode = document.querySelector('.fd-mode-selector');
+    if (mode && state.report) mode.replaceWith(fdModeSelector(state.report));
+    const m = document.querySelector('.fd-metrics'); if (m && state.report) m.replaceWith(fdMetrics(state.report));
   }
   function fdRefreshFoot() {
     const sel = readyChanges().total, b = $('fd-preview-btn'), n = $('fd-selcount');
-    if (b) { b.disabled = !sel || state.busy; b.classList.toggle('primary', !!sel); }
+    if (b) { b.disabled = !sel || state.busy; b.classList.toggle('primary', !!sel); b.onclick = correctionAction(fdPreview); }
     if (n) n.textContent = sel ? plural(sel, 'change') + ' selected' : 'No changes selected';
-    if (state.report) { const st = fdStatus(state.report), pill = document.querySelector('.fd-status');
-      if (pill) { pill.className = 'fd-status ' + st.tone; pill.replaceChildren(icon(st.icon, 16), h('span', {}, st.text)); } }
+    if (state.report) { const st = fdStatus(state.report);
+      document.querySelectorAll('.fd-status').forEach(pill => { const global = pill.classList.contains('fd-global-status'); pill.className = 'fd-status ' + (global ? 'fd-global-status ' : 'fd-panel-status ') + st.tone; pill.replaceChildren(icon(st.icon, 16), h('span', {}, global ? fdGlobalStatus(st) : fdPanelStatus(state.report, st))); }); }
   }
   function fdRefresh() {
     state.fdItems = fdItems(); drawSide(); drawGrid(); fdRefreshFoot();
@@ -1122,35 +1432,50 @@
   }
 
   // ---------- preview, then a new version, then the checks run again on it
-  function fdPreview() {
-    const c = readyChanges(); if (!c.total) return;
-    const r = state.report, next = revisionOf(r) + 1;
+  function fdRemovePreview(c, row, dialog) {
+    if (state.report?.file_hash !== c.binding.file_hash || state.report?.check_hash !== c.binding.expected_check_hash) {
+      dialog.close(); toast('The report changed. Reopen its correction list before editing the preview.', true); return;
+    }
+    const sameCell = x => x.sheet === row.sheet && String(x.cell).toUpperCase() === String(row.cell).toUpperCase();
+    fdSelect([{sheet: row.sheet, cell: row.cell, binding: c.binding}], false);
+    const accepted = c.accepted.filter(x => !sameCell(x));
+    const edits = Object.fromEntries(Object.entries(c.edits).filter(([, x]) => !sameCell(x)));
+    const next = captureCorrections(accepted, c.dec, edits, c.binding, c.report);
+    dialog.close(); dialog.remove();
+    if (next.total) fdPreview(next);
+  }
+  function fdPreview(c) {
+    const existing = $('fd-preview-dialog');
+    if (existing?.open) { existing.focus(); return; }
+    if (existing) existing.remove();
+    if (!c?.binding || !c.total) return;
+    const r = c.report, binding = c.binding, next = revisionOf(r) + 1;
     const rows = [...c.accepted.map(f => ({sheet: f.sheet, cell: f.cell, before: f.before, after: c.dec[f.id]?.after ?? f.after, why: f.reason, src: f.source})),
       ...Object.values(c.edits).map(e => ({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, why: e.reason || 'Your edit', src: 'Your edit'}))];
-    const d = h('dialog', {class: 'fd-modal', 'aria-labelledby': 'fd-prev-title'},
+    const d = h('dialog', {id: 'fd-preview-dialog', class: 'fd-modal', 'aria-labelledby': 'fd-prev-title'},
       h('p', {class: 'fd-eyebrow'}, 'Check before applying'),
       h('h2', {id: 'fd-prev-title'}, plural(rows.length, 'change')),
-      h('p', {}, `These cells change in a new version (v${next}). v${revisionOf(r)} stays exactly as it is, and the checks and the SharePoint comparison run again on v${next}.`),
-      h('div', {class: 'fd-prevlist', tabindex: '0'}, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Cell'), h('th', {}, 'Before'), h('th', {}, 'After'), h('th', {}, 'Why'))),
-        h('tbody', {}, rows.map(x => h('tr', {}, h('td', {}, `${x.sheet}!${x.cell}`), h('td', {}, showWs(x.before)), h('td', {}, h('b', {}, showWs(x.after))), h('td', {}, `${x.src}: ${x.why || ''}`)))))),
+      h('p', {}, `These cells change in a new version (v${next}). v${revisionOf(r)} stays exactly as it is, and the checks run again on v${next}. Source comparison runs when available.`),
+      h('div', {class: 'fd-prevlist', tabindex: '0'}, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Cell'), h('th', {}, 'Before'), h('th', {}, 'After'), h('th', {}, 'Why'), h('th', {}, 'Include'))),
+        h('tbody', {}, rows.map(x => h('tr', {}, h('td', {class: 'fd-preview-location'}, h('span', {class: 'fd-preview-sheet'}, x.sheet), h('b', {class: 'fd-preview-cell'}, x.cell)), h('td', {}, showWs(x.before)), h('td', {}, h('b', {}, showWs(x.after))), h('td', {}, `${x.src}: ${x.why || ''}`), h('td', {}, h('button', {type: 'button', class: 'btn small fd-preview-remove', 'aria-label': `Remove ${x.cell} from preview`, onclick: () => fdRemovePreview(c, x, d)}, 'Remove'))))))),
       h('div', {class: 'fd-modalacts'},
         h('button', {type: 'button', class: 'btn', onclick: () => d.close()}, 'Back to review'),
         h('button', {type: 'button', class: 'btn primary', id: 'fd-apply', onclick: async e => {
           if (state.busy) return; e.currentTarget.disabled = true; e.currentTarget.textContent = `Saving v${next} and re-checking…`;
-          const hash = await applyFixes(c.accepted, c.dec, c.edits, {download: false});
+          const hash = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding});
           d.close(); if (hash) toast(`v${next} saved and checked again. v${revisionOf(r)} is kept unchanged.`);
         }}, `Create v${next} and re-check`)));
     d.addEventListener('close', () => { d.remove(); $('fd-preview-btn')?.focus(); });
     document.body.append(d); d.showModal(); d.querySelector('#fd-apply').focus();
   }
-  async function fdApprove() {
+  async function fdApprove(binding) {
     const name = ($('fd-approver')?.value || '').trim(), btn = $('fd-approve-btn');
     if (!name) { toast('Type your name to approve the report.', true); $('fd-approver')?.focus(); return; }
     if (btn) { btn.disabled = true; btn.textContent = 'Approving…'; }
     try {
       store.set('rd-approver', name);
-      const out = await api('/api/spreadsheets/approve', {file_hash: state.report.file_hash, approver: name, note: ''});
-      toast('Internally approved. Nothing was sent; sending to the client is a separate step.');
+      const out = await api('/api/spreadsheets/approve', {...binding, approver: name, note: ''});
+      toast('Internally approved. Nothing was sent; sending is paused.');
       await openReport(out.item.file_hash, true); loadList();
     } catch (e) { toast(e.message, true); if (btn) { btn.disabled = false; btn.textContent = 'Approve internally'; } }
   }
@@ -1171,6 +1496,7 @@
 
   // ---------- history and sources
   function fdHistory(r) {
+    const binding = reviewBinding(r);
     const rv = r.review, rows = [];
     const add = (title, text, link) => rows.push(h('article', {class: 'fd-hist'}, h('b', {}, title), h('span', {}, text), link || null));
     if (r.fixed_from) add(`v${r.fixed_from.revision || 1} · ${r.fixed_from.filename}`, 'The version these changes were made on. Kept unchanged.', h('a', {href: '#r=' + r.fixed_from.file_hash}, `Open v${r.fixed_from.revision || 1}`));
@@ -1178,31 +1504,123 @@
     for (const f of r.fixes_applied || []) add(`v${f.revision || '?'} · ${f.fixed_filename}`, `${plural(f.changes.length, 'change')} applied ${when2(f.applied_at) || ''}.`, h('a', {href: '#r=' + f.fixed_file_hash}, 'Open it'));
     for (const x of r.recheck_applied || []) add('Re-checked', `${x.by || 'Someone'} re-ran the checks ${when2(x.at) || ''} (from ${x.from_version || '?'} to ${x.to_version || '?'}).`);
     for (const x of (r.review_decision_log || []).slice(-30)) add({keep: 'Kept as recorded', reject: 'Suggestion rejected', note: 'Note', reopen: 'Decision undone'}[x.action] || x.action, `${x.by || 'A reviewer'} ${when2(x.at) || ''}${x.note ? ': “' + x.note + '”' : ''}`);
+    // every decision on findings, with its exact scope; any one can be undone (the undo is logged too)
+    const flog = r.finding_decision_log || [], undone = new Set(flog.filter(x => x.undo_of).map(x => x.undo_of));
+    if (flog.length) rows.push(h('h3', {class: 'fd-histhead'}, `Decisions on findings (${flog.length})`));
+    for (const x of [...flog].reverse().slice(0, 200)) {
+      const cells = Object.values(x.cells || {}), word = {reject: 'Kept as recorded', defer: 'Waiting for the source owner', confirm: 'Confirmed: needs a correction', reopen: 'Put back for review', undo: 'Undone'}[x.action] || x.action;
+      add(`${word} · ${plural((x.ids || []).length, 'finding')}`,
+        `${x.by || 'A reviewer'} ${when2(x.at) || ''}${x.owner ? ' · asked ' + x.owner : ''}${x.reason ? ' · “' + x.reason + '”' : ''}${(x.evidence || []).length ? ' · evidence: ' + x.evidence.join('; ') : ''}`
+          + ` · ${cells.slice(0, 30).join(', ')}${cells.length > 30 ? ` and ${cells.length - 30} more` : ''}${x.undo_of ? ' (undid an earlier decision)' : ''}`,
+        x.action !== 'undo' && !undone.has(x.decision_id) && !r.approval ? h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || null,
+          onclick: () => fdSendDecision({...binding, action: 'undo', undo_of: x.decision_id, reason: 'Undone from the history'})}, 'Undo') : undone.has(x.decision_id) ? h('span', {class: 'muted'}, 'undone') : null);
+    }
     if (r.approval) add(rv.approval_current ? 'Internally approved' : 'Approved on an earlier check run', `${r.approval.by} ${when2(r.approval.at) || ''}${r.approval.note ? ': ' + r.approval.note : ''}. Not sent.`);
     for (const s of (r.sent || []).filter(x => x.sent)) add('Sent to client', `${when2(s.at) || ''} to ${(s.to || []).join(', ')}`);
     return h('section', {class: 'fd-utility'}, h('h2', {}, 'Version history'), h('p', {}, 'Every version has its own file, its own checks and its own provenance. Originals are never changed.'), rows);
   }
+  function fdSourceRecovery(r) {
+    const rec = r.source_reconciliation || {};
+    const candidates = Object.entries(rec.column_mapping || {}).filter(([, m]) => ['needs_confirmation', 'conflict'].includes(m.status));
+    const changed = (r.holds || []).some(hold => hold.code === 'source_mapping_changed');
+    if (!candidates.length && !changed) return null;
+    const binding = reviewBinding(r), snapshot = rec.snapshot_id, isAdmin = state.me?.user?.role === 'admin';
+    const request = Object.freeze({file_hash: binding.file_hash, expected_check_hash: binding.expected_check_hash, expected_snapshot_id: snapshot, expected_mapping_revision: rec.mapping_binding?.revision ?? null, site_id: rec.site_id, list_id: rec.list_id || rec.list?.id,
+      mapping: Object.freeze(Object.fromEntries(candidates.filter(([, m]) => typeof m.column === 'string' && m.column.trim()).map(([field, m]) => [field, m.column])))});
+    const complete = !!snapshot && !!binding.expected_check_hash && !!request.site_id && !!request.list_id && candidates.length > 0 && Object.keys(request.mapping).length === candidates.length;
+    const current = () => state.report?.file_hash === binding.file_hash && state.report?.check_hash === binding.expected_check_hash &&
+      state.report?.source_reconciliation?.snapshot_id === snapshot && state.report?.source_reconciliation?.site_id === request.site_id &&
+      (state.report?.source_reconciliation?.list_id || state.report?.source_reconciliation?.list?.id) === request.list_id &&
+      (state.report?.source_reconciliation?.mapping_binding?.revision ?? null) === request.expected_mapping_revision;
+    const message = h('p', {class: 'fd-hint', role: 'status'}, 'Saving columns changes only this exact source mapping. It does not modify the workbook, verify quantities or release holds. Compare again afterward.');
+    let pending = false;
+    const compare = h('button', {type: 'button', class: 'btn small', hidden: !changed, onclick: async () => {
+      if (pending) return;
+      if (!current()) { message.textContent = 'The displayed report or source changed. Reopen Comparison details before comparing.'; return; }
+      pending = true; compare.disabled = true;
+      try {
+        await api('/api/spreadsheets/source-reconcile', {file_hash: binding.file_hash});
+        if (current()) await openReport(binding.file_hash, true);
+      } catch (error) { message.textContent = error.message; }
+      finally { pending = false; compare.disabled = false; }
+    }}, 'Compare again');
+    const confirm = h('button', {type: 'button', class: 'btn small', disabled: !complete || !isAdmin, onclick: async () => {
+      if (pending || !complete || state.me?.user?.role !== 'admin') return;
+      if (!current()) { message.textContent = 'The displayed report or source changed. Reopen Comparison details before confirming columns.'; return; }
+      pending = true; confirm.disabled = true;
+      try {
+        await api('/api/sharepoint/confirm-columns', request);
+        message.textContent = 'Source columns saved. The workbook is unchanged and existing holds still apply. Compare again to capture fresh evidence.';
+        compare.hidden = false;
+      } catch (error) { message.textContent = error.message; confirm.disabled = false; }
+      finally { pending = false; }
+    }}, 'Confirm source columns');
+    return h('section', {class: 'fd-source-recovery', 'aria-label': 'Source column review'},
+      h('h3', {}, 'Source column review'), h('p', {}, `Exact site ID: ${request.site_id || 'Missing'} · List ID: ${request.list_id || 'Missing'}`),
+      candidates.length ? h('ul', {}, candidates.map(([field, m]) => h('li', {}, `${field} → ${m.column || 'No column selected'} (${m.status.replace('_', ' ')})`))) : null,
+      candidates.length && !complete ? h('p', {class: 'fd-coverage'}, 'Confirmation unavailable: exact source identity, snapshot or a selected column is missing. Capture the exact source before continuing.') : null,
+      candidates.length && !isAdmin ? h('p', {class: 'fd-coverage'}, 'Ask an admin to confirm these source columns. Your account can review the evidence but cannot change the source mapping.') : null,
+      message, candidates.length ? confirm : null, compare);
+  }
+  function fdComparison(r) {
+    const rec = r.source_reconciliation || {}, counts = rec.count_reconciliation, sp = r.review?.sharepoint || {};
+    const value = v => v == null ? 'Unknown' : String(v);
+    const rows = counts?.record_counts || {};
+    const total = side => `${value(side?.total)} (${value(side?.known_rows)} known rows; ${value(side?.unknown_rows)} unknown rows)`;
+    const pair = (label, data) => h('div', {class: 'fd-comparison-pair'}, h('dt', {}, label),
+      h('dd', {}, `Report: ${total(data?.report)} · Source: ${total(data?.source)} · Recorded result: ${{matched:'Matched', differs:'Differs', unavailable:'Unavailable'}[data?.status] || 'Unavailable'}`));
+    const bound = rec.bound_to || {}, current = !rec.stale && bound.file_hash === r.file_hash && !!bound.checker_version && bound.checker_version === r.checker_version;
+    const sourceHolds = (r.holds || []).filter(hold => String(hold.code || '').startsWith('source_'));
+    const verified = fdSourceVerified(r);
+    return h('details', {class: 'fd-comparison'},
+      h('summary', {}, `Comparison details · ${verified ? 'exact-source quantities matched' : 'not verified; review required'}`),
+      !verified ? h('p', {class: 'fd-coverage', role: 'note'}, sp.message || 'Current exact-source verification is unavailable. Stored totals do not establish client readiness.') : null,
+      sourceHolds.length ? h('ul', {class: 'fd-coverage'}, sourceHolds.map(hold => h('li', {}, hold.text || hold.code))) : null,
+      h('p', {}, 'Inspection records count rows. Inspected and rejected quantities count units. A match is evidence for this snapshot only, not permission to send to a client.'),
+      h('p', {}, `Source: ${rec.list?.name || (typeof rec.list === 'string' ? rec.list : null) || sp.source || 'Unknown'} · Site ID: ${rec.site_id || 'Unknown'} · List ID: ${rec.list_id || rec.list?.id || 'Unknown'} · Snapshot: ${rec.snapshot_id || sp.snapshot_id || 'Unknown'} · Captured: ${rec.captured_at || sp.captured_at || 'Unknown'}`),
+      h('p', {}, `Compared workbook: ${bound.file_hash || 'Unknown'} · Checker: ${bound.checker_version || 'Unknown'}${current ? '' : ' · Binding is missing or out of date; re-check before relying on these totals.'}`),
+      counts ? h('dl', {},
+        h('dt', {}, 'Inspection records'), h('dd', {}, `Report: ${value(rows.report_rows)} · Source rows read: ${value(rows.source_rows)} · Unique source items matched: ${value(rows.matched_unique_items)}`),
+        h('dt', {}, 'Coverage gaps'), h('dd', {}, `Duplicate report rows: ${value(rows.duplicate_report_rows)} · Missing source items: ${value(rows.missing_source_items)} · Unmatched report rows: ${value(rows.unmatched_report_rows)}`),
+        pair('Inspected quantity', counts.quantities?.inspected), pair('Rejected quantity', counts.quantities?.rejected), pair('Records with rejected quantity', counts.rejected_records))
+        : h('p', {}, 'Record and quantity comparison is unavailable for this snapshot. Unknown counts are not zero.'),
+      rec.coverage?.complete !== true ? h('p', {class: 'fd-coverage', role: 'note'}, 'Source coverage is incomplete or unknown. Rows read are not a complete source total; no missing quantity is treated as zero.') : null,
+      h('p', {}, `Fields checked: ${(rec.fields_checked || sp.fields_checked || []).join(', ') || 'Unknown'}. Fields not checked: ${(rec.fields_not_checked || sp.fields_not_checked || []).join(', ') || 'Not specified'}. This does not verify photos, source correctness or release readiness.`),
+      (rec.not_verified_because || []).length ? h('ul', {}, rec.not_verified_because.map(reason => h('li', {}, reason))) : null,
+      ...[['duplicates', 'Duplicate report references'], ['exclusions', 'Source records outside the confirmed business date']].map(([key, title]) =>
+        (counts?.[key] || []).length ? h('details', {}, h('summary', {}, `${title} · ${counts[key].length}`), h('ul', {}, counts[key].map((x, n) =>
+          h('li', {'data-comparison-id': `${key}:${n}`}, `${x.sheet ? x.sheet + ' · row ' + x.row + ' · ' : ''}Source item ${value(x.item)}${x.day ? ' · ' + x.day : ''}: ${x.evidence || x.reason || 'Evidence unavailable'}`,
+            x.day_basis ? h('small', {}, ` Date basis: ${x.day_basis}`) : null)))) : null),
+      h('p', {}, counts?.note || 'No report rows are deleted or excluded by this display.'),
+      fdSourceRecovery(r),
+      sp.web_url ? h('a', {href: sp.web_url, target: '_blank', rel: 'noopener'}, 'Open exact source (read only)') : null);
+  }
   function fdSources(r) {
     const rec = r.source_reconciliation || {}, sp = r.review.sharepoint || {}, sel = r.dataset_selection || {}, cov = rec.coverage || {};
+    const extra = [];
+      if ((r.other_days || []).length) extra.push(h('section', {class: 'block', id: 'otherdays'},
+        h('header', {}, h('h2', {}, 'Already reported on another day'), h('p', {}, `${r.other_days.length >= 20 ? '20 or more' : r.other_days.length} VIN${r.other_days.length === 1 ? '' : 's'} in this report ${r.other_days.length === 1 ? 'is' : 'are'} also in another day's report for ${r.review.job || "this job"}. An old file sent again, or a car counted twice?`)),
+        h('ul', {class: 'otherdays'}, Object.values(r.other_days.reduce((g, x) => { (g[x.file_hash] ||= {...x, vins: []}).vins.push(x.vin); return g; }, {}))
+          .map(g => h('li', {}, h('b', {}, shortDay(g.day)), ' ', h('a', {href: '#r=' + g.file_hash}, g.filename), h('span', {}, g.vins.join(', ')))))));
     const kv = (k, v) => v == null || v === '' ? null : [h('dt', {}, k), h('dd', {}, String(v))];
     return h('section', {class: 'fd-utility'}, h('h2', {}, 'Sources'),
       h('p', {}, 'Source coverage is shown separately from report correctness. A partial or conflicting read is never called verified.'),
-      h('article', {class: 'fd-hist'}, h('b', {}, `SharePoint: ${({match: 'matches item by item', differences: 'differs', incomplete: 'incomplete, not verified', unverified: 'not verified', stale: 'out of date', day_level: 'day totals only'})[sp.status] || 'not compared'}`),
-        h('dl', {class: 'fd-kv'}, kv('List', sp.source), kv('Snapshot', sp.snapshot_id), kv('Captured', when2(sp.captured_at)), kv('Records matched', sp.matched != null ? `${sp.matched} of ${r.review.scans}` : null),
+      h('article', {class: 'fd-hist'}, h('b', {}, `SharePoint: ${fdSourceVerified(r) ? 'matches item by item' : ({match: 'not verified', differences: 'differs', incomplete: 'incomplete, not verified', unverified: 'not verified', stale: 'out of date', day_level: 'day totals only'})[sp.status] || 'not compared'}`),
+        h('dl', {class: 'fd-kv'}, kv('List', sp.source), kv('Snapshot', sp.snapshot_id), kv('Captured', when2(sp.captured_at)), kv('Matching evidence', fdSourceSummary(r)),
           kv('Fields checked', (sp.fields_checked || []).join(', ')), kv('Fields not checked', (sp.fields_not_checked || []).join(', ')), kv('Pages read', cov.pages),
           kv('Denied / throttled / failed pages', [cov.denied, cov.throttled, (cov.failed_pages || []).length].some(Boolean) ? `${cov.denied || 0} / ${cov.throttled || 0} / ${(cov.failed_pages || []).length}` : null),
           kv('Undated records', cov.undated), kv('Why not verified', (rec.not_verified_because || []).join(' '))),
         sp.web_url ? h('a', {href: sp.web_url, target: '_blank', rel: 'noopener'}, 'Open the list (read only)') : null),
       h('article', {class: 'fd-hist'}, h('b', {}, 'Record set'), h('dl', {class: 'fd-kv'}, kv('Counted', (sel.authoritative || []).join(', ')), kv('Compared, not added', (sel.compared || []).join(', ')),
         kv('Status', sel.status), kv('Roles', Object.entries(sel.roles || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')))),
-      readBlock(r));
+      fdComparison(r), ...extra, readBlock(r));
   }
   // switching sheets keeps each sheet's scroll position
   function fdKeepScroll() { const w = document.querySelector('#sheet-block .gridwrap'); if (w && state.grid) (state.sheetScroll ||= {})[state.grid.sheet] = [w.scrollTop, w.scrollLeft]; }
   // keyboard: j / k next and previous correction, s select, Escape closes drawers
   document.addEventListener('keydown', e => {
     if (!document.body.classList.contains('reportmode') || e.target.closest('input, textarea, select, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey) return;
-    const flat = (state.fdItems || []).filter(x => x.tier === state.fdTier), at = flat.findIndex(x => x.key === state.fdCur);
+    const flat = (state.fdItems || []).filter(x => x.tier === state.fdTier && (state.fdIncludeDecided || x.state === 'open' || x.key === state.fdCur)), at = flat.findIndex(x => x.key === state.fdCur);
     if (e.key === 'j') { fdOpen(flat[Math.min(flat.length - 1, at + 1)]); e.preventDefault(); }
     if (e.key === 'k') { fdOpen(flat[Math.max(0, at - 1)]); e.preventDefault(); }
   });
@@ -1212,41 +1630,31 @@
   // ---------------- right-hand panel: Fixes (issues grouped by severity and type, suggested fixes), Facts, Ask Claude
   const myName = () => store.get('rd-approver', '') || (state.me?.user && !state.me.user.virtual ? state.me.user.name || state.me.user.email || '' : '');
   const reviewedSet = () => new Set(store.get('rd-reviewed:' + state.report.file_hash, []));
-  function showSide(tab) { if (state.sideTab !== tab) { state.sideTab = tab; drawSide(); } }
+  function showSide(tab) { if (tab === 'facts') tab = 'fixes'; if (state.sideTab !== tab) { state.sideTab = tab; drawSide(); } }
   function drawSideTabs() {
     const bar = $('sidetabs'); if (!bar || !state.report) return;
     const done = reviewedSet(), open = walkIssues().filter(i => !done.has(i.key)).length, tab = state.sideTab;
     const btn = (id, label, badge) => h('button', {type: 'button', role: 'tab', class: tab === id ? 'on' : '', 'aria-selected': String(tab === id),
       onclick: () => { if (id === 'claude') state.chatUnread = false; showSide(id); }}, label, badge ? h('i', {}, badge) : null);
     const c = fdCounts(), todo = (c.blockers || 0) + (c.review || 0);
-    bar.replaceChildren(btn('fixes', 'Corrections', todo ? String(todo) : null), btn('facts', 'Facts'), btn('claude', 'Ask Claude', state.chatUnread ? 'new' : null));
+    bar.replaceChildren(btn('fixes', 'Corrections', todo ? String(todo) : null), btn('claude', 'Ask Dex', state.chatUnread ? 'new' : null));
     const mc = $('fd-mobile-count'); if (mc) mc.textContent = todo ? String(todo) : '';
     void open;
   }
   function drawSide() {
     const side = $('side'), r = state.report; if (!side || !r) return;
+    if (state.sideTab === 'facts') state.sideTab = 'fixes';
     const rv = r.review, tab = state.sideTab || 'fixes';
     const body = h('div', {class: 'sidebody', id: 'side-body'});
     side.replaceChildren(h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
     drawSideTabs();
     if (tab === 'fixes') {
+      body.append(fdComparison(r));
       fdCorrections(body);
+      body.append(h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'sources'; drawReport(); }}, 'Source evidence and coverage'));
       const sc = shiftCard(rv); if (sc) body.append(h('div', {id: 'shiftfix'}, sc));
-    } else if (tab === 'facts') {
-      body.append(h('div', {id: 'recs'}), numbers(r));
-      if (r.built) body.append(builtBanner(r));
-      body.append(sourcesBlock(r));
-      if ((r.other_days || []).length) body.append(h('section', {class: 'block', id: 'otherdays'},
-        h('header', {}, h('h2', {}, 'Already reported on another day'), h('p', {}, `${r.other_days.length >= 20 ? '20 or more' : r.other_days.length} VIN${r.other_days.length === 1 ? '' : 's'} in this report ${r.other_days.length === 1 ? 'is' : 'are'} also in another day's report for ${rv.job}. An old file sent again, or a car counted twice?`)),
-        h('ul', {class: 'otherdays'}, Object.values(r.other_days.reduce((g, x) => { (g[x.file_hash] ||= {...x, vins: []}).vins.push(x.vin); return g; }, {}))
-          .map(g => h('li', {}, h('b', {}, shortDay(g.day)), ' ', h('a', {href: '#r=' + g.file_hash}, g.filename), h('span', {}, g.vins.join(', ')))))));
-      body.append(nexusBlock(r));
-      const tl = timelineBlock(r); if (tl) body.append(tl);
-      body.append(readBlock(r));
-      if (rv.fixed_from || rv.fixes_applied || r.fixed_from || (r.fixes_applied || []).length) body.append(historyBlock(r));
-      loadReportRecs(false);
     } else {
-      body.append(h('div', {id: 'chat', class: 'chat embedded', 'aria-label': 'Ask Claude'}));
+      body.append(h('div', {id: 'chat', class: 'chat embedded', 'aria-label': 'Ask Dex'}));
       drawChat();
       body.querySelector('textarea')?.focus();
     }
@@ -1275,7 +1683,7 @@
         state.walkNote = null;
         { state.issueNav = null; state.groupWalk = null; drawSide();
           const c = readyChanges(), msg = gw ? `Done! ${gw.label === 'Not sure' ? 'Every item you had to check' : `All the ${gw.label.toLowerCase()}`} handled.` : 'Done! That was the last open issue.';
-          if (c.total) { toast(`${msg} Saving your ${c.total} change${c.total === 1 ? "" : "s"} into a new version and checking it again…`); applyFixes(c.accepted, c.dec, c.edits, {download: false}); }
+          if (c.total) toast('Selected changes are ready. Preview and apply them when you are ready.');
           else toast(msg); } };
       // every open item with exactly the same issue: handled together unless the person asks to go one by one
       state.oneByOne ||= new Set(); state.bulkOff ||= new Set();
@@ -1293,7 +1701,7 @@
           state.groupWalk = null; focusIssue(list.indexOf(nx)); return; }
         state.walkNote = null; state.issueNav = null; state.groupWalk = null; drawSide();
         const c = readyChanges();
-        if (c.total) { toast(`Done! That was the last kind of issue. Saving your ${c.total} change${c.total === 1 ? '' : 's'} into a new version and checking it again…`); applyFixes(c.accepted, c.dec, c.edits, {download: false}); }
+          if (c.total) toast('Selected changes are ready. Preview and apply them when you are ready.');
         else toast('Done! That was the last kind of issue.');
       };
       let bulk = null;
@@ -1321,7 +1729,7 @@
           h('div', {class: 'bulk-btns'},
             withFix.length + dups.length ? h('button', {type: 'button', class: 'btn primary small', onclick: acceptAll},
               withFix.length + dups.length === n ? `Make the suggested change on ${n === same.length ? 'all ' : ''}${n}` : `Fix the ${withFix.length + dups.length} that have a suggested change`) : null,
-            state.aiOn ? h('button', {type: 'button', class: 'btn small', onclick: e => { const k = ticked.map(x => x.key); aiFix(k, e.target); }}, `Let Claude fix ${n === same.length ? 'all ' : ''}${n}`) : null,
+            state.aiOn ? h('button', {type: 'button', disabled: true, title: 'AI workbook changes are paused pending reviewed-plan safety checks', class: 'btn small', onclick: e => { const k = ticked.map(x => x.key); aiFix(k, e.target); }}, `Let Dex fix ${n === same.length ? 'all ' : ''}${n}`) : null,
             h('button', {type: 'button', class: 'btn small', onclick: () => { advance(ticked, 'marked fine as is', true); }}, `${n === same.length ? 'All' : 'The'} ${n} are fine as is`),
             h('button', {type: 'button', class: 'linkish small', onclick: () => { state.oneByOne.add(sameKey(issue)); drawCellSlot(); }}, 'Go through them one by one')));
       }
@@ -1339,7 +1747,7 @@
         issue.check ? h('p', {class: 'hint'}, 'Check: ' + issue.check) : null,
         fixChoices(issue, markNext),
         h('p', {class: 'keys-hint'}, 'Keys: A make the change · S skip · F fine as is · ← → move'),
-        issue.verdict_reason ? h('p', {class: 'hint'}, 'Claude: ' + issue.verdict_reason) : null,
+        issue.verdict_reason ? h('p', {class: 'hint'}, 'Dex: ' + issue.verdict_reason) : null,
         !issue.sheet && !issue.row ? h('p', {class: 'hint'}, 'This one is about the report as a whole, not one cell.') : null,
         h('div', {class: 'in-nav'},
           h('button', {type: 'button', class: 'btn small', disabled: pos === 0, onclick: () => goByHand(pos - 1)}, '‹ Previous'),
@@ -1409,7 +1817,7 @@
     // Opening a report never runs Claude by itself: its read, its double-check (which can set issues aside) and its draft
     // fixes all change what the report shows, so each is a person's choice (Ask Claude tab, or Facts → AI review).
     void open; maybeBrief(hash, false);
-    fdMaybeAutoFix(hash);
+    // nothing is changed automatically on opening: suggestions are prepared, and a person selects, previews and applies them
   }
   async function runReview(hash) {
     (state.reviewTried ||= new Set()).add(hash);
@@ -1428,28 +1836,20 @@
     finally { state.verifying = null; }
     if (state.selected === hash) { await openReport(hash, true); loadList(); }
   }
-  async function runAiFixes(auto) {
-    const hash = state.report.file_hash;
-    (state.aiFixTried ||= new Set()).add(hash);
-    if (state.aiFixing) return;
-    state.aiFixing = true; drawFixes();
-    if (!auto) toast('Claude is working out the fixes…');
+  async function runAiFixes(auto, binding) {
+    if (!binding || !state.aiOn || state.aiFixing) return;
+    const hash = binding.file_hash;
+    if (state.report?.file_hash !== hash || state.report?.check_hash !== binding.expected_check_hash) { toast('The report changed. Review the current version before preparing suggestions.', true); return; }
+    state.aiFixing = true; drawReport();
     try {
-      const out = (await api('/api/spreadsheets/ai-fixes', {file_hash: hash})).ai_fixes || {};
+      const out = await api('/api/spreadsheets/ai-fixes', {...binding});
       if (state.selected !== hash) return;
-      const data = await api('/api/spreadsheets/fixes', {file_hash: hash});
-      state.fixes = data.proposals || []; state.aiFix = data.ai || {};
-      const dec = store.get(decisionsKey(), {});
-      if (auto) { maybeBrief(hash, false); return; }  // the chat offers them
-      // asked for by button: accept them; reject any you disagree with before downloading
-      for (const f of state.fixes) if ((f.source === 'AI fix' || f.confidence === 'high') && !dec[f.id]) dec[f.id] = {state: 'accepted', after: f.after};
-      store.set(decisionsKey(), dec);
-      const n = (out.fixes || []).length, k = (out.skipped || []).length;
-      const ready = state.fixes.filter(f => dec[f.id]?.state === 'accepted').length;
-      toast(n || ready ? `Claude fixed ${n} cell${n === 1 ? '' : 's'}${k ? ` and left ${k} issue${k === 1 ? '' : 's'} for a person` : ''}. ${ready} fix${ready === 1 ? ' is' : 'es are'} accepted; review them, then download.`
-        : `Claude found nothing it could fix safely${k ? ` (${k} issue${k === 1 ? '' : 's'} need a person)` : ''}.`);
-    } catch (e) { if (!auto) toast(e.message, true); else if (state.selected === hash) maybeBrief(hash, false); }
-    finally { state.aiFixing = false; if (state.selected === hash) { drawFixes(); maybeBrief(hash, false); } }
+      if (!out.report || out.report.file_hash !== hash) throw new Error('Preparation did not return a current review. Reopen the report before continuing.');
+      state.report = await fillPages(out.report); state.fixes = null;
+      drawReport(); await loadFixes(hash);
+      toast(`${(out.ai_fixes?.fixes || []).length} AI suggestions prepared. Review and include each change before applying. The workbook is unchanged.`);
+    } catch (e) { toast(e.message, true); }
+    finally { state.aiFixing = false; if (state.selected === hash) drawReport(); }
   }
   const restoredKey = () => 'rd-restored:' + state.report.file_hash;
   function allIssues(rv) {
@@ -1502,7 +1902,7 @@
   }
   function drawCleanOffer() {   // the step-by-step guide: the one place where changes are accepted, one step at a time
     const slot = $('cleanoffer'); if (!slot || !state.report) return;
-    const r = state.report, hash = r.file_hash;
+    const r = state.report, hash = r.file_hash, displayedBinding = reviewBinding(r);
     if (!state.fixes || r.approval && (r.sent || []).some(x => x.sent) || state.busy) { slot.replaceChildren(); return; }
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
     const undecided = (state.fixes || []).filter(f => !edits[editId(f.sheet, f.cell)] && !dec[f.id]);
@@ -1535,8 +1935,8 @@
       const ex = withFix[0] && fixesFor(withFix[0]).find(isFix);
       const plan = dups.length === items.length ? `Take out the extra ${dups.length === 1 ? 'copy' : 'copies'}`
         : withFix.length === items.length ? `Change to the suggested value` + (ex ? `, e.g. ${show(ex.before)} → ${show(ex.after)}` : '')
-        : withFix.length || dups.length ? `${withFix.length + dups.length} get the suggested change; ${none.length} ${state.aiOn ? 'Claude fixes' : 'need you'}`
-        : state.aiOn ? 'Claude fixes ' + (items.length === 1 ? 'it' : 'them') : 'No change proposed: needs you';
+        : withFix.length || dups.length ? `${withFix.length + dups.length} get the suggested change; ${none.length} ${state.aiOn ? 'Dex fixes' : 'need you'}`
+        : state.aiOn ? 'Dex fixes ' + (items.length === 1 ? 'it' : 'them') : 'No change proposed: needs you';
       return {items, withFix, dups, none, plan, label: issueType(items[0]), text: items[0].text};
     });
     const seenFix = new Set();   // two flags on the same cell are settled by one change: say so instead of listing it twice
@@ -1582,27 +1982,24 @@
           if (fx.length) fx.forEach(f => p.fixes.set(f.id, f)); else if (isDupRow(x) && x.row) p.dups.push(x); else if (opt.includeLeft || !claudeLeft(x)) p.none.push(x); }
       }
       p.fixes = [...p.fixes.values()];
+      p.correction = captureCorrections(p.fixes, Object.fromEntries(p.fixes.map(f => [f.id, {after: dec[f.id]?.after ?? f.after}])), {}, displayedBinding, r);
       return p;
     };
-    const approve = async (p, btn, quiet) => {   // suggested changes, extra copies out, and (with AI on) Claude takes whatever had no suggestion
+    const approve = async (p, btn, quiet) => {   // suggested changes, extra copies out, and (with AI on) Dex takes whatever had no suggestion
       if (state.busy) return quiet ? hash : undefined;
-      if (!p.fixes.length && !p.dups.length && !(state.aiOn && p.none.length)) return quiet ? hash : toast('Nothing ticked has a suggested change. Use Fix with AI or Fix myself.', true);
+      if (!p.fixes.length && !p.dups.length && !(state.aiOn && p.none.length)) return quiet ? hash : toast('Nothing ticked has a suggested cell change. Review a manual correction; AI changes are paused.', true);
       if (btn) { btn.disabled = true; btn.textContent = 'Fixing…'; }
-      const d = store.get(decisionsKey(), {}), dn = reviewedSet();
-      for (const f of p.fixes) d[f.id] = {state: 'accepted', after: d[f.id]?.after ?? f.after};
-      p.issues.filter(x => fixesFor(x).some(isFix) || (isDupRow(x) && x.row)).forEach(x => dn.add(x.key));   // only what this click actually settles
-      store.set(decisionsKey(), d); store.set('rd-reviewed:' + hash, [...dn]);
+      if (p.dups.length || p.none.length) { toast('Review cell corrections separately. Automatic and row-deletion batches are paused.', true); if (btn) btn.disabled = false; return null; }
+      const k = p.correction;
+      if (!k) { toast('Reopen the correction preview.', true); return null; }
       let cur = hash;
-      const k = readyChanges();
-      if (k.total) { cur = await applyFixes(k.accepted, k.dec, k.edits, {download: false, thenOpen: false}); if (!cur) { if (btn) btn.disabled = false; return quiet ? null : undefined; } }
-      if (p.dups.length) { try { cur = (await api('/api/spreadsheets/remove-rows', {file_hash: cur, rows: p.dups.map(x => ({sheet: x.sheet, row: Number(x.row)}))})).item.file_hash; } catch (e) { toast(e.message, true); } }
-      if (state.aiOn && p.none.length) { const want = new Set(p.none.map(idOf)); cur = await autoFixAll(cur, i => want.has(idOf(i))); }
+      if (k.total) { cur = await applyFixes(k.accepted, k.dec, k.edits, {download: false, thenOpen: false}); if (!cur) { if (btn) btn.disabled = false; return null; } }
       if (quiet) return cur;
       await loadList(); select(cur); showResult(cur, true);
     };
-    const aiFix = async (p, btn) => {   // Claude decides each ticked item (any number: it works in batches)
+    const aiFix = async (p, btn) => {   // Dex decides each ticked item (any number: it works in batches)
       if (state.busy || !p.issues.length) return;
-      if (btn) { btn.disabled = true; btn.textContent = `Claude is fixing ${fmt(p.issues.length)}…`; }
+      if (btn) { btn.disabled = true; btn.textContent = `Dex is fixing ${fmt(p.issues.length)}…`; }
       const want = new Set(p.issues.map(idOf));
       const cur = await autoFixAll(hash, i => want.has(idOf(i)));
       await loadList();
@@ -1623,7 +2020,7 @@
       else { state.planOpen.add(k.id); drawCleanOffer(); const f = k.entries.find(isOn) || k.entries[0]; showCell(f.sheet, f.cell); toast('Click a cell in the list to go to it, then type the right value.'); }
     };
     const changeOf = (f, x) => f ? ['Now ', show(f.before), ' → becomes ', h('b', {}, showWs(f.after))] : x && isDupRow(x) ? 'Fix: take out the extra copy'
-      : state.aiOn ? 'Fix with AI lets Claude work it out, or fix it yourself' : 'No suggested change: fix it yourself, or Ignore';
+      : state.aiOn ? 'AI workbook changes are paused; review a manual correction' : 'No suggested change: fix it yourself, or Ignore';
     const firstOf = k => { if (k.row) { const f = k.entries[0]; return {where: `${f.sheet} ${f.cell}`, what: f.reason || '', change: changeOf(f), go: () => showCell(f.sheet, f.cell)}; }
       const x = k.entries[0]; return {where: where(x), what: x.text, change: changeOf(fixesFor(x).find(isFix), x), go: () => goTo(x)}; };
     const card = k => {
@@ -1634,7 +2031,7 @@
       const listItem = e => { const f = k.row ? e : fixesFor(e).find(isFix);
         return h('li', {class: isOn(e) ? '' : 'out'}, h('label', {}, box(e), h('span', {class: 'pi-text'}, h('span', {class: 'pi-where'}, k.row ? `${e.sheet} ${e.cell}` : where(e)),
           h('span', {class: 'pi-change'}, f ? [show(f.before), ' → ', h('b', {}, showWs(f.after))] : !k.row && isDupRow(e) ? 'Extra copy: take it out' : h('em', {}, 'No suggested change')))),
-          k.group && state.aiOn ? h('button', {type: 'button', class: 'linkish small', onclick: ev => aiFix({issues: [e], fixes: [], dups: [], none: [e], n: 1}, ev.target)}, 'Fix with AI') : null,
+          k.group && state.aiOn ? h('button', {type: 'button', disabled: true, title: 'AI workbook changes are paused pending reviewed-plan safety checks', class: 'linkish small', onclick: ev => aiFix({issues: [e], fixes: [], dups: [], none: [e], n: 1}, ev.target)}, 'Fix with AI') : null,
           h('button', {type: 'button', class: 'linkish small', onclick: () => k.row ? showCell(e.sheet, e.cell) : goTo(e)}, 'Show')); };
       return h('section', {class: `kind sev-${k.sev}`, id: 'kind-' + k.id.replace(/[^\w-]/g, '_')},
         h('div', {class: 'kind-head'}, h('h3', {}, `Review ${titleOf(k)}?`), k.sev === 'high' ? h('span', {class: 'kind-pill'}, 'Must fix') : null),
@@ -1642,7 +2039,7 @@
           h('button', {type: 'button', class: 'linkish small kind-ex-where', onclick: ex.go}, ex.where), ex.what ? h('span', {class: 'kind-ex-what'}, ex.what) : null, h('span', {class: 'kind-ex-change'}, ex.change)),
         h('div', {class: 'kind-btns'},
           k.hasSugg ? h('button', {type: 'button', class: 'btn primary', disabled: !on, onclick: e => { const b = e.target; previewAll({...p, none: []}, () => approve(p, b)); }}, n > 1 ? `Change${cnt}` : 'Change it') : null,
-          k.ai ? h('button', {type: 'button', class: 'btn ai', disabled: !on, onclick: e => aiFix(k.unsure ? partsOf([k], {includeLeft: true}) : p, e.target)}, n > 1 ? `Fix${cnt} with AI` : 'Fix with AI') : null,
+          k.ai ? h('button', {type: 'button', disabled: true, title: 'AI workbook changes are paused pending reviewed-plan safety checks', class: 'btn ai',  onclick: e => aiFix(k.unsure ? partsOf([k], {includeLeft: true}) : p, e.target)}, n > 1 ? `Fix${cnt} with AI` : 'Fix with AI') : null,
           h('button', {type: 'button', class: 'btn', disabled: !on, onclick: () => fixMyself(k)}, 'Fix myself'),
           h('button', {type: 'button', class: 'btn ghost', disabled: !on, onclick: () => ignore(p, k)}, `Ignore${cnt}`)),
         some ? h('p', {class: 'kind-note'}, `${fmt(n - on)} unticked ${n - on === 1 ? 'is' : 'are'} left out of these buttons.`) : null,
@@ -1655,8 +2052,8 @@
           n > 500 ? h('p', {class: 'kind-note'}, `Showing the first 500 of ${fmt(n)}. The buttons cover all of them.`) : null) : null);
     };
     if (kinds.length) {
-      const all = partsOf(kinds), total = kinds.reduce((t, k) => t + k.entries.length, 0);
-      const acceptAll = btn => previewAll(partsOf(kinds, {includeLeft: true}), () => { if (btn) { btn.disabled = true; btn.textContent = 'Fixing everything…'; } return fixEverythingLoop(); });
+      const all = partsOf(kinds), allDisplayed = partsOf(kinds, {includeLeft: true}), total = kinds.reduce((t, k) => t + k.entries.length, 0);
+      const acceptAll = btn => { const displayed = allDisplayed; return previewAll(displayed, () => approve(displayed, btn)); };
       const unsureAny = kinds.some(k => k.unsure);
       state.fixEverything = {hash, parts: opt => partsOf(kinds, opt), approve, run: () => acceptAll(document.querySelector('#cleanoffer .sum-accept'))};
       const canAll = all.fixes.length || all.dups.length || (state.aiOn && (all.none.length || unsureAny));
@@ -1666,8 +2063,8 @@
         h('p', {class: 'sum-line'}, `${plural(total, 'issue')} in ${plural(kinds.length, 'kind')}.` + (r.fixed_from ? ' Nothing below has been changed yet.' : ' Nothing has been changed yet.')),
         h('ul', {class: 'sum-list'}, kinds.map(k => h('li', {}, h('span', {class: 'sev ' + k.sev}),
           h('button', {type: 'button', class: 'linkish', onclick: () => document.getElementById('kind-' + k.id.replace(/[^\w-]/g, '_'))?.scrollIntoView({behavior: 'smooth', block: 'start'})}, titleOf(k))))),
-        canAll ? h('button', {type: 'button', class: 'btn primary sum-accept', onclick: e => acceptAll(e.target)}, state.aiOn ? 'Fix everything with AI' : 'Accept all fixes') : null,
-        h('p', {class: 'sum-note'}, canAll ? (state.aiOn ? 'One click: every suggested change is made and Claude fixes the rest. ' : 'Makes every suggested change. ') + 'Or review each kind below.' : 'Review each kind below.'));
+        canAll ? h('button', {type: 'button', class: 'btn primary sum-accept', onclick: e => acceptAll(e.target)}, 'Review suggested cell changes') : null,
+        h('p', {class: 'sum-note'}, canAll ? ('Only the displayed cell changes can be applied. AI and row changes are paused. ') + 'Or review each kind below.' : 'Review each kind below.'));
       steps.push({id: 'review', title: `${plural(total, 'issue')} to review`, panel: h('div', {class: 'plan2'}, summary, h('div', {class: 'kinds'}, kinds.map(card)))});
     }
     const walkOpen = openIssues;
@@ -1675,8 +2072,8 @@
     if (!walkOpen.length && wentThrough) steps.push({id: 'walked', title: `Went through ${plural(wentThrough, 'item')}`, done: true});
     if (c.total) steps.push({id: 'save', title: `Save your ${plural(c.total, 'change')}`, say: 'They go into a new version, which is checked again. Your original stays as it is.',
       go: ['Save the changes', () => { toast('Saving your changes into a new version…'); applyFixes(c.accepted, c.dec, c.edits, {download: false}); }]});
-    if (!(r.sent || []).some(x => x.sent)) steps.push({id: 'send', title: r.approval ? 'Send it to the client' : 'Approve it', say: r.approval ? 'Approved. Sending is a separate step: the email is ready to review.' : 'Everything is handled. Check the totals, then approve.',
-      go: [r.approval ? 'Send to client…' : 'Approve…', sendFinal]});
+    if (!(r.sent || []).some(x => x.sent)) steps.push({id: 'send', title: r.approval ? 'Approval recorded' : 'Approve it', say: r.approval ? 'Sending and draft creation are paused. Download the approved report for manual delivery.' : 'Everything is handled. Check the totals, then approve.',
+      go: [r.approval ? 'Approval details…' : 'Approve…', correctionAction(sendFinal)]});
     const live = steps.filter(s => !s.done && !(s.skippable && skipped.includes(s.id)));
     const current = live[0];
     const numbered = steps;
@@ -1725,7 +2122,7 @@
     ];
     const current = list.findIndex(x => !x[1]);
     const next = current === 1 ? (sureN ? 'Next: clean the data (see the box below), or pick fixes one by one on the right.' : unsureLeft ? 'Next: check the items the app is not sure about.' : 'Next: fix the must-fix issues on the right.')
-      : current === 2 ? 'Next: approve the final copy.' : current === 3 ? 'Next: send it to the client.' : 'All done. This report has been sent.';
+      : current === 2 ? 'Next: approve the final copy.' : current === 3 ? 'External sending is paused. Download the approved copy for manual delivery.' : 'All done. This report has been sent.';
     const pr = progress(), total = (state.fixes || []).length + walkIssues().length, left = pr ? pr.undecided + pr.open : null;
     const meter = (i, done) => i === 1 && !done && pr && total ? (() => { const f = h('i'); f.style.width = `${Math.round((total - left) / total * 100)}%`;
       return h('span', {class: 'meter', title: `${total - left} of ${total} handled`, role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': String(total), 'aria-valuenow': String(total - left)}, f); })() : null;
@@ -1744,20 +2141,21 @@
     const fixes = state.fixes.filter(f => !edits[editId(f.sheet, f.cell)]);
     const accepted = fixes.filter(f => dec[f.id]?.state === 'accepted');
     const total = accepted.length + editList.length;
+    const correction = captureCorrections(accepted, dec, edits, reviewBinding(state.report), state.report);
     block.replaceChildren();
     const save = d => { store.set(decisionsKey(), d); drawFixes(); };
     block.append(h('header', {}, h('h2', {}, 'Suggested fixes'),
-      h('p', {}, fixes.length ? `${fixes.length} suggested${fixes.some(f => f.source === 'AI fix') ? ', including Claude\'s' : ''}. Accept the ones you want, or edit any cell yourself, then download a corrected copy.`
-        : state.aiFixing ? 'Claude is reading the report and writing fixes for the issues above…' : 'No fixes yet. Let AI fix the issues, or click any cell in the sheet to change it.'),
+      h('p', {}, fixes.length ? `${fixes.length} suggested${fixes.some(f => f.source === 'AI fix') ? ', including Dex\'s' : ''}. Accept the ones you want, or edit any cell yourself, then download a corrected copy.`
+        : state.aiFixing ? 'Dex is reading the report and writing fixes for the issues above…' : 'No fixes yet. Let AI fix the issues, or click any cell in the sheet to change it.'),
       h('div', {class: 'right'},
-        state.aiOn ? h('button', {type: 'button', class: 'btn small' + (state.aiFix?.status === 'done' ? '' : ' primary'), disabled: state.aiFixing, onclick: () => runAiFixes(false)},
-          state.aiFixing ? [h('span', {class: 'spin'}), ' Claude is fixing…'] : state.aiFix?.status === 'done' ? 'Ask AI to fix again' : 'Let AI fix the issues') : null,
+        state.aiOn ? h('button', {type: 'button', class: 'btn small' + (state.aiFix?.status === 'done' ? '' : ' primary'), disabled: state.aiFixing, onclick: (() => { const binding = reviewBinding(state.report); return () => runAiFixes(false, binding); })()},
+          state.aiFixing ? [h('span', {class: 'spin'}), ' Dex is fixing…'] : state.aiFix?.status === 'done' ? 'Prepare AI suggestions again' : 'Prepare AI suggestions') : null,
         fixes.length ? h('button', {type: 'button', class: 'btn small', onclick: () => {
           const d = store.get(decisionsKey(), {}); fixes.filter(f => f.confidence === 'high' || f.source === 'AI fix').forEach(f => { d[f.id] = {state: 'accepted', after: d[f.id]?.after ?? f.after}; }); save(d);
         }}, 'Accept all') : null)));
     const ai = state.aiFix || {};
     if (ai.status === 'done' && (ai.skipped || []).length) block.append(h('details', {class: 'skipped'},
-      h('summary', {}, `Claude left ${ai.skipped.length} issue${ai.skipped.length === 1 ? '' : 's'} for a person to fix`),
+      h('summary', {}, `Dex left ${ai.skipped.length} issue${ai.skipped.length === 1 ? '' : 's'} for a person to fix`),
       h('ul', {}, ai.skipped.map(x => h('li', {}, h('b', {}, x.issue), ' ', x.reason)))));
     const panel = h('div', {class: 'panel'});
     state.fixSel ||= {};
@@ -1804,7 +2202,7 @@
     panel.append(h('div', {class: 'fixbar'},
       h('span', {}, total ? `${total} change${total === 1 ? '' : 's'} ready` + (editList.length ? ` (${editList.length} yours)` : '') : 'No changes yet'),
       total ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { store.set(decisionsKey(), {}); store.set(editsKey(), {}); drawFixes(); }}, 'Clear all') : null,
-      h('button', {type: 'button', class: 'btn', disabled: !total || state.busy, onclick: () => applyFixes(accepted, dec, edits)},
+      h('button', {type: 'button', class: 'btn', disabled: !total || state.busy, onclick: () => applyFixes(correction.accepted, correction.dec, correction.edits)},
         total ? `Download fixed version (${total})` : 'Download fixed version')));
     block.append(panel);
     drawGrid();
@@ -1830,11 +2228,26 @@
     const issues = walkIssues().filter(i => i.sure === false && !done.has(i.key) && !(state.fixes || []).some(f => fixCovers(f, i)));
     return {fixes, issues, total: fixes.length + issues.length};
   }
+  const correctionSnapshots = new WeakMap();
+  function captureCorrections(accepted, dec, edits, binding, report) {
+    const frozen = value => {
+      if (value && typeof value === 'object') { Object.values(value).forEach(frozen); Object.freeze(value); }
+      return value;
+    };
+    const snap = frozen(JSON.parse(JSON.stringify({accepted, dec, edits, binding,
+      report: {file_hash: report.file_hash, filename: report.filename, revision: revisionOf(report)}})));
+    correctionSnapshots.set(snap.accepted, snap);
+    return {...snap, total: snap.accepted.length + Object.keys(snap.edits).length};
+  }
+  function correctionAction(action) {
+    const captured = readyChanges();
+    return () => action(captured);
+  }
   function readyChanges() {
     if (!state.report) return {accepted: [], dec: {}, edits: {}, total: 0};
     const dec = store.get(decisionsKey(), {}), edits = store.get(editsKey(), {});
     const accepted = (state.fixes || []).filter(f => !edits[editId(f.sheet, f.cell)] && dec[f.id]?.state === 'accepted');
-    return {accepted, dec, edits, total: accepted.length + Object.keys(edits).length};
+    return captureCorrections(accepted, dec, edits, reviewBinding(state.report), state.report);
   }
   // A copy of the report with each record's label and defect photos pulled from SharePoint (original unchanged).
   async function downloadWithPhotos(r) {
@@ -1849,33 +2262,39 @@
       toast(`Downloaded with ${got} photo${got === '1' ? '' : 's'} on the "${res.headers.get('X-Photos-Tab') || 'Defect Photos'}" tab.` + (miss ? ` ${miss} photo${miss === 1 ? '' : 's'} could not be read; the tab says which.` : ''));
     } catch (e) { toast(e.message, true); }
   }
-  function downloadWithChanges() {
-    const c = readyChanges();
-    if (!c.total) { const a = h('a', {href: '/api/spreadsheets/download?id=' + state.report.file_hash, download: state.report.filename}); document.body.append(a); a.click(); a.remove(); return; }
-    applyFixes(c.accepted, c.dec, c.edits);
+  function downloadWithChanges(c) {
+    if (!c?.binding) return;
+    if (!c.total) { const a = h('a', {href: '/api/spreadsheets/download?id=' + c.report.file_hash, download: c.report.filename}); document.body.append(a); a.click(); a.remove(); return; }
+    fdPreview(c);
   }
   function updateDownloads() {
     const c = readyChanges(), label = c.total ? `Download with ${c.total} change${c.total === 1 ? '' : 's'}` : `Download v${state.report ? revisionOf(state.report) : 1}`;
-    for (const b of document.querySelectorAll('.dl-changes')) { b.textContent = state.busy ? 'Building the fixed copy…' : label; b.disabled = !!state.busy; }
+    for (const b of document.querySelectorAll('.dl-changes')) { b.textContent = state.busy ? 'Building the fixed copy…' : label; b.disabled = !!state.busy; b.onclick = () => downloadWithChanges(c); }
   }
   async function applyFixes(accepted, dec, edits, opts = {}) {
+    const captured = correctionSnapshots.get(accepted);
+    if (!captured?.binding?.expected_check_hash) { toast('Reopen the correction preview before applying.', true); return null; }
+    ({accepted, dec, edits} = captured);
+    const binding = captured.binding;
     if (state.busy) return; state.busy = true; drawFixes(); updateDownloads();
     toast('Building the fixed copy with your changes…');
     try {
       const changes = accepted.map(f => {
         const after = dec[f.id]?.after ?? f.after;
-        return {id: f.id, sheet: f.sheet, cell: f.cell, before: f.before, after, reason: f.reason, source: f.source,
+        return {id: f.id, sheet: f.sheet, cell: f.cell, before: f.before, after, reason: f.reason, source: f.source, snapshot_id: f.snapshot_id, item: f.item, field: f.field,
           kind: f.kind === 'auto' ? 'auto' : after === f.after ? f.kind : (f.kind === 'number' && after.trim() !== '' && !isNaN(Number(after)) ? 'number' : 'text')};
       });
       for (const e of Object.values(edits || {})) {
         const numeric = e.after.trim() !== '' && !isNaN(Number(e.after.replace(/,/g, ''))) && (e.before === '' || !isNaN(Number(e.before)));
-        changes.push({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: e.reason || 'Edited by reviewer', source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit', kind: numeric ? 'number' : 'text'});
+        changes.push({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: e.reason || 'Edited by reviewer', source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit', kind: numeric ? 'number' : 'text',
+          change_set: e.change_set || undefined, change_set_size: e.change_set_size || undefined});
       }
-      const answer = await api('/api/spreadsheets/apply-fixes', {file_hash: state.report.file_hash, changes});
+      const answer = await api('/api/spreadsheets/apply-fixes', {...binding, changes});
       if (state.celebrate) state.celebrate.hash = answer.item.file_hash;
-      const rejected = (state.fixes || []).filter(f => dec[f.id]?.state === 'rejected').map(f => ({sheet: f.sheet, cell: f.cell, after: f.after}));
-      store.set('rd-carry:' + answer.item.file_hash, {reviewed: store.get('rd-reviewed:' + state.report.file_hash, []), rejected});
-      store.set(decisionsKey(), {}); store.set(editsKey(), {});
+      // Do not carry local review markers into a new file or erase edits made while this request ran.
+      for (const [key, shown] of [['rd-fixes:' + binding.file_hash, dec], ['rd-edits:' + binding.file_hash, edits]]) {
+        if (JSON.stringify(store.get(key, {})) === JSON.stringify(shown)) store.set(key, {});
+      }
       if (opts.download !== false) {
         const link = h('a', {href: '/api/spreadsheets/download?id=' + answer.item.file_hash, download: answer.item.filename});
         document.body.append(link); link.click(); link.remove();
@@ -1888,16 +2307,7 @@
   }
   // Take out extra copies of duplicate rows (new corrected version; original untouched). Accepted cell changes are saved first.
   async function removeRows(rows, what) {
-    if (!rows.length || state.busy) return;
-    let hash = state.report.file_hash;
-    const c = readyChanges();
-    if (c.total) { hash = await applyFixes(c.accepted, c.dec, c.edits, {download: false, thenOpen: false}); if (!hash) return; }
-    state.busy = true; toast(`Taking out ${rows.length} extra row${rows.length === 1 ? '' : 's'}…`);
-    try {
-      const out = await api('/api/spreadsheets/remove-rows', {file_hash: hash, rows: rows.map(([sheet, row]) => ({sheet, row}))});
-      toast(`${what || `Took out ${out.removed} extra row${out.removed === 1 ? '' : 's'}`}. Saved as "${out.item.filename}" and checked again. The original is unchanged.`);
-      state.busy = false; await loadList(); select(out.item.file_hash);
-    } catch (e) { state.busy = false; toast(e.message, true); if (hash !== state.report.file_hash) { await loadList(); select(hash); } }
+    toast('Row deletion is paused until it can be bound to a reviewed source snapshot. No changes were made.', true);
   }
   const isDupRow = i => i.code === 'duplicate_row';
 
@@ -1931,7 +2341,8 @@
       const g = await api('/api/spreadsheets/sheet', {file_hash: hash, sheet});
       if (state.selected !== hash) return;
       state.grid = {...g, hash}; state.gridSheet = g.sheet; if (!quiet) drawGrid(!(state.sheetScroll || {})[g.sheet]);
-    } catch (e) { block.replaceChildren(h('p', {class: 'note'}, e.message)); }
+    } catch (e) {   // a failed sheet keeps the one on screen and says what went wrong
+      if (state.grid) { drawGrid(); toast(`Could not open "${sheet}": ${e.message}`, true); } else block.replaceChildren(h('p', {class: 'note', role: 'alert'}, `Could not open "${sheet}": ${e.message}`)); }
   }
   // One sheet as an HTML table. opts: onlyRows (Set of row numbers), selected (cell), focus {cell, row}
   function buildGrid(g, m, opts = {}) {
@@ -2001,9 +2412,24 @@
     const focus = cur && cur.sheet === sheet ? {cell: cur.cell, row: cur.row} : state.gridRow ? {row: state.gridRow} : null;
     const {table, first} = buildGrid(g, m, {onlyRows: only, selected: state.gridCell, focus});
     table.style.fontSize = (state.gridZoom || 100) / 100 * 13 + 'px';
+    // the workbook's own links stay clickable (http, https and mailto only); its pictures show where they are anchored
+    for (const [ref, ln] of Object.entries(g.links || {})) {
+      const td = table.querySelector(`td[data-cell="${ref}"]`); if (!td) continue;
+      const text = td.textContent || ln.url;
+      td.replaceChildren(ln.safe ? h('a', {href: ln.url, target: '_blank', rel: 'noopener noreferrer', class: 'cell-link', title: ln.url}, text)
+        : h('span', {class: 'cell-link unsafe', title: `Not opened: ${ln.url.slice(0, 120)} is not a web link`}, text));
+    }
+    const mediaUrl = p => `/api/spreadsheets/media?id=${state.report.file_hash}&media=${encodeURIComponent(p.media)}`;
+    for (const p of g.images || []) {
+      const td = p.cell && table.querySelector(`td[data-cell="${p.cell}"]`); if (!td || p.missing) continue;
+      td.classList.add('has-pic');
+      td.append(h('a', {href: mediaUrl(p), target: '_blank', rel: 'noopener', class: 'cell-pic', title: `Picture at ${p.cell}${p.item ? ' · SharePoint item ' + p.item : ''}${p.historical ? ' · reference only' : ''}`},
+        h('img', {src: mediaUrl(p), alt: `Photo at ${sheet} ${p.cell}${p.item ? ', item ' + p.item : ''}`, loading: 'lazy'})));
+    }
     const flagged = Object.entries(m.cells).filter(([k, l]) => k.startsWith(sheet + '!') && l.some(x => x.kind === 'issue')).length + Object.keys(m.rows).filter(k => k.startsWith(sheet + '!')).length;
     const tabs = h('div', {class: 'fd-tabs', role: 'tablist', 'aria-label': 'Sheets'}, (g.sheets || []).map(n => h('button', {type: 'button', role: 'tab', class: n === sheet ? 'on' : '', 'aria-selected': String(n === sheet),
-      onclick: () => { if (n === sheet) return; fdKeepScroll(); state.gridCell = null; state.gridRow = null; loadGrid(n); }}, n, m.perSheet[n] ? h('i', {'aria-label': `${m.perSheet[n]} flagged`}, String(m.perSheet[n])) : null)));
+      onclick: e => { if (n === sheet) return; fdKeepScroll(); state.gridCell = null; state.gridRow = null; e.currentTarget.classList.add('loading'); e.currentTarget.setAttribute('aria-busy', 'true');
+        block.querySelector('.gridwrap')?.classList.add('loading'); loadGrid(n); }}, n, m.perSheet[n] ? h('i', {'aria-label': `${m.perSheet[n]} flagged`}, String(m.perSheet[n])) : null)));
     table.addEventListener('click', e => {
       const td = e.target.closest('td[data-cell]'); if (!td) return;
       const addr = td.dataset.cell, row = splitCell(addr)[1];
@@ -2025,6 +2451,12 @@
           [80, 100, 125, 150].map(z => h('option', {value: String(z), selected: (state.gridZoom || 100) === z ? true : null}, z + '%')))),
         state.fdAsideHidden ? h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdAsideHidden = false; $('fd-work')?.classList.remove('aside-hidden'); drawSide(); }}, icon('panel', 15), ' Show corrections') : null),
       empty ? h('div', {class: 'fd-empty'}, h('b', {}, q ? 'No matching rows' : 'No exceptions on this sheet'), h('p', {}, q ? `Nothing on "${sheet}" contains “${state.gridSearch}”.` : 'Every row on this sheet is clear.')) : scroller,
+      (g.images || []).length ? h('details', {class: 'fd-gallery', open: (g.images || []).length <= 6 || null},
+        h('summary', {}, `Pictures on this sheet: ${g.image_summary.placements} placed, ${g.image_summary.unique} unique${g.image_summary.missing ? `, ${g.image_summary.missing} missing from the file` : ''}`),
+        h('ul', {}, g.images.map(p => h('li', {class: p.historical ? 'historical' : ''},
+          p.missing ? h('span', {class: 'pic-missing'}, 'Missing from the file') : h('a', {href: mediaUrl(p), target: '_blank', rel: 'noopener'}, h('img', {src: mediaUrl(p), alt: `Photo at ${sheet} ${p.cell}`, loading: 'lazy'})),
+          h('span', {}, h('b', {}, p.cell || 'Floating'), p.item ? ` · item ${p.item}` : ' · no record', p.field ? ` · ${p.field}` : '', ` · ${p.purpose}`, p.business_date ? ` · ${p.business_date}` : ''),
+          p.historical ? h('small', {}, p.note) : null)))) : null,
       tabs,
       h('div', {class: 'legend'},
         h('span', {class: 'k iss high'}, `Flagged (${flagged})`),
@@ -2037,153 +2469,27 @@
     drawCellSlot();
   }
 
-  // ---------------- chat with Claude: ask questions, have it make the changes
-  const chatKey = () => 'rd-chat:' + state.report.file_hash;
-  function queuedList() {
-    const c = readyChanges();
-    return [...c.accepted.map(f => ({sheet: f.sheet, cell: f.cell, before: f.before, after: c.dec[f.id]?.after ?? f.after, source: f.source})),
-      ...Object.values(c.edits).map(e => ({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, source: e.source || 'Your edit'}))];
-  }
-  function applyChat(msg) {
-    const edits = store.get(editsKey(), {}), dec = store.get(decisionsKey(), {});
-    msg.prev = {};
-    for (const u of msg.undo || []) {
-      const id = editId(u.sheet, u.cell);
-      if (edits[id]) { msg.prev[id] = edits[id]; delete edits[id]; }
-      for (const f of state.fixes || []) if (f.sheet === u.sheet && f.cell === u.cell && dec[f.id]?.state === 'accepted') { dec[f.id] = {state: 'rejected', after: dec[f.id].after}; (msg.rejected ||= []).push(f.id); }
-    }
-    for (const ch of msg.changes || []) {
-      const id = editId(ch.sheet, ch.cell);
-      if (!(id in msg.prev)) msg.prev[id] = edits[id] || null;
-      edits[id] = {sheet: ch.sheet, cell: ch.cell, before: ch.before, after: ch.after, header: '', source: 'Claude', reason: ch.reason};
-    }
-    msg.applied = true;
-    store.set(editsKey(), edits); store.set(decisionsKey(), dec);
-  }
-  function undoChat(msg) {
-    const edits = store.get(editsKey(), {}), dec = store.get(decisionsKey(), {});
-    for (const [id, prev] of Object.entries(msg.prev || {})) { if (prev) edits[id] = prev; else delete edits[id]; }
-    for (const fid of msg.rejected || []) if (dec[fid]) dec[fid].state = 'accepted';
-    msg.applied = false;
-    store.set(editsKey(), edits); store.set(decisionsKey(), dec);
-  }
-  // Claude's opening message: what it found, what it can fix, and an offer to do all the fixes
-  const pendingFixes = () => { const c = readyChanges(); return (state.fixes || []).filter(f => !c.edits[editId(f.sheet, f.cell)] && !c.dec[f.id]?.state); };
+  // ---------------- Dex: one route to the reviewed correction workflow
+  // Historical chat records are retained, but cannot select, undo or apply changes.
   function maybeBrief(hash, working) {
-    if (!state.report || state.report.file_hash !== hash) return;
-    const issues = (state.report.review.issues || []).filter(i => i.severity !== 'info');
-    if (!issues.length) return;
-    const log = store.get(chatKey(), []);
-    if (log.some(m => m.kind === 'brief')) { if (!working) drawChat(); return; }
-    if (working || state.aiFixing) { state.briefWaiting = hash; autoOpenChat(); return; }
-    state.briefWaiting = null;
-    const rv = state.report.review, ai = state.aiFix || {}, fixes = pendingFixes();
-    const high = issues.filter(i => i.severity === 'high').length, rest = issues.length - high;
-    const fixedCells = new Set(fixes.map(f => `${f.sheet}!${f.cell}`));
-    const people = issues.filter(i => !(i.cell && fixedCells.has(`${i.sheet}!${String(i.cell).toUpperCase()}`)) && !fixes.some(f => f.sheet === i.sheet && i.row && splitCell(f.cell)?.[1] === Number(i.row)));
-    const lines = [];
-    if (rv.ai?.summary) lines.push(rv.ai.summary);
-    if (rv.verify?.status === 'done' && rv.verify.dismissed) lines.push(`I double-checked everything that was flagged against the actual cells and dismissed ${rv.verify.dismissed} false alarm${rv.verify.dismissed === 1 ? '' : 's'} (listed under Issues if you want to look).`);
-    lines.push(`I found ${issues.length} issue${issues.length === 1 ? '' : 's'}` + (high ? `: ${high} must be fixed` : '') + (high && rest ? `, ${rest} to check` : !high ? '' : '') + '.');
-    lines.push(fixes.length ? `I have ${fixes.length} fix${fixes.length === 1 ? '' : 'es'} ready (listed below).` : 'None of them can be fixed safely from the file alone.');
-    if (people.length) lines.push(`${people.length} need a person to decide` + (ai.skipped?.length ? ', for example: ' + ai.skipped.slice(0, 2).map(x => x.issue).join('; ') : '') + '.');
-    lines.push(fixes.length ? 'Want me to do all the fixes? Or we can go through them one at a time, or you can tell me what to change.' : 'We can go through them one at a time in the sheet, or tell me what to change.');
-    log.push({role: 'assistant', kind: 'brief', content: lines.join('\n\n'), offer: fixes.map(f => f.id)});
-    store.set(chatKey(), log);
-    autoOpenChat(); drawChat();
+    if (state.report?.file_hash === hash && !working) drawChat();
   }
-  function autoOpenChat() {  // Claude's first read is ready: flag the Ask Claude tab rather than pulling you away from the fixes
-    if (state.sideTab === 'claude') return;
-    state.chatUnread = true; drawSideTabs();
-  }
-  function doFixes(msg, ids) {
-    const dec = store.get(decisionsKey(), {}), byId = Object.fromEntries((state.fixes || []).map(f => [f.id, f]));
-    msg.done = [];
-    for (const id of ids) if (byId[id] && !dec[id]?.state) { dec[id] = {state: 'accepted', after: byId[id].after}; msg.done.push(id); }
-    store.set(decisionsKey(), dec);
-    return msg.done.length;
-  }
-  function undoFixes(msg) {
-    const dec = store.get(decisionsKey(), {});
-    for (const id of msg.done || []) if (dec[id]?.state === 'accepted') delete dec[id];
-    msg.done = []; store.set(decisionsKey(), dec);
-  }
-
   function openChat() { showSide('claude'); }
   function closeChat() { if (state.sideTab === 'claude') showSide('fixes'); }
   function drawChat() {
     const panel = $('chat'); if (!panel || !state.report) return;
-    const log = store.get(chatKey(), []);
-    const save = () => store.set(chatKey(), log);
-    const list = h('div', {class: 'chat-log', 'aria-live': 'polite'});
-    if (!log.length && state.briefWaiting !== state.report.file_hash) list.append(h('div', {class: 'chat-hello'},
-      h('p', {}, 'Tell me what to change in this report, or ask about anything in it. I make the changes in a corrected copy; nothing is final until you download it.'),
-      h('div', {class: 'chat-ideas'}, ['Why is this report on hold?', 'Fix everything you safely can', 'Make the defect reason spellings match', 'Clear any duplicate rows']
-        .map(t => h('button', {type: 'button', class: 'chip', onclick: () => send(t)}, t)))));
-    for (const m of log) {
-      if (m.role === 'user') { list.append(h('div', {class: 'msg me'}, m.content)); continue; }
-      if (m.kind === 'brief') {
-        const byId = Object.fromEntries((state.fixes || []).map(f => [f.id, f])), offer = (m.offer || []).map(id => byId[id]).filter(Boolean);
-        const done = (m.done || []).length;
-        list.append(h('div', {class: 'msg ai brief'}, h('div', {class: 'txt'}, m.content),
-          offer.length ? h('div', {class: 'chg'}, h('ul', {}, offer.slice(0, 40).map(f => h('li', {},
-            h('button', {type: 'button', class: 'cellref', onclick: () => showCell(f.sheet, f.cell)}, `${f.sheet} ${f.cell}`), ' ', h('s', {}, f.before || '(blank)'), ' → ', h('b', {}, f.after || '(blank)'),
-            h('small', {}, f.reason || f.source))))) : null,
-          h('div', {class: 'offer'},
-            offer.length ? (done ? [h('span', {class: 'tagok'}, `✓ Did ${done} fix${done === 1 ? '' : 'es'}`), h('button', {type: 'button', class: 'btn small', onclick: () => { undoFixes(m); save(); drawFixes(); drawChat(); }}, 'Undo')]
-              : h('button', {type: 'button', class: 'btn primary small', onclick: () => {
-                  const n = doFixes(m, m.offer || []); log.push({role: 'assistant', content: n ? `Done. I queued ${n} fix${n === 1 ? '' : 'es'}; they're green in the sheet. Download when you're ready, or tell me anything else to change.` : 'Those fixes were already decided.'});
-                  save(); drawFixes(); drawChat(); if (offer[0]) showCell(offer[0].sheet, offer[0].cell, true); }}, `Do all ${offer.length} fix${offer.length === 1 ? '' : 'es'}`)) : null,
-            h('button', {type: 'button', class: 'btn small', onclick: () => focusIssue(0)}, 'Go through them with me'),
-            offer.length && !done ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { showSide('fixes'); $('fixes-block')?.scrollIntoView({behavior: 'smooth'}); }}, "I'll pick") : null)));
-        continue;
-      }
-      const n = (m.changes || []).length, u = (m.undo || []).length;
-      list.append(h('div', {class: 'msg ai' + (m.error ? ' err' : '')}, h('div', {class: 'txt'}, m.content),
-        n || u ? h('div', {class: 'chg'},
-          h('div', {class: 'chg-head'}, h('b', {}, m.applied ? `✓ ${n ? `Changed ${n} cell${n === 1 ? '' : 's'}` : ''}${n && u ? ', ' : ''}${u ? `undid ${u}` : ''}` : 'Changes undone'),
-            h('button', {type: 'button', class: 'btn small', onclick: () => { m.applied ? undoChat(m) : applyChat(m); save(); drawFixes(); drawChat(); }}, m.applied ? 'Undo' : 'Redo')),
-          h('ul', {}, (m.changes || []).slice(0, 30).map(ch => h('li', {}, h('button', {type: 'button', class: 'cellref', onclick: () => showCell(ch.sheet, ch.cell)}, `${ch.sheet} ${ch.cell}`), ' ',
-            h('s', {}, ch.before || '(blank)'), ' → ', h('b', {}, ch.after || '(blank)'))), (m.changes || []).length > 30 ? h('li', {}, `…and ${(m.changes || []).length - 30} more`) : null),
-          (m.dropped || []).length ? h('p', {class: 'skipnote'}, `Skipped ${m.dropped.length}: ` + m.dropped.slice(0, 4).map(d => `${d.cell} (${d.why})`).join(', ')) : null) : null));
-    }
-    if (state.chatBusy) list.append(h('div', {class: 'msg ai'}, h('span', {class: 'spin'}), ' Claude is reading the report…'));
-    else if (state.briefWaiting === state.report.file_hash && !log.some(m => m.kind === 'brief')) list.append(h('div', {class: 'msg ai'}, h('span', {class: 'spin'}),
-      state.reviewing === state.report.file_hash ? ' Claude is reading the whole report…' : state.verifying === state.report.file_hash ? ' Claude is double-checking each flagged item against the actual cells…' : ' Claude is working out fixes for the real issues…'));
-    const box = h('textarea', {rows: 2, placeholder: 'e.g. Change the auditor on every row to Robert Swanke', 'aria-label': 'Message to Claude'});
-    box.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(box.value); } });
     panel.replaceChildren(
-      h('div', {class: 'chat-top'}, h('b', {}, 'Ask Claude about this report'),
-        log.length ? h('button', {type: 'button', class: 'btn ghost small', onclick: () => { store.set(chatKey(), []); drawChat(); }}, 'New chat') : null),
-      list,
-      h('form', {class: 'chat-send', onsubmit: e => { e.preventDefault(); send(box.value); }}, box,
-        h('button', {type: 'submit', class: 'btn primary', disabled: !!state.chatBusy}, 'Send')),
-    );
-    requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
-    async function send(text) {
-      text = (text || '').trim(); if (!text || state.chatBusy) return;
-      const hash = state.report.file_hash;
-      log.push({role: 'user', content: text}); save();
-      state.chatBusy = true; drawChat();
-      try {
-        const brief = [...log].reverse().find(m => m.kind === 'brief');
-        if (brief && !(brief.done || []).length && /^(yes|yep|yeah|sure|ok(ay)?|please|do (it|them|all|all (the|of the) fixes)|apply (them|all)|fix (them|all|everything))[.! ]*$/i.test(text)) {
-          const n = doFixes(brief, brief.offer || []);
-          log.push({role: 'assistant', content: n ? `Done. I queued ${n} fix${n === 1 ? '' : 'es'}; they're green in the sheet. Download when you're ready, or tell me anything else to change.` : 'There were no waiting fixes left to do.'});
-          save(); drawFixes(); return;
-        }
-        const suggested = pendingFixes().map(f => ({sheet: f.sheet, cell: f.cell, before: f.before, after: f.after, reason: f.reason, source: f.source}));
-        const out = await api('/api/spreadsheets/chat', {file_hash: hash, messages: log.filter(m => !m.error).map(m => ({role: m.role, content: m.content})), queued: queuedList(), suggested});
-        if (state.report?.file_hash !== hash) return;
-        const msg = {role: 'assistant', content: out.reply || 'Done.', changes: out.changes || [], undo: out.undo || [], dropped: out.dropped || []};
-        if (msg.changes.length || msg.undo.length) applyChat(msg);
-        log.push(msg); save();
-        drawFixes();
-        if (msg.changes[0]) showCell(msg.changes[0].sheet, msg.changes[0].cell, true);
-      } catch (e) {
-        log.push({role: 'assistant', content: e.message, error: true}); save();
-      } finally { state.chatBusy = false; drawChat(); }
-    }
+      h('div', {class: 'chat-top'}, h('b', {}, 'Ask Dex about this report')),
+      h('div', {class: 'chat-hello'},
+        h('p', {}, state.aiOn
+          ? 'Dex can prepare suggestions through the AI prepares suggestions review mode. Chat sending is unavailable in this version.'
+          : 'Dex is unavailable because AI preparation is not configured. You can review manually or leave the file unchanged.'),
+        h('p', {}, 'Choose a review mode above the spreadsheet. Include or remove individual corrections, then preview the selected changes before explicitly creating a new version. Your original file and source-review holds are preserved.'),
+        h('button', {type: 'button', class: 'btn', onclick: () => {
+          showSide('fixes'); document.querySelector('.fd-mode-selector')?.scrollIntoView({behavior: 'smooth', block: 'center'});
+        }}, 'Go to review modes')),
+      h('textarea', {rows: 2, disabled: true, 'aria-label': 'Message to Dex', placeholder: 'Chat sending is unavailable. Use the review modes above.'}),
+      h('button', {type: 'button', class: 'btn primary', disabled: true}, 'Send'));
   }
   async function showCell(sheet, cell, quiet) {
     if (!state.grid || state.grid.sheet !== sheet) await loadGrid(sheet);
@@ -2203,13 +2509,13 @@
     const open = allIssues(r.review).filter(i => i.severity !== 'info' && !reviewed.has(i.key) && !(i.cell && changed.has(editId(i.sheet, String(i.cell).toUpperCase())))).length;
     return {undecided, open, ready: readyChanges().total, done: !undecided && !open};
   }
-  function downloadFinal() { $('finish-dialog')?.open && $('finish-dialog').close(); downloadWithChanges(); }
-  function sendFinal() {
+  function downloadFinal(c) { $('finish-dialog')?.open && $('finish-dialog').close(); downloadWithChanges(c); }
+  function sendFinal(c) {
+    if (!c?.binding || c.binding.file_hash !== state.report?.file_hash) return;
     $('finish-dialog')?.open && $('finish-dialog').close();
-    const c = readyChanges();
     if (!c.total) { openSend(); return; }
     state.openSendFor = 'next';                      // the corrected copy opens with the send window
-    applyFixes(c.accepted, c.dec, c.edits, {download: false});
+    fdPreview(c);
   }
   function updateFinish() {
     drawSteps();
@@ -2239,18 +2545,17 @@
     let dlg = $('finish-dialog');
     if (!dlg) { dlg = h('dialog', {id: 'finish-dialog', class: 'fixer finishdlg', 'aria-labelledby': 'finish-title'}); document.body.append(dlg);
       dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); }); }
-    const r = state.report, handled = p.items || (state.fixes || []).length + walkIssues().length;
+    const r = state.report, status = fdStatus(r), handled = p.items || (state.fixes || []).length + walkIssues().length;
     const nextRep = visibleList().find(x => x.file_hash !== r.file_hash && x.review && x.review.status !== 'clear' && !x.review.sent_at && inClientR(x));
     dlg.replaceChildren(h('div', {class: 'fixer-wait celebrate'},
-      confetti(),
-      h('div', {class: 'finish-mark'}, '✓'),
-      h('h2', {id: 'finish-title'}, 'All clear!'),
-      h('p', {class: 'wins'}, handled ? `You handled ${handled === 1 ? 'the one item' : `all ${handled} items`} on ${r.review.job || r.filename}.` : `${r.review.job || r.filename} is clean.`),
-      h('p', {}, (p.saved ? `${p.saved} change${p.saved === 1 ? ' is' : 's are'} saved in this version, and it has been checked again. ` : p.ready ? `${p.ready} change${p.ready === 1 ? '' : 's'} will go into the final report. ` : 'Nothing needs changing. ') + 'Next: approve it and send it to the client, or download it.'),
+      h('h2', {id: 'finish-title'}, 'Selection review finished'),
+      h('p', {class: 'wins'}, handled ? `You reviewed ${handled} visible items on ${r.review.job || r.filename}.` : 'No visible corrections are selected.'),
+      h('p', {class: 'fd-coverage'}, `${status.text}. ${status.why || 'Review source coverage and holds before internal approval.'}`),
+      h('p', {}, (p.saved ? `${p.saved} change${p.saved === 1 ? ' is' : 's are'} saved in this version, and it has been checked again. ` : p.ready ? `${p.ready} selected change${p.ready === 1 ? ' has' : 's have'} not been applied yet. ` : 'No selected changes are pending. ') + 'Next: review the selected changes, approve internally when ready, or download this version. External sending is paused.'),
       h('div', {class: 'row'},
         nextRep ? h('button', {type: 'button', class: 'btn ghost', onclick: () => { dlg.close(); select(nextRep.file_hash); }}, 'Next report ›') : h('button', {type: 'button', class: 'btn ghost', onclick: () => dlg.close()}, 'Not now'),
-        h('button', {type: 'button', class: 'btn', onclick: downloadFinal}, 'Download final report'),
-        h('button', {type: 'button', class: 'btn primary', onclick: sendFinal}, 'Approve…'))));
+        h('button', {type: 'button', class: 'btn', onclick: correctionAction(downloadFinal)}, 'Review or download this version'),
+        status.next === 'approve' && !p.ready ? h('button', {type: 'button', class: 'btn primary', onclick: correctionAction(sendFinal)}, 'Approve internally…') : h('button', {type: 'button', class: 'btn primary', onclick: () => dlg.close()}, 'Back to review'))));
     if (!dlg.open) dlg.showModal();
   }
 
@@ -2259,12 +2564,12 @@
   function recsBlock(recs, {ask, act, scope}) {
     if (!recs) return null;
     const items = recs.items || [];
-    const busy = h('span', {class: 'note recsbusy', hidden: true}, h('span', {class: 'spin'}), ' Claude is reading the results…');
+    const busy = h('span', {class: 'note recsbusy', hidden: true}, h('span', {class: 'spin'}), ' Dex is reading the results…');
     const askBtn = recs.ai_on ? h('button', {type: 'button', class: 'btn small', onclick: async e => {
       e.target.disabled = true; busy.hidden = false;
       try { await ask(); } catch (err) { toast(err.message, true); e.target.disabled = false; busy.hidden = true; } }},
-      recs.source === 'ai' ? 'Ask Claude again' : 'Ask Claude for recommendations') : null;
-    const src = recs.source === 'ai' ? `From Claude's analysis of ${scope}, ${ago(recs.made_at)}.` : `From the checks on ${scope}.` + (recs.ai_on ? ' Ask Claude for a deeper read.' : '');
+      recs.source === 'ai' ? 'Ask Dex again' : 'Ask Dex for recommendations') : null;
+    const src = recs.source === 'ai' ? `From Dex's analysis of ${scope}, ${ago(recs.made_at)}.` : `From the checks on ${scope}.` + (recs.ai_on ? ' Ask Dex for a deeper read.' : '');
     return h('section', {class: 'block recs', 'aria-label': 'Recommendations'},
       h('header', {}, h('h2', {}, 'Recommendations'), h('p', {}, src), h('div', {class: 'recsbar'}, askBtn, busy)),
       recs.note ? h('p', {class: 'note'}, recs.note) : null,
@@ -2289,8 +2594,8 @@
       review_fixes: {label: 'Show the fixes', run: () => { showSide('fixes'); scrollTo('fixes-block')(); }},
       fix_shifts: {label: 'Show the rows', run: () => { showSide('fixes'); scrollTo('shiftfix')(); }},
       recheck_sharepoint: {label: 'Check SharePoint', run: () => rerun('sharepoint', 'Checking SharePoint…')},
-      send_for_review: {label: 'Send for review', run: () => { reviewForm('request'); scrollTo('reviewstate')(); }},
-      approve_send: {label: 'Send', run: openSend},
+      send_for_review: {label: 'Request internal review', run: () => { reviewForm('request'); scrollTo('reviewstate')(); }},
+      approve_send: {label: 'Internal approval details', run: openSend},
       open_report: newer ? {label: 'Open corrected copy', run: () => select(newer.fixed_file_hash)} : null,
     })[rec.do] || null;
   }
@@ -2305,11 +2610,11 @@
     if (rr.status === 'waiting') return h('div', {class: 'reviewstate', id: 'reviewbox'},
       h('div', {}, h('b', {}, 'Waiting for review'), h('span', {}, `${rr.by} asked ${ago(rr.at)}${rr.note ? `: “${rr.note}”` : '.'}`)),
       h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => openSend()}, 'Approve'),
-        h('button', {type: 'button', class: 'btn small', onclick: () => reviewForm('send_back')}, 'Send back with a comment'),
+        h('button', {type: 'button', class: 'btn small', onclick: () => reviewForm('send_back')}, 'Record changes needed'),
         h('button', {type: 'button', class: 'btn ghost small', onclick: link}, 'Copy link for the reviewer')));
     if (rr.status === 'sent_back') return h('div', {class: 'reviewstate back', id: 'reviewbox'},
       h('div', {}, h('b', {}, `Sent back by ${rr.reviewer}`), h('span', {}, `“${rr.comment}” (${ago(rr.answered_at)})`)),
-      h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn small', onclick: () => reviewForm('request')}, 'Send for review again')));
+      h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn small', onclick: () => reviewForm('request')}, 'Request internal review again')));
     return null;
   }
   function reviewForm(action) {
@@ -2321,18 +2626,33 @@
         store.set('rd-approver', who.value.trim());
         const out = await api('/api/spreadsheets/review', {file_hash: state.report.file_hash, action, by: who.value, note: note.value});
         state.report = {...state.report, ...out.item, review: {...state.report.review, review_state: out.item.review_request?.status}};
-        toast(action === 'request' ? 'Sent for review. Copy the link to let the reviewer know.' : 'Sent back with your comment.');
+        toast(action === 'request' ? 'Internal review requested. No notification was sent. Copy the link to contact the reviewer yourself.' : 'Changes-needed comment recorded. No notification was sent.');
         drawReport(); loadList();
       } catch (e) { toast(e.message, true); }
     };
     slot.replaceChildren(h('div', {class: 'reviewstate' + (action === 'send_back' ? ' back' : '')},
-      h('div', {class: 'reviewform'}, h('b', {}, action === 'request' ? 'Send this report for review' : 'Send it back with a comment'), who, note,
+      h('div', {class: 'reviewform'}, h('b', {}, action === 'request' ? 'Request internal review (no notification sent)' : 'Record a return-for-changes comment'), who, note,
         h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn ghost small', onclick: () => slot.replaceChildren(...[reviewState(state.report)].filter(Boolean))}, 'Cancel'),
-          h('button', {type: 'button', class: 'btn primary small', onclick: go}, action === 'request' ? 'Send for review' : 'Send back')))));
+          h('button', {type: 'button', class: 'btn primary small', onclick: go}, action === 'request' ? 'Request internal review' : 'Record changes needed')))));
     note.focus();
   }
 
   // ---------------- executive overview across every job
+  const statisticNumber = value => value == null || (typeof value === 'number' && !Number.isFinite(value)) ? 'Unknown' : String(value);
+  const statisticFindings = (totals, field = 'caught') => statisticNumber(totals[field]) + (totals[field + '_complete'] === false ? ' (basis incomplete or uncertain)' : '');
+  function statisticQuantity(totals, field) {
+    return `${totals[field + '_range_exceeded'] ? 'Unknown: total exceeds the supported numeric range. ' : ''}Known subtotal: ${statisticNumber(totals[field + '_known'])} · ${statisticNumber(totals[field + '_complete_reports'])} complete reports · ${statisticNumber(totals[field + '_missing_reports'])} missing/partial · ${statisticNumber(totals[field + '_incompatible_reports'])} incompatible units`;
+  }
+  const statisticSource = row => h('span', {}, row.job, h('small', {}, `Source scope: ${row.source_label || 'Source label unavailable'}`), h('details', {onclick: e => e.stopPropagation(), onkeydown: e => e.stopPropagation()}, h('summary', {}, 'Exact source scope'), h('small', {}, row.source || 'Unknown')));
+  function statisticNotes(data) {
+    const definitions = data.statistics?.definitions || {}, coverage = data.statistics?.coverage || {};
+    return h('details', {class: 'statistics-notes'}, h('summary', {}, 'Definitions and data coverage'),
+      h('p', {}, 'Findings on first uploads uses their current reviews, not an immutable first-check history. Findings may describe the same underlying problem. An incomplete or uncertain basis is not a lower-bound count. Client exposure is unknown.'),
+      h('p', {}, 'Quantities are reported by selected versions, not source-verified totals. Job navigation combines source groups; source-scoped rows remain separate below.'),
+      h('dl', {}, ...Object.entries(definitions).flatMap(([key, text]) => [h('dt', {}, key.replaceAll('_', ' ')), h('dd', {}, text)])),
+      h('p', {}, data.statistics?.coverage_scope || 'Coverage scope unavailable; exclusions are not the selected scope denominator.'),
+      h('p', {}, Object.entries(coverage).map(([key, value]) => `${key.replaceAll('_', ' ')}: ${statisticNumber(value)}`).join(' · ') || 'Coverage metadata unavailable.'));
+  }
   async function showOverview() {
     const wrap = h('div', {class: 'sheetwrap apiwrap'});
     $('report').replaceChildren(wrap);
@@ -2342,29 +2662,34 @@
     try { o = state.ovRecs && state.ovRecs.days === state.ovDays ? state.ovRecs : await api('/api/overview', {days: state.ovDays}); state.ovRecs = null; } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
     if (location.hash !== '#overview') return;
     const t = o.totals, top = Math.max(1, ...o.categories.map(c => c.count));
-    const pct = v => v == null ? '—' : v.toFixed(v < 10 ? 1 : 0) + '%';
+    const pct = v => v == null ? 'Unknown' : v.toFixed(v < 10 ? 1 : 0) + '%';
     wrap.replaceChildren(...[
-      h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Quality overview'), h('div', {class: 'meta'}, `Every job: ${o.label.replace(/^Last/, 'the last')}. What the verifier caught before any client saw it, and how reliably reports went out.`))),
-      h('div', {class: 'periodbar'}, h('div', {class: 'pseg'}, [7, 30, 90].map(d => h('button', {type: 'button', class: state.ovDays === d ? 'on' : '', onclick: () => { state.ovDays = d; showOverview(); }}, `${d} days`))),
+      h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Quality overview'), h('div', {class: 'meta'}, `Every job: ${o.label.replace(/^Last/, 'the last')}. Findings on first uploads, selected-version quantities, and recorded sends.`))),
+      h('div', {class: 'periodbar'}, h('div', {class: 'pseg'}, [7, 30, 90, 365].map(d => h('button', {type: 'button', class: state.ovDays === d ? 'on' : '', onclick: () => { state.ovDays = d; showOverview(); }}, `${d} days`))),
       ),
-      h('div', {class: 'ovhero'}, h('b', {}, fmt(t.caught)), h('span', {}, `errors caught and fixed before the client saw them, across ${fmt(t.reports)} daily reports for ${fmt(t.jobs)} job${t.jobs === 1 ? '' : 's'}. ${fmt(t.must_fix)} were must-fix.`)),
+      h('div', {class: 'ovhero'}, h('b', {}, statisticFindings(t)), h('span', {}, `Findings on first uploads · current reviews across ${fmt(t.reports)} daily reports and ${fmt(t.jobs)} job/source groups. ${fmt(t.must_fix)} high-priority findings. This does not establish what clients saw.`)),
       h('div', {class: 'numbers five'},
-        h('div', {}, h('b', {}, fmt(t.corrected)), h('span', {}, 'Corrected before sending')),
+        h('div', {}, h('b', {}, fmt(t.corrected)), h('span', {}, 'Reports with saved corrected copies')),
         h('div', {}, h('b', {}, `${fmt(t.sent)} of ${fmt(t.reports)}`), h('span', {}, 'Sent from the verifier')),
         h('div', {}, h('b', {}, pct(t.on_time_pct)), h('span', {}, 'Sent on time')),
-        h('div', {}, h('b', {}, t.turnaround == null ? '—' : `${t.turnaround} h`), h('span', {}, 'Upload to sent')),
+        h('div', {}, h('b', {}, t.turnaround == null ? 'Unknown' : `${t.turnaround} h`), h('span', {}, 'Upload to sent')),
         h('div', {}, h('b', {class: t.open ? 'bad' : ''}, fmt(t.open)), h('span', {}, 'Still on Hold'))),
+      h('details', {class: 'statistics-notes'}, h('summary', {}, `Inspected quantity: ${statisticNumber(t.inspected)} · Rejected quantity: ${statisticNumber(t.rejected)} · Reject rate: ${pct(t.rate)}`),
+        ...['inspected', 'rejected', 'certified'].map(field => h('p', {}, `${field}: ${statisticNumber(t[field])} · ${statisticQuantity(t, field)}`))),
+      h('p', {class: 'note'}, `Selected-version findings: ${statisticFindings(t, 'current_issues')}. Recorded changes: ${statisticNumber(t.changes)}. Client exposure remains unknown.`),
+      statisticNotes(o),
       recsBlock(o.recs, {scope: 'every job', ask: async () => { const n = await api('/api/overview', {days: o.days, ask_ai: true}); if (location.hash === '#overview') { state.ovRecs = n; showOverview(); } },
         act: rec => periodAct(rec, job => { state.periodQuery = {kind: o.days > 7 ? 'month' : 'week', day: o.end, job: job || ''}; location.hash = 'periods'; })}),
-      h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'What was caught'), h('p', {}, 'By kind of error, from the first upload of each daily report.')),
+      h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Finding categories'), h('p', {}, 'Listed findings in current reviews of first uploads, one per source/job/day. Categories use the same population as the headline.')),
         o.categories.length ? h('div', {class: 'ovbars'}, o.categories.map(c => h('div', {class: 'ovbar'}, h('span', {}, c.reason), h('div', {}, (() => { const i = h('i'); i.style.width = `${c.count / top * 100}%`; return i; })()), h('em', {}, fmt(c.count)))))
-          : h('p', {class: 'note'}, 'Nothing caught in this period.')),
-      h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'By job')),
+          : h('p', {class: 'note'}, 'No listed findings in this period; check coverage before interpreting this as complete.')),
+      h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'By job/source group')),
         h('div', {class: 'tablewrap'}, h('table', {class: 'keys pdays'},
-          h('thead', {}, h('tr', {}, ['Job', 'Days', 'Inspected', 'Reject rate', 'Errors caught', 'Corrected', 'Sent', 'On time', 'Upload to sent', ''].map(x => h('th', {}, x)))),
-          h('tbody', {}, o.jobs.map(j => h('tr', {}, h('td', {}, h('b', {}, j.job)), h('td', {}, fmt(j.days)), h('td', {}, fmt(j.inspected)), h('td', {}, pct(j.rate)),
-            h('td', {}, fmt(j.caught)), h('td', {}, fmt(j.corrected)), h('td', {}, `${fmt(j.sent)} of ${fmt(j.days)}`), h('td', {}, fmt(j.on_time)), h('td', {}, j.turnaround == null ? '—' : `${j.turnaround} h`),
-            h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => { state.periodQuery = {kind: o.days > 7 ? 'month' : 'week', day: o.end, job: j.job}; location.hash = 'periods'; }}, 'Details')))))))),
+          h('thead', {}, h('tr', {}, ['Job', 'Days', 'Inspected', 'Reject rate', 'Findings on first uploads', 'Corrected', 'Sent', 'On time', 'Upload to sent', ''].map(x => h('th', {}, x)))),
+          h('tbody', {}, o.jobs.map(j => h('tr', {}, h('td', {}, statisticSource(j)), h('td', {}, fmt(j.days)), h('td', {}, statisticNumber(j.inspected), h('small', {}, statisticQuantity(j, 'inspected'))), h('td', {}, pct(j.rate)),
+            h('td', {}, statisticFindings(j)), h('td', {}, fmt(j.corrected)), h('td', {}, `${fmt(j.sent)} of ${fmt(j.days)}`), h('td', {}, fmt(j.on_time)), h('td', {}, j.turnaround == null ? 'Unknown' : `${j.turnaround} h`),
+            h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => { state.periodQuery = {kind: o.days > 7 ? 'month' : 'week', day: o.end, job: j.job}; location.hash = 'periods'; }}, 'View job reports')))))))),
+      !t.reports ? h('p', {class: 'note'}, 'No eligible daily reports in this period. See data coverage for excluded or ambiguous records.') : null,
       changeRecords(),
     ].filter(Boolean));
   }
@@ -2373,20 +2698,21 @@
   function kpiChart(points, opts) {
     // one series, one axis; bars in the app green, hover any bar for its value
     const W = 360, H = 140, pad = {l: 34, r: 6, t: 8, b: 20};
-    const vals = points.map(p => p.v == null ? 0 : p.v), raw = Math.max(...vals, 0);
+    const vals = points.filter(p => p.v != null).map(p => p.v), raw = Math.max(...vals, 0);
     const max = opts.pct ? Math.max(opts.min || 1, raw) : Math.max(1, Math.ceil(raw));
     const step = (W - pad.l - pad.r) / Math.max(points.length, 1), bw = Math.max(1, Math.min(18, step - (step > 4 ? 2 : 0)));
     const y = v => pad.t + (H - pad.t - pad.b) * (1 - v / max), NS = 'http://www.w3.org/2000/svg';
     const el = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; };
-    const svg = el('svg', {viewBox: `0 0 ${W} ${H}`, class: 'kchart', role: 'img', 'aria-label': opts.label});
+    const svg = el('svg', {viewBox: `0 0 ${W} ${H}`, class: 'kchart', role: 'img', 'aria-label': `${opts.label}. ${points.filter(p => p.v == null).length} unknown values, marked with a question mark.`});
     const ticks = opts.pct || max >= 4 ? [0, max / 2, max] : [0, max];
     ticks.forEach(t => { svg.append(el('line', {x1: pad.l, x2: W - pad.r, y1: y(t), y2: y(t), class: 'grid'}), el('text', {x: pad.l - 6, y: y(t) + 3, class: 'ax', 'text-anchor': 'end'}, opts.fmt(t, true))); });
     points.forEach((p, i) => {
-      const x = pad.l + i * step + (step - bw) / 2, v = p.v == null ? 0 : p.v, top = y(v), hgt = H - pad.b - top;
+      if (p.v == null) { const missing = el('g', {class: 'unknown'}); missing.append(el('text', {x: pad.l + i * step + step / 2, y: H - pad.b - 5, 'text-anchor': 'middle', class: 'ax'}, '?'), el('title', {}, `${p.label}: Unknown`)); svg.append(missing); return; }
+      const x = pad.l + i * step + (step - bw) / 2, v = p.v, top = y(v), hgt = H - pad.b - top;
       const g = el('g', {class: 'bar' + (opts.bad && v > 0 ? ' bad' : '')});
       g.append(el('rect', {x: pad.l + i * step, y: pad.t, width: step, height: H - pad.t - pad.b, class: 'hit'}));
       if (v > 0) g.append(el('path', {d: `M${x},${H - pad.b}V${top + Math.min(4, hgt / 2)}q0,-${Math.min(4, hgt / 2)} ${Math.min(4, bw / 2)},-${Math.min(4, hgt / 2)}h${Math.max(0, bw - 2 * Math.min(4, bw / 2))}q${Math.min(4, bw / 2)},0 ${Math.min(4, bw / 2)},${Math.min(4, hgt / 2)}V${H - pad.b}Z`}));
-      g.append(el('title', {}, `${p.label}: ${p.v == null ? 'no reports' : opts.fmt(p.v)}`));
+      g.append(el('title', {}, `${p.label}: ${opts.fmt(p.v)}`));
       svg.append(g);
     });
     const lbl = [0, Math.floor((points.length - 1) / 2), points.length - 1].filter((v, i, a) => a.indexOf(v) === i);
@@ -2395,15 +2721,10 @@
   }
   function kpiSeries(trend, days) {
     const md = d => { const [, m, dd] = d.split('-').map(Number); return `${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][m - 1]} ${dd}`; };
-    if (days <= 31) return trend.map(t => ({...t, label: md(t.day), short: md(t.day)}));
-    const out = [];   // weeks for longer ranges
-    for (let i = 0; i < trend.length; i += 7) {
-      const wk = trend.slice(i, i + 7), sum = k => wk.reduce((a, t) => a + (t[k] || 0), 0);
-      out.push({day: wk[0].day, label: `Week of ${md(wk[0].day)}`, short: md(wk[0].day), reports: sum('reports'), caught: sum('caught'), stopped: sum('stopped'), reached: sum('reached'),
-        inspected: sum('inspected'), rejected: sum('rejected'), rate: sum('inspected') ? sum('rejected') / sum('inspected') * 100 : null});
-    }
-    return out;
+    // Retain canonical daily totals and coverage; do not sum partial or incompatible units in the browser.
+    return trend.map(t => ({...t, label: md(t.day), short: md(t.day)}));
   }
+
   async function showKpis() {
     const wrap = h('div', {class: 'sheetwrap apiwrap kpis'});
     $('report').replaceChildren(wrap);
@@ -2413,7 +2734,7 @@
     try { k = await api('/api/kpis', {days: q.days, client: q.client || null, job: q.job || null}); } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return; }
     if (location.hash !== '#kpis' || state.kpi !== q) return;
     const t = k.totals, go = (c) => { Object.assign(q, c); showKpis(); };
-    const pct = v => v == null ? '—' : (v < 10 ? v.toFixed(1) : Math.round(v)) + '%';
+    const pct = v => v == null ? 'Unknown' : (v < 10 ? v.toFixed(1) : Math.round(v)) + '%';
     const plural = (n, w) => `${fmt(n)} ${w}${n === 1 ? '' : 's'}`;
     const clientName = k.client_name || (q.client === '_none' ? 'Other' : q.client);
     const crumbs = [h('button', {type: 'button', class: 'crumb' + (!q.client ? ' on' : ''), onclick: () => go({client: '', job: ''})}, 'All clients')];
@@ -2427,51 +2748,52 @@
     const tile = (v, label, sub, cls) => h('div', {class: 'ktile' + (cls ? ' ' + cls : '')}, h('span', {}, label), h('b', {}, v), sub ? h('em', {}, sub) : null);
     const s = kpiSeries(k.trend, k.days);
     const chartBlock = (title, note, key, o) => h('div', {class: 'kcard'}, h('h3', {}, title), h('p', {}, note),
-      s.some(p => p[key]) ? kpiChart(s.map(p => ({v: p[key], label: p.label, short: p.short})), {label: title, ...o}) : h('div', {class: 'kzero'}, o.zero || 'None in this period'));
+      s.some(p => p[key] != null) ? kpiChart(s.map(p => ({v: p[key + '_complete'] === false ? null : p[key], label: p.label, short: p.short})), {label: title, ...o}) : h('div', {class: 'kzero'}, 'Unknown for this period; no complete values available'));
     const n0 = v => fmt(Math.round(v));
     const empty = !t.reports;
     const top = Math.max(1, ...k.categories.map(c => c.count));
     const tableRow = (cells, onclick, label) => h('tr', {class: onclick ? 'go' : '', tabindex: onclick ? '0' : null, title: label || null, onclick, onkeydown: onclick ? e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onclick(); } } : null}, cells.map((c, i) => h('td', {}, i === 0 ? h('b', {}, c) : c)));
-    const heads = ['Reports', 'Errors caught', 'Stopped before client', 'Reached client', 'Sent on time', 'Inspected', 'Rejected', 'Reject rate', 'On hold'];
-    const cellsOf = r => [fmt(r.reports), fmt(r.caught), fmt(r.stopped), r.reached ? h('span', {class: 'badn'}, fmt(r.reached)) : '0', pct(r.on_time_pct), fmt(r.inspected), fmt(r.rejected), pct(r.rate), r.hold ? h('span', {class: 'badn'}, fmt(r.hold)) : '0'];
+    const heads = ['Reports', 'Findings on first uploads', 'Selected-version findings', 'Client exposure', 'Sent on time', 'Inspected', 'Rejected', 'Reject rate', 'On hold'];
+    const cellsOf = r => [fmt(r.reports), statisticFindings(r), statisticFindings(r, 'current_issues'), 'Unknown', pct(r.on_time_pct), h('span', {}, statisticNumber(r.inspected), h('small', {}, statisticQuantity(r, 'inspected'))), h('span', {}, statisticNumber(r.rejected), h('small', {}, statisticQuantity(r, 'rejected'))), pct(r.rate), statisticNumber(r.hold)];
     const toPeriods = job => { state.periodQuery = {kind: k.days > 7 ? 'month' : 'week', day: k.end, job}; location.hash = 'periods'; };
     wrap.replaceChildren(...[
       h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'KPIs'), h('div', {class: 'meta'}, `Reporting numbers for ${scope}, ${k.label}.`))),
       h('div', {class: 'kbar'},
         h('nav', {class: 'crumbs', 'aria-label': 'Drill down'}, ...crumbs),
         h('div', {class: 'kfilters'}, sel, h('div', {class: 'pseg'}, [[7, '7 days'], [30, '30 days'], [90, '90 days'], [365, '12 months']].map(([d, l]) => h('button', {type: 'button', class: q.days === d ? 'on' : '', 'aria-pressed': String(q.days === d), onclick: () => go({days: d})}, l))))),
-      empty ? h('section', {class: 'block'}, h('p', {class: 'note'}, `No daily reports for ${scope} in this period. Try a longer range${q.client ? ' or All clients' : ''}.`)) : null,
+      empty ? h('section', {class: 'block'}, h('p', {class: 'note'}, `No eligible daily reports for ${scope} in this period. Try a longer range${q.client ? ' or All clients' : ''}.`)) : null,
       empty ? null : h('div', {class: 'khero'},
-        h('div', {}, h('b', {}, fmt(t.stopped)), h('span', {}, `errors stopped before they reached a client`), h('em', {}, !t.caught ? 'Nothing caught in this period.' : `${fmt(t.stopped)} of the ${fmt(t.caught)} errors caught were fixed before sending` + (t.stopped_must ? `, ${fmt(t.stopped_must)} of them must-fix.` : '.') + (t.waiting ? ` ${fmt(t.waiting)} ${t.waiting === 1 ? 'is' : 'are'} in reports not sent yet.` : ''))),
-        h('div', {class: t.reached ? 'warn' : 'good'}, h('b', {}, fmt(t.reached)), h('span', {}, t.reached === 1 ? 'error reached a client' : 'errors reached a client'), h('em', {}, t.reached ? `Still in reports that were sent. ${fmt(t.reached_must)} must-fix.` : 'Every report that went out was clean.'))),
+        h('div', {}, h('b', {}, statisticFindings(t)), h('span', {}, 'Findings on first uploads'), h('em', {}, 'Current review of the first original per source/job/day; findings are not confirmed distinct errors.')),
+        h('div', {}, h('b', {}, statisticFindings(t, 'current_issues')), h('span', {}, 'Selected-version findings'), h('em', {}, 'Client exposure: Unknown. No immutable at-send finding snapshots or evidence of client viewing.'))),
+      statisticNotes(k),
       empty ? null : h('div', {class: 'ktiles'},
         tile(fmt(t.reports), 'Reports made', `${fmt(t.sent)} sent, ${fmt(t.unsent)} not sent yet`),
-        tile(pct(t.on_time_pct), 'Sent on time', t.sent ? `${fmt(t.on_time)} of ${fmt(t.sent)} by the next day` : 'None sent yet'),
-        tile(t.turnaround == null ? '—' : `${t.turnaround} h`, 'Upload to sent', 'Typical time from upload to sent'),
-        tile(fmt(t.jobs), q.job ? 'Job' : 'Jobs done', q.client ? null : plural(t.clients, 'client')),
-        tile(fmt(t.inspected), 'Parts inspected', null),
-        tile(fmt(t.certified), 'Accepted', null),
-        tile(fmt(t.rejected), 'Rejected', `Reject rate ${pct(t.rate)}`),
+        tile(pct(t.on_time_pct), 'Sent on time', `${fmt(t.on_time)} on time · ${statisticNumber(t.on_time_unknown)} unknown timing · ${fmt(t.sent)} recorded sends`),
+        tile(t.turnaround == null ? 'Unknown' : `${t.turnaround} h`, 'Upload to sent', `Median for ${statisticNumber(t.turnaround_reports)} reports with valid timestamps`),
+        tile(fmt(t.jobs), q.job ? 'Job/source group' : 'Job/source groups', q.client ? null : plural(t.clients, 'client')),
+        tile(statisticNumber(t.inspected), 'Inspected quantity', statisticQuantity(t, 'inspected')),
+        tile(statisticNumber(t.certified), 'Certified quantity', statisticQuantity(t, 'certified')),
+        tile(statisticNumber(t.rejected), 'Rejected quantity', `Reject rate ${pct(t.rate)} · ${statisticQuantity(t, 'rejected')}`),
         tile(fmt(t.hold), 'Still on hold', t.hold ? 'Not sent, needs a fix' : 'None', t.hold ? 'bad' : ''),
-        tile(fmt(t.corrected), 'Corrected before sending', `${fmt(t.uploads)} uploads in all`)),
+        tile(fmt(t.corrected), 'Reports with saved corrected copies', `${fmt(t.uploads)} uploads in all`)),
       empty ? null : h('div', {class: 'kcharts'},
-        chartBlock('Errors stopped before the client', k.days > 31 ? 'Per week' : 'Per day', 'stopped', {fmt: n0, zero: t.caught ? 'None fixed and sent yet' : 'Nothing caught in this period'}),
-        chartBlock('Errors that reached a client', 'Still in a report when it was sent', 'reached', {fmt: n0, bad: true, zero: 'None. Every report sent was clean.'}),
-        chartBlock('Reports made', k.days > 31 ? 'Per week' : 'Per day', 'reports', {fmt: n0}),
-        chartBlock('Parts inspected', k.days > 31 ? 'Per week' : 'Per day', 'inspected', {fmt: n0}),
+        chartBlock('Findings on first uploads', 'Per day, current reviews', 'caught', {fmt: n0}),
+        chartBlock('Selected-version findings', 'Per day, current reviews', 'current_issues', {fmt: n0}),
+        chartBlock('Reports made', 'Per day; unknown points are not zero', 'reports', {fmt: n0}),
+        chartBlock('Inspected quantity', 'Per day; unknown points are not zero', 'inspected', {fmt: statisticNumber}),
         chartBlock('Reject rate', 'Rejected out of inspected', 'rate', {pct: true, fmt: (v, ax) => ax ? (v < 10 ? v.toFixed(1) : Math.round(v)) + '%' : pct(v), min: 1})),
-      empty || !k.categories.length ? null : h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'What was caught'), h('p', {}, `By kind of error, from the first upload of each daily report for ${scope}.`)),
+      empty || !k.categories.length ? null : h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Finding categories'), h('p', {}, `Current-review findings on first uploads for ${scope}, one per source/job/day.`)),
         h('div', {class: 'ovbars'}, k.categories.map(c => h('div', {class: 'ovbar', title: `${c.kind}: ${fmt(c.count)}`}, h('span', {}, c.kind), h('div', {}, (() => { const i = h('i'); i.style.width = `${c.count / top * 100}%`; return i; })()), h('em', {}, fmt(c.count)))))),
       !q.client && k.clients.length ? h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'By client'), h('p', {}, 'Click a client to see its jobs.')),
         h('div', {class: 'tablewrap'}, h('table', {class: 'keys ktable'},
           h('thead', {}, h('tr', {}, ['Client', 'Jobs', ...heads].map(x => h('th', {}, x)))),
           h('tbody', {}, k.clients.map(c => tableRow([c.name, fmt(c.jobs), ...cellsOf(c)], () => go({client: c.key, job: ''}), `See ${c.name}`)))))) : null,
-      q.client && !q.job && k.jobs.length ? h('section', {class: 'block'}, h('header', {}, h('h2', {}, `${clientName} by job`), h('p', {}, 'Click a job to see its numbers.')),
+      q.client && !q.job && k.jobs.length ? h('section', {class: 'block'}, h('header', {}, h('h2', {}, `${clientName} by job`), h('p', {}, 'Rows are source-specific. View job numbers combines all eligible source groups for that job.')),
         h('div', {class: 'tablewrap'}, h('table', {class: 'keys ktable'},
           h('thead', {}, h('tr', {}, ['Job', ...heads].map(x => h('th', {}, x)))),
-          h('tbody', {}, k.jobs.map(j => tableRow([j.job, ...cellsOf(j)], () => go({job: j.job}), `See ${j.job}`)))))) : null,
+          h('tbody', {}, k.jobs.map(j => tableRow([statisticSource(j), ...cellsOf(j)], () => go({job: j.job}), `View job numbers for ${j.job}, across source groups`)))))) : null,
       q.job ? h('section', {class: 'block'}, h('header', {}, h('h2', {}, `More on ${q.job}`)),
-        h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => toPeriods(q.job)}, `Open the ${k.days > 7 ? 'monthly' : 'weekly'} report`),
+        h('div', {class: 'btns'}, h('button', {type: 'button', class: 'btn primary small', onclick: () => toPeriods(q.job)}, 'View job reports'),
           h('button', {type: 'button', class: 'btn small', onclick: () => go({job: ''})}, `Back to ${clientName}`))) : null,
     ].filter(Boolean));
   }
@@ -2500,16 +2822,27 @@
           try { await api('/api/settings/report-header', {job: rv.job, header}); form.remove(); buildReport(rv.job, rv.day, true, e.target); } catch (err) { toast(err.message, true); } }}, 'Save and rebuild')));
     bar.after(form); inputs.customer.focus();
   }
+  function nexusCopyAllowed(n) {
+    const fields = ['inspected', 'rejected', 'certified'], coverage = n.coverage || {};
+    return n.status === 'compared' && coverage.complete === true && coverage.source_records != null &&
+      coverage.placed_records === coverage.source_records && !n.unplaced && Array.isArray(n.shifts) && n.shifts.length > 0 &&
+      fields.every(key => n.total?.[key] != null) && n.shifts.every(shift => fields.every(key => shift[key] != null));
+  }
   function nexusTable(n) {
-    const copy = () => { const t = n.shifts.map(x => `${x.name}\t${x.inspected}\t${x.rejected}\t${x.certified}`).join('\n'); navigator.clipboard?.writeText('Shift\tInspected\tRejected\tCertified\n' + t).then(() => toast('Copied. Paste into Nexus or Excel.'), () => toast(t)); };
+    const canCopy = nexusCopyAllowed(n);
+    const copyText = 'Shift\tInspected\tRejected\tCertified\n' + (n.shifts || []).map(x => `${x.name}\t${x.inspected}\t${x.rejected}\t${x.certified}`).join('\n');
+    const copy = () => { if (!canCopy) { toast('Nexus copy is unavailable while quantities or shift coverage are incomplete.', true); return; }
+      navigator.clipboard?.writeText(copyText).then(() => toast('Captured shift totals copied. Confirm the capture covers the intended period before using them.'), () => toast('Clipboard unavailable. Review the displayed totals.')); };
     return h('div', {},
       h('div', {class: 'tablewrap'}, h('table', {class: 'keys nexus'},
         h('thead', {}, h('tr', {}, ['Nexus shift', 'Window', 'Scans', 'Inspected', 'Rejected', 'Certified'].map(x => h('th', {}, x)))),
         h('tbody', {}, n.shifts.map(x => h('tr', {}, h('td', {}, h('b', {}, x.name)), h('td', {}, `${hm12(x.start)} – ${hm12(x.end)}`),
           h('td', {class: 'num'}, fmt(x.scans)), h('td', {class: 'num'}, fmt(x.inspected)), h('td', {class: 'num'}, fmt(x.rejected)), h('td', {class: 'num'}, fmt(x.certified)))),
           h('tr', {class: 'tot'}, h('td', {}, h('b', {}, 'Day')), h('td', {}), ...['scans', 'inspected', 'rejected', 'certified'].map(k => h('td', {class: 'num'}, h('b', {}, fmt(n.total[k])))))))),
+      h('p', {class: 'note', role: 'status'}, canCopy ? 'Captured records are placed and quantities are known. This does not confirm the shift has ended.' : 'Nexus totals held: quantity or shift coverage is incomplete. Unknown values are shown as a dash; copying is unavailable.'),
+      h('p', {class: 'note'}, `Placed records: ${n.coverage?.placed_records ?? 'Unknown'} of ${n.coverage?.source_records ?? 'Unknown'} captured source records. Day totals include all source records, including unplaced ones.`),
       n.unplaced ? h('p', {class: 'note'}, `${n.unplaced} scan(s) had no time or fell outside every Nexus window.`) : null,
-      h('button', {type: 'button', class: 'btn small', onclick: copy}, 'Copy for Nexus'));
+      h('button', {type: 'button', class: 'btn small', disabled: !canCopy, onclick: copy}, 'Copy captured Nexus totals'));
   }
   const hm12 = t => { const [H, M] = t.split(':').map(Number); return `${(H % 12) || 12}:${String(M).padStart(2, '0')} ${H < 12 ? 'AM' : 'PM'}`; };
   function nexusBlock(r) {
@@ -2519,7 +2852,7 @@
           e.target.disabled = true; e.target.textContent = 'Reading the scan times…';
           try { body.replaceChildren(nexusTable(await api('/api/nexus', {file_hash: r.file_hash}))); } catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Show Nexus numbers'; } }}, 'Show Nexus numbers'));
     return h('section', {class: 'block', id: 'nexus-block'}, h('header', {}, h('h2', {}, 'Nexus numbers'),
-      h('p', {}, 'The day split into Nexus’s three shifts by scan time (plant time), ready to enter in Nexus. Internal only.')), body);
+      h('p', {}, 'The day split into Nexus’s three shifts by scan time (plant time), for review against the captured source. Internal only; capture totals do not confirm shift completion.')), body);
   }
 
   // ---------------- build a report from SharePoint
@@ -2568,25 +2901,19 @@
         const s = sp[job];
         if (when === 'today' && s?.today) {
           const rd = s.readiness || {};
-          return h('td', {}, rd.state === 'running'
-            ? h('span', {class: 'buildcell'}, h('span', {class: 'quiet'}, `Shift running · ready about ${clock(rd.ready_at)}`), buildBtn(job, day, 'Build now anyway', true, false))
-            : h('span', {class: 'buildcell'}, h('span', {class: 'ok'}, 'Ready to build'), buildBtn(job, day, 'Build report', false, true)));
+          return h('td', {}, h('span', {class: 'buildcell'}, h('span', {class: 'quiet'}, rd.note || 'Provisional through this capture; shift end is not confirmed.'),
+            rd.state === 'no_scans' ? null : buildBtn(job, day, 'Build captured report', false, true)));
         }
         if (scans) return h('td', {}, h('span', {class: 'buildcell'}, h('span', {class: 'differs'}, `Missing (${fmt(scans)} scans on SharePoint)`), data.sharepoint_on ? buildBtn(job, prevDay, 'Build it', true, true) : null));
-        return h('td', {}, h('span', {class: 'quiet'}, when === 'today' ? 'No scans yet' : '—'));
+        return h('td', {}, h('span', {class: 'quiet'}, when === 'today' ? (s?.readiness?.state === 'no_scans' || s?.today === 0 ? 'No scans in this capture' : 'Source capture not loaded') : '—'));
       };
-      const readyJobs = rows.filter(r => !r.today && sp[r.job]?.today && sp[r.job]?.readiness?.state === 'ready');
       const addBox = h('input', {type: 'text', placeholder: 'Add a job to watch, e.g. HANDS-HMMA-2219', 'aria-label': 'Job number'});
       wrap.replaceChildren(
         h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Today'), h('div', {class: 'meta'}, 'Every job’s day at a glance: scans on SharePoint so far, and where each daily report stands.'))),
         todaysWins(),
         h('div', {class: 'periodbar'}, h('div', {class: 'pnav'}, h('button', {type: 'button', class: 'btn small', 'aria-label': 'Previous day', onclick: () => shift(-1)}, '‹'),
-          h('b', {}, label), h('button', {type: 'button', class: 'btn small', 'aria-label': 'Next day', onclick: () => shift(1)}, '›')),
-          readyJobs.length ? h('button', {type: 'button', class: 'btn primary', onclick: async e => {
-            e.target.disabled = true;
-            for (const [i, r] of readyJobs.entries()) { e.target.textContent = `Building ${i + 1} of ${readyJobs.length}…`; await buildReport(r.job, day, false, null, true); }
-            showToday(); }}, `Build ${readyJobs.length} ready report${readyJobs.length === 1 ? '' : 's'}`) : null),
-        h('p', {class: 'note'}, 'A job is ready to build 45 minutes after its last scan, so breaks and lunches are not taken as the end of the shift. Built reports are checked like uploads; nothing is sent until someone approves it.'),
+          h('b', {}, label), h('button', {type: 'button', class: 'btn small', 'aria-label': 'Next day', onclick: () => shift(1)}, '›'))),
+        h('p', {class: 'note'}, 'Build a provisional report from the records captured so far. A gap in scans does not confirm shift completion. Review source coverage and quantities before internal approval; external sending remains paused.'),
         unwatched.length ? h('div', {class: 'clientwatch'}, h('span', {}, `${client.client} has ${unwatched.length} job${unwatched.length === 1 ? '' : 's'} on SharePoint you are not watching: ${unwatched.slice(0, 6).map(j => j.job).join(', ')}${unwatched.length > 6 ? '…' : ''}`),
           h('button', {type: 'button', class: 'btn small', onclick: async e => { e.target.disabled = true; e.target.textContent = 'Adding…';
             for (const j of unwatched) if (!await load({add: j.job})) return;
@@ -2689,7 +3016,7 @@
     box.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(box.value); } });
     const talk = d.messages.concat(state.dashPending ? [{role: 'user', text: state.dashPending}] : []);
     const log = h('div', {class: 'dashlog'},
-      h('p', {class: 'dashintro'}, `Built from the report data. Ask for any change in plain words; Claude uses only these numbers and leaves out inspector names and scan times.${ctx.noun === 'slide show' ? ' Use the arrow keys or click to move between slides.' : ''}`),
+      h('p', {class: 'dashintro'}, `Built from the report data. Ask for any change in plain words; Dex uses only these numbers and leaves out inspector names and scan times.${ctx.noun === 'slide show' ? ' Use the arrow keys or click to move between slides.' : ''}`),
       talk.length ? null : h('div', {class: 'dashideas'}, ctx.ideas.map(t => h('button', {type: 'button', class: 'chip', disabled: !d.ai_on, onclick: () => send(t)}, t))),
       ...talk.map(m => h('div', {class: 'dmsg ' + m.role}, m.text)),
       state.dashBusy ? h('div', {class: 'dmsg assistant wait'}, h('span', {class: 'spin'}), ` Redesigning the ${ctx.noun}. This can take a minute.`) : null);
@@ -2704,7 +3031,7 @@
         h('button', {type: 'button', class: 'btn', onclick: () => dlg.close()}, 'Close')),
       h('div', {class: 'dashbody'}, h('div', {class: 'dashview'}, state.dashFrame),
         h('aside', {class: 'dashchat'}, log,
-          d.ai_on ? null : h('p', {class: 'ssource warn'}, `Changes by Claude need AI review turned on. You can still view and download this ${ctx.noun}.`),
+          d.ai_on ? null : h('p', {class: 'ssource warn'}, `Changes by Dex need AI review turned on. You can still view and download this ${ctx.noun}.`),
           h('div', {class: 'dashsend'}, box, h('button', {type: 'button', class: 'btn primary', disabled: !d.ai_on || state.dashBusy, onclick: () => send(box.value)}, 'Send')))));
     log.scrollTop = log.scrollHeight;
     if (!state.dashBusy && d.ai_on) box.focus();
@@ -2753,7 +3080,7 @@
     const fc = data.file_check;
     wrap.replaceChildren(...[
       h('button', {type: 'button', class: 'back', onclick: () => { location.hash = ''; }}, '‹ All reports'),
-      h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Weekly & monthly'), h('div', {class: 'meta'}, 'A job’s week or month: every daily report and SharePoint scan, checked together, with a dashboard and slide show you can shape by talking to Claude.'))),
+      h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Weekly & monthly'), h('div', {class: 'meta'}, 'A job’s week or month: every daily report and SharePoint scan, checked together, with a dashboard and slide show you can shape by talking to Dex.'))),
       h('div', {class: 'periodbar'},
         h('select', {'aria-label': 'Job', onchange: e => { q.job = e.target.value; showPeriods(); }}, data.jobs.map(j => h('option', {value: j, selected: j === p.job}, j))),
         h('div', {class: 'pseg'}, ['week', 'month'].map(k => h('button', {type: 'button', class: q.kind === k ? 'on' : '', onclick: () => { q.kind = k; showPeriods(); }}, k === 'week' ? 'Week' : 'Month'))),
@@ -2824,18 +3151,18 @@
     const moved = d => `Saved. ${d.rechecked ? `${d.rechecked} report${d.rechecked === 1 ? '' : 's'} checked again with the new times` : 'New uploads use the new times'}${d.moved ? `; ${d.moved} row${d.moved === 1 ? ' is' : 's are'} on a different shift than in the report. Open the report to move them.` : '.'}`;
     const spSlot = spJobsSection();
     const draw = () => {
-      const ruleText = h('input', {type: 'text', placeholder: 'e.g. Flag any VIN that does not start with HZA', 'aria-label': 'What Claude should look for', maxlength: '400'});
+      const ruleText = h('input', {type: 'text', placeholder: 'e.g. Flag any VIN that does not start with HZA', 'aria-label': 'What Dex should look for', maxlength: '400'});
       const ruleJob = h('select', {'aria-label': 'Which jobs'}, h('option', {value: ''}, 'All jobs'), data.jobs.map(j => h('option', {value: j}, j)));
       const jobsWithOwn = Object.keys(data.shifts.jobs || {});
       const newJob = h('input', {type: 'text', list: 'job-list', placeholder: 'Job number, e.g. HANDS-HMMA-2219', 'aria-label': 'Job number'});
       wrap.replaceChildren(
         h('button', {type: 'button', class: 'back', onclick: () => { location.hash = ''; }}, '‹ All reports'),
-        h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Checks & shifts'), h('div', {class: 'meta'}, 'What the verifier looks at, what else you want Claude to look for, and when each shift starts and ends.'))),
+        h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Checks & shifts'), h('div', {class: 'meta'}, 'What the verifier looks at, what else you want Dex to look for, and when each shift starts and ends.'))),
         h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'What it checks')),
           h('div', {class: 'checkgroups'}, data.checks.map(g => h('div', {class: 'checkgroup'}, h('h3', {}, g.title), h('p', {class: 'note'}, g.when),
             h('ul', {}, g.items.map(t => h('li', {}, t))))))),
         h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Also look for'),
-            h('p', {}, 'Tell Claude anything else to check. It reads this list every time it reviews a report, and its double-check will not dismiss what you asked for.')),
+            h('p', {}, 'Tell Dex anything else to check. It reads this list every time it reviews a report, and its double-check will not dismiss what you asked for.')),
           data.ai_on ? null : h('p', {class: 'ssource warn'}, 'AI review is off, so these rules are saved but not used until it is turned on.'),
           h('div', {class: 'keyform'}, ruleText, ruleJob,
             h('button', {type: 'button', class: 'btn primary', onclick: () => save('/api/settings/rules', {text: ruleText.value, job: ruleJob.value || null}, () => 'Added. New AI reviews will look for it.')}, 'Add')),
@@ -2862,18 +3189,9 @@
   function shiftCard(rv) {
     const wrong = allIssues(rv).filter(i => i.code === 'wrong_shift');
     if (!wrong.length) return null;
-    return h('div', {class: 'shiftcard'},
-      h('div', {}, h('b', {}, `${wrong.length} row${wrong.length === 1 ? ' is' : 's are'} on the wrong shift by scan time`),
-        h('span', {}, wrong.slice(0, 2).map(i => i.text).join(' ') + (wrong.length > 2 ? ` And ${wrong.length - 2} more.` : '')),
-        h('span', {class: 'note'}, 'Rows move to the right shift tab. A row whose shift has no tab in this workbook is taken out (it belongs in that shift\'s report). You get a corrected copy; the original stays as it is.')),
-      h('button', {type: 'button', class: 'btn primary', onclick: async e => {
-        e.target.disabled = true; e.target.textContent = 'Moving…';
-        try {
-          const out = await api('/api/spreadsheets/shift-fix', {file_hash: state.report.file_hash});
-          toast(`Moved ${out.moved} row${out.moved === 1 ? '' : 's'}${out.removed ? ` and took out ${out.removed}` : ''}. This is the corrected copy; it has been checked again.`);
-          await loadList(); select(out.item.file_hash);
-        } catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Put them on the right shift'; }
-      }}, 'Put them on the right shift'));
+    return h('div', {class: 'shiftcard'}, h('b', {}, `${wrong.length} rows need shift review`),
+      h('p', {class: 'note'}, 'Moving or deleting rows is paused until the full affected-cell plan can be reviewed.'),
+      h('button', {type: 'button', class: 'btn', disabled: true}, 'Shift correction paused'));
   }
 
   // ---------------- API page: keys and how to call it
@@ -2912,7 +3230,7 @@
       const canSend = h('input', {type: 'checkbox'});
       wrap.replaceChildren(
         h('button', {type: 'button', class: 'back', onclick: () => { location.hash = ''; }}, '‹ All reports'),
-        h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'API'), h('div', {class: 'meta'}, 'Let other programs upload reports, read the results, apply fixes, approve and send, with the same rules as this screen.'))),
+        h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'API'), h('div', {class: 'meta'}, 'Let other programs upload reports, read the results, apply reviewed cell corrections and approve, with the same safety rules as this screen. Sending is paused.'))),
         connectorBlock(),
         h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'API keys'), h('p', {}, 'A program sends its key with every call. You see a key once, when you make it; revoke it any time.')),
           fresh ? h('div', {class: 'keynew'}, h('p', {}, h('b', {}, `New key for ${fresh.name}. Copy it now; it will not be shown again.`)),
@@ -2946,10 +3264,10 @@
     const a = r.approval, sent = (r.sent || []).filter(x => x.sent), last = sent[sent.length - 1];
     if (!a) return null;
     return h('div', {class: 'sendstate' + (last ? ' sent' : '')},
-      h('b', {}, last ? `Sent to the client ${when(last.at)}` : 'Approved as final'),
+      h('b', {}, last ? `Sent to the client ${when(last.at)}` : 'Internal approval recorded'),
       h('span', {}, last ? `To ${last.to.join(', ')}${last.cc.length ? `, Cc ${last.cc.length}` : ''}. Approved by ${a.by}.`
         : `By ${a.by}, ${when(a.at)}${a.overridden ? `, with ${a.open_must_fix} must-fix issue${a.open_must_fix === 1 ? '' : 's'} open` : ''}. Not sent yet.`),
-      h('button', {type: 'button', class: 'btn small', onclick: () => openSend()}, last ? 'Details' : 'Send to client'));
+      h('button', {type: 'button', class: 'btn small', onclick: () => openSend()}, last ? 'Details' : 'Approval details'));
   }
   async function openSend() {
     let dlg = $('send-dialog');
@@ -2959,7 +3277,7 @@
     const hash = state.report.file_hash;
     state.sendForm = null; state.sendConfirm = false;
     dlg.replaceChildren(h('div', {class: 'fixer-wait'}, h('span', {class: 'spin'}), h('h2', {id: 'send-title'}, state.report.approval ? 'Send to client' : 'Approve'),
-      h('p', {}, 'Finding the last report sent for this job in data@ppgquality.com…')));
+      h('p', {}, 'Loading approval details…')));
     try {
       const info = await api('/api/spreadsheets/send-info', {file_hash: hash});
       if (state.report?.file_hash !== hash) return;
@@ -2975,80 +3293,55 @@
     const newer = (r.fixes_applied || []).slice(-1)[0];
     const sentBefore = (r.sent || []).filter(x => x.sent);
     // form values survive redraws while the dialog is open
-    const f = state.sendForm ||= {to: info.to.join(', '), cc: info.cc.join(', '), subject: info.subject, body: info.body, name: info.attachment.name,
+    const f = state.sendForm ||= {...reviewBinding(r), to: info.to.join(', '), cc: info.cc.join(', '), subject: info.subject, body: info.body, name: info.attachment.name,
       reply: info.previous ? 'reply' : 'new', again: false, override: false, approver: myName(), note: ''};
     const bind = (key, attrs, tag = 'input') => { const el = h(tag, {...attrs, oninput: e => { f[key] = e.target.value; }}); el.value = f[key]; return el; };
     const check = (key, label) => h('label', {class: 'tick'}, h('input', {type: 'checkbox', checked: f[key], onchange: e => { f[key] = e.target.checked; drawSend(); }}), label);
     // step 1: approve
     let step1;
     if (approval) {
-      step1 = h('div', {class: 'sstep done'}, h('div', {class: 'shead'}, h('span', {class: 'snum'}, '✓'), h('h3', {}, 'Approved as final')),
+      step1 = h('div', {class: 'sstep done'}, h('div', {class: 'shead'}, h('span', {class: 'snum'}, '✓'), h('h3', {}, 'Internal approval recorded')),
         h('p', {}, `${approval.by} approved version ${approval.version} on ${when(approval.at)}.` + (approval.note ? ` Note: ${approval.note}` : '')
           + (approval.overridden ? ` It was approved with ${approval.open_must_fix} must-fix issue${approval.open_must_fix === 1 ? '' : 's'} open.` : '')),
         sentBefore.length ? null : h('button', {type: 'button', class: 'btn ghost small', onclick: () => approve(true)}, 'Withdraw approval'));
     } else {
       const warns = [];
       if (pending) warns.push(h('div', {class: 'swarn'}, h('p', {}, `${pending} change${pending === 1 ? ' is' : 's are'} ready but not in a corrected copy yet. Approve the corrected copy, not this one.`),
-        h('button', {type: 'button', class: 'btn small', disabled: state.busy, onclick: () => { state.openSendFor = 'next'; dlg.close(); downloadWithChanges(); }}, `Apply ${pending} change${pending === 1 ? '' : 's'} and continue`)));
+        h('button', {type: 'button', class: 'btn small', disabled: state.busy, onclick: correctionAction(c => { state.openSendFor = 'next'; dlg.close(); downloadWithChanges(c); })}, `Apply ${pending} change${pending === 1 ? '' : 's'} and continue`)));
       const unsure = needsCheck().total;
       if (unsure) warns.push(h('div', {class: 'swarn'}, h('p', {}, `${unsure} item${unsure === 1 ? '' : 's'} the app is not sure about ${unsure === 1 ? 'has' : 'have'} not been checked yet. A person has to accept, skip or mark ${unsure === 1 ? 'it' : 'each one'} reviewed first.`),
         h('button', {type: 'button', class: 'btn small', onclick: () => { dlg.close(); showSide('fixes'); }}, 'Check them now')));
       if (newer) warns.push(h('div', {class: 'swarn'}, h('p', {}, `A corrected copy of this report exists: "${newer.fixed_filename}".`),
         h('button', {type: 'button', class: 'btn small', onclick: () => { state.openSendFor = newer.fixed_file_hash; dlg.close(); select(newer.fixed_file_hash); }}, 'Open the corrected copy')));
       if (must) warns.push(h('div', {class: 'swarn high'}, h('p', {}, `${must} must-fix issue${must === 1 ? ' is' : 's are'} still open on this report.`), check('override', 'Approve anyway')));
-      step1 = h('div', {class: 'sstep'}, h('div', {class: 'shead'}, h('span', {class: 'snum'}, '1'), h('h3', {}, 'Approve the final report')),
-        h('p', {}, `${rv.status === 'clear' ? 'Nothing is flagged.' : statusNote(rv) + '.'} The report goes to the client exactly as this version (${r.filename}, version ${r.version}).`),
+      step1 = h('div', {class: 'sstep'}, h('div', {class: 'shead'}, h('span', {class: 'snum'}, '1'), h('h3', {}, 'Approve this exact version internally')),
+        h('p', {}, `${rv.status === 'clear' ? 'Nothing is flagged.' : statusNote(rv) + '.'} Approval applies only to this version (${r.filename}, version ${r.version}).`),
         ...warns,
         h('div', {class: 'sgrid'}, h('label', {}, 'Approved by', bind('approver', {type: 'text', placeholder: 'Your name', autocomplete: 'name'})),
           h('label', {}, 'Note (optional)', bind('note', {type: 'text', placeholder: 'For example: checked against the app, 144 = 144'}))),
-        h('button', {type: 'button', class: 'btn primary', disabled: !!state.sending || (must > 0 && !f.override) || (!!newer && !f.override) || pending > 0 || needsCheck().total > 0, onclick: () => approve(false)}, 'Approve as final'));
+        h('button', {type: 'button', class: 'btn primary', disabled: !!state.sending || (must > 0 && !f.override) || (!!newer && !f.override) || pending > 0 || needsCheck().total > 0, onclick: () => approve(false)}, 'Record internal approval'));
     }
-    // step 2: send
-    const prev = info.previous;
-    const source = prev ? h('p', {class: 'ssource'}, f.reply === 'reply' ? `Reply All on "${prev.subject}", sent ${when(prev.sent_at)}. Recipients come from that email.` : 'New email (not a reply).',
-        h('button', {type: 'button', class: 'linkish', onclick: () => { f.reply = f.reply === 'reply' ? 'new' : 'reply'; drawSend(); }}, f.reply === 'reply' ? 'Send as a new email instead' : 'Reply on the earlier email'))
-      : h('p', {class: 'ssource warn'}, info.lookup_error ? `Could not read Sent Items: ${info.lookup_error}` :
-        info.recipients_from === 'saved' ? 'No earlier report email was found for this job in Sent Items. The recipients below are the ones used the last time this app sent it. Check them.'
-          : `No earlier report email was found for ${info.job || 'this job'} in Sent Items. Type the client's addresses carefully.`);
-    const canSend = !!approval && info.enabled && !info.attachment.too_big && !state.sending;
-    const n = addrList(f.to).length + addrList(f.cc).length;
-    const step2 = h('div', {class: 'sstep' + (approval ? '' : ' locked')}, h('div', {class: 'shead'}, h('span', {class: 'snum'}, '2'), h('h3', {}, 'Send to the client')),
-      !info.enabled ? h('p', {class: 'ssource warn'}, 'Sending is not set up yet. The app needs permission to use the data@ppgquality.com mailbox.') : null,
-      approval ? null : h('p', {}, 'Approve the report first.'),
-      source,
-      h('div', {class: 'sform'},
-        h('label', {}, 'From', h('input', {type: 'text', value: info.sender, disabled: true})),
-        h('label', {}, 'To', bind('to', {type: 'text', placeholder: 'client@company.com'})),
-        h('label', {}, 'Cc', bind('cc', {type: 'text'})),
-        h('label', {}, 'Subject', bind('subject', {type: 'text'})),
-        h('label', {}, 'Message', bind('body', {rows: 6}, 'textarea')),
-        h('label', {}, 'Attachment', h('span', {class: 'att'}, bind('name', {type: 'text'}), h('em', {}, kb(info.attachment.size))))),
-      info.attachment.too_big ? h('p', {class: 'ssource warn'}, 'The file is over 3 MB, too large to send from here. Download it and send it from Outlook.') : null,
-      r.fixed_from ? h('p', {class: 'ssource'}, `This is a corrected copy with ${r.fixed_from.changes.length} changed value${r.fixed_from.changes.length === 1 ? '' : 's'}. Make the same changes in the SharePoint list, so it matches what the client receives.`) : null,
-      sentBefore.length ? h('div', {class: 'swarn'}, h('p', {}, `Already sent ${when(sentBefore[sentBefore.length - 1].at)}. Only send it again if a corrected report needs to go out.`), check('again', 'Send again')) : null,
-      h('div', {class: 'sbtns'},
-        h('button', {type: 'button', class: 'btn', disabled: !canSend, onclick: () => deliver('draft')}, 'Save as draft in Outlook'),
-        h('button', {type: 'button', class: 'btn primary' + (state.sendConfirm ? ' confirm' : ''), disabled: !canSend || (sentBefore.length > 0 && !f.again),
-          onclick: () => { if (!state.sendConfirm) { state.sendConfirm = true; drawSend(); return; } deliver('send'); }},
-          state.sending === 'send' ? 'Sending…' : state.sendConfirm ? `Confirm: send to ${n} ${n === 1 ? 'person' : 'people'}` : 'Send to client')),
-      h('p', {class: 'note'}, 'Save as draft puts it in Drafts in data@ppgquality.com, so someone can review it in Outlook and send it from there.'));
+    const step2 = h('div', {class: 'sstep'}, h('h3', {}, 'Sending is paused'),
+      h('p', {}, 'Sending and draft creation are unavailable while delivery safety checks are completed. Download the approved report for manual delivery.'));
     const history = (r.sent || []).length ? h('div', {class: 'shist'}, h('h3', {}, 'History'),
       ...[...r.sent].reverse().map(x => h('p', {}, `${x.sent ? 'Sent' : 'Draft saved'} ${when(x.at)}${x.by ? ` by ${x.by}` : ''}: "${x.subject}" to ${x.to.join(', ')}.`,
         x.web_link ? h('a', {href: x.web_link, target: '_blank', rel: 'noopener'}, x.sent ? ' Open in Outlook' : ' Open the draft') : null))) : null;
     dlg.replaceChildren(
-      h('div', {class: 'fixer-top'}, h('div', {}, h('p', {class: 'eyebrow'}, 'APPROVE AND SEND'), h('h2', {id: 'send-title'}, `${rv.job || r.filename}, ${shortDay(rv.day)}`)),
+      h('div', {class: 'fixer-top'}, h('div', {}, h('p', {class: 'eyebrow'}, 'INTERNAL APPROVAL'), h('h2', {id: 'send-title'}, `${rv.job || r.filename}, ${shortDay(rv.day)}`)),
         h('button', {type: 'button', class: 'btn', disabled: !!state.sending, onclick: () => dlg.close()}, 'Close')),
       h('div', {class: 'fixer-body'}, step1, step2, history));
   }
+  const reviewBindingFields = f => ({file_hash: f.file_hash, expected_rev: f.expected_rev,
+    expected_run: f.expected_run, expected_check_hash: f.expected_check_hash});
   async function approve(withdraw) {
     const f = state.sendForm, hash = state.report.file_hash;
     if (!withdraw && !f.approver.trim()) { toast('Type your name to approve the report.', true); return; }
     state.sending = 'approve'; drawSend();
     try {
       if (!withdraw) store.set('rd-approver', f.approver.trim());
-      const out = await api('/api/spreadsheets/approve', {file_hash: hash, approver: f.approver, note: f.note, override: !!f.override, withdraw});
+      const out = await api('/api/spreadsheets/approve', {...reviewBindingFields(f), approver: f.approver, note: f.note, override: !!f.override, withdraw});
       state.report = {...state.report, ...out.item, approval: out.item.approval || null, review: state.report.review};
-      toast(withdraw ? 'Approval withdrawn.' : 'Approved as final. You can send it to the client now.' + (out.change_summary ? ' It differed from SharePoint or was changed, so a change summary PDF was saved on record.' : ''));
+      toast(withdraw ? 'Approval withdrawn.' : 'Approved as final. Sending is paused; download the approved report for manual delivery.' + (out.change_summary ? ' It differed from SharePoint or was changed, so a change summary PDF was saved on record.' : ''));
       if (out.change_summary) state.report.change_summaries = [{id: out.change_summary.id, made_at: out.change_summary.made_at, by: out.change_summary.by, reason: 'approved'}, ...(state.report.change_summaries || [])];
       refreshHead(); loadList();
     } catch (e) { toast(e.message, true); }
@@ -3074,7 +3367,7 @@
   }
   // Internal approval and sending to the client are separate steps; a report with blockers never looks ready.
   const blockers = r => (r.review?.counts?.high || 0) + (r.holds || []).filter(x => x.hard).length + (r.assignment?.needs_person && !(r.holds || []).some(x => x.hard) ? 1 : 0);
-  const sendLabel = r => (r.sent || []).some(x => x.sent) ? 'Sent to client' : r.approval ? 'Send to client…'
+  const sendLabel = r => (r.sent || []).some(x => x.sent) ? 'Sent to client' : r.approval ? 'Approval details…'
     : blockers(r) ? `${blockers(r)} blocker${blockers(r) === 1 ? '' : 's'} to resolve` : 'Approve…';
 
   const sameKey = i => (i.code || '') + '|' + (i.column || (String(i.cell || '').match(/^[A-Z]+/i) || [''])[0].toUpperCase()) + '|' + String(i.text || '').replace(/"[^"]*"|“[^”]*”|'[^']*'/g, '"…"').replace(/\b[A-Za-z0-9-]*\d[A-Za-z0-9-]*\b/g, '#').replace(/\s+/g, ' ').trim();
@@ -3089,8 +3382,8 @@
   // a person said these are fine: saved on the report (not only in this browser), so later versions keep them settled
   async function markFine(items) {
     if (!items.length || !state.report) return;
-    try { await api('/api/spreadsheets/mark-fine', {file_hash: state.report.file_hash, by: myName() || null,
-      issues: items.map(i => ({code: i.code || null, sheet: i.sheet || null, row: i.row ?? null, text: i.text || ''}))}); }
+    try { await api('/api/spreadsheets/mark-fine', {file_hash: state.report.file_hash, by: myName() || null, ...shownFor(items.map(i => i.key).filter(Boolean)),
+      issues: items.map(i => ({code: i.code || null, sheet: i.sheet || null, row: i.row ?? null, cell: i.cell || null, key: i.key || null, text: i.text || ''}))}); }
     catch (e) { /* still marked reviewed in this browser */ }
   }
   function fixesFor(issue) {
@@ -3124,7 +3417,7 @@
       h('button', {type: 'button', class: 'btn small', onclick: () => removeRows([[issue.sheet, Number(issue.row)]], `Took out ${issue.sheet} row ${issue.row}`)}, 'Take out this row')));
     if (!fx.length && !isDupRow(issue) && state.aiOn) kids.push(h('div', {class: 'choice'},
       h('span', {}, 'No automatic fix for this one yet.'),
-      state.aiOn ? h('button', {type: 'button', class: 'btn small', onclick: e => aiFix([issue.key], e.target)}, 'Fix with AI') : null));
+      state.aiOn ? h('button', {type: 'button', disabled: true, title: 'AI workbook changes are paused pending reviewed-plan safety checks', class: 'btn small', onclick: e => aiFix([issue.key], e.target)}, 'Fix with AI') : null));
     return h('div', {class: 'choices'}, h('b', {class: 'choices-h'}, 'How to fix it'), ...kids,
       h('div', {class: 'choice'}, h('span', {}, kids.length ? 'Or, if the value is actually right:' : 'If the value is actually right:'),
         h('button', {type: 'button', class: 'btn small', onclick: async () => { await markFine([issue]); next(); }}, 'It\'s fine as is')));
@@ -3257,7 +3550,7 @@
       let {n, fixedKeys} = accept();
       const missing = picked.filter(i => !fixedKeys.includes(i.key) && !isDupRow(i));
       if (missing.length && state.aiOn) {
-        btn.disabled = true; btn.textContent = `Claude is fixing ${missing.length}…`;
+        btn.disabled = true; btn.textContent = `Dex is fixing ${missing.length}…`;
         try {
           await api('/api/spreadsheets/ai-fixes', {file_hash: hash});
           if (state.selected !== hash) return;
@@ -3270,7 +3563,7 @@
       const left = picked.length - fixedKeys.length;
       sel.clear();
       toast(fixedKeys.length ? `${n} fix${n === 1 ? '' : 'es'} accepted for ${fixedKeys.length} issue${fixedKeys.length === 1 ? '' : 's'}; they go into the download.` + (left - dupRows.length > 0 ? ` ${left - dupRows.length} have no automatic fix yet: open each one to choose what to do.` : '')
-        : dupRows.length ? '' : 'None of these have an automatic fix yet. Open each one to choose what to do' + (state.aiOn ? '.' : ', or turn on AI review so Claude can write fixes.'), !fixedKeys.length && !dupRows.length);
+        : dupRows.length ? '' : 'None of these have an automatic fix yet. Open each one to choose what to do' + (state.aiOn ? '.' : ', or turn on AI review so Dex can write fixes.'), !fixedKeys.length && !dupRows.length);
       drawFixes(); draw(); updateFinish(); drawSideTabs();
       if (dupRows.length) await removeRows(dupRows);
     };
@@ -3279,8 +3572,8 @@
       const cur = state.issueNav != null ? issues[state.issueNav]?.key : null;
       block.replaceChildren(h('header', {}, h('h2', {}, 'All issues'),
         h('p', {}, issues.length ? `${left} of ${issues.length} still open. The guide at the top takes you through them one at a time; click any one here to jump to it.`
-          + (rv.verify?.status === 'done' ? ' Double-checked by Claude.' : state.verifying ? ' Claude is double-checking…' : '')
-          : dismissed.length ? 'Nothing left: Claude checked every flagged item and none are real problems.' : 'Nothing flagged by the checks, SharePoint, the usual-day comparison or AI.'),
+          + (rv.verify?.status === 'done' ? ' Double-checked by Dex.' : state.verifying ? ' Dex is double-checking…' : '')
+          : dismissed.length ? 'Nothing left: Dex checked every flagged item and none are real problems.' : 'Nothing flagged by the checks, SharePoint, the usual-day comparison or AI.'),
         null));
       const summary = errorSummary(issues, done);
       if (summary) block.append(summary);
@@ -3293,7 +3586,7 @@
           picked.some(i => !done.has(i.key)) ? h('button', {type: 'button', class: 'btn small', onclick: () => { const k = picked.map(i => i.key); sel.clear(); setDone(k, true); toast(`${k.length} marked reviewed.`); drawSteps(); drawCleanOffer(); }},
             `Mark ${picked.length === 1 ? 'it' : picked.length} reviewed`) : null,
           ready ? h('button', {type: 'button', class: 'btn small', onclick: e => fixSelected(e.target)}, `Make the ${ready === 1 ? 'suggested fix' : `${ready} suggested fixes`}`) : null,
-          state.aiOn ? h('button', {type: 'button', class: 'btn primary small ai', onclick: e => { const k = picked.map(i => i.key); sel.clear(); aiFix(k, e.target); }}, `Fix ${picked.length === 1 ? 'it' : picked.length} with AI`) : null));
+          state.aiOn ? h('button', {type: 'button', disabled: true, title: 'AI workbook changes are paused pending reviewed-plan safety checks', class: 'btn primary small ai', onclick: e => { const k = picked.map(i => i.key); sel.clear(); aiFix(k, e.target); }}, `Fix ${picked.length === 1 ? 'it' : picked.length} with AI`) : null));
       }
       for (const [sev, label] of SEVERITIES) {
         const ofSev = issues.filter(i => i.severity === sev); if (!ofSev.length) continue;
@@ -3316,7 +3609,7 @@
           const limit = state.openGroups[gk + '|all'] ? list.length : 25;
           for (const i of list.slice(0, limit)) {
             const fx = fixesFor(i).filter(f => f.state !== 'rejected');
-            const badge = i.restored ? 'Put back by you' : i.verdict === 'valid' ? '✓ Claude confirmed' : i.verdict === 'unsure' ? 'Claude unsure' : null;
+            const badge = i.restored ? 'Put back by you' : i.verdict === 'valid' ? '✓ Dex confirmed' : i.verdict === 'unsure' ? 'Dex unsure' : null;
             ul.append(h('li', {class: 'iitem' + (done.has(i.key) ? ' done' : '') + (i.key === cur ? ' cur' : '') + (sel.has(i.key) ? ' picked' : '')},
               h('input', {type: 'checkbox', checked: sel.has(i.key), 'aria-label': 'Select this error', title: 'Select this error',
                 onchange: e => { e.target.checked ? sel.add(i.key) : sel.delete(i.key); draw(); }}),
@@ -3348,20 +3641,24 @@
     return block;
   }
   function dismissedList(list) {
-    return h('details', {class: 'dismissed'}, h('summary', {}, `Claude checked and dismissed ${list.length} false alarm${list.length === 1 ? '' : 's'}`),
-      h('ul', {}, list.map(i => h('li', {}, h('div', {}, h('b', {}, i.text), h('small', {}, [i.source, i.where].filter(Boolean).join(' · ') + (i.verdict_reason ? ' · Claude: ' + i.verdict_reason : ''))),
+    return h('details', {class: 'dismissed'}, h('summary', {}, `Dex checked and dismissed ${list.length} false alarm${list.length === 1 ? '' : 's'}`),
+      h('ul', {}, list.map(i => h('li', {}, h('div', {}, h('b', {}, i.text), h('small', {}, [i.source, i.where].filter(Boolean).join(' · ') + (i.verdict_reason ? ' · Dex: ' + i.verdict_reason : ''))),
         h('button', {type: 'button', class: 'btn small', onclick: () => { const b = new Set(store.get(restoredKey(), [])); b.add(i.key); store.set(restoredKey(), [...b]); drawReport(); if (state.fixes) drawFixes(); toast('Put back in the issue list.'); }}, 'Put back')))));
   }
   const infoNote = info => { const texts = [...new Set(info.map(i => i.text))]; return h('p', {class: 'note'}, 'For information: ' + texts.slice(0, 3).join(' ') + (texts.length > 3 ? ` (and ${texts.length - 3} more)` : '')); };
 
   // ---------------- sources
   function sourcesBlock(r) {
-    const rv = r.review, sp = r.sharepoint || {}, bl = r.baseline || {}, ai = r.ai_review || {};
-    const spState = {match: ['Matches SharePoint', 'good'], differences: ['Differs from SharePoint', 'bad'], not_found: ['No SharePoint data found', ''],
+    // the same source verdict as the header (the item-by-item reconciliation of this version), never the older daily export
+    const rv = r.review, sp = rv.sharepoint || {}, bl = r.baseline || {}, ai = r.ai_review || {};
+    const spState = {match: ['Matches SharePoint item by item', 'good'], differences: ['Differs from SharePoint', 'bad'], incomplete: ['SharePoint read incomplete: not verified', 'bad'],
+      unverified: ['Not verified', ''], stale: ['SharePoint check out of date', 'bad'], day_level: ['Day totals only (not record by record)', ''], not_found: ['No SharePoint data found', ''],
       not_configured: ['SharePoint not connected', ''], error: ['SharePoint check failed', 'bad']}[sp.status] || ['Not checked yet', ''];
-    const spText = sp.status === 'match' ? `All ${sp.matched_rows} rows and the totals agree with ${sp.source_kind === 'list' ? 'the job\'s SharePoint list' : 'the daily export'}.`
-      : sp.status === 'differences' ? `${(sp.findings || []).length} difference(s), listed under Issues. ${sp.matched_rows || 0} of ${sp.report_rows || 0} rows matched.`
-      : sp.message || 'The report has not been compared with SharePoint yet.';
+    const scope = (sp.fields_checked || []).length ? ` Fields checked: ${sp.fields_checked.join(', ')}.` + ((sp.fields_not_checked || []).length ? ` Not checked: ${sp.fields_not_checked.join(', ')}.` : '')
+      + ' A match covers only these fields: not identifiers, photos, duplicates, source correctness or release readiness.' : '';
+    const spText = (sp.status === 'match' ? `${sp.matched ?? '?'} of ${rv.scans ?? '?'} records agree with ${sp.source || 'the SharePoint list'}${sp.captured_at ? ' (captured ' + when2(sp.captured_at) + ')' : ''}.`
+      : sp.status === 'differences' ? `${sp.differences || 0} difference(s), listed under Corrections${sp.captured_at ? ' (captured ' + when2(sp.captured_at) + ')' : ''}.`
+      : sp.message || 'The report has not been compared with SharePoint item by item yet.') + scope;
     const blState = {normal: ['In line with usual', 'good'], unusual: ['Different from usual', 'bad'], not_enough_history: ['Not enough history', '']}[bl.status] || ['Not compared yet', ''];
     const aiState = {done: [ai.issues?.length ? `${ai.issues.length} suggestion(s)` : 'Nothing spotted', ai.issues?.length ? 'bad' : 'good'], error: ['AI review failed', 'bad'], not_configured: ['AI review off', '']}[ai.status] || ['Not run yet', ''];
     const source = (title, [label, tone], text, link, button) => h('div', {class: 'source'}, h('h3', {}, title),
@@ -3372,8 +3669,8 @@
           h('button', {type: 'button', class: 'btn small', onclick: () => rerun('sharepoint', 'Checking SharePoint…')}, 'Check again')),
         source('Usual day', blState, bl.message || 'Compares scans, inspected and reject rate with this job\'s earlier days.', null,
           h('button', {type: 'button', class: 'btn small', onclick: () => rerun('baseline', 'Comparing with earlier days…')}, 'Compare again')),
-        source('AI review', aiState, ai.summary || ai.message || 'Claude reads every sheet and points out anything that looks wrong.', null,
-          h('button', {type: 'button', class: 'btn small', onclick: () => rerun('ai-review', 'Claude is reading the report…')}, ai.status === 'done' ? 'Run again' : 'Run AI review'))));
+        source('AI review', aiState, ai.summary || ai.message || 'Dex reads every sheet and points out anything that looks wrong.', null,
+          h('button', {type: 'button', class: 'btn small', onclick: () => rerun('ai-review', 'Dex is reading the report…')}, ai.status === 'done' ? 'Run again' : 'Run AI review'))));
   }
 
   // ---------------- what was read
@@ -3423,25 +3720,18 @@
     await loadList(); select(last.file_hash);
     showResult(last.file_hash, true);   // nothing is fixed until the person chooses: AI fixes everything, or they review first
   }
-  // After an upload the app fixes everything it can by itself: the sure cleanups already ran on the server, then Claude
-  // works through every open issue (in batches, so a report with hundreds of errors is still covered). The person only
-  // sees what is left, one at a time.
-  // "Accept all fixes" / "Let AI fix everything": one click. Each saved version is checked again, and anything new it turns up is
-  // fixed too (a few rounds at most). Items Claude already tried are not asked again; whatever is left is for a person.
-  // Before anything is changed: every suggested change with its cell, the value now, the new value, where it comes from
-  // and why; and how many items Claude will work out. Nothing is saved until "Make these changes". The original upload is
-  // always kept, and every change makes a new version that is checked again.
+  // Explicit preview of one captured correction batch. No automatic follow-up rounds.
   function previewAll(p, go) {
     let dlg = $('preview-dialog');
     if (!dlg) { dlg = h('dialog', {id: 'preview-dialog', class: 'fixer', 'aria-labelledby': 'preview-title'}); document.body.append(dlg); }
-    const fixes = (p.fixes || []).filter(f => f.state !== 'rejected');
+    const fixes = (p.correction ? p.correction.accepted.map(f => ({...f, after: p.correction.dec[f.id]?.after ?? f.after})) : p.fixes || []).filter(f => f.state !== 'rejected');
     const bySource = {};
     for (const f of fixes) (bySource[f.source || 'Suggested'] ||= []).push(f);
     const ai = state.aiOn ? (p.none || []).length : 0;
     dlg.replaceChildren(h('div', {class: 'preview'},
       h('h2', {id: 'preview-title'}, 'Review the changes'),
       h('p', {}, `${fixes.length} suggested change${fixes.length === 1 ? '' : 's'}` + ((p.dups || []).length ? `, ${p.dups.length} duplicate row${p.dups.length === 1 ? '' : 's'} removed` : '')
-        + (ai ? `, and Claude works out ${ai} more (shown in "what changed" afterwards)` : '') + '. Your original file is kept, and the new version is checked again.'),
+        + (ai ? `, and Dex works out ${ai} more (shown in "what changed" afterwards)` : '') + '. Your original file is kept, and the new version is checked again.'),
       ...Object.entries(bySource).map(([src, list]) => h('details', {open: list.length <= 12 ? '' : null},
         h('summary', {}, `${src}: ${list.length}`),
         h('table', {class: 'preview-table'}, h('thead', {}, h('tr', {}, ...['Cell', 'Now', 'Change to', 'Why'].map(t => h('th', {}, t)))),
@@ -3451,53 +3741,9 @@
         h('button', {type: 'button', class: 'btn primary', onclick: () => { dlg.close(); go(); }}, 'Make these changes'))));
     if (!dlg.open) dlg.showModal();
   }
-  async function fixEverythingLoop() {
-    if (state.fixingAll) return; state.fixingAll = true;
-    const issueId = i => `${i.code}|${i.text}|${i.sheet}|${i.row ?? ''}|${i.cell || ''}`, tries = new Map(), wait = ms => new Promise(r => setTimeout(r, ms));
-    let cur = state.report?.file_hash;
-    try {
-      for (let round = 1; round <= 5 && cur; round++) {
-        for (let i = 0; i < 120 && !(state.report?.file_hash === cur && state.fixes && !state.busy); i++) await wait(250);
-        drawCleanOffer();
-        const fe = state.fixEverything;
-        if (!fe || fe.hash !== cur) break;   // nothing left on this version
-        const p = fe.parts({includeLeft: true});
-        p.none = p.none.filter(x => (tries.get(issueId(x)) || 0) < 2);
-        if (!p.fixes.length && !p.dups.length && !(state.aiOn && p.none.length)) break;
-        const retry = p.none.some(x => tries.get(issueId(x)));
-        p.none.forEach(x => tries.set(issueId(x), (tries.get(issueId(x)) || 0) + 1));
-        if (round > 1) toast(retry ? `Taking a closer look at the ones Claude was not sure about…` : `Fixing what the re-check found…`);
-        state.aiBatch = retry ? 20 : null;   // a second look goes in small batches, so Claude can take more care over each one
-        const next = await fe.approve(p, null, true).finally(() => { state.aiBatch = null; });
-        if (!next) break;
-        if (next === cur && !p.fixes.length && !p.dups.length) { await openReport(cur); continue; }   // Claude only confirmed items fine: same version, new notes
-        cur = next; await loadList(); select(cur);
-      }
-    } finally { state.fixingAll = false; }
-    if (cur) { await loadList(); select(cur); showResult(cur, true, {afterAll: true}); }
-  }
   async function autoFixAll(hash, only) {
-    if (!state.aiOn) return hash;
-    const row = h('div', {class: 'uploading'}), say = t => row.replaceChildren(h('span', {class: 'spin'}), h('span', {}, ' ' + t));
-    $('uploads').prepend(row);
-    const asked = new Set();
-    let cur = hash;
-    try {
-      for (let round = 1; round <= 40; round++) {
-        const data = await api('/api/spreadsheet?id=' + cur);
-        const sig = i => `${i.code}|${i.text}|${i.sheet}|${i.row ?? ''}|${i.column || i.cell || ''}`;   // keys change between versions; this does not
-        const open = (data.review?.issues || []).filter(i => i.severity !== 'info' && !asked.has(i.key) && !asked.has(sig(i)) && (!only || only(i)));
-        if (!open.length) break;
-        const size = state.aiBatch || 100, batch = open.slice(0, size);
-        batch.forEach(i => { asked.add(i.key); asked.add(sig(i)); });
-        say(open.length > size ? `Fixing everything it can: part ${round}, ${fmt(open.length)} issues to go…` : `Fixing everything it can: ${open.length === 1 ? '1 issue' : `${fmt(open.length)} issues`}…`);
-        let out;
-        try { out = await api('/api/spreadsheets/ai-fix', {file_hash: cur, keys: batch.map(i => i.key), auto: true}); }
-        catch (e) { if (round === 1) toast(`Claude could not fix the issues this time (${e.message}). The sure cleanups were still made; the rest are listed for you.`, true); break; }
-        cur = out.item.file_hash;
-      }
-    } finally { row.remove(); }
-    return cur;
+    toast('AI workbook changes are paused. Review and apply cell corrections instead.', true);
+    return hash;
   }
   async function uploadOne(file) {
     const meter = h('b'), text = h('span', {}, `Preparing ${file.name}…`);
@@ -3517,12 +3763,18 @@
       }
       text.textContent = `Checking ${file.name}: rows, SharePoint, usual day and AI. This can take a minute.`;
       meter.style.width = '75%';
-      const result = await api('/api/spreadsheets/upload/finish', {upload_id: id, filename: file.name, part_count: parts, sha256: hash});
+      let result;
+      try { result = await api('/api/spreadsheets/upload/finish', {upload_id: id, filename: file.name, part_count: parts, sha256: hash}); }
+      catch (e) {   // no clear answer: the file's own SHA-256 is its ID, so ask whether it was saved before calling it failed
+        let saved = null; try { saved = await api('/api/spreadsheet?id=' + hash); } catch (e2) { saved = null; }
+        if (!saved) throw e;
+        result = {item: saved, recovered: true};
+      }
       meter.style.width = '100%';
-      setTimeout(() => row.remove(), 800);
+      receipt(row, file, result.item, result.recovered);
       if (result.item.idempotent) toast(`${file.name} was already uploaded, so the saved copy was opened.`);
       return result.item;
-    } catch (e) { row.classList.add('failed'); text.textContent = `${file.name}: ${e.message}`; return null; }
+    } catch (e) { row.classList.add('failed'); text.textContent = `${file.name}: ${e.message} Nothing was saved; upload it again (the same file is never stored twice).`; return null; }
   }
   $('file-input').addEventListener('change', e => { const files = [...e.target.files]; e.target.value = ''; if (files.length) upload(files); });
   let dragDepth = 0;
@@ -3544,8 +3796,8 @@
     const fixedLines = [
       youDid ? `Made the ${plural(youDid, 'proposed change')} you accepted.` : null,
       a.count ? `Cleaned up ${plural(a.count, 'value')} the app was sure about (capitals, spaces, duplicates and the like).` : null,
-      aiDid ? `Claude fixed ${plural(aiDid, 'problem')}` + ((s.removed || []).length || (s.moved || []).length ? `, including ${[(s.removed || []).length ? plural(s.removed.length, 'row') + ' taken out' : '', (s.moved || []).length ? plural(s.moved.length, 'row') + ' moved to the right shift' : ''].filter(Boolean).join(' and ')}` : '') + '.' : null,
-      aiFine ? `Claude checked ${plural(aiFine, 'flag')} and found ${aiFine === 1 ? 'it is' : 'they are'} fine as is.` : null,
+      aiDid ? `Dex fixed ${plural(aiDid, 'problem')}` + ((s.removed || []).length || (s.moved || []).length ? `, including ${[(s.removed || []).length ? plural(s.removed.length, 'row') + ' taken out' : '', (s.moved || []).length ? plural(s.moved.length, 'row') + ' moved to the right shift' : ''].filter(Boolean).join(' and ')}` : '') + '.' : null,
+      aiFine ? `Dex checked ${plural(aiFine, 'flag')} and found ${aiFine === 1 ? 'it is' : 'they are'} fine as is.` : null,
     ].filter(Boolean);
     const ready = async () => { dialog.close(); for (let i = 0; i < 60 && !(state.report?.file_hash === hash && state.fixes); i++) await new Promise(r => setTimeout(r, 250)); };
     const walk = async () => { dialog.close();
@@ -3558,20 +3810,20 @@
       h('h2', {id: 'result-title'}, title),
       h('p', {class: 'note'}, `${rv.job || data.filename}, ${shortDay(rv.day)}. ${fmt(rv.scans)} rows, ${fmt(rv.inspected)} inspected, ${fmt(rv.rejected)} rejected.`),
       fixedLines.length ? h('div', {class: 'res-fixed'}, h('b', {}, 'What was fixed'), h('ul', {}, fixedLines.map(t => h('li', {}, t))),
-        h('p', {class: 'quiet'}, 'Every change is listed at the top of the report, with a link to the version before.' + (checks ? ` ${plural(checks, 'change')} ${checks === 1 ? 'is' : 'are'} Claude's best judgment and marked "please double-check".` : ''))) : null,
+        h('p', {class: 'quiet'}, 'Every change is listed at the top of the report, with a link to the version before.' + (checks ? ` ${plural(checks, 'change')} ${checks === 1 ? 'is' : 'are'} Dex's best judgment and marked "please double-check".` : ''))) : null,
       left.length ? h('div', {class: 'res-left'}, h('b', {}, 'What was found'),
-        h('p', {}, (must ? `${plural(must, 'must-fix item')} before it goes out. ` : '') + (opts.afterAll ? `${left.length === 1 ? 'This one needs' : 'These need'} a person: ${state.aiOn ? 'Claude already tried and was not sure' : 'there was no suggested change'}. Review them on the right: Fix myself, or Ignore if ${left.length === 1 ? 'it is' : 'they are'} fine.` : (fixedLines.length ? '' : 'Nothing has been changed yet. ') + (state.aiOn ? 'Let AI fix everything in one click, or review them first: each kind shows the first one, with Approve, Fix with AI, Fix myself or Ignore for all of that kind.' : 'Approve every suggested change in one click, or review them first: each kind shows the first one, with Approve, Fix myself or Ignore for all of that kind.'))),
+        h('p', {}, (must ? `${plural(must, 'must-fix item')} before it goes out. ` : '') + (opts.afterAll ? `${left.length === 1 ? 'This one needs' : 'These need'} a person: ${state.aiOn ? 'Dex already tried and was not sure' : 'there was no suggested change'}. Review them on the right: Fix myself, or Ignore if ${left.length === 1 ? 'it is' : 'they are'} fine.` : (fixedLines.length ? '' : 'Nothing has been changed yet. ') + (state.aiOn ? 'AI and row changes are paused. Review suggested cell corrections and apply the displayed plan.' : 'Approve every suggested change in one click, or review them first: each kind shows the first one, with Approve, Fix myself or Ignore for all of that kind.'))),
         (() => { const g = new Map(); for (const i of left) { const k = sameKey(i); g.set(k, [...(g.get(k) || []), i]); }
           const kinds = [...g.values()].sort((x, y) => y.length - x.length);
           return [h('ul', {}, kinds.slice(0, 5).map(k => h('li', {}, h('span', {class: 'sev ' + k[0].severity}), h('span', {}, k.length > 1 ? h('b', {}, `${fmt(k.length)}× `) : null, k[0].text)))),
             kinds.length > 5 ? h('p', {class: 'quiet'}, `and ${kinds.length - 5} more kinds.`) : null,
             kinds.length < left.length ? h('p', {class: 'quiet'}, `Only ${plural(kinds.length, 'kind')} of issue, so each kind can be handled in one go.`) : null]; })())
-        : h('p', {}, 'Check the totals, then approve and send when you are ready.')),
+        : h('p', {}, 'Check the totals, then approve when you are ready. Sending is paused.')),
       data.fixed_from ? h('a', {class: 'btn dl-fixed', href: '/api/spreadsheets/download?id=' + hash, download: data.filename}, '⬇ Download the fixed version') : null,
       h('div', {class: 'row'}, h('button', {type: 'button', class: 'btn', onclick: () => dialog.close()}, left.length ? 'Later' : 'Open report'),
         left.length ? h('button', {type: 'button', class: 'btn primary', onclick: async () => { await ready(); showSide('fixes'); document.querySelector('.workspace')?.scrollIntoView({behavior: 'smooth', block: 'start'}); }}, opts.afterAll ? "Review what's left" : 'Review them first') : null,
         left.length && !opts.afterAll ? h('button', {type: 'button', class: 'btn ' + (state.aiOn ? 'ai' : 'primary'), onclick: async () => { await ready(); showSide('fixes');
-          if (state.fixEverything?.hash === hash) state.fixEverything.run(); else toast('Open the Fixes tab to choose what to fix.', true); }}, state.aiOn ? 'Let AI fix everything' : 'Approve all suggested changes') : null));
+          if (state.fixEverything?.hash === hash) state.fixEverything.run(); else toast('Open the Fixes tab to choose what to fix.', true); }}, 'Review suggested cell changes') : null));
     dialog.showModal();
   }
   $('result-dialog').addEventListener('click', e => { if (e.target === $('result-dialog')) $('result-dialog').close(); });

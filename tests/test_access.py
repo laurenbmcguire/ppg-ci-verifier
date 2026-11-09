@@ -92,7 +92,10 @@ class Access(unittest.TestCase):
         self.assertEqual(st, 200, p); self.assertEqual(p['jobs'], ['2230-OWENS-BASCO'])
         st, hits, _ = self.call('/api/vins/search', {'q': ROWS[0][0]}, sam)
         self.assertTrue(hits['results']); self.assertTrue(all(h['file_hash'] == owens for h in hits['results']))
-        st, o, _ = self.call('/api/overview', {'days': 90}, sam)
+        # Reporting now requires explicit source identity; this fixture has no live registry.
+        with patch('hosting.spreadsheet_inbox.SpreadsheetInbox.assignment_for', side_effect=lambda r,rv,ctx=None:
+                   dict(status='manual',job=rv['job'],business_date=rv['day'],client_key='Owens' if 'OWENS' in rv['job'] else 'Lear',site_id='synthetic',list_id=rv['job'])):
+            st, o, _ = self.call('/api/overview', {'days': 90}, sam)
         self.assertEqual([j['job'] for j in o['jobs']], ['2230-OWENS-BASCO'])
         self.assertEqual(self.call('/api/users', {}, sam)[0], 403)
         self.assertEqual(self.call('/api/keys', {}, sam)[0], 403)

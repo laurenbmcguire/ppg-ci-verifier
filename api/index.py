@@ -31,6 +31,14 @@ TYPES = {'html': 'text/html; charset=utf-8', 'js': 'text/javascript; charset=utf
          'css': 'text/css; charset=utf-8', 'png': 'image/png', 'woff2': 'font/woff2'}
 MAX_RESPONSE_BYTES = 3 * 1024 * 1024
 
+
+def review_page_size():
+    """How many findings go in one response; the rest are fetched page by page (counts always use all of them)."""
+    try:
+        return max(1, min(5000, int(os.environ.get('CI_REVIEW_PAGE', '2000'))))
+    except ValueError:
+        return 2000
+
 def encode_json(data):
     body = json.dumps(data, allow_nan=False).encode()
     if len(body) > MAX_RESPONSE_BYTES:
@@ -130,6 +138,42 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
         # True means "a reply has been sent": gate() relies on it, so a refusal always stops the request
         return True
+
+    def report_view(self, inbox, file_hash):
+        """Everything the report screen shows, from one read: the same state for the header, the corrections panel,
+        the sheet badges and the decision history."""
+        from hosting.review_summary import summarize
+        from hosting import sharepoint_jobs, registry
+        data = inbox.get(file_hash)
+        try:
+            repeats = inbox.repeats_elsewhere(file_hash, index_old=False)   # never slow down opening a report
+        except Exception:
+            debug_log(); repeats = []
+        rv = summarize(data)
+        try:
+            assignment = inbox.assignment_for(data, rv)
+            assignment['history'] = registry.history(inbox, file_hash)
+        except Exception:
+            debug_log(); assignment = None
+        try:
+            holds = inbox.holds(data, rv)
+        except Exception:
+            debug_log(); holds = [dict(code='source_assignment_unavailable', hard=True, text='Current report holds could not be verified. Reload before proceeding.')]
+        source = rv.get('sharepoint') or {}
+        rec = data.get('source_reconciliation') or {}
+        assigned = assignment or {}
+        source['source_verified'] = bool(source.get('source_evidence_complete') and assigned.get('status') in registry.RESOLVED and not assigned.get('needs_person') and all(assigned.get(k) and assigned.get(k) == rec.get(k) for k in ('site_id','list_id')) and not any(str(h.get('code','')).startswith('source_') for h in holds))
+        if source.get('status') == 'match' and not source['source_verified']:
+            source['status'] = 'unverified'
+            source['message'] = ' '.join(h['text'] for h in holds if str(h.get('code','')).startswith('source_')) or 'Current exact-source assignment is not verified.'
+        rv['sharepoint'] = source
+        # counts, holds and approval use every finding; the list itself is sent in pages so a very large report still opens
+        page = review_page_size()
+        rv['page'] = dict(size=page, issues_total=len(rv.get('issues') or []), dismissed_total=len(rv.get('dismissed') or []))
+        rv['issues'], rv['dismissed'] = (rv.get('issues') or [])[:page], (rv.get('dismissed') or [])[:page]
+        rv['page'].update(issues_returned=len(rv['issues']), dismissed_returned=len(rv['dismissed']))
+        return dict(data, review=rv, other_days=repeats, built=inbox.setting(f'built|{file_hash}', None), assignment=assignment, holds=holds,
+                    sp_job=sharepoint_jobs.lookup(rv.get('job'), inbox.setting(sharepoint_jobs.KEY)))
 
     def fail(self, status, message):
         return self.send(status, json.dumps({'error': message, 'fail_closed': True}).encode())
@@ -268,6 +312,15 @@ class handler(BaseHTTPRequestHandler):
             return oops(str(exc))
         return self.fail(404, 'Not found.')
 
+    @staticmethod
+    def shown(payload):
+        """(seen, run) from a decision request: the check run the reviewer's screen showed and the fingerprint of each
+        finding it names. None when the page did not send them (an out-of-date page): the caller answers 409."""
+        run, seen = payload.get('run'), payload.get('seen', {})
+        if not isinstance(run, dict) or not isinstance(seen, dict):
+            return None
+        return {str(k): str(v) for k, v in seen.items()}, run
+
     def gate(self, method, route, payload=None):
         """None when the request may go ahead; otherwise the reply that refuses it."""
         if route in ('/api/health', '/api/me') or route.startswith('/api/auth/'):
@@ -396,7 +449,7 @@ class handler(BaseHTTPRequestHandler):
         return route.path
 
     def sharepoint_check(self, file_hash):
-        from hosting.sharepoint import fetch_export, SharePointNotConfigured, SharePointNotFound, SharePointError
+        from hosting.sharepoint import fetch_export, assignment_identity, SharePointNotConfigured, SharePointNotFound, SharePointError
         from hosting.source_compare import identify, SourceError
         from hosting import registry, reconcile
         from hosting.review_summary import summarize
@@ -410,18 +463,27 @@ class handler(BaseHTTPRequestHandler):
                 a = inbox.assignment_for(item, rv)
             except Exception:
                 a, rv = {}, {}
-        has_ids = any((rec.get('source') or {}).get('item') for rec in item.get('records') or [])
-        if a.get('status') in registry.RESOLVED and a.get('site') and a.get('list_id') and (rv.get('day') or day) and (has_ids or item.get('dataset_selection', {}).get('identified_records')):
-            # the one source check: every record against the job's own SharePoint list, item by item
-            snap = reconcile.snapshot(a['site'], a['list_id'], schedule=schedule)
+        try:
+            binding = assignment_identity(a)
+        except (SharePointError, SharePointNotConfigured) as exc:
             with self.store().session() as directory:
-                return SpreadsheetInbox(directory).source_reconcile(file_hash, snap, rv.get('day') or day)
+                return SpreadsheetInbox(directory).record_lookup(file_hash, 'error', str(exc), job, day)
+        has_ids = any((rec.get('source') or {}).get('item') for rec in item.get('records') or [])
+        if (rv.get('day') or day) and (has_ids or item.get('dataset_selection', {}).get('identified_records')):
+            try:
+                snap = reconcile.snapshot(a.get('site'), binding['list_id'], schedule=schedule, site_id=binding['site_id'])
+                with self.store().session() as directory:
+                    return SpreadsheetInbox(directory).source_reconcile(file_hash, snap, rv.get('day') or day, expected_check_hash=item.get('check_hash'), expected_assignment=a)
+            except Exception as exc:
+                debug_log()
+                with self.store().session() as directory:
+                    return SpreadsheetInbox(directory).record_lookup(file_hash, 'error', f'SharePoint source capture failed: {exc}', job, day)
         if not job or not day:   # say why instead of leaving "Not checked yet"
             with self.store().session() as directory:
                 return SpreadsheetInbox(directory).record_lookup(file_hash, 'not_found',
                     'Could not tell this report\'s ' + ' and '.join(x for x, v in (('job number', job), ('date', day)) if not v) + ', so SharePoint was not checked. Use Check again after fixing the report title.', job, day)
         try:
-            filename, content, meta = fetch_export(job, day, schedule=schedule)
+            filename, content, meta = fetch_export(job, day, schedule=schedule, **binding)
         except SharePointNotConfigured as exc:
             status, message = 'not_configured', str(exc)
         except SharePointNotFound as exc:
@@ -444,16 +506,26 @@ class handler(BaseHTTPRequestHandler):
     def baseline_check(self, file_hash):
         """Compare the report with the job's usual day. Earlier days come from SharePoint (the job's "Data #" list,
         then the daily exports); saved reports only fill days SharePoint doesn't have."""
+        from hosting.sharepoint import assignment_identity, SharePointError, SharePointNotConfigured
+        from hosting.review_summary import summarize
         from hosting.baseline import compare_to_usual, stats_from_result, stats_from_rows, MAX_DAYS
         from hosting.source_compare import identify, parse_export, SourceError
         with self.store().session() as directory:
             inbox = SpreadsheetInbox(directory)
             item = inbox.get(file_hash)
             job, day = identify(item.get('filename'), item)
-            saved = inbox.history_for(job, day, exclude_hash=file_hash)
+            assignment = inbox.assignment_for(item, summarize(item, with_issues=False))
+            # Legacy history_for is keyed by job only, so it cannot safely fill gaps
+            # when the same job label exists at another site. Keep it out until bound.
+            saved = []
             schedule = inbox.shift_schedule(job)
-        history, sp_note = [], None
-        if job and day and sharepoint_configured():
+        history, sp_note, coverage_note = [], None, None
+        try:
+            binding = assignment_identity(assignment)
+        except (SharePointError, SharePointNotConfigured) as exc:
+            binding = None
+            coverage_note = str(exc)
+        if job and day and binding and sharepoint_configured():
             from hosting.sharepoint import list_history, recent_exports, _list_items, SharePointError
             def add(entries, label):
                 have = {h['day'] for h in history}
@@ -466,13 +538,13 @@ class handler(BaseHTTPRequestHandler):
                     except SourceError:
                         continue
             try:
-                found = _list_items(job)
+                found = _list_items(job, **binding)
                 if found:
                     sp_note = found[1].get('displayName')
-                    add(list_history(job, day, limit=MAX_DAYS, schedule=schedule), f'SharePoint list ({sp_note})')
-                if len(history) < MAX_DAYS:
-                    add(recent_exports(job, day, limit=MAX_DAYS), 'SharePoint export')
-            except SharePointError:
+                    add(list_history(job, day, limit=MAX_DAYS, schedule=schedule, **binding), f'SharePoint list ({sp_note})')
+
+            except (SharePointError, SharePointNotConfigured) as exc:
+                coverage_note = str(exc)
                 debug_log()
         have = {h['day'] for h in history}
         history += [h for h in saved if h['day'] not in have]
@@ -481,8 +553,11 @@ class handler(BaseHTTPRequestHandler):
         label = (f'the SharePoint list "{sp_note}"' if sp_note else 'SharePoint') if sp_used == len(recent) and recent else None
         baseline = compare_to_usual(stats_from_result(item), history, job, day, source_label=label)
         sp_days = sum(1 for h in (baseline.get('history') or []) if str(h.get('source', '')).startswith('SharePoint'))
-        baseline['history_source'] = (f'SharePoint list "{sp_note}"' if sp_note else 'SharePoint') if sp_days else 'saved reports'
+        baseline['history_source'] = (f'SharePoint list "{sp_note}"' if sp_note else 'SharePoint') if sp_days else 'unavailable'
         baseline['sharepoint_days'] = sp_days
+        baseline['source_identity'] = binding
+        baseline['coverage_note'] = coverage_note
+        baseline['saved_history_excluded'] = 'Legacy saved history is job-keyed, not verified site/list-bound.'
         with self.store().session() as directory:
             return SpreadsheetInbox(directory).record_baseline(file_hash, baseline)
 
@@ -644,13 +719,20 @@ class handler(BaseHTTPRequestHandler):
                     filename, raw = inbox.download(file_hash)
                 if not filename.lower().endswith('.xlsx'):
                     raise Conflict('Photos can only be added to Excel (.xlsx) reports.')
-                if a['status'] not in registry.RESOLVED or not a.get('site') or not a.get('list_id'):
-                    raise Conflict('Choose the client and job first, so the photos come from the right SharePoint list.')
+                if (a['status'] not in registry.RESOLVED or a.get('needs_person')
+                        or not a.get('site_id') or not a.get('list_id')):
+                    raise Conflict('Choose the client and exact source first, so the photos come from the right SharePoint list.')
                 with self.store().session() as directory:
                     photo_embed.use_stored_certificate(SpreadsheetInbox(directory).setting(photo_embed.CERT_KEY, None))
                 try:
-                    name, data, info = photo_embed.build(filename, raw, a['site'], a['list_id'])
-                except photo_embed.PhotoError as exc:
+                    binding = sharepoint.assignment_identity(a)
+                    exact = sharepoint._find_list(None, **binding)
+                    if not exact or exact[1] != binding['site_id'] or exact[2].get('id') != binding['list_id']:
+                        raise photo_embed.PhotoError('The exact assigned SharePoint list could not be verified.')
+                    name, data, info = photo_embed.build(filename, raw, exact[0], binding['list_id'],
+                                                        site_id=binding['site_id'], list_url=exact[2].get('webUrl'))
+                except (photo_embed.PhotoError, sharepoint.SharePointError, sharepoint.SharePointNotFound,
+                        sharepoint.SharePointNotConfigured) as exc:
                     raise Conflict(str(exc))
                 safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', name)[:180]
                 return self.send(200, data, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -665,6 +747,21 @@ class handler(BaseHTTPRequestHandler):
                 safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', filename)[:180] or 'report'
                 kind = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if safe.lower().endswith('.xlsx') else 'text/csv; charset=utf-8'
                 return self.send(200, raw, kind, {'Content-Disposition': f'attachment; filename="{safe}"'})
+            if route == '/api/spreadsheets/media':   # one embedded picture's original bytes, for the sheet view
+                q = parse_qs(urlsplit(self.path).query)
+                file_hash, media = q.get('id', [''])[0], q.get('media', [''])[0]
+                if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
+                from hosting import photos
+                with self.store().session() as directory:
+                    _, raw = SpreadsheetInbox(directory).download(file_hash)
+                data = photos.media_bytes(raw, media) if raw[:2] == b'PK' else None
+                if data is None:
+                    return self.fail(404, 'That picture is not in this report.')
+                kind = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif', 'bmp': 'image/bmp', 'webp': 'image/webp'}.get(media.rsplit('.', 1)[-1].lower(), 'application/octet-stream')
+                return self.send(200, data, kind, {'Cache-Control': 'private, max-age=3600', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline'})
             if route == '/' and hosted_preview() or route == '/app':
                 return self.send(200, (ROOT / 'web' / 'app.html').read_bytes(), TYPES['html'])
             if route == '/classic':
@@ -707,27 +804,7 @@ class handler(BaseHTTPRequestHandler):
                     file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
                     if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                         raise Conflict('Valid spreadsheet version ID required.')
-                    inbox = SpreadsheetInbox(directory)
-                    data = inbox.get(file_hash)
-                    from hosting.review_summary import summarize
-                    try:
-                        repeats = inbox.repeats_elsewhere(file_hash, index_old=False)   # never slow down opening a report
-                    except Exception:
-                        debug_log(); repeats = []
-                    from hosting import sharepoint_jobs
-                    rv = summarize(data)
-                    from hosting import registry
-                    try:
-                        assignment = inbox.assignment_for(data, rv)
-                        assignment['history'] = registry.history(inbox, file_hash)
-                    except Exception:
-                        debug_log(); assignment = None
-                    try:
-                        holds = inbox.holds(data, rv)
-                    except Exception:
-                        debug_log(); holds = []
-                    data = dict(data, review=rv, other_days=repeats, built=inbox.setting(f'built|{file_hash}', None), assignment=assignment, holds=holds,
-                                sp_job=sharepoint_jobs.lookup(rv.get('job'), inbox.setting(sharepoint_jobs.KEY)))
+                    data = self.report_view(SpreadsheetInbox(directory), file_hash)
                 else:
                     data = {'status': 'ready', 'storage': getattr(self.store(), 'storage_label', 'unconfigured'), 'live_connectors_enabled': False, 'sharepoint_configured': sharepoint_configured(), 'ai_review_configured': ai_review_configured(), 'spreadsheet_scope': 'internal_checks_only', 'send_enabled': mail_configured(), 'reviewer_identity_available': False, 'prototype': True, 'local_only': not hosted_preview(), 'development_demo': self.demo_enabled()}
                 body = encode_json(data)
@@ -756,11 +833,11 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine', '/api/spreadsheets/decision', '/api/spreadsheets/auto-fix', '/api/spreadsheets/revert-fix', '/api/spreadsheets/assign', '/api/spreadsheets/source-reconcile', '/api/spreadsheets/recheck', '/api/sharepoint/confirm-columns', '/api/change-summary', '/api/change-summaries', '/api/settings/sharepoint-jobs', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine', '/api/spreadsheets/decision', '/api/spreadsheets/decide', '/api/spreadsheets/decision-status', '/api/spreadsheets/findings', '/api/spreadsheets/auto-fix', '/api/spreadsheets/revert-fix', '/api/spreadsheets/assign', '/api/spreadsheets/source-reconcile', '/api/spreadsheets/recheck', '/api/sharepoint/confirm-columns', '/api/change-summary', '/api/change-summaries', '/api/settings/sharepoint-jobs', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload', '/api/periods/check-file', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/remove-rows') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
-            if not route.startswith('/api/workflow/') and route not in ('/api/periods/check-file', '/api/settings/sharepoint-jobs', '/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/ai-fixes','/api/spreadsheets/ai-fix','/api/spreadsheets/auto-fix','/api/spreadsheets/revert-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine','/api/spreadsheets/ai-verify','/api/spreadsheets/ai-summary','/api/spreadsheets/chat','/api/spreadsheets/baseline','/api/spreadsheets/fixes','/api/spreadsheets/cells','/api/spreadsheets/sheet','/api/spreadsheets/apply-fixes','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
+            if not route.startswith('/api/workflow/') and route not in ('/api/periods/check-file', '/api/settings/sharepoint-jobs', '/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/ai-fixes','/api/spreadsheets/ai-fix','/api/spreadsheets/auto-fix','/api/spreadsheets/revert-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine','/api/spreadsheets/decide','/api/spreadsheets/decision-status','/api/spreadsheets/findings','/api/spreadsheets/ai-verify','/api/spreadsheets/ai-summary','/api/spreadsheets/chat','/api/spreadsheets/baseline','/api/spreadsheets/fixes','/api/spreadsheets/cells','/api/spreadsheets/sheet','/api/spreadsheets/apply-fixes','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= limit:
                 return self.fail(413, 'Request size is invalid.')
@@ -782,6 +859,8 @@ class handler(BaseHTTPRequestHandler):
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
                 if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                     raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
                 from hosting.fixes import FixError
                 try:
                     if route.endswith('/fixes'):
@@ -797,7 +876,7 @@ class handler(BaseHTTPRequestHandler):
                     if isinstance(changes, list):
                         changes = [dict(c, kind='auto') if isinstance(c, dict) and c.get('kind') not in ('number', 'text', 'auto') else c for c in changes]
                     with self.store().session() as directory:
-                        fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, changes)
+                        fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, changes, expected_check_hash=payload.get('expected_check_hash'))
                 except FixError as exc:
                     raise Conflict(str(exc))
                 for step in (self.sharepoint_check if sharepoint_configured() else None, self.baseline_check):
@@ -922,7 +1001,69 @@ class handler(BaseHTTPRequestHandler):
                     return self.send(200, encode_json({'item': item}))
                 except (autofix.AutoFixError, FixError) as exc:
                     raise Conflict(str(exc))
+            if route == '/api/spreadsheets/decide':   # reject / defer / confirm / undo findings of this exact version, all or nothing
+                from hosting import review_decisions
+                payload = json.loads(raw)
+                if not isinstance(payload, dict):
+                    raise Conflict('Send a decision.')
+                file_hash = payload.get('file_hash')
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
+                ids = payload.get('ids') if isinstance(payload.get('ids'), list) else []
+                evidence = payload.get('evidence') if isinstance(payload.get('evidence'), list) else []
+                seen, run = payload.get('expected_fps', payload.get('seen')), payload.get('expected_run', payload.get('run'))
+                # every decision names the check run the reviewer was looking at and, except an undo, the exact reading of
+                # each finding; the inbox checks both under the report's lock
+                if not isinstance(run, dict) or (payload.get('action') != 'undo' and not isinstance(seen, dict)):
+                    return self.send(409, encode_json({'error': 'This page is out of date (it did not say what you were looking at). Reload the report and decide again.',
+                                                       'reload': True}))
+                me = self.current_user() or {}
+                by = str(me.get('name') or me.get('email') or payload.get('by') or '').strip()[:80]   # a signed-in reviewer is who they are
+                try:
+                    with self.store().session() as directory:
+                        inbox = SpreadsheetInbox(directory)
+                        item, entry = inbox.decide_findings(file_hash, ids=[str(k) for k in ids], action=str(payload.get('action') or ''),
+                                                            reason=str(payload.get('reason') or ''), by=by, owner=str(payload.get('owner') or ''),
+                                                            evidence=[str(e) for e in evidence], request_id=str(payload.get('request_id') or ''),
+                                                            expected_rev=payload.get('expected_rev'), expected_fps=payload.get('expected_fps', seen),
+                                                            expected_run=payload.get('expected_run', run), undo_of=payload.get('undo_of'))
+                        view = self.report_view(inbox, file_hash)
+                except review_decisions.DecisionConflict as exc:
+                    return self.send(409, encode_json({'error': str(exc), **exc.detail}))
+                except review_decisions.DecisionError as exc:
+                    raise Conflict(str(exc))
+                return self.send(200, encode_json({'ok': True, 'entry': {k: v for k, v in entry.items() if k != 'prev'}, 'report': view}))
+            if route == '/api/spreadsheets/findings':   # the next page of findings (open or decided) of one version
+                from hosting.review_summary import summarize
+                payload = json.loads(raw)
+                file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
+                which = 'dismissed' if payload.get('list') == 'dismissed' else 'issues'
+                offset, limit = max(0, int(payload.get('offset') or 0)), max(1, min(review_page_size(), int(payload.get('limit') or review_page_size())))
+                with self.store().session() as directory:
+                    rv = summarize(SpreadsheetInbox(directory).get(file_hash))
+                items = rv.get(which) or []
+                return self.send(200, encode_json({'list': which, 'offset': offset, 'total': len(items), 'items': items[offset:offset + limit],
+                                                   'rev': (rv.get('decisions') or {}).get('rev', 0)}))
+            if route == '/api/spreadsheets/decision-status':   # after a lost response: was this request saved?
+                payload = json.loads(raw)
+                file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
+                with self.store().session() as directory:
+                    item = SpreadsheetInbox(directory).get(file_hash)
+                rid = str(payload.get('request_id') or '')
+                did = (item.get('finding_requests') or {}).get(rid)
+                return self.send(200, encode_json({'saved': bool(did), 'decision_id': did, 'rev': int(item.get('finding_decisions_rev') or 0)}))
             if route == '/api/spreadsheets/decision':   # a reviewer's note, "keep as recorded" or "reject this suggestion", on this exact version
+                raise Conflict('Reload the report and use scoped finding decisions with current fingerprints.')
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
                 if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
@@ -934,11 +1075,19 @@ class handler(BaseHTTPRequestHandler):
                 keys = payload.get('keys') if isinstance(payload.get('keys'), list) else [payload.get('key')]
                 if not 1 <= len(keys) <= 500:
                     raise Conflict('Send 1 to 500 items.')
-                with self.store().session() as directory:
-                    inbox = SpreadsheetInbox(directory)
-                    item = inbox.record_decisions(file_hash, [str(k or '') for k in keys], str(payload.get('action') or ''), str(payload.get('note') or ''), by)
+                shown = self.shown(payload)
+                if shown is None:
+                    return self.send(409, encode_json({'error': 'This page is out of date (it did not say what you were looking at). Reload the report and decide again.', 'reload': True}))
+                from hosting import review_decisions
+                try:
+                    with self.store().session() as directory:
+                        inbox = SpreadsheetInbox(directory)
+                        item = inbox.record_decisions(file_hash, [str(k or '') for k in keys], str(payload.get('action') or ''), str(payload.get('note') or ''), by, *shown)
+                except review_decisions.DecisionConflict as exc:
+                    return self.send(409, encode_json({'error': str(exc), **exc.detail}))
                 return self.send(200, encode_json({'ok': True, 'decisions': item.get('review_decisions') or {}}))
             if route == '/api/spreadsheets/mark-fine':   # a person said these flags are fine: kept on this version and every later one
+                raise Conflict('Reload the report and use scoped finding decisions with current fingerprints.')
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
                 issues = payload.get('issues') if isinstance(payload, dict) else None
@@ -951,9 +1100,17 @@ class handler(BaseHTTPRequestHandler):
                 by = str(payload.get('by') or '').strip()[:80]
                 clean = lambda v, n=500: None if v is None else str(v)[:n]
                 add = [dict(code=clean(i.get('code'), 80), sheet=clean(i.get('sheet'), 120), row=i.get('row') if isinstance(i.get('row'), (int, str)) else None,
+                            cell=clean(i.get('cell'), 12), key=clean(i.get('key'), 300),   # the exact cell: never settles another cell on the same row
                             text=clean(i.get('text')) or '', reason=f'Marked fine as is by {by}.' if by else 'Marked fine as is by a reviewer.', by_person=True) for i in issues]
-                with self.store().session() as directory:
-                    SpreadsheetInbox(directory)._update(file_hash, lambda r: r.update(accepted_issues=(r.get('accepted_issues') or []) + add))
+                shown = self.shown(payload)
+                if shown is None:
+                    return self.send(409, encode_json({'error': 'This page is out of date (it did not say what you were looking at). Reload the report and decide again.', 'reload': True}))
+                from hosting import review_decisions
+                try:
+                    with self.store().session() as directory:
+                        SpreadsheetInbox(directory).mark_fine(file_hash, add, *shown)
+                except review_decisions.DecisionConflict as exc:
+                    return self.send(409, encode_json({'error': str(exc), **exc.detail}))
                 return self.send(200, encode_json({'ok': True, 'marked': len(add)}))
             if route == '/api/spreadsheets/assign':   # a person chooses the client and job; kept with who, when and why
                 payload = json.loads(raw)
@@ -983,11 +1140,16 @@ class handler(BaseHTTPRequestHandler):
                 if not self.is_admin():
                     return self.fail(403, 'Only admins can confirm SharePoint columns.')
                 payload = json.loads(raw)
-                if not isinstance(payload, dict) or not isinstance(payload.get('list_id'), str) or not isinstance(payload.get('mapping'), dict):
-                    raise Conflict('Choose the list and its columns.')
+                if not isinstance(payload, dict) or not isinstance(payload.get('site_id'), str) or not payload.get('site_id') or not isinstance(payload.get('list_id'), str) or not isinstance(payload.get('mapping'), dict) or 'expected_mapping_revision' not in payload:
+                    raise Conflict('Choose the exact source columns from the displayed comparison.')
+                file_hash = payload.get('file_hash')
+                if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash) or not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
                 with self.store().session() as directory:
-                    saved = SpreadsheetInbox(directory).confirm_columns(payload['list_id'][:80], payload['mapping'],
-                                                                         (self.current_user() or {}).get('email') or 'admin')
+                    saved = SpreadsheetInbox(directory).confirm_columns(payload['list_id'], payload['mapping'],
+                            (self.current_user() or {}).get('email') or 'admin', site_id=payload['site_id'],
+                            expected_mapping_revision=payload['expected_mapping_revision'], file_hash=file_hash,
+                            expected_check_hash=payload.get('expected_check_hash'), expected_snapshot_id=payload.get('expected_snapshot_id'))
                 return self.send(200, encode_json({'ok': True, 'mapping': saved}))
             if route == '/api/spreadsheets/recheck':   # show what the current checks would change; save only when a person applies them
                 payload = json.loads(raw)
@@ -1034,9 +1196,10 @@ class handler(BaseHTTPRequestHandler):
                     raise Conflict('The report has no business date, so SharePoint cannot be matched to a day.')
                 if not sharepoint.configured():
                     raise Conflict('SharePoint is not connected.')
-                snap = reconcile.snapshot(a['site'], a['list_id'], schedule=schedule)
+                binding = sharepoint.assignment_identity(a)
+                snap = reconcile.snapshot(a.get('site'), binding['list_id'], schedule=schedule, site_id=binding['site_id'])
                 with self.store().session() as directory:
-                    item = SpreadsheetInbox(directory).source_reconcile(file_hash, snap, rv['day'])
+                    item = SpreadsheetInbox(directory).source_reconcile(file_hash, snap, rv['day'], expected_check_hash=found.get('check_hash'), expected_assignment=a)
                 return self.send(200, encode_json({'ok': True, 'source_reconciliation': item.get('source_reconciliation')}))
             if route == '/api/spreadsheets/auto-clean':   # an older report (uploaded before the automatic cleanup): make the sure fixes now
                 payload = json.loads(raw)
@@ -1073,16 +1236,21 @@ class handler(BaseHTTPRequestHandler):
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
                 if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                     raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
+                expected_check_hash = payload.get('expected_check_hash')
                 from hosting.spreadsheet_inbox import make_ai_fixes
                 with self.store().session() as directory:
-                    item, data, issues = SpreadsheetInbox(directory).ai_fix_inputs(file_hash)
+                    item, data, issues = SpreadsheetInbox(directory).proposal_inputs(file_hash, expected_check_hash)
                 record = make_ai_fixes(item, data, issues)  # network call outside any DB transaction
                 if record.get('status') == 'done':
                     with self.store().session() as directory:
-                        SpreadsheetInbox(directory).record_ai_fixes(file_hash, record)
+                        SpreadsheetInbox(directory).record_ai_fixes(file_hash, record, expected_check_hash=expected_check_hash)
                 if record.get('status') in ('error', 'not_configured'):
                     raise Conflict(record.get('message') or 'AI fixes failed.')
-                return self.send(200, encode_json({'ai_fixes': record}))
+                with self.store().session() as directory:
+                    view = self.report_view(SpreadsheetInbox(directory), file_hash)
+                return self.send(200, encode_json({'ai_fixes': record, 'report': view}))
             if route in ('/api/settings', '/api/settings/shifts', '/api/settings/rules'):
                 from hosting import shifts as shift_times
                 from hosting.check_catalog import catalog
@@ -1189,6 +1357,8 @@ class handler(BaseHTTPRequestHandler):
                 file_hash = payload.get('file_hash')
                 if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                     raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
                 rows = [(r.get('sheet'), r.get('row')) for r in (payload.get('rows') or []) if isinstance(r, dict) and r.get('sheet') and str(r.get('row', '')).isdigit()]
                 try:
                     item = ops.remove_rows(self, file_hash, rows)
@@ -1295,21 +1465,32 @@ class handler(BaseHTTPRequestHandler):
                         raise Conflict('Which job?')
                     with self.store().session() as directory:
                         inbox = SpreadsheetInbox(directory)
+                        try:
+                            binding = ops._build_binding(inbox, job, payload.get('source'))
+                        except ops.ApiError as exc:
+                            raise Conflict(str(exc))
+                        header_key = f'report_header|{binding["site_id"]}|{binding["list_id"]}'
                         if isinstance(payload.get('header'), dict):
-                            inbox.set_setting(f'report_header|{job}', {k: ' '.join(str(payload['header'].get(k) or '').split())[:120] for k in ('customer', 'worksite', 'program', 'prepared_by')})
-                        from hosting import suggest, sharepoint_jobs
-                        suggested = suggest.header(suggest.context(job, None, inbox.setting(sharepoint_jobs.KEY)))
-                        return self.send(200, encode_json(dict(job=job, header=inbox.setting(f'report_header|{job}', {}) or {}, suggested=suggested)))
+                            inbox.set_setting(header_key, {k: ' '.join(str(payload['header'].get(k) or '').split())[:120] for k in ('customer', 'worksite', 'program', 'prepared_by')})
+                        return self.send(200, encode_json(dict(job=job, source_identity=binding, header=inbox.setting(header_key, {}) or {}, suggested={})))
                 try:
                     if route == '/api/build':
-                        return self.send(200, encode_json(ops.op_build(self, payload.get('job'), payload.get('day'), payload.get('force') is True, payload.get('header'))))
+                        return self.send(200, encode_json(ops.op_build(self, payload.get('job'), payload.get('day'), payload.get('force') is True, payload.get('header'), payload.get('source'))))
                     job, day = payload.get('job'), payload.get('day')
+                    source = payload.get('source')
                     if payload.get('file_hash'):
                         from hosting.source_compare import identify
                         with self.store().session() as directory:
-                            item = SpreadsheetInbox(directory).get(str(payload['file_hash']))
+                            inbox = SpreadsheetInbox(directory)
+                            item = inbox.get(str(payload['file_hash']))
+                            from hosting.review_summary import summarize
+                            from hosting import registry
+                            assigned = inbox.assignment_for(item, summarize(item, with_issues=False))
+                            if assigned.get('status') not in registry.RESOLVED:
+                                raise ops.ApiError(409, 'Resolve this report source before retrieving Nexus values.')
+                            source = {k: assigned.get(k) for k in ('site','site_id','list_id') if assigned.get(k)}
                         job, day = identify(item.get('filename'), item)
-                    return self.send(200, encode_json(ops.op_nexus(self, job, day)))
+                    return self.send(200, encode_json(ops.op_nexus(self, job, day, source)))
                 except ops.ApiError as exc:
                     raise Conflict(str(exc))
             if route == '/api/recommendations':
@@ -1323,7 +1504,9 @@ class handler(BaseHTTPRequestHandler):
                     inbox = SpreadsheetInbox(directory)
                     item = inbox.get(file_hash)
                     try:
-                        waiting = 0 if item.get('fixes_applied') else len(inbox.fix_proposals(file_hash)['proposals'])
+                        rejected = {k[4:] for k, d in (item.get('review_decisions') or {}).items() if k.startswith('fix:') and d.get('action') in ('reject', 'keep')}
+                        # the same count the Corrections panel shows: suggestions on this version a person has not turned down
+                        waiting = 0 if item.get('fixes_applied') else sum(1 for p in inbox.fix_proposals(file_hash)['proposals'] if str(p.get('id')) not in rejected)
                     except Exception:
                         waiting = 0
                     try:
@@ -1350,12 +1533,16 @@ class handler(BaseHTTPRequestHandler):
                 from hosting.source_compare import identify
                 from zoneinfo import ZoneInfo
                 payload = json.loads(raw) or {}
-                days = payload.get('days') if payload.get('days') in (7, 30, 90, 365) else 30
+                days = payload.get('days') if type(payload.get('days')) is int and payload['days'] in (7, 30, 90, 365) else 30
                 end = datetime.now(ZoneInfo('America/Chicago')).date()
                 with self.store().session() as directory:
-                    results = SpreadsheetInbox(directory).all_results()
-                if not self.is_admin():
-                    results = [r for r in results if self.can_job(identify(r.get('filename'), r)[0])]
+                    inbox = SpreadsheetInbox(directory)
+                    results = inbox.all_results()
+                    from hosting.review_summary import summarize
+                    context = inbox.assignment_context()
+                    results = [dict(r, _statistics_assignment=inbox.assignment_for(r, summarize(r, with_issues=False), context)) for r in results]
+                    if not self.is_admin():
+                        results = [r for r in results if self.can_report(r['_statistics_assignment'], identify(r.get('filename'), r)[0])]
                 clients = self.clients_map()
                 client = payload.get('client') if isinstance(payload.get('client'), str) and len(payload.get('client')) < 200 else None
                 job = payload.get('job') if isinstance(payload.get('job'), str) and len(payload.get('job')) < 200 else None
@@ -1363,16 +1550,20 @@ class handler(BaseHTTPRequestHandler):
             if route.startswith('/api/overview'):
                 from hosting import overview as ov
                 from hosting import dashboard as dash_mod
+                from hosting.source_compare import identify
                 from urllib.parse import quote
                 from zoneinfo import ZoneInfo
                 payload = json.loads(raw) or {}
-                days = payload.get('days') if payload.get('days') in (7, 30, 90) else 30
+                days = payload.get('days') if type(payload.get('days')) is int and payload['days'] in (7, 30, 90, 365) else 30
                 end = datetime.now(ZoneInfo('America/Chicago')).date()
                 with self.store().session() as directory:
-                    results = SpreadsheetInbox(directory).all_results()
-                if not self.is_admin():
-                    from hosting.source_compare import identify
-                    results = [r for r in results if self.can_job(identify(r.get('filename'), r)[0])]
+                    inbox = SpreadsheetInbox(directory)
+                    results = inbox.all_results()
+                    from hosting.review_summary import summarize
+                    context = inbox.assignment_context()
+                    results = [dict(r, _statistics_assignment=inbox.assignment_for(r, summarize(r, with_issues=False), context)) for r in results]
+                    if not self.is_admin():
+                        results = [r for r in results if self.can_report(r['_statistics_assignment'], identify(r.get('filename'), r)[0])]
                 o = ov.build(results, days, end)
                 if route == '/api/overview':
                     from hosting import recommend
@@ -1532,6 +1723,8 @@ class handler(BaseHTTPRequestHandler):
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
                 if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                     raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
                 from hosting.public_api import shift_fix, ApiError
                 try:
                     fixed, moved, removed = shift_fix(self, file_hash)
@@ -1560,9 +1753,12 @@ class handler(BaseHTTPRequestHandler):
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
                 if not isinstance(file_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                     raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
                 from hosting import delivery
                 if route.endswith('/approve'):
-                    item = delivery.approve(self.store(), file_hash, payload.get('approver'), payload.get('note'), payload.get('override'), payload.get('withdraw'))
+                    item = delivery.approve(self.store(), file_hash, payload.get('approver'), payload.get('note'), payload.get('override'), payload.get('withdraw'),
+                                            expected_check_hash=payload.get('expected_check_hash'), expected_run=payload.get('expected_run'))
                     summary = None
                     if not payload.get('withdraw'):   # at the end: a PDF change summary on record when the report differed from SharePoint or was changed
                         try:

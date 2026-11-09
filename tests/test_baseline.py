@@ -89,14 +89,25 @@ class FakeGraph:
 
 
 class SharePointHistoryTests(unittest.TestCase):
-    def test_recent_exports_newest_first_before_the_report_day(self):
+    def test_recent_exports_newest_first_from_exact_assigned_list(self):
         from hosting import sharepoint
-        env = {'MS_TENANT_ID': 't', 'MS_CLIENT_ID': 'c', 'MS_CLIENT_SECRET': 's', 'SHAREPOINT_SITES': 'Site'}
-        sharepoint._token.update(value=None, expires=0); sharepoint._site_ids.clear()
-        with patch.dict(os.environ, env):
-            got = sharepoint.recent_exports(JOB, '2026-10-07', limit=3, opener=FakeGraph(['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-06', '2026-10-08']))
+        env = {'MS_TENANT_ID': 't', 'MS_CLIENT_ID': 'c', 'MS_CLIENT_SECRET': 's'}
+        dates = ['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-06', '2026-10-08']
+        capture = ('Synthetic', {'displayName': 'Data #' + JOB}, {'Date': 'Date', 'Qty': 'Quantity Inspected'},
+                   [dict(id=str(n), fields={'Date': d, 'Qty': 34}) for n, d in enumerate(dates, 1)])
+        with patch.dict(os.environ, env), patch.object(sharepoint, '_list_items', return_value=capture) as lookup:
+            got = sharepoint.recent_exports(JOB, '2026-10-07', limit=3, site_id='site-exact', list_id='list-exact')
         self.assertEqual([d for d, _, _ in got], ['2026-10-06', '2026-10-03', '2026-10-02'])
-        sharepoint._token.update(value=None, expires=0); sharepoint._site_ids.clear()
+        lookup.assert_called_once_with(JOB, None, site_id='site-exact', list_id='list-exact', refresh=False)
+        self.assertTrue(all(b'Quantity Inspected' in raw for _, _, raw in got))
+
+    def test_job_label_only_history_cannot_choose_cross_site_exports(self):
+        from hosting import sharepoint
+        with patch.object(sharepoint, 'list_history') as history:
+            with self.assertRaisesRegex(sharepoint.SharePointError, 'verified site_id and list_id'):
+                sharepoint.recent_exports(JOB, '2026-10-07')
+        history.assert_not_called()
+
 
 
 if __name__ == '__main__':
@@ -110,7 +121,7 @@ class SharePointHistoryFirstTests(unittest.TestCase):
         import api.index as app
         from hosting.sqlite_storage import SQLiteWorkspace
         from eos_fixture import build, ROWS
-        store = SQLiteWorkspace(tempfile.mkdtemp())
+        store = SQLiteWorkspace(self.enterContext(tempfile.TemporaryDirectory()))
         h = app.handler.__new__(app.handler)
         h.store = lambda: store
         with store.session() as d:
@@ -120,13 +131,27 @@ class SharePointHistoryFirstTests(unittest.TestCase):
             lines += [f'80100{i:05d},80139189,34,2' for i in range(n)]
             return '\n'.join(lines).encode()
         days = [(f'2026-10-0{d}', f'x {d}.csv', csv_for(500)) for d in (6, 5, 4, 3, 2)]
+        assignment = dict(status='source', site_id='site-exact', list_id='list-exact')
         with patch.object(app, 'sharepoint_configured', return_value=True), \
+             patch.object(app.SpreadsheetInbox, 'assignment_for', return_value=assignment), \
              patch('hosting.sharepoint._list_items', return_value=('site', {'displayName': 'Data #2230-OWENS-BASCO'}, {}, [])), \
-             patch('hosting.sharepoint.list_history', return_value=days), \
+             patch('hosting.sharepoint.list_history', return_value=days) as history, \
              patch('hosting.sharepoint.recent_exports', return_value=[]):
             result = h.baseline_check(item['file_hash'])
         bl = result['baseline']
+        self.assertEqual(bl['source_identity'], {'site_id': 'site-exact', 'list_id': 'list-exact'})
+        self.assertEqual(history.call_args.kwargs['site_id'], 'site-exact')
+        self.assertEqual(history.call_args.kwargs['list_id'], 'list-exact')
         self.assertEqual(bl['sharepoint_days'], 5)
         self.assertIn('SharePoint list "Data #2230-OWENS-BASCO"', bl['history_source'])
         self.assertIn('from the SharePoint list', bl['message'])
         self.assertEqual(bl['status'], 'unusual')  # 13 rows today vs 500 usual
+
+        # A formerly successful source read cannot make an unresolved assignment current.
+        with patch.object(app.SpreadsheetInbox, 'assignment_for', return_value={}), \
+             patch('hosting.sharepoint._list_items') as lookup:
+            held = h.baseline_check(item['file_hash'])['baseline']
+        lookup.assert_not_called()
+        self.assertEqual(held['history_source'], 'unavailable')
+        self.assertEqual(held['sharepoint_days'], 0)
+        self.assertTrue(held['coverage_note'])

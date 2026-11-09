@@ -25,18 +25,18 @@ ENDPOINTS = [
     ('POST', '/api/v1/uploads/{upload_id}/parts/{n}', 'Send part n (0, 1, 2...) of the file: {"content_base64": "..."}, each part at most part_size bytes before base64.'),
     ('POST', '/api/v1/uploads/{upload_id}/finish', 'Put the parts together and check the report: {"filename": "...xlsx", "part_count": N, "sha256": "<hex SHA-256 of the whole file>"}. Same result as POST /api/v1/reports.'),
     ('GET', '/api/v1/vins?q=...', 'Which reports a VIN or identifier is in (full or partial, at least 4 characters).'),
-    ('POST', '/api/v1/build', 'Build the end-of-shift report from SharePoint: {"job": "SLAL-HYMOBAL-2221", "day": "YYYY-MM-DD" (default today, plant time), "force": false}. Each scan goes on the shift its scan time falls in. Waits until 45 minutes after the last scan unless force is true. The report is saved and checked like an upload; nothing is sent.'),
-    ('GET', '/api/v1/nexus?job=...&day=...', 'The day split into Nexus shifts by plant-time window (Shift 1 6:00a-2:30p, Shift 2 2:30p-10:30p, Shift 3 10:00p-6:30a): scans, inspected, rejected, certified.'),
+    ('POST', '/api/v1/build', 'Build the legacy-layout provisional report from an exact verified SharePoint source: {"job": "SLAL-HYMOBAL-2221", "day": "YYYY-MM-DD", "source": {"site_id": "...", "list_id": "..."}}. Recorded shifts are retained; inactivity never proves completion. Selected Briggs-template generation is a separate worker stage. Nothing is sent.'),
+    ('GET', '/api/v1/nexus?job=...&day=...', 'Read the exact-source day with recorded shifts, quantities and unresolved-field holds. Supply site_id and list_id when the job is ambiguous; no shift-completion inference.'),
     ('GET', '/api/v1/reports/{id}', 'One report: status, numbers, every issue, approval and send history.'),
     ('GET', '/api/v1/reports/{id}/fixes', 'Suggested cell changes (checks and Claude).'),
-    ('POST', '/api/v1/reports/{id}/fixes', 'Make a corrected copy: {"accept": "all"} or {"ids": [...]} and/or {"changes": [{"sheet","cell","after","reason"}]}. Returns the new report (it is checked again). The original is never changed.'),
+    ('POST', '/api/v1/reports/{id}/fixes', 'Make a reviewed corrected copy with expected_check_hash and {"ids": [...]} and/or {"changes": [{"sheet","cell","after","reason"}]}. Returns the new report (it is checked again). The original is never changed. Automatic accept-all is paused.'),
     ('POST', '/api/v1/reports/{id}/ai-fixes', 'Ask Claude to draft fixes for the open issues, then list them with GET .../fixes.'),
-    ('POST', '/api/v1/reports/{id}/shift-fix', 'Put every row that is on the wrong shift (by scan time and the shift times) on its shift\'s tab. Returns the corrected copy.'),
+    ('POST', '/api/v1/reports/{id}/shift-fix', 'Row relocation is paused; requests fail without changing the workbook.'),
     ('POST', '/api/v1/reports/{id}/recheck', 'Run checks again: {"checks": ["sharepoint", "baseline", "ai"]} (default: sharepoint and baseline).'),
     ('GET', '/api/v1/reports/{id}/download', 'The spreadsheet file itself.'),
-    ('POST', '/api/v1/reports/{id}/approve', 'Approve as final: {"approver": "Name", "note": "", "override": false}. {"withdraw": true} removes an approval that was not sent.'),
-    ('GET', '/api/v1/reports/{id}/send', 'Preview the client email: Reply All recipients, subject, message, attachment.'),
-    ('POST', '/api/v1/reports/{id}/send', 'Needs a key with "can send" and an approved report. {"mode": "draft"|"send"}; to, cc, subject, body are optional and default to the preview. A second real send needs {"again": true}.'),
+    ('POST', '/api/v1/reports/{id}/approve', 'Record internal approval for the exact reviewed version; this does not establish source verification or authorize delivery: {"approver": "Name", "note": "", "override": false}. {"withdraw": true} removes an approval that was not sent.'),
+    ('GET', '/api/v1/reports/{id}/send', 'Local approval/download details. Delivery is paused; no mailbox is read.'),
+    ('POST', '/api/v1/reports/{id}/send', 'Sending and draft creation are paused; all requests fail without provider calls.'),
 ]
 
 
@@ -63,7 +63,7 @@ def report(item):
     rv = summarize(item)
     applied = (item.get('fixes_applied') or [])[-1:] or [None]
     return dict(
-        id=item['file_hash'], filename=item['filename'], version=item.get('version'), uploaded_at=item.get('received_at'),
+        id=item['file_hash'], check_hash=item.get('check_hash'), run=rv['run'], filename=item['filename'], version=item.get('version'), uploaded_at=item.get('received_at'),
         job=rv['job'], day=rv['day'], status=rv['status'], status_label=STATUS_LABEL.get(rv['status']), counts=rv['counts'],
         numbers=dict(scans=rv.get('scans'), inspected=rv.get('inspected'), rejected=rv.get('rejected'), certified=rv.get('certified'),
                      rejected_unit=rv.get('rejected_unit')),
@@ -230,12 +230,20 @@ def op_fixes(h, file_hash):
     return dict(id=file_hash, fixes=out['proposals'], applied=out['applied'], ai=out['ai'])
 
 
-def op_apply(h, file_hash, accept=None, ids=None, changes=None):
+def op_apply(h, file_hash, accept=None, ids=None, changes=None, expected_check_hash=None):
     from hosting.fixes import FixError
+    if not expected_check_hash:
+        raise ApiError(409, 'Reload and review the corrections; the displayed check revision is required.')
     file_hash = _id(file_hash); _get(h, file_hash)
     with h.store().session() as directory:
         props = SpreadsheetInbox(directory).fix_proposals(file_hash)['proposals']
-    chosen = props if accept == 'all' or accept is True else [p for p in props if p['id'] in set(ids or [])]
+    everything = accept == 'all' or accept is True
+    if everything:   # "accept all" is automatic: what a person kept as recorded or deferred is left out
+        with h.store().session() as directory:
+            inbox = SpreadsheetInbox(directory)
+            held = inbox.held_cells(inbox.get(file_hash))
+        props = [p for p in props if (p.get('sheet'), str(p.get('cell') or '').upper()) not in held]
+    chosen = props if everything else [p for p in props if p['id'] in set(ids or [])]
     extra = [dict(c) for c in changes or [] if isinstance(c, dict)]
     for c in extra:
         c.setdefault('reason', 'Changed through the API'); c.setdefault('source', 'API'); c.setdefault('kind', 'auto')
@@ -247,24 +255,24 @@ def op_apply(h, file_hash, accept=None, ids=None, changes=None):
         raise ApiError(400, 'Nothing to apply. Accept all, list fix ids, or send changes.')
     try:
         with h.store().session() as directory:
-            fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, todo)
+            fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, todo, expected_check_hash=expected_check_hash, auto=everything)
     except FixError as exc:
         raise ApiError(409, str(exc)) from None
     _after_change(h, fixed['file_hash'])
     return dict(report(_get(h, fixed['file_hash'])), applied=len(todo))
 
 
-def op_ai_fixes(h, file_hash):
+def op_ai_fixes(h, file_hash, expected_check_hash=None):
     from hosting.spreadsheet_inbox import make_ai_fixes
     file_hash = _id(file_hash); _get(h, file_hash)
     with h.store().session() as directory:
-        item, raw, issues = SpreadsheetInbox(directory).ai_fix_inputs(file_hash)
+        item, raw, issues = SpreadsheetInbox(directory).proposal_inputs(file_hash, expected_check_hash)
     record = make_ai_fixes(item, raw, issues)
     if record.get('status') in ('error', 'not_configured'):
         raise ApiError(409, record.get('message') or 'AI fixes failed.')
     if record.get('status') == 'done':
         with h.store().session() as directory:
-            SpreadsheetInbox(directory).record_ai_fixes(file_hash, record)
+            SpreadsheetInbox(directory).record_ai_fixes(file_hash, record, expected_check_hash=expected_check_hash)
     return dict(status=record.get('status'), drafted=len(record.get('fixes') or []), left_for_a_person=record.get('skipped') or [])
 
 
@@ -275,10 +283,10 @@ def op_recheck(h, file_hash, checks=None):
     return dict(report(_get(h, file_hash)), ran=ran)
 
 
-def op_approve(h, file_hash, approver=None, note=None, override=False, withdraw=False):
+def op_approve(h, file_hash, approver=None, note=None, override=False, withdraw=False, expected_check_hash=None, expected_run=None):
     from hosting import delivery
     file_hash = _id(file_hash); _get(h, file_hash)
-    return report(delivery.approve(h.store(), file_hash, approver, note, override, withdraw))
+    return report(delivery.approve(h.store(), file_hash, approver, note, override, withdraw, expected_check_hash=expected_check_hash, expected_run=expected_run))
 
 
 def op_send_preview(h, file_hash):
@@ -306,33 +314,58 @@ def _job_day(job, day):
     return job, day
 
 
-def op_build(h, job, day=None, force=False, header=None):
+def _build_binding(inbox, job, source=None):
+    """Select only a verified registry source; explicit source narrows, never grants."""
+    from hosting import registry, sharepoint
+    entries = [e for e in registry.entries(inbox.setting(registry.REGISTRY_KEY, []))
+               if e.get('verified') and e.get('list_id') and registry._same_job(job,e.get('job'))]
+    if source is not None and not isinstance(source,dict):
+        raise ApiError(400,'source must identify a verified site/list object.')
+    if source:
+        if not source.get('list_id') or not (source.get('site_id') or source.get('site')):
+            raise ApiError(400,'source requires list_id and site_id or site.')
+        entries = [e for e in entries if e.get('list_id') == source['list_id'] and
+                   (not source.get('site') or e.get('site') == source['site'])]
+    choices = {(e.get('site_id') or e.get('site'),e['list_id']):e for e in entries}
+    if len(choices) != 1 and not (source and source.get('site_id')):
+        raise ApiError(409,'Select one verified client/site/list source before building. No source was guessed.')
+    # Resolve registry site names when stable IDs are not saved. Every supplied
+    # selector must agree; a matching name must never override a conflicting ID.
+    resolved = {}
+    try:
+        for entry in choices.values():
+            binding = sharepoint.assignment_identity(dict(entry,status='verified'))
+            if source and source.get('site_id') and binding['site_id'] != source['site_id']:
+                continue
+            resolved[(binding['site_id'],binding['list_id'])] = binding
+    except (sharepoint.SharePointError,sharepoint.SharePointNotConfigured) as exc:
+        raise ApiError(409,str(exc)) from None
+    if len(resolved) != 1:
+        raise ApiError(409,'Select one verified client/site/list source with consistent identifiers. No source was guessed.')
+    return next(iter(resolved.values()))
+
+
+def op_build(h, job, day=None, force=False, header=None, source=None):
     """Build the job's report for the day from SharePoint, save it, and run the checks. Returns the report and how it was built."""
     from datetime import datetime as _dt, timezone as _tz
     from hosting import builder
     job, day = _job_day(job, day)
     with h.store().session() as directory:
         inbox = SpreadsheetInbox(directory)
+        binding = _build_binding(inbox, job, source)
         schedule = inbox.shift_schedule(job)
-        saved = inbox.setting(f'report_header|{job}', {}) or {}
+        saved = inbox.setting(f'report_header|{binding["site_id"]}|{binding["list_id"]}', {}) or {}
         if isinstance(header, dict):
-            saved = inbox.set_setting(f'report_header|{job}', {k: ' '.join(str(header.get(k) or '').split())[:120] for k in ('customer', 'worksite', 'program', 'prepared_by')})
+            saved = inbox.set_setting(f'report_header|{binding["site_id"]}|{binding["list_id"]}', {k: ' '.join(str(header.get(k) or '').split())[:120] for k in ('customer', 'worksite', 'program', 'prepared_by')})
         windows = inbox.setting('nexus_windows', None)
-        from hosting import suggest, sharepoint_jobs
-        suggested = suggest.header(suggest.context(job, day, inbox.setting(sharepoint_jobs.KEY)))
-    saved = dict(suggested, **{k: v for k, v in (saved or {}).items() if v})   # blank header fields: the client, worksite and preparer most likely meant
+    # Header values are explicitly saved/user supplied; never guess a customer from job text.
     try:
-        rows, info = builder.day_rows(job, day, schedule)        # network call outside any DB transaction
+        rows, info = builder.day_rows(job, day, schedule, **binding)        # network call outside any DB transaction
     except builder.BuildError as exc:
         raise ApiError(409, str(exc)) from None
     if not rows:
         raise ApiError(409, f'SharePoint has no scans for {job} on {day}.')
     ready = builder.readiness(info['last_scan'])
-    if ready['state'] == 'running' and not force:
-        last = _dt.fromisoformat(info['last_scan'])
-        raise ApiError(409, f'The last {job} scan was at {last.strftime("%I:%M %p").lstrip("0")}; the shift may still be going. '
-                            f'The report is ready at {_dt.fromisoformat(ready["ready_at"]).strftime("%I:%M %p").lstrip("0")} '
-                            f'(45 minutes after the last scan). Build anyway to make it now.')
     raw = builder.build_xlsx(job, day, rows, schedule, saved)
     # 45 quiet minutes only means nobody scanned for a while: it never proves the shift is over, so the built report says so
     built = dict(info, built_at=_dt.now(_tz.utc).isoformat(), ready=ready, nexus=builder.nexus_split(rows, windows),
@@ -347,14 +380,15 @@ def op_build(h, job, day=None, force=False, header=None):
     return dict(report=report(_get(h, item['file_hash'])), built={k: v for k, v in built.items() if k != 'columns'})
 
 
-def op_nexus(h, job, day=None):
+def op_nexus(h, job, day=None, source=None):
     from hosting import builder
     job, day = _job_day(job, day)
     with h.store().session() as directory:
         inbox = SpreadsheetInbox(directory)
+        binding = _build_binding(inbox, job, source)
         schedule, windows = inbox.shift_schedule(job), inbox.setting('nexus_windows', None)
     try:
-        rows, info = builder.day_rows(job, day, schedule)
+        rows, info = builder.day_rows(job, day, schedule, **binding)
     except builder.BuildError as exc:
         raise ApiError(409, str(exc)) from None
     return dict(job=job, day=day, last_scan=info['last_scan'], **builder.nexus_split(rows, windows))
@@ -362,6 +396,7 @@ def op_nexus(h, job, day=None):
 
 def shift_fix(h, file_hash):
     """Corrected copy with every wrong-shift row on its shift's tab (or taken out). Returns (item, moved, removed)."""
+    raise ApiError(409, 'Row removal and relocation are disabled until the complete affected-cell plan can be reviewed.')
     from hosting.fixes import relocate_rows, FixError
     with h.store().session() as directory:
         inbox = SpreadsheetInbox(directory)
@@ -383,6 +418,7 @@ def shift_fix(h, file_hash):
 def remove_rows(h, file_hash, rows):
     """Corrected copy with the given report rows taken out (extra copies of duplicate rows). Rows below move up;
     totals and formulas are never touched. rows: [(sheet, row)]. Returns the new item."""
+    raise ApiError(409, 'Row removal and relocation are disabled until the complete affected-cell plan can be reviewed.')
     from hosting.fixes import relocate_rows, FixError
     rows = [(str(s_), int(r)) for s_, r in rows]
     if not rows:
@@ -413,6 +449,7 @@ def op_send(h, key, file_hash, data):
     from hosting import delivery
     if not key['can_send']:
         raise ApiError(403, 'This key cannot send email to clients. Make a key (or connector link) with "Can send to clients" ticked.')
+    raise ApiError(409, 'Sending and draft creation are paused pending delivery safety checks. No email was sent. Use the approved download for manual delivery.')
     file_hash = _id(file_hash); _get(h, file_hash)
     data = dict(data, via=('connector:' if key.get('via') == 'mcp' else 'api:') + key['name'])
     updated, record = delivery.send(h.store(), file_hash, data, defaults=delivery.info(h.store(), file_hash))
@@ -432,10 +469,11 @@ def handle(h, method, route, send):
             return send(200, op_find_vin(h, unquote_plus(query.get('q', ''))))
         if path == '/api/v1/build' and method == 'POST':
             data = _body(h, 10000)
-            return send(201, op_build(h, data.get('job'), data.get('day'), data.get('force') is True, data.get('header')))
+            return send(201, op_build(h, data.get('job'), data.get('day'), data.get('force') is True, data.get('header'), data.get('source')))
         if path == '/api/v1/nexus' and method == 'GET':
             from urllib.parse import unquote_plus
-            return send(200, op_nexus(h, unquote_plus(query.get('job', '')), query.get('day')))
+            return send(200, op_nexus(h, unquote_plus(query.get('job', '')), query.get('day'),
+                {k: unquote_plus(query[k]) for k in ('site','site_id','list_id') if query.get(k)} or None))
         if path == '/api/v1/uploads' and method == 'POST':
             return send(201, op_upload_start())
         m = re.fullmatch(r'/api/v1/uploads/([0-9a-f]{32})/(?:parts/(\d{1,5})|(finish))', path)
@@ -470,9 +508,10 @@ def handle(h, method, route, send):
             return send(200, op_fixes(h, file_hash))
         if action == 'fixes' and method == 'POST':
             data = _body(h, MAX_UPLOAD)
-            return send(201, op_apply(h, file_hash, data.get('accept'), data.get('ids'), data.get('changes')))
+            return send(201, op_apply(h, file_hash, data.get('accept'), data.get('ids'), data.get('changes'), data.get('expected_check_hash')))
         if action == 'ai-fixes' and method == 'POST':
-            return send(200, op_ai_fixes(h, file_hash))
+            data = _body(h, 10000)
+            return send(200, op_ai_fixes(h, file_hash, data.get('expected_check_hash')))
         if action == 'shift-fix' and method == 'POST':
             return send(201, op_shift_fix(h, file_hash))
         if action == 'recheck' and method == 'POST':
@@ -480,7 +519,7 @@ def handle(h, method, route, send):
             return send(200, op_recheck(h, file_hash, data.get('checks')))
         if action == 'approve' and method == 'POST':
             data = _body(h, 10000)
-            return send(200, op_approve(h, file_hash, data.get('approver'), data.get('note'), data.get('override'), data.get('withdraw')))
+            return send(200, op_approve(h, file_hash, data.get('approver'), data.get('note'), data.get('override'), data.get('withdraw'), data.get('expected_check_hash'), data.get('expected_run')))
         if action == 'send' and method == 'GET':
             return send(200, op_send_preview(h, file_hash))
         if action == 'send' and method == 'POST':

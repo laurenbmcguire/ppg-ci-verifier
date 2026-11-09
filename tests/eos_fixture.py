@@ -92,5 +92,9 @@ def add_cached_values(raw, sheetnames, cached):
                         continue
                     text = re.sub(rf'(<c r="{ref}"[^>]*>)(<f>[^<]*</f>)(?:<v>[^<]*</v>|<v/>)?', rf'\g<1>\g<2><v>{value}</v>', text)
                 data = text.encode()
-            zout.writestr(item, data)
+            if item.filename == 'docProps/core.xml':   # openpyxl stamps the save time: fixed, so the same workbook is the same bytes
+                data = re.sub(rb'(<dcterms:(?:created|modified)[^>]*>)[^<]*', rb'\g<1>2026-01-01T00:00:00Z', data)
+            fixed = zipfile.ZipInfo(item.filename, date_time=(2026, 1, 1, 0, 0, 0))
+            fixed.compress_type, fixed.external_attr = zipfile.ZIP_DEFLATED, item.external_attr
+            zout.writestr(fixed, data)
     return out.getvalue()

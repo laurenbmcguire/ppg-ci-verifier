@@ -1,0 +1,46 @@
+# Outlook delivery foundation: offline, not live
+
+Only `hosting/outlook_delivery.py`, its synthetic tests, and a proposed SQL schema are supplied. No routes, UI, actual session authentication, Graph adapter, OAuth implementation, grants or credentials are enabled. Existing delivery/draft/reservation barriers remain unchanged. No provider or real report was accessed. Do not call legacy `hosting.mailer` as this transport: ambiguous errors, inferred send status, and unseen reply-all history do not satisfy this contract.
+
+## Server integration contract
+
+`DeliveryService(path, authenticate=..., build_snapshot=..., transport=None)` defaults to no transport. `preview`, `confirm`, `cancel`, `status`, and `dispatch` are server service methods, not public API endpoints. Callers must implement these boundaries before release:
+
+* `authenticate(opaque_server_session)` verifies an authenticated human session, CSRF protection for mutations, authentic actor/workspace/client membership and current explicit send capability. Return the `Auth` record only after those checks. A browser-provided `Auth`, actor name, OWNER fallback, or API key `can_send` flag is not human confirmation. The type check cannot make an untrusted resolver secure. Scope and capability changes invalidate the stored identity.
+* `build_snapshot(auth, report_id, draft, db)` runs within the SAME active report-writer SQLite transaction as claim. It must authorize report ownership in that workspace/client, lock/read authoritative report, current checker/check/run, exact approval and full `approved_state_hash`, source revision and assignment, verified sender, and the final artifact bytes. It must enforce all existing approval/source/assignment guards, not merely copy booleans from report JSON. Required string-valued identifiers are explicit in `_snapshot`; serialize versions and timestamps consistently. The normalized snapshot includes approval identity/time, all final To/Cc/Bcc (including configured CC), subject, complete plain-text body, and artifact name/MIME/size/SHA-256. The artifact bytes are persisted separately in the dedicated ledger.
+* `draft` accepts only To/Cc/Bcc/subject/body. The trusted builder must merge configured recipients before returning the final snapshot. No client-supplied attachment, identity, reply history or mode is accepted. First release is new-message only, never hidden reply-all. No preview email or provider draft is created.
+* Show the person the exact snapshot, attachment download from these frozen bytes, and expiry. A deliberate protected Confirm action submits intent ID plus digest. Every edit requires cancellation and a new preview/confirmation; changing only a random request ID cannot bypass the report/sender duplicate guard. A fresh preview does not confer send permission by itself.
+* Before dispatch, authorization and full snapshot are rechecked under `BEGIN IMMEDIATE`. The claim is committed before transport, which runs outside the transaction. The builder MUST use the provided connection for report reads, not open an independently unlocked connection. External source/artifact revisions must be pinned or participate in the same lock protocol; a freshness callback alone cannot lock a remote source.
+* All approval withdrawal, recheck, source import, assignment, correction and report mutations must use the same database/writer transaction and call `assert_mutation_allowed` before writing. A claim that wins the race blocks these mutations while `dispatching`/`unknown`; a mutation that wins invalidates the snapshot. Existing JSON/blob/filesystem report writers DO NOT yet implement this contract. A separate ledger database without coordinated writer locks is NOT safe for live send. This integration and concurrent report-mutation tests remain release blockers.
+
+The ledger is outside report JSON because bookkeeping must not invalidate its full-state approval fingerprint. The exact actor and confirmation time are persisted. A unique active scope conservatively blocks the same workspace/client/report/sender even with different envelope or approved revision. Accepted deliveries also remain blocked; controlled resend is intentionally unimplemented. Sender-account IDs must be canonical and stable, not arbitrary aliases.
+
+## Outcomes and recovery
+
+States: awaiting_confirmation → confirmed → dispatching → accepted. Pre-dispatch rejection/cancellation are terminal; unknown and dispatching are durable safety barriers. A Graph HTTP 202 is accepted by Microsoft 365, **not delivered**. A future adapter must return `Acceptance(receipt)` only for an unambiguous acceptance and must disable SDK/HTTP/proxy automatic retries. It must send only the captured content and bytes, not reread mutable files.
+
+Timeout, connection reset, ambiguous return, or ordinary transport exception records unknown. A process crash or result-persistence failure can leave dispatching. Neither state expires, auto-resets or becomes retryable after 300 seconds. A failed/uncertain claim commit makes zero transport calls; if the claim actually committed, it stays blocked. No generic reservation clearer is permitted. Recovery needs separately designed evidence-based reconciliation and explicit controlled resend, neither implemented here. This is conservative duplicate suppression, not an exactly-once guarantee. Preserve/backup this ledger; restoring an older backup or deleting rows can destroy duplicate evidence and must never be used as retry recovery.
+
+## Mail identity and release decisions
+
+Choose explicitly between a dedicated company sender scoped to its mailbox, or per-user delegated Microsoft `Mail.Send` through MSAL authorization-code + PKCE. Do not silently replace the existing company mailbox with a personal identity. No shared SharePoint app credentials are reused. Persistent grants, credential creation/configuration, consent and access expansion require separate per-action user approval. Audit actual effective tenant/mailbox grants and identity before enablement; no OAuth or permission changes were performed here.
+
+Remaining release gates: mode decision; authenticated session/CSRF and tenant/client/report scope contract; actual callback/route/UI wiring; cross-table and filesystem writer coordination; pinned external source freshness; least-privilege grant audit; transport and bounded attachment encoding; protected attachment access and sensitive snapshot retention; PostgreSQL adapter/concurrency parity; isolated hosted staging and tested backup/restore; and separately approved controlled real-send test. Do not remove legacy fail-closed barriers until these gates pass.
+
+`supabase/outlook_delivery.sql` is a PostgreSQL-compatible schema proposal with RLS and no browser policies. It was not applied or validated against PostgreSQL. A PostgreSQL implementation must use row/advisory locks shared by report writers, conditional claim plus committed transaction, the partial unique index, and the same durable outcome semantics. Python SQLite service is not a PostgreSQL adapter.
+
+## Synthetic verification
+
+From the isolated checkout:
+
+    TMPDIR=../test-tmp PYTHONDONTWRITEBYTECODE=1 ../test-venv/bin/python -m unittest tests.test_outlook_delivery -v
+
+Tests use only generated SQLite files, synthetic reports and fake transports: repeat confirmations/clicks/concurrent workers; restart persistence; provider acceptance then result-commit failure and retry after expiry (one call); failed and uncertain pre-dispatch commit (zero calls); timeout and crash; every captured field changed; forged/missing/OWNER/API-key authorization; digest tampering; expiry; cancellation; duplicate previews; attachment and serialization limits; no-network default; and report mutation guard. No real mailbox, provider, OAuth, report, deployment or PostgreSQL database is touched.
+
+### Expanded foundation verification (17 tests)
+
+The SQLite foundation is additionally exercised with three genuinely separate spawned Python processes racing one confirmed intent: exactly one fake-provider call and one accepted outcome, with two blocked dispatches. This is distinct from the thread-only race.
+
+Authorization tests change `can_send` to false, or change actor, workspace or client, after preview and after confirmation. Each change independently blocks confirmation/dispatch and produces zero fake-provider calls. These tests use a controlled synthetic resolver; they do not validate a production login, session store, CSRF implementation or grant.
+
+Both report-writer/dispatch orderings use a synthetic report table in the same SQLite database and the actual transaction connection supplied to the freshness callback. A writer that holds the lock first commits a source-revision change, after which dispatch rejects without invoking transport. A claim that holds the lock first commits dispatching, after which the competing guarded writer is rejected and leaves the report unchanged. Transport runs after commit, outside the transaction. These prove the foundation contract with cooperating synthetic writers; existing production report/import/approval/assignment writers still do not call this guard. Their integration, external-source pinning and production callback correctness remain untested release blockers, not completed by these tests.

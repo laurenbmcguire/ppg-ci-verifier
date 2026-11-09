@@ -18,7 +18,9 @@ import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from xml.sax.saxutils import escape
+from xml.dom import minidom
+from xml.parsers.expat import ExpatError
+from xml.sax.saxutils import escape, quoteattr
 
 PHOTO_FIELDS = ('PictureLabel', 'PictureDefect', 'Photo2', 'Photo20', 'PictureLH', 'PictureRH', 'PictureBack_x002d_LH')
 MAX_PHOTOS = 600
@@ -145,6 +147,9 @@ def _get(url, opener=None, raw=False):
 
 def fetch_photos(site, list_id, items, opener=None):
     """{item: [dict(field, title, name, bytes|None, error)]} for the given SharePoint item IDs."""
+    items = list(items)
+    if len(items) > MAX_PHOTOS:
+        raise PhotoError(f'This report exceeds the {MAX_PHOTOS}-record photo download limit. No partial photo copy was created.')
     base = f'https://{_host()}/sites/{urllib.parse.quote(site)}/_api/web/lists(guid\'{list_id}\')'
     status, fields = _get(base + "/fields?$filter=Hidden eq false and TypeAsString eq 'Thumbnail'&$select=Title,InternalName", opener)
     if status in (401, 403):
@@ -177,7 +182,7 @@ def fetch_photos(site, list_id, items, opener=None):
         return item, out
 
     with ThreadPoolExecutor(WORKERS) as pool:
-        return dict(pool.map(one, list(items)[:MAX_PHOTOS]))
+        return dict(pool.map(one, items))
 
 
 def _permission_hint(detail):
@@ -231,22 +236,55 @@ def _cell(ref, value):
     return f'<c r="{ref}" t="inlineStr"><is><t xml:space="preserve">{escape(str(value))}</t></is></c>'
 
 
+_SHEET_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+_REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships'
+_DOC_REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+_CT_NS = 'http://schemas.openxmlformats.org/package/2006/content-types'
+
+
+def _registry(raw, namespace, root_name):
+    try:
+        document = minidom.parseString(raw)
+    except ExpatError as exc:
+        raise PhotoError('The workbook has an invalid XML registry.') from exc
+    root = document.documentElement
+    if root.namespaceURI != namespace or root.localName != root_name:
+        raise PhotoError('The workbook uses an unsupported XML registry format.')
+    return document
+
+
+def _sheet_nodes(document):
+    return document.getElementsByTagNameNS(_SHEET_NS, 'sheet')
+
+
+def _append_element(parent, namespace, name, attributes):
+    # Keep original prefix declarations (including those referenced by mc:Ignorable).
+    # New children declare their own namespace, independent of the input's prefixes.
+    node = parent.ownerDocument.createElementNS(namespace, name)
+    node.setAttribute('xmlns', namespace)
+    for key, value in attributes.items():
+        node.setAttribute(key, str(value))
+    parent.appendChild(node)
+    return node
+
+
 def embed(raw, rows, sheet_title=None):
     """raw: the original .xlsx bytes. rows: [dict(item, identifier, part, defect, photos=[dict(title, bytes, error, name)])].
     Returns the new workbook bytes."""
     zin = zipfile.ZipFile(io.BytesIO(raw))
     names = zin.namelist()
-    wb = zin.read('xl/workbook.xml').decode('utf-8')
-    existing = re.findall(r'<sheet\b[^>]*\bname="([^"]+)"', wb)
+    wb = _registry(zin.read('xl/workbook.xml'), _SHEET_NS, 'workbook')
+    existing = [s.getAttribute('name') for s in _sheet_nodes(wb)]
     title = sheet_title or ('Defect Photos' if 'Defect Photos' not in existing else 'SharePoint Photos')
     n = 2
-    while title in existing:
+    while title.casefold() in {name.casefold() for name in existing}:
         title = f'SharePoint Photos {n}'; n += 1
     sheet_no = 1 + max([int(m) for m in re.findall(r'xl/worksheets/sheet(\d+)\.xml', ' '.join(names))] or [0])
     draw_no = 1 + max([int(m) for m in re.findall(r'xl/drawings/drawing(\d+)\.xml', ' '.join(names))] or [0])
-    sheet_ids = [int(x) for x in re.findall(r'<sheet\b[^>]*\bsheetId="(\d+)"', wb)] or [0]
-    wb_rels = zin.read('xl/_rels/workbook.xml.rels').decode('utf-8')
-    rid_nums = [int(x) for x in re.findall(r'Id="rId(\d+)"', wb_rels)] or [0]
+    sheet_ids = [int(s.getAttribute('sheetId')) for s in _sheet_nodes(wb)] or [0]
+    wb_rels = _registry(zin.read('xl/_rels/workbook.xml.rels'), _REL_NS, 'Relationships')
+    rel_ids = [r.getAttribute('Id') for r in wb_rels.getElementsByTagNameNS(_REL_NS, 'Relationship')]
+    rid_nums = [int(r[3:]) for r in rel_ids if re.fullmatch(r'rId\d+', r)] or [0]
     rid = f'rId{max(rid_nums) + 1}'
 
     labels = sorted({p['title'] for r in rows for p in r['photos']}, key=lambda t: (0 if 'label' in t.lower() else 1, t))
@@ -277,7 +315,7 @@ def embed(raw, rows, sheet_title=None):
                 cx, cy = int(size[0] * scale * 9525), int(size[1] * scale * 9525)
                 anchors.append(
                     f'<xdr:oneCellAnchor><xdr:from><xdr:col>{4 + j}</xdr:col><xdr:colOff>38100</xdr:colOff><xdr:row>{rn - 1}</xdr:row><xdr:rowOff>38100</xdr:rowOff></xdr:from>'
-                    f'<xdr:ext cx="{cx}" cy="{cy}"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{k + 1}" name="{escape(t)} {escape(str(r["item"]))}" descr="{escape(p.get("name") or "")}"/>'
+                    f'<xdr:ext cx="{cx}" cy="{cy}"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{k + 1}" name={quoteattr(str(t) + " " + str(r["item"]))} descr={quoteattr(p.get("name") or "")}/>'
                     '<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>'
                     f'<xdr:blipFill><a:blip r:embed="rIdImg{k}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
                     f'<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:oneCellAnchor>')
@@ -301,28 +339,35 @@ def embed(raw, rows, sheet_title=None):
     sheet_rels = rel_head + f'<Relationship Id="rIdDraw1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing{draw_no}.xml"/></Relationships>'
     drawing_rels = rel_head + ''.join(img_rels) + '</Relationships>'
 
-    wb_new = wb.replace('</sheets>', f'<sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
-                                     f'name="{escape(title)}" sheetId="{max(sheet_ids) + 1}" r:id="{rid}"/></sheets>', 1)
-    wb_rels_new = wb_rels.replace('</Relationships>', f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{sheet_no}.xml"/></Relationships>', 1)
-    ct = zin.read('[Content_Types].xml').decode('utf-8')
-    adds = f'<Override PartName="/xl/worksheets/sheet{sheet_no}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+    sheets = wb.getElementsByTagNameNS(_SHEET_NS, 'sheets')
+    if len(sheets) != 1:
+        raise PhotoError('The workbook does not have a valid sheet registry.')
+    node = _append_element(sheets[0], _SHEET_NS, 'sheet', {'name': title, 'sheetId': max(sheet_ids) + 1})
+    node.setAttribute('xmlns:r', _DOC_REL_NS)
+    node.setAttributeNS(_DOC_REL_NS, 'r:id', rid)
+    _append_element(wb_rels.documentElement, _REL_NS, 'Relationship', {
+        'Id': rid, 'Type': _DOC_REL_NS + '/worksheet', 'Target': f'worksheets/sheet{sheet_no}.xml'})
+    ct = _registry(zin.read('[Content_Types].xml'), _CT_NS, 'Types')
+    _append_element(ct.documentElement, _CT_NS, 'Override', {
+        'PartName': f'/xl/worksheets/sheet{sheet_no}.xml',
+        'ContentType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'})
     if anchors:
-        adds += f'<Override PartName="/xl/drawings/drawing{draw_no}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>'
+        _append_element(ct.documentElement, _CT_NS, 'Override', {
+            'PartName': f'/xl/drawings/drawing{draw_no}.xml',
+            'ContentType': 'application/vnd.openxmlformats-officedocument.drawing+xml'})
+    extensions = {d.getAttribute('Extension') for d in ct.getElementsByTagNameNS(_CT_NS, 'Default')}
     for ext, mime in (('jpeg', 'image/jpeg'), ('png', 'image/png'), ('gif', 'image/gif')):
-        if any(p.endswith('.' + ext) for p, _ in media) and f'Extension="{ext}"' not in ct:
-            adds += f'<Default Extension="{ext}" ContentType="{mime}"/>'
-    ct_new = ct.replace('</Types>', adds + '</Types>', 1)
+        if any(p.endswith('.' + ext) for p, _ in media) and ext not in extensions:
+            _append_element(ct.documentElement, _CT_NS, 'Default', {'Extension': ext, 'ContentType': mime})
+    registries = {'xl/workbook.xml': wb.toxml(encoding='utf-8'),
+                  'xl/_rels/workbook.xml.rels': wb_rels.toxml(encoding='utf-8'),
+                  '[Content_Types].xml': ct.toxml(encoding='utf-8')}
 
     out = io.BytesIO()
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
             data = zin.read(item)
-            if item.filename == 'xl/workbook.xml':
-                data = wb_new.encode('utf-8')
-            elif item.filename == 'xl/_rels/workbook.xml.rels':
-                data = wb_rels_new.encode('utf-8')
-            elif item.filename == '[Content_Types].xml':
-                data = ct_new.encode('utf-8')
+            data = registries.get(item.filename, data)
             zout.writestr(item, data)
         zout.writestr(f'xl/worksheets/sheet{sheet_no}.xml', sheet_xml)
         if anchors:
@@ -339,31 +384,63 @@ def photos_filename(filename):
     return f'{stem} (with photos).xlsx'
 
 
-def build(filename, raw, site, list_id, opener=None):
-    """(new filename, bytes, summary). Records come from the report's own record rows (the authoritative sheet)."""
+def _photo_source(source, expected, site_id, list_id):
+    """Validate a complete row identity before item IDs are deduplicated or fetched."""
+    from hosting.sheet_roles import source_url_identity
+    source = source or {}
+    item = source.get('item')
+    if isinstance(item, bool) or not re.fullmatch(r'[0-9]+', str(item)):
+        raise PhotoError('Every report record needs a complete matching SharePoint source identity before photos can be added.')
+    has_ids = bool(source.get('site_id') or source.get('list_id'))
+    if has_ids and (source.get('site_id') != site_id or source.get('list_id') != list_id):
+        raise PhotoError('A report record belongs to a different or incomplete SharePoint source. No photos were fetched.')
+    # Stable IDs must not override contradictory URL or source fields.
+    if source.get('url') or not has_ids:
+        linked = source_url_identity(source.get('url'))
+        if (not linked or linked['origin'] != expected['origin'] or linked['list_path'] != expected['list_path']
+                or str(linked['item']) != str(item)):
+            raise PhotoError('A report record has an unconfirmed or different SharePoint source URL. No photos were fetched.')
+    for field in ('site', 'list'):
+        value = source.get(field)
+        if value and (not isinstance(value, str) or value.casefold() != expected[field].casefold()):
+            raise PhotoError('A report record has conflicting SharePoint source details. No photos were fetched.')
+    return str(item)
+
+
+def build(filename, raw, site, list_id, opener=None, *, site_id=None, list_url=None):
+    """Build a copy only after rows match IDs and list URL verified from the exact assigned list."""
     from hosting.spreadsheets import report_and_export_records
+    from hosting.sheet_roles import source_url_identity
+    expected = source_url_identity(list_url, list_only=True)
+    if (not site_id or not list_id or not expected or expected['item'] is not None
+            or expected['origin'] != 'https://' + _host().lower()
+            or not isinstance(site, str) or expected['site'].casefold() != site.casefold()):
+        raise PhotoError('The exact assigned SharePoint list must be verified before adding photos.')
     records, _ = report_and_export_records(filename, raw)
     ordered, seen = [], set()
     for r in records:
-        item = (r.get('source') or {}).get('item')
-        if item and item not in seen:
-            seen.add(item); ordered.append(r)
+        item = _photo_source(r.get('source'), expected, site_id, list_id)
+        if item not in seen:
+            seen.add(item); ordered.append((item, r))
     if not ordered:
         raise PhotoError('This report has no SharePoint item IDs on its record rows, so its photos cannot be matched.')
+    if len(ordered) > MAX_PHOTOS:
+        raise PhotoError(f'This report exceeds the {MAX_PHOTOS}-record photo download limit. No partial photo copy was created.')
     started = time.time()
-    found = fetch_photos(site, list_id, [r['source']['item'] for r in ordered], opener)
+    found = fetch_photos(expected['site'], list_id, [item for item, _ in ordered], opener)
     rows = []
-    for r in ordered:
-        photos = found.get(r['source']['item']) or []
+    for item, r in ordered:
+        photos = found.get(item) or []
         if photos:
-            rows.append(dict(item=r['source']['item'], identifier=r['labels'].get('identifier'), part=r['labels'].get('part'),
+            rows.append(dict(item=item, identifier=r['labels'].get('identifier'), part=r['labels'].get('part'),
                              defect=r['labels'].get('defect'), photos=photos))
     embedded = sum(1 for x in rows for p in x['photos'] if p.get('bytes'))
     missing = sum(1 for x in rows for p in x['photos'] if not p.get('bytes'))
     if not rows:
         raise PhotoError('None of this report\'s SharePoint records have photos attached.')
     data = embed(raw, rows)
-    existing = re.findall(r'<sheet\b[^>]*\bname="([^"]+)"', zipfile.ZipFile(io.BytesIO(raw)).read('xl/workbook.xml').decode('utf-8'))
-    tab = 'Defect Photos' if 'Defect Photos' not in existing else 'SharePoint Photos'
+    with zipfile.ZipFile(io.BytesIO(data)) as result:
+        workbook = minidom.parseString(result.read('xl/workbook.xml'))
+        tab = _sheet_nodes(workbook)[-1].getAttribute('name')
     return photos_filename(filename), data, dict(tab=tab, records=len(ordered), with_photos=len(rows), embedded=embedded, missing=missing,
                                                  seconds=round(time.time() - started, 1), sha256=hashlib.sha256(data).hexdigest())

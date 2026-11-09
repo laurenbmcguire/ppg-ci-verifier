@@ -80,10 +80,11 @@ class The2214Case(unittest.TestCase):
     def test_record_identity_is_site_list_item(self):
         r = check(sl_daily())
         src = r['records'][0]['source']
-        self.assertEqual(src, dict(site='SLAlabama_AlexanderCity', list='Data 2214SLALSLAL', item='432'))
+        self.assertEqual({k:src[k] for k in ('site','list','item')}, dict(site='SLAlabama_AlexanderCity', list='Data 2214SLALSLAL', item='432'))
+        self.assertEqual(src['origin'],'https://ppg.sharepoint.com');self.assertTrue(src['url'].endswith('/432_.000'))
         self.assertEqual(parse_source_url('https://x.sharepoint.com/sites/A/Lists/B%20C/DispForm.aspx?ID=9'), ('A', 'B C', '9'))
 
-    def test_identity_from_a_relative_source_record_link(self):
+    def test_relative_source_link_retains_item_but_cannot_infer_origin(self):
         # the real template: header "Source record", value "/sites/<site>/Lists/Data%20<list>/<item>_.000"
         wb = load_workbook(io.BytesIO(sl_daily(source_records=False)))
         d = wb['Inspection Detail']; d['T3'] = 'Source record'
@@ -91,7 +92,9 @@ class The2214Case(unittest.TestCase):
             d[f'T{row}'] = f'/sites/SLAlabama_AlexanderCity/Lists/Data%202214SLALSLAL/{428 + row}_.000'
         buf = io.BytesIO(); wb.save(buf)
         r = check(buf.getvalue())
-        self.assertEqual(r['records'][0]['source'], dict(site='SLAlabama_AlexanderCity', list='Data 2214SLALSLAL', item='432'))
+        src=r['records'][0]['source']
+        self.assertEqual(src,dict(site=None,list=None,item='432',url='/sites/SLAlabama_AlexanderCity/Lists/Data%202214SLALSLAL/432_.000'))
+        self.assertIsNone(parse_source_url(src['url']))
 
     def test_photo_rows_are_not_production(self):
         r = check(sl_daily())

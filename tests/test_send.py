@@ -53,6 +53,12 @@ class FakeMail:
 ENV = {'MS_TENANT_ID': 't', 'MS_CLIENT_ID': 'c', 'MS_CLIENT_SECRET': 's'}
 
 
+def displayed_binding(base, file_hash):
+    with urllib.request.urlopen(base + '/api/spreadsheet?id=' + file_hash, timeout=30) as response:
+        shown = json.loads(response.read())
+    return {'expected_check_hash': shown['check_hash'], 'expected_run': shown['review']['run']}
+
+
 class WordingTests(unittest.TestCase):
     def test_date_and_shift(self):
         self.assertEqual(mailer.mdy('2026-09-18'), '9.18.26')
@@ -156,39 +162,38 @@ class SendRouteTests(unittest.TestCase):
         self.assertEqual(status, 200, data)
         return data['item']['file_hash']
 
-    def test_approve_then_send_records_it_and_remembers_contacts(self):
+    def test_approved_send_stays_paused_without_provider_or_storage_writes(self):
+        from hosting.spreadsheet_inbox import SpreadsheetInbox
         h = self.upload()
-        status, info = self.post('/api/spreadsheets/send-info', {'file_hash': h})
+        with patch('hosting.delivery.mailer.last_sent', side_effect=AssertionError('Paused delivery must not read the mailbox')) as lookup:
+            status, info = self.post('/api/spreadsheets/send-info', {'file_hash': h})
+            lookup.assert_not_called()
         self.assertEqual(status, 200, info)
-        self.assertEqual(info['recipients_from'], 'previous')
-        self.assertEqual(info['to'], ['buyer@client.com'])
+        self.assertFalse(info['enabled']); self.assertTrue(info['delivery_paused'])
+        self.assertEqual(info['recipients_from'], 'none')
+        self.assertEqual(info['to'], [])
         self.assertIn('lauren.mcguire@ppgquality.com', info['cc'])
-        self.assertEqual(info['subject'], '2230-OWENS-BASCO| PPG Quality End-of-Shift Report - 10.07.26 1st Shift')
         self.assertEqual(info['attachment']['name'], NAME)
-        msg = dict(file_hash=h, to=info['to'], cc=info['cc'], subject=info['subject'], body=info['body'], reply_to='m1', mode='send')
-        status, data = self.post('/api/spreadsheets/send', msg)
-        self.assertEqual(status, 409); self.assertIn('Approve', data['error'])
-        self.assertFalse(any(u.endswith('/send') for _, u, _ in self.fake.calls))
-        status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Chris', 'override': True})
-        self.assertEqual(status, 200, data); self.assertEqual(data['item']['approval']['by'], 'Chris')
-        status, data = self.post('/api/spreadsheets/send', msg)
-        self.assertEqual(status, 200, data)
-        self.assertTrue(data['record']['sent']); self.assertTrue(data['record']['reply_all'])
-        self.assertEqual(len(data['item']['sent']), 1)
-        self.assertTrue(any(u.endswith('/send') for _, u, _ in self.fake.calls))
-        status, data = self.post('/api/spreadsheets/send', msg)   # a second send needs "Send again"
-        self.assertEqual(status, 409); self.assertIn('Send again', data['error'])
+        status, approved = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Chris', 'override': True,
+            'note': 'Synthetic fixture reviewed', **displayed_binding(self.base, h)})
+        self.assertEqual(status, 200, approved)
+        before = displayed_binding(self.base, h)
+        calls = list(self.fake.calls)
+        with patch('hosting.delivery.mailer.deliver') as provider, patch.object(SpreadsheetInbox, 'record_send') as record, patch.object(SpreadsheetInbox, 'save_contacts') as contacts:
+            for again in (False, True):
+                status, data = self.post('/api/spreadsheets/send', dict(file_hash=h, to=info['to'], cc=info['cc'], subject=info['subject'], body=info['body'], mode='send', again=again))
+                self.assertEqual(status, 409, data); self.assertIn('paused', data['error'])
+            provider.assert_not_called(); record.assert_not_called(); contacts.assert_not_called()
+        self.assertEqual(self.fake.calls, calls)
+        self.assertEqual(displayed_binding(self.base, h), before)
         status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'withdraw': True})
-        self.assertEqual(status, 409)                                # approval stays once sent
-        self.fake.previous = False                                   # no earlier email: use the contacts saved by the app
-        status, info = self.post('/api/spreadsheets/send-info', {'file_hash': h})
-        self.assertEqual(info['recipients_from'], 'saved'); self.assertEqual(info['to'], ['buyer@client.com'])
+        self.assertEqual(status, 200, data); self.assertFalse(data['item'].get('approval'))
 
     def test_withdraw_and_approve_again(self):
         status, data = self.post('/api/spreadsheets/import', {'filename': NAME, 'content_base64': base64.b64encode(build()).decode()})
         h = data['item']['file_hash']
         for _ in range(2):
-            status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Lauren', 'override': True})
+            status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Lauren', 'override': True, 'note': 'Synthetic fixture reviewed', **displayed_binding(self.base, h)})
             self.assertEqual(status, 200, data); self.assertTrue(data['item'].get('approval'))
             status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Lauren', 'withdraw': True})
             self.assertEqual(status, 200, data); self.assertFalse(data['item'].get('approval'))
@@ -199,24 +204,27 @@ class SendRouteTests(unittest.TestCase):
         rows = [list(r) for r in ROWS]; rows[1][0] = ''
         status, data = self.post('/api/spreadsheets/import', {'filename': NAME, 'content_base64': base64.b64encode(build([tuple(r) for r in rows])).decode()})
         h = data['item']['file_hash']
-        status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Chris'})
+        status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Chris', **displayed_binding(self.base, h)})
         if status == 409:
             self.assertIn('Approve anyway', data['error'])
-            status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Chris', 'override': True})
+            status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Chris', 'override': True, 'note': 'Synthetic fixture reviewed', **displayed_binding(self.base, h)})
             self.assertTrue(data['item']['approval']['overridden'])
         self.assertEqual(status, 200, data)
-        status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': ''})
+        status, data = self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': '', **displayed_binding(self.base, h)})
         self.assertEqual(status, 409)
 
-    def test_draft_mode_and_mail_errors(self):
+    def test_draft_and_send_are_paused_before_mail_errors(self):
         h = self.upload()
-        self.post('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Lauren', 'override': True})
-        status, data = self.post('/api/spreadsheets/send', dict(file_hash=h, to=['buyer@client.com'], cc=[], subject='S', body='B', mode='draft'))
-        self.assertEqual(status, 200, data); self.assertFalse(data['record']['sent'])
-        self.assertFalse(any(u.endswith('/send') for _, u, _ in self.fake.calls))
+        calls = list(self.fake.calls)
         self.fake.fail_send = 403
-        status, data = self.post('/api/spreadsheets/send', dict(file_hash=h, to=['buyer@client.com'], cc=[], subject='S', body='B', mode='send'))
-        self.assertEqual(status, 409); self.assertIn('Mail.Send', data['error'])
+        before = displayed_binding(self.base, h)
+        with patch('hosting.delivery.mailer.deliver') as provider:
+            for mode in ('draft', 'send'):
+                status, data = self.post('/api/spreadsheets/send', dict(file_hash=h, to=['buyer@client.com'], cc=[], subject='S', body='B', mode=mode))
+                self.assertEqual(status, 409, data); self.assertIn('paused', data['error'])
+            provider.assert_not_called()
+        self.assertEqual(self.fake.calls, calls)
+        self.assertEqual(displayed_binding(self.base, h), before)
 
 
 if __name__ == '__main__':

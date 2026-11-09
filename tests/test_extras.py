@@ -6,7 +6,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(__file__))
 from eos_fixture import build
 from hosting import sharepoint, shifts
-from test_shifts import FakeGraph, ENV, JOB, NAME
+from test_shifts import FakeGraph, ENV, JOB, NAME, seed_verified_source
 
 
 class TimelineTests(unittest.TestCase):
@@ -35,6 +35,7 @@ class ExtrasRouteTests(unittest.TestCase):
         self.graph = patch('hosting.sharepoint._open', lambda request, opener=None: fake(request)); self.graph.start()
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
         self.server.workspace_store = PostgresWorkspace('postgresql://test.invalid/x', FakeDatabase().connect)
+        seed_verified_source(self.server.workspace_store)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f'http://127.0.0.1:{self.server.server_port}'
 

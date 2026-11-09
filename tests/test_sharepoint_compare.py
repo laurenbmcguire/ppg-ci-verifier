@@ -107,17 +107,45 @@ class GraphLookupTests(unittest.TestCase):
         sharepoint._token.update(value=None, expires=0)
         sharepoint._site_ids.clear()
 
-    def test_finds_export_in_the_right_site(self):
-        fake = FakeGraph({('BriggsStratton_Auburn', 'Daily Data Exports/2230-OWENS-BASCO/2026-10-07/2230-OWENS-BASCO 2026-10-07.csv'): b'data'})
+    def test_reads_only_the_exact_assigned_list(self):
+        calls = []
+        base = '/sites/site-exact/lists/list-exact'
+        def graph(request, timeout=None):
+            calls.append(request.full_url)
+            if 'oauth2/v2.0/token' in request.full_url:
+                return io.BytesIO(json.dumps({'access_token': 'tok', 'expires_in': 3600}).encode())
+            path = urllib.request.unquote(request.full_url.split('/v1.0', 1)[1])
+            if path == base:
+                value = dict(id='list-exact', displayName='Data #2230-OWENS-BASCO',
+                             webUrl='https://example.com/sites/Synthetic/Lists/Exact')
+            elif path.startswith(base + '/columns?'):
+                value = {'value': [dict(name=n, displayName=n) for n in ('Date', 'Identifier', 'Quantity Inspected', 'Quantity Rejected')]}
+            elif path.startswith(base + '/items?'):
+                value = {'value': [dict(id='1', fields={'Date': '2026-10-07', 'Identifier': 'synthetic-1',
+                                                      'Quantity Inspected': 34, 'Quantity Rejected': 1})]}
+            else:
+                raise AssertionError('Unexpected cross-source request: ' + path)
+            return io.BytesIO(json.dumps(value).encode())
         with patch.dict(os.environ, ENV):
-            name, content, meta = sharepoint.fetch_export('2230-OWENS-BASCO', '2026-10-07', opener=fake)
-        self.assertEqual((name, content, meta['site']), ('2230-OWENS-BASCO 2026-10-07.csv', b'data', 'BriggsStratton_Auburn'))
-        self.assertTrue(all('client_secret' not in c for c in fake.calls))  # secret only in the POST body
+            name, content, meta = sharepoint.fetch_export('2230-OWENS-BASCO', '2026-10-07', opener=graph,
+                                                        site_id='site-exact', list_id='list-exact')
+        self.assertIn('SharePoint list', name)
+        self.assertIn(b'synthetic-1', content)
+        self.assertEqual(meta['capture']['site_id'], 'site-exact')
+        self.assertEqual(meta['capture']['list_id'], 'list-exact')
+        self.assertTrue(meta['capture']['terminal'])
+        self.assertTrue(all('client_secret' not in c and '/drive/' not in c for c in calls))
+
+    def test_job_only_lookup_cannot_fall_back_to_named_export(self):
+        fake = FakeGraph({})
+        with patch.dict(os.environ, ENV), self.assertRaisesRegex(sharepoint.SharePointError, 'verified site_id and list_id'):
+            sharepoint.fetch_export('2230-OWENS-BASCO', '2026-10-07', opener=fake)
+        self.assertEqual(fake.calls, [])
 
     def test_not_found_and_not_configured(self):
         with patch.dict(os.environ, ENV):
             with self.assertRaises(sharepoint.SharePointNotFound):
-                sharepoint.fetch_export('NOPE-JOB-1', '2026-10-07', opener=FakeGraph({}))
+                sharepoint.fetch_export('NOPE-JOB-1', '2026-10-07', opener=FakeGraph({}), site_id='site-exact', list_id='missing')
         with patch.dict(os.environ, {}, clear=True):
             self.assertFalse(sharepoint.configured())
             with self.assertRaises(sharepoint.SharePointNotConfigured):
@@ -129,7 +157,7 @@ class GraphLookupTests(unittest.TestCase):
                 return io.BytesIO(json.dumps({'access_token': 'tok', 'expires_in': 3600}).encode())
             raise urllib.error.HTTPError(request.full_url, 403, 'forbidden', {}, None)
         with patch.dict(os.environ, ENV), self.assertRaises(sharepoint.SharePointError) as caught:
-            sharepoint.fetch_export('2230-OWENS-BASCO', '2026-10-07', opener=deny)
+            sharepoint.fetch_export('2230-OWENS-BASCO', '2026-10-07', opener=deny, site_id='site-exact', list_id='list-exact')
         self.assertIn('not allowed', str(caught.exception))
         self.assertNotIn('very-secret-value', str(caught.exception))
 
@@ -203,6 +231,11 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(code, 200, res)
         file_hash = res['item']['file_hash']
         code, res = self.post('/api/spreadsheets/sharepoint', {'file_hash': file_hash})
+        self.assertEqual(code, 200, res)
+        self.assertEqual(res['item']['sharepoint']['status'], 'error')
+        self.assertIn('assignment', res['item']['sharepoint']['message'].lower())
+        with patch.object(SpreadsheetInbox, 'assignment_for', return_value=dict(status='source', site_id='site-exact', list_id='list-exact')):
+            code, res = self.post('/api/spreadsheets/sharepoint', {'file_hash': file_hash})
         self.assertEqual(code, 200, res)
         self.assertEqual(res['item']['sharepoint']['status'], 'not_configured')
         self.assertEqual((res['item']['sharepoint']['job'], res['item']['sharepoint']['day']), ('2230-OWENS-BASCO', '2026-10-07'))

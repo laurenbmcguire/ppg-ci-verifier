@@ -6,6 +6,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 import test_autopilot
 from eos_fixture import build, ROWS
 from hosting import sharepoint_jobs
+from unittest.mock import patch
+from decimal import Decimal
 
 
 def job_list():
@@ -17,6 +19,8 @@ def job_list():
     ws.append(['Grammer', 'Shannon, MS', 'Grammer_Shannon', '2222-SUNWAY-GRAMMS', 'Job', 'Active', 55, None, '2026-10-28', 9, '', '', 'List web address says 2232 (internal name only)'])
     ws.append(['AVIIXA', '—', 'AVIIXA', 'HyundaiTemplate', 'Template / Test', 'Template / Test', 0, None, None, None, '', '', ''])
     b = io.BytesIO(); wb.save(b); return b.getvalue()
+
+from test_send import displayed_binding
 
 
 class Lookup(unittest.TestCase):
@@ -34,6 +38,41 @@ class Lookup(unittest.TestCase):
 class Summaries(test_autopilot.Autopilot):
     test_only_sure_fixes_and_never_sends = test_remove_duplicate_rows = test_paused_by_default = None
 
+    def setUp(self):
+        super().setUp()
+        self.assignment = dict(status='source', site_id='site-synthetic', list_id='list-synthetic',
+                               site='Synthetic', client_key='Synthetic', job='2230-OWENS-BASCO')
+        # These PDF route tests assume a separately verified assignment. Registry
+        # resolution and ambiguous assignments retain their own regression suites.
+        self.enterContext(patch('hosting.spreadsheet_inbox.SpreadsheetInbox.assignment_for', return_value=self.assignment))
+
+    def bind_verified_source(self, file_hash, day='2026-10-07'):
+        from hosting import reconcile
+        from hosting.spreadsheet_inbox import SpreadsheetInbox
+        from hosting.spreadsheets import CHECKER_VERSION
+        records, items = [], []
+        for n, row in enumerate(ROWS, 1):
+            values = dict(inspected=Decimal(row[2]), rejected=Decimal(row[3]), certified=Decimal(row[2])-Decimal(row[3]))
+            records.append(dict(sheet='1st Shift', row=15+n, columns={'inspected': 'F', 'rejected': 'H', 'certified': 'G'},
+                                source=dict(site_id='site-synthetic', list_id='list-synthetic', item=str(n)), values=values))
+            items.append(dict(item=str(n), day=day, day_basis='business_date', raw={
+                'QuantityInspected': row[2], 'QuantityRejected': row[3], 'QuantityOK': row[2]-row[3]}))
+        snapshot = dict(site_id='site-synthetic', list_id='list-synthetic', site='Synthetic',
+                        list=dict(id='list-synthetic', url='https://example.com/sites/Synthetic/Lists/Exact'),
+                        captured_at='2026-11-08T00:00:00Z', coverage=dict(complete=True, pages=1, items=len(items)), items=items,
+                        quantity_candidates={'inspected': ['QuantityInspected'], 'rejected': ['QuantityRejected'], 'certified': ['QuantityOK']},
+                        columns={n: dict(name=n, displayName=n) for n in ('QuantityInspected', 'QuantityRejected', 'QuantityOK')})
+        receipt = reconcile.compare(day, records, [], snapshot, report=dict(file_hash=file_hash, checker_version=CHECKER_VERSION))
+        self.assertTrue(receipt['verified'], receipt)
+        self.assertTrue(reconcile.counts_verified(receipt))
+        with self.server.workspace_store.session() as directory:
+            inbox = SpreadsheetInbox(directory)
+            item = inbox.get(file_hash)
+            item['source_reconciliation'] = receipt
+            item['source_reconciliation_status'] = 'verified'
+            with inbox.connect() as db:
+                inbox.save_check(db, item)
+
     def upload(self, rows, day='2026-10-07'):
         st, up = self.call('/api/spreadsheets/import', {'filename': f'2230-OWENS-BASCO - EOS - {day}.xlsx', 'content_base64': base64.b64encode(build(rows, day=day)).decode()})
         self.assertEqual(st, 200, up); return up['item']['file_hash']
@@ -49,16 +88,25 @@ class Summaries(test_autopilot.Autopilot):
         rows = [tuple(r) for r in ROWS]
         rows[1] = (rows[1][0], ' 80139189 ') + rows[1][2:]                     # formatting: cleaned automatically
         h = self.upload(rows)
+        status, proposals = self.call('/api/spreadsheets/fixes', {'file_hash': h})
+        self.assertEqual(status, 200, proposals)
+        chosen = [f for f in proposals['proposals'] if f.get('sure')]
+        self.assertEqual(len(chosen), 1)
+        status, corrected = self.call('/api/spreadsheets/apply-fixes', {'file_hash': h,
+            'changes': chosen, **displayed_binding(self.base, h)})
+        self.assertEqual(status, 200, corrected)
+        h = corrected['item']['file_hash']
         item = json.loads(self.get('/api/spreadsheet?id=' + h))
         self.assertEqual(item['sp_job']['status'], 'found')
-        st, out = self.call('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Lauren', 'override': True})
+        self.bind_verified_source(h)
+        st, out = self.call('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Lauren', 'override': True, 'note': 'Synthetic fixture reviewed', **displayed_binding(self.base, h)})
         self.assertEqual(st, 200, out)
         rec = out['change_summary']; self.assertTrue(rec and rec['differed']); self.assertEqual(rec['changes'], 1)
         pdf = self.get('/api/change-summary?id=' + rec['id'])
         self.assertTrue(pdf.startswith(b'%PDF'))
         from pypdf import PdfReader
         text = ' '.join(p.extract_text() for p in PdfReader(io.BytesIO(pdf)).pages)
-        for want in ('Report change summary', '2230-OWENS-BASCO', 'is in SharePoint', 'Automatic cleanup', 'Approved as final by Lauren'):
+        for want in ('Report change summary', '2230-OWENS-BASCO', 'Current SharePoint check', 'Status: verified', '80139189', 'Recorded approval by Lauren'):
             self.assertIn(want, text)
         st, lst = self.call('/api/change-summaries', {})
         self.assertEqual([r['id'] for r in lst['records']], [rec['id']])
@@ -70,10 +118,24 @@ class Summaries(test_autopilot.Autopilot):
     def test_matching_report_needs_no_pdf(self):
         self.call('/api/settings/sharepoint-jobs', {'content_base64': base64.b64encode(job_list()).decode()})
         h = self.upload([tuple(r) for r in ROWS], day='2026-10-08')
-        st, out = self.call('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Lauren', 'override': True})
+        self.bind_verified_source(h, day='2026-10-08')
+        st, out = self.call('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Lauren', 'override': True, 'note': 'Synthetic fixture reviewed', **displayed_binding(self.base, h)})
         self.assertEqual(st, 200, out)
-        if out['change_summary'] is not None:                                      # only when something differed or was open
-            self.assertTrue(out['change_summary']['open'] or out['change_summary']['differences'])
+        self.assertIsNone(out['change_summary'])  # complete exact-version match needs no difference record
+
+    def test_clean_report_without_current_source_receipt_keeps_hold_in_pdf(self):
+        h = self.upload([tuple(r) for r in ROWS], day='2026-10-08')
+        st, out = self.call('/api/spreadsheets/approve', {'file_hash': h, 'approver': 'Lauren', 'override': True,
+            'note': 'Synthetic internal review only', **displayed_binding(self.base, h)})
+        self.assertEqual(st, 200, out)
+        rec = out['change_summary']
+        self.assertEqual(rec['source_receipt']['status'], 'held')
+        self.assertTrue(rec['differed'])
+        from pypdf import PdfReader
+        text = ' '.join(p.extract_text() for p in PdfReader(io.BytesIO(self.get('/api/change-summary?id=' + rec['id']))).pages)
+        self.assertIn('HOLD: current exact-version source verification', text)
+        self.assertIn('Recorded approval by Lauren', text)
+        self.assertNotIn('Matched SharePoint and needed no changes.', text)
 
 
 if __name__ == '__main__':

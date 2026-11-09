@@ -51,7 +51,7 @@ def entries(saved):
     """Seed entries plus the ones people verified in the app (theirs win on the same client/site/job/source)."""
     out = {}
     for e in SEED + list(saved or []):
-        out[(e.get('client_key'), e.get('site'), str(e.get('job')), e.get('source'))] = e
+        out[(e.get('client_key'), e.get('site_id') or e.get('site'), str(e.get('job')), e.get('list_id'), e.get('source'))] = e
     return list(out.values())
 
 
@@ -60,16 +60,20 @@ def candidates_for(job, registry, snapshot):
     found = {}
     for e in registry:
         if e.get('job') and _same_job(job, e['job']):
-            found[(e['client_key'], e.get('site'))] = dict(e, verified=bool(e.get('verified')), origin='registry')
+            found[(e['client_key'], e.get('site_id') or e.get('site'), e.get('list_id'))] = dict(e, verified=bool(e.get('verified')), origin='registry')
     for c in snapshot or []:
         for j in c.get('jobs') or []:
             if _same_job(job, j.get('job')):
-                key = (c['key'], j.get('site'))
+                key = (c['key'], j.get('site_id') or j.get('site'), j.get('list_id'))
+                if not j.get('site_id'):
+                    matches = [k for k, v in found.items() if v.get('client_key') == c['key'] and v.get('site') == j.get('site') and v.get('list_id') == j.get('list_id')]
+                    if len(matches) == 1:
+                        key = matches[0]
                 if key in found:
                     found[key].setdefault('url', j.get('url'))
                     continue
                 found[key] = dict(client_key=c['key'], client=c.get('client'), site=j.get('site'), job=j.get('job'),
-                                  list_id=j.get('list_id'), url=j.get('url'), verified=False, origin='sharepoint')
+                                  site_id=j.get('site_id'), list_id=j.get('list_id'), url=j.get('url'), verified=False, origin='sharepoint')
     return list(found.values())
 
 
@@ -114,7 +118,7 @@ def resolve(result, filename, job, day, registry, snapshot, manual=None):
     out = dict(business_date=day, evidence=[], candidates=[])
     if manual:
         return dict(out, status='manual', client_key=manual.get('client_key'), client=manual.get('client'), job=manual.get('job') or job,
-                    site=manual.get('site'), list_id=manual.get('list_id'), source=manual.get('source'),
+                    site=manual.get('site'), site_id=manual.get('site_id'), list_id=manual.get('list_id'), source=manual.get('source'),
                     evidence=[f'Assigned by {manual.get("by") or "a reviewer"} on {str(manual.get("at") or "")[:10]}.'], assigned=manual)
     sites = sorted({l.get('site') for l in (result.get('dataset_selection') or {}).get('source_lists') or [] if l.get('site')})
     title_hint = (result.get('report_identity') or {}).get('client')
@@ -125,7 +129,7 @@ def resolve(result, filename, job, day, registry, snapshot, manual=None):
         return dict(out, status='source', client_key=e['client_key'], client=e['client'], job=pratt, job_number=None, source=pratt,
                     evidence=[f'Pratt & Whitney source "{pratt}" (no verified job number, shown by source name).'])
     cands = candidates_for(job, registry, snapshot) if job else []
-    out['candidates'] = [{k: c.get(k) for k in ('client_key', 'client', 'site', 'job', 'list_id', 'verified', 'separate', 'url')} for c in cands]
+    out['candidates'] = [{k: c.get(k) for k in ('client_key', 'client', 'site', 'site_id', 'job', 'list_id', 'verified', 'separate', 'url')} for c in cands]
     if not job:
         return dict(out, status='unmatched', evidence=['No job number was found in the report.'])
     if sites:
@@ -180,7 +184,7 @@ def resolve(result, filename, job, day, registry, snapshot, manual=None):
 
 def _pick(out, c, job, status):
     return dict(out, status=status, client_key=c['client_key'], client=c.get('client'), job=c.get('job') or job,
-                site=c.get('site'), list_id=c.get('list_id'))
+                site=c.get('site'), site_id=c.get('site_id'), list_id=c.get('list_id'))
 
 
 def label(a):
@@ -193,7 +197,7 @@ def label(a):
 def assign(inbox, file_hash, choice, user, reason, current=None, remember=False):
     """Save a person's client/job choice for one file. Nothing about the report itself changes."""
     at = datetime.now(timezone.utc).isoformat()
-    record = {k: choice.get(k) for k in ('client_key', 'client', 'job', 'site', 'list_id', 'source')}
+    record = {k: choice.get(k) for k in ('client_key', 'client', 'job', 'site', 'site_id', 'list_id', 'source')}
     if not record.get('client_key') or not (record.get('job') or record.get('source')):
         raise ValueError('Choose a client and a job.')
     record.update(by=(user or {}).get('email') or 'reviewer', at=at, reason=(reason or '').strip()[:300] or None)
@@ -205,7 +209,7 @@ def assign(inbox, file_hash, choice, user, reason, current=None, remember=False)
     inbox.set_setting(LOG_KEY, log[-LOG_LIMIT:])
     if remember and record.get('site') and record.get('job'):
         saved = list(inbox.setting(REGISTRY_KEY, []) or [])
-        saved.append(dict({k: record[k] for k in ('client_key', 'client', 'job', 'site', 'list_id')}, verified=True,
+        saved.append(dict({k: record[k] for k in ('client_key', 'client', 'job', 'site', 'site_id', 'list_id')}, verified=True,
                           note=f'Verified by {record["by"]} on {at[:10]}.' + (f' {record["reason"]}' if record['reason'] else '')))
         inbox.set_setting(REGISTRY_KEY, saved)
     return record

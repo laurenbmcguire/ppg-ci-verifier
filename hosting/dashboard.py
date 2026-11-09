@@ -404,23 +404,58 @@ def build_slides(d):
 
 
 # ---------------------------------------------------------------- executive overview (all jobs)
+def _ov_number(value):
+    return 'Unknown' if value is None else format(Decimal(str(value)), ',f')
+
+
 def _pctf(v, digits=1):
     return '—' if v is None else f'{v:.{digits}f}%'
 
 
 def _ov_kpis(o):
     t = o['totals']
-    return [('Errors caught before the client', _fmt(t['caught']), 'rej'), ('Daily reports checked', _fmt(t['reports']), ''),
-            ('Corrected before sending', _fmt(t['corrected']), ''), ('Sent on time', '—' if t['on_time_pct'] is None else f'{t["on_time_pct"]:.0f}%', ''),
-            ('Parts inspected', _fmt(t['inspected']), '')]
+    return [('First-original findings (current review)', _fmt(t['caught']), 'rej'), ('Selected daily reports', _fmt(t['reports']), ''),
+            ('Reports with correction records', _fmt(t['corrected']), ''), ('Recorded sends on time', 'Unknown' if t['on_time_pct'] is None else f'{t["on_time_pct"]:.1f}%', ''),
+            ('Reported parts inspected', _ov_number(t['inspected']), '')]
+
+
+def _ov_evidence(o):
+    t = o['totals']
+    lines = ['Client exposure: Unknown. No immutable delivery snapshot establishes what the client saw.',
+             'The headline counts findings in current reviews of earliest original uploads, not confirmed distinct errors. '
+             'If an original is absent, the earliest saved copy is used. '
+             f'{_fmt(t.get("current_issues", 0))} listed findings remain on the selected versions.',
+             'Each source/job/report date contributes one selected version: recorded sent, then currently approved, then corrected copy, then newest. '
+             'Selection does not prove that independent uploads are revisions of the same report.']
+    for field, label in (('inspected', 'Inspected'), ('rejected', 'Rejected'), ('certified', 'Accepted')):
+        value = _ov_number(t.get(field))
+        known = _ov_number(t.get(field+'_known'))
+        lines.append(f'{label}: {value}. Known subtotal: {known}; complete for {_fmt(t.get(field+"_complete_reports", 0))} of {_fmt(t["reports"])} selected reports. '
+                     f'{_fmt(t.get(field+"_incompatible_reports", 0))} use incompatible units.')
+        if t.get(field+'_range_exceeded'):
+            lines.append(f'{label} exceeds supported numeric precision or range; its total and rate are not shown.')
+    lines.append('Reject rate: ' + ('Unknown because quantities are incomplete, incompatible, or outside supported numeric precision.' if t.get('rate') is None else _pctf(t['rate'], 2)) )
+    lines.append(f'Median upload-to-send time uses {_fmt(t.get("turnaround_reports", 0))} reports with valid timestamps. '
+                 f'{_fmt(t.get("on_time_unknown", 0))} recorded sends have unknown timing.')
+    cov = (o.get('statistics') or {}).get('coverage') or {}
+    lines.append(f'Coverage: {_fmt(cov.get("excluded_identity", 0))} versions excluded for missing or invalid job/date; '
+                 f'{_fmt(cov.get("excluded_assignment", 0))} for unresolved source assignment; '
+                 f'{_fmt(cov.get("competing_original_groups", 0))} groups contain multiple independent original uploads. '
+                 f'{_fmt(cov.get("first_original_missing_reports", 0))} selected reports have no saved original. '
+                 f'{_fmt(cov.get("first_order_unknown_reports", 0))} groups have incomplete upload timestamps, so the earliest-original order is uncertain. '
+                 f'{_fmt(cov.get("conflicting_client_groups", 0))} groups were excluded for conflicting client assignments.')
+    if not t.get('caught_complete', True) or not t.get('current_issues_complete', True):
+        lines.append('Some finding lists are truncated or original uploads are absent. The displayed finding counts are known listed findings only.')
+    lines.append('Quantity completeness does not independently verify the source data.')
+    return '<div class="evidence">' + ''.join(f'<p class="sub">{_e(x)}</p>' for x in lines) + '</div>'
 
 
 def _ov_table(o):
-    rows = ''.join(f'<tr><td>{_e(j["job"])}</td><td class="num">{_fmt(j["days"])}</td><td class="num">{_fmt(j["inspected"])}</td>'
-                   f'<td class="num">{_pctf(j["rate"])}</td><td class="num">{_fmt(j["caught"])}</td>'
+    rows = ''.join(f'<tr><td>{_e(j["job"])}<br><small>{_e(j.get("source_label") or "")}</small></td><td class="num">{_fmt(j["days"])}</td><td class="num">{_ov_number(j["inspected"])}</td>'
+                   f'<td class="num">{_pctf(j["rate"], 2) if j["rate"] is not None else "Unknown"}</td><td class="num">{_fmt(j["caught"])}</td>'
                    f'<td class="num">{_fmt(j["corrected"])}</td><td class="num">{_fmt(j["sent"])} of {_fmt(j["days"])}</td></tr>' for j in o['jobs'])
     return ('<table><thead><tr><th>Job</th><th class="num">Days</th><th class="num">Inspected</th><th class="num">Reject rate</th>'
-            '<th class="num">Errors caught</th><th class="num">Corrected</th><th class="num">Sent</th></tr></thead><tbody>'
+            '<th class="num">First-original findings</th><th class="num">Correction records</th><th class="num">Recorded sends</th></tr></thead><tbody>'
             + (rows or '<tr><td colspan="7" class="empty">No reports in this period.</td></tr>') + '</tbody></table>')
 
 
@@ -431,15 +466,16 @@ def build_overview_page(o):
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PPG Quality: Quality Overview, {_e(o['label'])}</title><style>{CSS}</style></head>
 <body>
-<header class="band"><div class="brand">PPG QUALITY</div><h1>Quality overview</h1><p>{_e(o['label'])} · {_fmt(t['jobs'])} job{'s' if t['jobs'] != 1 else ''}</p></header>
+<header class="band"><div class="brand">PPG QUALITY</div><h1>Quality overview</h1><p>{_e(o['label'])} · {_fmt(t['jobs'])} job/source groups</p></header>
 <main class="wrap">
 <section class="kpis">{kpi_html}</section>
 <section class="grid">
-<div class="card"><h2>What was caught</h2><p class="sub">{_fmt(t['caught'])} errors found and fixed before the client saw them, {_fmt(t['must_fix'])} of them must-fix.</p>{_hbars(o['categories'][:9], lambda i: i['reason'], lambda i: i['count'], '#c0392b')}</div>
-<div class="card"><h2>Reports out the door</h2><p class="sub">Daily reports sent to clients from the verifier.</p>
-{_hbars([dict(reason='Sent', count=t['sent']), dict(reason='Sent on time', count=t['on_time']), dict(reason='Corrected first', count=t['corrected']), dict(reason='Still on Hold', count=t['open'])], lambda i: i['reason'], lambda i: i['count'])}
+<div class="card"><h2>What was caught</h2><p class="sub">{_fmt(t['caught'])} listed first-original findings in current reviews; {_fmt(t['must_fix'])} marked must-fix. These are not verified client outcomes.</p>{_hbars(o['categories'], lambda i: i['reason'], lambda i: i['count'], '#c0392b')}</div>
+<div class="card"><h2>Recorded report activity</h2><p class="sub">Verifier records only; client receipt and external sending are unknown.</p>
+{_hbars([dict(reason='Recorded sends', count=t['sent']), dict(reason='Known on-time sends', count=t['on_time']), dict(reason='Correction records', count=t['corrected']), dict(reason='Still on Hold', count=t['open'])], lambda i: i['reason'], lambda i: i['count'])}
 <p class="sub" style="margin-top:12px">{'Typical time from upload to sent: ' + _fmt(t['turnaround'], 1) + ' hours.' if t['turnaround'] is not None else ''}</p></div>
 <div class="card wide"><h2>By job</h2><div class="scroll">{_ov_table(o)}</div></div>
+<div class="card wide"><h2>Definitions and data coverage</h2>{_ov_evidence(o)}</div>
 </section>
 <footer>Prepared by PPG Quality from the daily end-of-shift reports checked in the verifier, {_e(o['start'])} to {_e(o['end'])}, on {_e(o['generated'])}.</footer>
 </main></body></html>"""
@@ -452,14 +488,15 @@ def build_overview_slides(o):
     worst = sorted([j for j in o['jobs'] if j['rate'] is not None], key=lambda j: -j['rate'])[:6]
     slides = [
         f'<section class="slide title"><div class="brand">PPG QUALITY</div><h1>Quality overview</h1><p>{_e(o["label"])}</p>{foot}</section>',
-        f'<section class="slide"><h2>At a glance</h2><p class="lede">{_fmt(t["reports"])} daily reports across {_fmt(t["jobs"])} jobs; {_fmt(t["caught"])} errors caught before any client saw them.</p><div class="body"><div class="tiles">{tiles}</div></div>{foot}</section>',
-        f'<section class="slide"><h2>What we caught</h2><p class="lede">Every one found and fixed before the report went out.</p><div class="body">{_hbars(o["categories"][:8], lambda i: i["reason"], lambda i: i["count"], "#c0392b")}</div>{foot}</section>',
-        f'<section class="slide"><h2>Reports out the door</h2><p class="lede">{_fmt(t["sent"])} sent{", " + _pctf(t["on_time_pct"], 0) + " on time" if t["on_time_pct"] is not None else ""}{"; typically " + _fmt(t["turnaround"], 1) + " hours from upload to sent" if t["turnaround"] is not None else ""}.</p><div class="body">'
-        + _hbars([dict(reason='Sent', count=t['sent']), dict(reason='Sent on time', count=t['on_time']), dict(reason='Corrected first', count=t['corrected']), dict(reason='Still on Hold', count=t['open'])], lambda i: i['reason'], lambda i: i['count'])
+        f'<section class="slide"><h2>At a glance</h2><p class="lede">{_fmt(t["reports"])} selected daily reports across {_fmt(t["jobs"])} job/source groups; {_fmt(t["caught"])} listed findings on first-original versions in current reviews. Client exposure is unknown.</p><div class="body"><div class="tiles">{tiles}</div></div>{foot}</section>',
+        f'<section class="slide"><h2>Listed first-original findings</h2><p class="lede">Current reviews, not confirmed unique errors or proof of prevention. All categories shown.</p><div class="body">{_hbars(o["categories"], lambda i: i["reason"], lambda i: i["count"], "#c0392b")}</div>{foot}</section>',
+        f'<section class="slide"><h2>Recorded report activity</h2><p class="lede">{_fmt(t["sent"])} recorded verifier sends{", " + _pctf(t["on_time_pct"], 1) + " on time" if t["on_time_pct"] is not None else "; on-time rate unknown"}{"; median " + _fmt(t["turnaround"], 1) + " hours from upload to send" if t["turnaround"] is not None else ""}. External sending and client receipt are unknown.</p><div class="body">'
+        + _hbars([dict(reason='Recorded sends', count=t['sent']), dict(reason='Known on-time sends', count=t['on_time']), dict(reason='Correction records', count=t['corrected']), dict(reason='Still on Hold', count=t['open'])], lambda i: i['reason'], lambda i: i['count'])
         + f'</div>{foot}</section>',
-        f'<section class="slide"><h2>Reject rate by job</h2><p class="lede">Highest first.</p><div class="body">{_hbars([dict(reason=j["job"], count=round(j["rate"], 1)) for j in worst], lambda i: i["reason"], lambda i: i["count"], "#20594d", "%")}</div>{foot}</section>',
-        f'<section class="slide"><h2>By job</h2><p class="lede">{_fmt(t["jobs"])} jobs.</p><div class="body">{_ov_table(o)}</div>{foot}</section>',
-        f'<section class="slide title"><div class="brand">PPG QUALITY</div><h1>Thank you</h1><p>The client never finds an error we did not find first.</p>{foot}</section>',
+        f'<section class="slide"><h2>Reject rate by job</h2><p class="lede">Up to six highest known rates. Incomplete or incompatible quantities are excluded, not treated as zero.</p><div class="body">{_hbars([dict(reason=j["job"], count=round(j["rate"], 2)) for j in worst], lambda i: i["reason"], lambda i: i["count"], "#20594d", "%")}</div>{foot}</section>',
+        f'<section class="slide"><h2>By job</h2><p class="lede">{_fmt(t["jobs"])} job/source groups.</p><div class="body">{_ov_table(o)}</div>{foot}</section>',
+        f'<section class="slide"><h2>Definitions and data coverage</h2><div class="body">{_ov_evidence(o)}</div>{foot}</section>',
+        f'<section class="slide title"><div class="brand">PPG QUALITY</div><h1>Quality review</h1><p>Check unresolved findings and missing source values before relying on these reports.</p>{foot}</section>',
     ]
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

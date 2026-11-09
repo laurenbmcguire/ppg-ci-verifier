@@ -35,7 +35,7 @@ class AIFixTests(unittest.TestCase):
                 dict(sheet='No Sheet', cell='A1', before='', after='x', reason='bad sheet', confidence='medium'),
                 dict(sheet='1st Shift', cell='E17', before='8O10808540', after='dup', reason='same cell twice', confidence='medium'),
             ]
-            record = inbox.ai_fixes(item['file_hash'], opener=opener_for(fixes, [dict(issue='Reject rate high', reason='needs a person')]))
+            record = inbox.ai_fixes(item['file_hash'], expected_check_hash=item['check_hash'], opener=opener_for(fixes, [dict(issue='Reject rate high', reason='needs a person')]))
             self.assertEqual(record['status'], 'done')
             self.assertEqual([f['cell'] for f in record['fixes']], ['E17'])
             self.assertEqual(record['dropped'], 3)

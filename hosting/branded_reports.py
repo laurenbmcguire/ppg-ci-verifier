@@ -18,7 +18,7 @@ SHIFT_SHEETS={'1st Shift':'1','2nd Shift':'2','3rd Shift':'3'}
 QUANTITIES={'inspected':6,'rejected':9,'certified':10}
 SUMMARY_BRAND='PPG QUALITY   /   END OF SHIFT DATA AND BILLING REPORT'
 DETAIL_BRAND='PPG QUALITY / DAILY INSPECTION REPORT'
-MAX_FINDINGS=200
+from hosting.limits import MAX_FINDINGS  # every finding is stored (bounded only against hostile files)
 
 
 def canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)

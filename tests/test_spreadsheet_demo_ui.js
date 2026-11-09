@@ -47,6 +47,7 @@ async function harness(initialReview = review()) {
   const calls = [], actions = [], queuedReviews = new Map();
   const reviews = new Map([[A, initialReview], [B, review(B)], [DRAFT, review(DRAFT, {proposals: [], download_url: '/api/spreadsheets/demo/download?id=' + DRAFT})]]);
   vm.runInNewContext(script, {
+    window: {},
     CI_DEVELOPMENT_EXAMPLES: [],
     document: {getElementById: id => nodes[id], createElement: tag => new Element(tag)},
     fetch: (url, options) => {
@@ -67,6 +68,8 @@ async function harness(initialReview = review()) {
   });
   await tick();
   const detail = nodes['spreadsheet-detail'];
+  // Scope review assertions to the demo panel, not unrelated workbook action controls.
+  const demo = () => detail.querySelectorAll('section').find(el => el.className === 'spreadsheet-demo-review');
   const choose = async id => {
     await nodes['spreadsheet-list'].querySelectorAll('button').find(b => b.dataset.id === id).listeners.click();
     await tick();
@@ -84,7 +87,7 @@ async function harness(initialReview = review()) {
     for (const input of detail.querySelectorAll('input')) assert.equal(input.disabled, expected);
   };
   await choose(A);
-  return {nodes, detail, calls, actions, queuedReviews, reviews, choose, buttons, click, checks, posts, busy};
+  return {nodes, detail, demo, calls, actions, queuedReviews, reviews, choose, buttons, click, checks, posts, busy};
 }
 
 for (const [label, decision, index] of [['Demo Accept change', 'approve', 0], ['Demo Reject change', 'deny', 1]]) {
@@ -138,7 +141,7 @@ test('accepted selected proposal creates and displays a new unapproved draft wit
   assert.equal(h.detail.querySelectorAll('h3')[0].textContent, 'synthetic-draft.xlsx · version 2');
   assert.match(h.nodes['spreadsheet-message'].textContent, /original workbook and source are unchanged/);
   assert.match(h.nodes['spreadsheet-message'].textContent, /decisions do not carry forward/);
-  assert.equal(h.detail.querySelectorAll('a')[0].href, '/api/spreadsheets/demo/download?id=' + DRAFT);
+  assert.equal(h.demo().querySelectorAll('a')[0].href, '/api/spreadsheets/demo/download?id=' + DRAFT);
   assert.equal(h.checks().length, 0); h.busy(false);
 });
 
@@ -184,7 +187,7 @@ for (const apply of [false, true]) for (const networkFailure of [false, true]) t
 
 test('ineligible review displays notice and no decision or apply controls', async () => {
   const h = await harness(review(A, {eligible: false, notice: 'Synthetic file is not eligible.'}));
-  assert.equal(h.detail.querySelectorAll('button').length, 0);
+  assert.equal(h.demo().querySelectorAll('button').length, 0);
   assert.equal(h.checks().length, 0);
   assert.ok(h.detail.querySelectorAll('p').some(p => p.textContent === 'Synthetic file is not eligible.'));
   assert.equal(h.posts().length, 0);
@@ -195,7 +198,7 @@ test('download links accept only exact same-origin draft endpoint and lowercase 
   for (const url of ['https://example.invalid/draft.xlsx', '//example.invalid/draft.xlsx', 'javascript:alert(1)',
     safe + '&redirect=x', '/api/spreadsheets/demo/download?id=short', safe.replace(DRAFT, DRAFT.toUpperCase()), safe]) {
     const h = await harness(review(A, {eligible: false, download_url: url}));
-    const links = h.detail.querySelectorAll('a');
+    const links = h.demo().querySelectorAll('a');
     assert.equal(links.length, url === safe ? 1 : 0, url);
     if (links.length) assert.equal(links[0].href, safe);
   }
@@ -205,7 +208,7 @@ test('historical review exposes audit history, blocks decisions and navigates to
   const h = await harness(review(A, {current_version: false, superseded_by: DRAFT,
     decisions: [{proposal_id: 'p1', decision: 'approve'}], events: [{type: 'synthetic-applied'}]}));
   assert.equal(h.checks().length, 0);
-  assert.deepEqual(h.detail.querySelectorAll('button').map(button => button.textContent), ['Open latest corrected draft']);
+  assert.deepEqual(h.demo().querySelectorAll('button').map(button => button.textContent), ['Open latest corrected draft']);
   assert.ok(h.detail.querySelectorAll('summary').some(summary => summary.textContent === 'Historical spreadsheet review'));
   assert.ok(h.detail.querySelectorAll('p').some(p => p.textContent.includes('audit history only')));
   const history = h.detail.querySelectorAll('details').find(element =>
@@ -225,7 +228,7 @@ test('historical review with invalid successor hash has no navigation or mutatio
   for (const superseded_by of [null, '', 'short', DRAFT.toUpperCase(), DRAFT + '&redirect=x',
     'https://example.invalid/' + DRAFT]) {
     const h = await harness(review(A, {current_version: false, superseded_by}));
-    assert.equal(h.detail.querySelectorAll('button').length, 0, String(superseded_by));
+    assert.equal(h.demo().querySelectorAll('button').length, 0, String(superseded_by));
     assert.equal(h.checks().length, 0);
     assert.ok(h.detail.querySelectorAll('summary').some(summary => summary.textContent === 'Historical spreadsheet review'));
     assert.equal(h.posts().length, 0);

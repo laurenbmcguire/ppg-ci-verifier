@@ -42,8 +42,8 @@ _add('number_stored_as_text',
      'The number is stored as text, so Excel skips it when it adds up the totals.',
      'Retype it as a plain number (remove the apostrophe or set the cell format to Number).', True)
 _add('missing_cell quantity_missing',
-     'A cell that should hold a quantity is blank, so the total is too low or cannot be worked out.',
-     'Fill it in from the scan data, or enter 0 if nothing was counted.', True)
+     'A quantity cell is blank, so that total cannot be worked out. A blank is not zero: it means not recorded.',
+     'Fill it in only from the source record. If the source has no value, keep it blank and say why.', False)
 _add('missing_part_number part_number_missing',
      'Without a part number the row cannot be billed or matched to the customer records.',
      'Add the part number from the scan or the label.', True)
@@ -149,6 +149,12 @@ _add('summary_part_mismatch summary_part_not_in_records summary_value_without_re
      'The summary sheet does not agree with the record rows it is meant to summarize.',
      'Recalculate the summary in Excel or correct the record rows; the totals use the record rows.', True)
 
+_add('findings_incomplete',
+     'Some findings were counted but not stored, so nobody can review them.',
+     'Re-check the report so every finding is stored, then review them.', True)
+_add('awaiting_source_owner',
+     'A finding was sent to the source owner and is still waiting for an answer.',
+     'Record the answer and its evidence, then decide the finding.', True)
 _add('client_not_settled client_unmatched',
      'The report is not tied to one client and job for certain, so it could be filed or sent under the wrong client.',
      'Choose the client and job on the report (Client line, Choose client and job); the choice is kept with your name and reason.', False)
@@ -160,7 +166,7 @@ _add('record_set_ambiguous',
      'Confirm which sheet is the record set before approving.', False)
 _add('source_coverage_incomplete',
      'Not all of the SharePoint list could be read (access, throttling or an unknown layout), so the report cannot be verified against it.',
-     'Run the SharePoint check again later, or ask an admin to fix access; approve anyway only with a reason.', False)
+     'Run the SharePoint check again later, or ask an admin to restore complete source access before verification.', False)
 _add('source_discrepancies',
      'The report differs from the live SharePoint list.',
      'Open each difference, check the SharePoint item, and correct the report or the list.', True)
@@ -385,3 +391,18 @@ def lookup(code):
 def explain(code):
     """{'why', 'fix', 'sure'} for a code; unknown codes get the generic explanation and are never sure."""
     return dict(lookup(code) or GENERIC, only=WRITTEN.get(code or ''))
+
+_add('source_evidence_incomplete',
+     'Current complete inspection and rejection evidence is missing, stale or different from the report.',
+     'Review each difference and capture the complete assigned source again; do not treat blanks as zero.', True)
+_add('source_assignment_changed source_assignment_unavailable',
+     'The current client and source assignment does not match the saved comparison or cannot be verified.',
+     'Resolve the exact site and list, then compare the report with that source again.', True)
+
+_add('source_mapping_changed',
+     'The source column interpretation changed or is not confirmed for this exact site and list.',
+     'Confirm the exact-source columns and run the comparison again before verification.', True)
+
+_add('export_source_unconfirmed',
+     'The captured export cannot be tied to the exact source site, list and item.',
+     'Capture the exact assigned source again with complete source links or stable IDs.', True)

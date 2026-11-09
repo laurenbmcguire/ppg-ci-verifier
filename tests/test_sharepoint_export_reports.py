@@ -48,8 +48,8 @@ class SharePointExportTests(unittest.TestCase):
 class VerifyTests(unittest.TestCase):
     def test_dismissed_issues_leave_the_count(self):
         result = {'filename': 'x.csv', 'record_count': 5, 'checker_version': 'v',
-                  'findings': [dict(code='duplicate_row', sheet='S', row=4, message='Same as row 3'),
-                               dict(code='duplicate_row', sheet='S', row=9, message='Same as row 8')]}
+                  'findings': [dict(code='outlier', sheet='S', row=4, message='Unusual quantity'),
+                               dict(code='outlier', sheet='S', row=9, message='Unusual quantity')]}
         keys = [i['key'] for i in summarize(result)['issues']]
         result['ai_verify'] = dict(status='done', checker_version='v', verdicts={
             keys[0]: dict(verdict='not_an_issue', reason='Own record ID.', fixable=False),
@@ -62,3 +62,14 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(out['dismissed'][0]['verdict_reason'], 'Own record ID.')
         self.assertEqual(out['verify']['dismissed'], 1)
         self.assertEqual(len(summarize(result, use_verdicts=False)['issues']), 2)
+
+    def test_claude_cannot_settle_a_blocker_by_itself(self):
+        result = {'filename': 'x.csv', 'record_count': 5, 'checker_version': 'v',
+                  'findings': [dict(code='duplicate_row', sheet='S', row=4, message='Same as row 3')]}
+        key = summarize(result)['issues'][0]['key']
+        from hosting.review_summary import check_run
+        result['ai_verify'] = dict(status='done', verdicts={key: dict(verdict='not_an_issue', reason='Own record ID.')}, run=check_run(result))
+        out = summarize(result)
+        self.assertEqual(len(out['issues']), 1)   # still open for a person, with Claude's view attached
+        self.assertEqual(out['issues'][0]['verdict'], 'not_an_issue')
+        self.assertEqual(out['counts']['high'], 1)

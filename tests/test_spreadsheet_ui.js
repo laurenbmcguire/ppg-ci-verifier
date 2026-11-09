@@ -55,6 +55,7 @@ async function harness() {
   const reconciliationResponses = [];
   const fetch = (url, options) => {
     calls.push({url, options});
+    if (url === '/api/health') return Promise.resolve(response({development_demo: false, local_only: true}));
     if (url === '/api/spreadsheets') {
       return listResponses.length ? listResponses.shift().promise :
         Promise.resolve(response({spreadsheets: [report('A'), report('B')]}));
@@ -71,6 +72,7 @@ async function harness() {
     throw Error('Unexpected fetch: ' + url);
   };
   vm.runInNewContext(script, {
+    window: {},
     document: {getElementById: id => nodes[id], createElement: tag => new Element(tag)},
     fetch
   });

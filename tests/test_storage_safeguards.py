@@ -7,6 +7,7 @@ import unittest
 import zipfile
 from unittest.mock import patch
 
+from tests.review_request_fixture import apply_displayed, approve_displayed
 from hosting.fixes import apply_fixes
 from hosting.spreadsheet_inbox import SpreadsheetInbox
 from hosting.spreadsheets import inspect_spreadsheet
@@ -74,7 +75,7 @@ class ProposedRecheck(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             inbox = SpreadsheetInbox(root)
             item = inbox.ingest(NAME, sl_daily())
-            inbox.approve(item['file_hash'], 'Chris', note='looked fine', override=True)
+            approve_displayed(inbox, item['file_hash'], 'Chris', note='looked fine', override=True)
             # make the stored result look like the old checker (12 rows / 1,200 units)
             with inbox.connect() as db:
                 for table in ('spreadsheets', 'spreadsheet_checks'):

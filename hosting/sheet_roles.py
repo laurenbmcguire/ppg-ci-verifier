@@ -36,15 +36,64 @@ def _norm(value):
     return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9]+', ' ', str(value).lower())).strip()
 
 
-def parse_source_url(url):
-    """https://…/sites/<site>/Lists/<list>/<item>_.000 -> (site, list, item)."""
-    if not isinstance(url, str):
+def source_url_identity(url, *, list_only=False):
+    """Parse the complete HTTPS source URL, retaining origin and list identity."""
+    from urllib.parse import urlsplit, unquote, parse_qs
+    if not isinstance(url, str) or not url or url != url.strip() or any(ord(c) < 32 for c in url):
         return None
-    m = _URL_ITEM.search(url) or _URL_DISPFORM.search(url)
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.fragment or parsed.port not in (None, 443):
+            return None
+        if re.search(r'%(?:2f|5c|00)', parsed.path, re.I):
+            return None
+        path = unquote(parsed.path, errors='strict')
+    except (ValueError, UnicodeError):
+        return None
+    if any(ord(c) < 32 for c in path) or '%' in path or '\\' in path or '//' in path or any(p in ('.','..') for p in path.split('/')):
+        return None
+    m = re.fullmatch(r'/sites/([^/]+)/Lists/([^/]+)(?:/([^/]+))?/?', path, re.I)
     if not m:
         return None
-    from urllib.parse import unquote
-    return unquote(m.group(1)), unquote(m.group(2)), m.group(3)
+    site, name, tail = m.groups()
+    item = None
+    if tail:
+        direct = re.fullmatch(r'(\d+)_\.000', tail)
+        if direct:
+            item = direct.group(1)
+        elif tail.lower() == 'dispform.aspx':
+            ids = [v for k, values in parse_qs(parsed.query).items() if k.lower() == 'id' for v in values]
+            if len(ids) != 1 or not ids[0].isdigit():
+                return None
+            item = ids[0]
+        elif not (list_only and tail.lower() == 'allitems.aspx'):
+            return None
+    if not list_only and item is None:
+        return None
+    return dict(site=site, list=name, item=item, origin='https://' + parsed.hostname.lower(),
+                list_path=f'/sites/{site}/Lists/{name}'.casefold(), url=url)
+
+
+def bound_source_key(source):
+    """An exact local record identity, or None when its origin is unproven."""
+    source = source or {}
+    item = source.get('item')
+    if not item:
+        return None
+    if source.get('site_id') or source.get('list_id'):
+        return ('ids', source['site_id'], source['list_id'], str(item)) if source.get('site_id') and source.get('list_id') else None
+    linked = source_url_identity(source.get('url'))
+    if not linked or str(linked['item']) != str(item):
+        return None
+    if any(source.get(k) and source[k].casefold() != linked[k].casefold() for k in ('site','list')):
+        return None
+    return ('url', linked['origin'], linked['list_path'], str(item))
+
+
+def parse_source_url(url):
+    """Compatibility tuple only after strict full-URL parsing."""
+    identity = source_url_identity(url)
+    return (identity['site'], identity['list'], identity['item']) if identity else None
 
 
 def _item_id(value):
@@ -100,13 +149,18 @@ def attach_identity(sheet_rows, sheets, records):
                     continue
                 row = rows[r['row'] - 1] if r['row'] - 1 < len(rows) else []
                 site = lst = item = None
+                url_identity = None
                 if url_col is not None and url_col < len(row):
-                    parsed = parse_source_url(row[url_col])
-                    if parsed:
-                        site, lst, item = parsed
+                    url_identity = source_url_identity(row[url_col])
+                    if url_identity:
+                        site, lst, item = (url_identity[k] for k in ('site','list','item'))
                 if id_col is not None and id_col < len(row):
                     item = _item_id(row[id_col]) or item
                 r['source'] = dict(site=site, list=lst, item=item) if item else None
+                if item and url_col is not None and url_col < len(row) and isinstance(row[url_col], str):
+                    r['source']['url'] = row[url_col]
+                if item and url_identity:
+                    r['source'].update(url=url_identity['url'], origin=url_identity['origin'], list_path=url_identity['list_path'])
                 if item and ver_col is not None and ver_col < len(row) and row[ver_col] not in (None, ''):
                     r['source']['version'] = str(row[ver_col])
                 if item and mod_col is not None and mod_col < len(row) and row[mod_col] not in (None, ''):

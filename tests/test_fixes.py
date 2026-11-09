@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 from eos_fixture import build, ROWS
+from tests.review_request_fixture import apply_displayed
 from hosting.fixes import proposals, apply_fixes, FixError, fixed_filename
 from hosting.spreadsheets import inspect_spreadsheet
 from hosting.spreadsheet_inbox import SpreadsheetInbox
@@ -84,7 +85,7 @@ class FixTests(unittest.TestCase):
             inbox = SpreadsheetInbox(root)
             raw = seeded(); item = inbox.ingest(NAME, raw)
             props = inbox.fix_proposals(item['file_hash'])['proposals']
-            fixed = inbox.apply_fixes(item['file_hash'], props[:2])
+            fixed = apply_displayed(inbox, item['file_hash'], props[:2])
             self.assertEqual(fixed['filename'], fixed_filename(NAME))
             self.assertEqual(len(fixed['fixed_from']['changes']), 2)
             self.assertEqual(inbox.download(item['file_hash'])[1], raw)          # original unchanged
@@ -131,16 +132,20 @@ class FixRouteTests(unittest.TestCase):
         raw = seeded()
         status, data = self.post('/api/spreadsheets/import', {'filename': NAME, 'content_base64': base64.b64encode(raw).decode()})
         self.assertEqual(status, 200); h = data['item']['file_hash']
+        with urllib.request.urlopen(self.base + '/api/spreadsheet?id=' + h, timeout=30) as response:
+            displayed=json.loads(response.read())
         status, data = self.post('/api/spreadsheets/fixes', {'file_hash': h})
         self.assertEqual(status, 200); props = data['proposals']; self.assertGreaterEqual(len(props), 4)
-        status, data = self.post('/api/spreadsheets/apply-fixes', {'file_hash': h, 'changes': props})
+        status, data = self.post('/api/spreadsheets/apply-fixes', {'file_hash': h, 'changes': props, 'expected_check_hash': displayed['check_hash']})
         self.assertEqual(status, 200, data); fixed = data['item']
         self.assertTrue(fixed['filename'].endswith('(fixed).xlsx'))
         with urllib.request.urlopen(self.base + '/api/spreadsheets/download?id=' + fixed['file_hash'], timeout=30) as r:
             self.assertIn('attachment; filename="2230-OWENS-BASCO - EOS - 10.07.26 (fixed).xlsx"', r.headers['Content-Disposition'])
             body = r.read()
         self.assertEqual(body, apply_fixes(NAME, raw, props))
-        status, data = self.post('/api/spreadsheets/apply-fixes', {'file_hash': h, 'changes': [dict(sheet='1st Shift', cell='K16', after='1')]})
+        with urllib.request.urlopen(self.base + '/api/spreadsheet?id=' + h, timeout=30) as response:
+            displayed=json.loads(response.read())
+        status, data = self.post('/api/spreadsheets/apply-fixes', {'file_hash': h, 'expected_check_hash':displayed['check_hash'], 'changes': [dict(sheet='1st Shift', cell='K16', after='1')]})
         self.assertEqual(status, 409); self.assertIn('formula', data['error'])
 
 

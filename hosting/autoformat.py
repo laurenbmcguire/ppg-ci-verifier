@@ -60,11 +60,14 @@ def sure_changes(proposals):
 def _dup_rows(item):
     from hosting.review_summary import summarize
     return [(i['sheet'], int(i['row']), i['text']) for i in summarize(item)['issues']
-            if i.get('code') == 'duplicate_row' and i.get('row') and 'every field identical' in (i.get('text') or '')]
+            if i.get('code') == 'duplicate_row' and i.get('row') and 'every field identical' in (i.get('text') or '')
+            and not i.get('decision') and not i.get('previous_decision')]   # a row a person decided on stays
 
 
 def run(h, file_hash):
     """Clean an upload. Returns the cleaned item, or None when there was nothing the app was sure about."""
+    # Automatic edits have no displayed, immutable review binding. Keep uploads unchanged.
+    return None
     import os
     if os.environ.get('PPG_AUTOFORMAT', '1') == '0':   # off switch (also used by tests of the manual fix steps)
         return None
@@ -74,10 +77,11 @@ def run(h, file_hash):
     with h.store().session() as directory:
         inbox = SpreadsheetInbox(directory)
         props = inbox.fix_proposals(file_hash)['proposals']
-        cells = sure_changes(props)
+        held = inbox.held_cells(inbox.get(file_hash))   # what a person kept as recorded or deferred is never cleaned up
+        cells = [p for p in sure_changes(props) if (p.get('sheet'), str(p.get('cell') or '').upper()) not in held]
         current, steps = file_hash, [file_hash]
-        if cells:
-            current = inbox.apply_fixes(file_hash, [dict(p, source=f"{p.get('source') or 'Fix'} (automatic cleanup)") for p in cells])['file_hash']
+        if cells:   # every field of the proposal goes along (its SharePoint read, item and field), checked again under the lock
+            current = inbox.apply_fixes(file_hash, [dict(p, source=f"{p.get('source') or 'Fix'} (automatic cleanup)") for p in cells], auto=True)['file_hash']
         item = inbox.get(current)
         dups = _dup_rows(item)
         removed = []
@@ -87,8 +91,12 @@ def run(h, file_hash):
             moves = relocate_rows(item['filename'], data, [(s_, r, None) for s_, r, _t in dups])
             for c in moves:
                 c['reason'], c['source'] = 'Extra copy of a duplicate row taken out', 'Row taken out (automatic cleanup)'
-            current = inbox.apply_fixes(current, moves)['file_hash']
-            removed = [dict(sheet=s_, row=r, text=t) for s_, r, t in dups]
+            from hosting.fixes import FixError
+            try:
+                current = inbox.apply_fixes(current, moves, auto=True)['file_hash']
+                removed = [dict(sheet=s_, row=r, text=t) for s_, r, t in dups]
+            except FixError:
+                pass   # taking the row out would move a cell a person decided on: left for a person
         if current == file_hash:
             return None
     kinds = Counter(label(p) for p in cells)

@@ -34,7 +34,7 @@ SUMMARY_BINDING = {'completed': 'Daily Summary!B24', 'pass': 'Daily Summary!C24'
                    'multi_complete': 'Daily Summary!B31',
                    'defect_occurrences': 'Daily Summary!B40'}
 LIST_KEYS = {'main': 'DCA Main Audit', 'multi': 'Multi-pack'}
-MAX_FINDINGS = 200
+from hosting.limits import MAX_FINDINGS  # every finding is stored (bounded only against hostile files)
 MAX_RECORDS = 10000
 COUNT_FIELDS = ('completed', 'pass', 'fail', 'in_progress')
 

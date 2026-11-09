@@ -116,14 +116,18 @@ if __name__ == '__main__':
 
 
 class SharePointListChoice(unittest.TestCase):
-    def test_pinned_list_wins_over_the_more_recently_modified_one(self):
+    def test_global_pin_does_not_replace_exact_source_identity(self):
         from unittest.mock import patch
         from hosting import sharepoint
         sites = [('Hyundai_Montgomery', 'h', [dict(id=HY_LIST, displayName='Data #2207', lastModifiedDateTime='2026-11-07T10:00:00Z')]),
                  ('SLAlabama_AlexanderCity', 's', [dict(id=SL_LIST, displayName='Data #2207', lastModifiedDateTime='2026-11-01T10:00:00Z')])]
         with patch('hosting.sharepoint.client_sites', return_value=sites):
-            name, _, lst = sharepoint._find_list('2207')
-        self.assertEqual((name, lst['id']), ('SLAlabama_AlexanderCity', SL_LIST))
+            with self.assertRaisesRegex(sharepoint.SharePointError, 'Ambiguous'):
+                sharepoint._find_list('2207')
+        selected = dict(sites[1][2][0], webUrl='https://x/sites/SLAlabama_AlexanderCity/Lists/data')
+        with patch('hosting.sharepoint._get', return_value=selected):
+            name, sid, lst = sharepoint._find_list('2207', site_id='s', list_id=SL_LIST)
+        self.assertEqual((name, sid, lst['id']), ('SLAlabama_AlexanderCity', 's', SL_LIST))
 
 
 class DiscoveryCoverage(unittest.TestCase):
@@ -136,8 +140,8 @@ class DiscoveryCoverage(unittest.TestCase):
             if url.startswith('/sites/b/lists'):
                 raise sharepoint.SharePointError('Access denied (403).')
             if url.startswith('/sites/a/lists'):
-                return {'value': [{'id': 'l1', 'displayName': 'Data #2207'}], '@odata.nextLink': 'page2'}
-            if url == 'page2':
+                return {'value': [{'id': 'l1', 'displayName': 'Data #2207'}], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/sites/a/lists?$skiptoken=page2'}
+            if url == 'https://graph.microsoft.com/v1.0/sites/a/lists?$skiptoken=page2':
                 return {'value': [{'id': 'l2', 'displayName': '2214-SLAL-SLAL'}]}
             return None
         with patch('hosting.sharepoint._get', get), patch.dict('os.environ', {'SHAREPOINT_SITES': ''}):

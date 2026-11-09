@@ -102,12 +102,7 @@ def _configured_sites(opener=None):
 
 
 def _site_lists(site_id, opener=None):
-    out, url = [], f'/sites/{site_id}/lists?$select=id,displayName,webUrl,lastModifiedDateTime&$top=500'
-    while url:   # every page, not just the first 500
-        page = _get(url, opener) or {}
-        out.extend(page.get('value', []))
-        url = page.get('@odata.nextLink')
-    return out
+    return _collection(f'/sites/{urllib.parse.quote(site_id, safe="")}/lists?$select=id,displayName,webUrl,lastModifiedDateTime&$top=500', opener)
 
 
 # what the last site discovery could and could not read, shown with the client list (a failed read is never "no lists")
@@ -124,14 +119,10 @@ def client_sites(opener=None, refresh=False):
         return _site_cache['value']
     sites = {sid: name for name, sid in _configured_sites(opener)}
     try:   # needs the app's Sites.Read.All; without it only the configured sites are used
-        url = '/sites?search=*&$select=id,name,displayName,webUrl&$top=200'
-        while url:
-            page = _get(url, opener) or {}
-            for site in page.get('value', []):
-                name = site.get('name') or (site.get('webUrl') or '').rstrip('/').rsplit('/', 1)[-1]
-                if site.get('id') and name and not _is_test(name, site.get('displayName')):
-                    sites.setdefault(site['id'], name)
-            url = page.get('@odata.nextLink')
+        for site in _collection('/sites?search=*&$select=id,name,displayName,webUrl&$top=200', opener):
+            name = site.get('name') or (site.get('webUrl') or '').rstrip('/').rsplit('/', 1)[-1]
+            if site.get('id') and name and not _is_test(name, site.get('displayName')):
+                sites.setdefault(site['id'], name)
     except SharePointError as exc:
         search_error = str(exc)
     else:
@@ -167,68 +158,27 @@ def _sites(opener=None):
         yield name, sid
 
 
-def fetch_export(job, day, opener=None, schedule=None):
+def fetch_export(job, day, opener=None, schedule=None, *, site_id=None, list_id=None, refresh=False):
     """Return (filename, bytes, meta) for the job's daily export, or raise SharePointNotFound."""
     if not configured():
         raise SharePointNotConfigured('SharePoint lookup is not set up yet (Microsoft app registration missing).')
     if not job or not day:
         raise SharePointNotFound('The report\'s job number or date could not be determined, so SharePoint could not be searched.')
-    folder = os.environ.get('SHAREPOINT_EXPORT_FOLDER', 'Daily Data Exports').strip('/')
-    tried = []
-    for name, site_id in _sites(opener):
-        for ext in ('csv', 'xlsx'):
-            filename = f'{job} {day}.{ext}'
-            path = f'{folder}/{job}/{day}/{filename}'
-            tried.append(f'{name}/{path}')
-            item = _get(f'/sites/{site_id}/drive/root:/{urllib.parse.quote(path)}', opener)
-            if not item:
-                continue
-            content = _get(f'/sites/{site_id}/drive/items/{item["id"]}/content', opener, raw=True)
-            if content is None:
-                continue
-            return filename, content, dict(site=name, path=path, web_url=item.get('webUrl'),
-                                           modified=item.get('lastModifiedDateTime'), job=job, day=day)
-    found = list_day(job, day, opener, schedule)
-    if found:
-        return found
-    data = _list_items(job, opener)
-    if data:
-        days = sorted({d for d in (_item_day(it) for it in data[3]) if d}, reverse=True)
-        raise SharePointNotFound(f'Found the SharePoint list "{data[1].get("displayName")}" ({len(data[3])} rows), but none are dated {day}.'
-                                 + (f' Most recent days in the list: {", ".join(days[:5])}.' if days else ' Its rows have no dates.'))
-    raise SharePointNotFound(f'No SharePoint data found for {job} on {day}: no daily export file, and no "Data #{job}" list with rows for that day.'
-                             + (f' Looked in {len(tried) // 2} site(s).' if tried else ' No client sites are configured.')
-                             + (f' Data lists seen: {", ".join(sorted(set(_seen_lists))[:12])}.' if _seen_lists else ''))
+    if site_id or list_id:
+        found = list_day(job, day, opener, schedule, site_id=site_id, list_id=list_id, refresh=refresh)
+        if found:
+            return found
+        raise SharePointNotFound('No records for this date in the assigned source; no other site or export was substituted.')
+    raise SharePointError('Report lookup requires the verified site_id and list_id. No cross-site export fallback is allowed.')
 
 
-def recent_exports(job, before_day, limit=10, opener=None):
+def recent_exports(job, before_day, limit=10, opener=None, *, site_id=None, list_id=None, schedule=None):
     """Earlier daily exports for a job: [(day, filename, bytes)], newest first, up to `limit`. Read-only."""
-    import re as _re
-    if not configured() or not job or not before_day:
-        return []
-    folder = os.environ.get('SHAREPOINT_EXPORT_FOLDER', 'Daily Data Exports').strip('/')
-    for name, site_id in _sites(opener):
-        listing = _get(f'/sites/{site_id}/drive/root:/{urllib.parse.quote(f"{folder}/{job}")}:/children?$select=name,folder&$top=500', opener)
-        if not listing:
-            continue
-        days = sorted((c['name'] for c in listing.get('value', []) if c.get('folder') is not None
-                       and _re.fullmatch(r'\d{4}-\d{2}-\d{2}', c.get('name', '')) and c['name'] < before_day), reverse=True)
-        out = []
-        for day in days:
-            if len(out) >= limit:
-                break
-            for ext in ('csv', 'xlsx'):
-                filename = f'{job} {day}.{ext}'
-                item = _get(f'/sites/{site_id}/drive/root:/{urllib.parse.quote(f"{folder}/{job}/{day}/{filename}")}', opener)
-                if not item:
-                    continue
-                content = _get(f'/sites/{site_id}/drive/items/{item["id"]}/content', opener, raw=True)
-                if content:
-                    out.append((day, filename, content))
-                    break
-        if out:
-            return out
-    return list_history(job, before_day, limit, opener)
+    if site_id or list_id:
+        # Earlier production data must come from the assigned list, not job-named
+        # files whose provenance cannot be established by their directory name.
+        return list_history(job, before_day, limit, opener, schedule, site_id=site_id, list_id=list_id)
+    raise SharePointError('History requires the verified site_id and list_id; cross-site export fallback is disabled.')
 
 
 # ---------------------------------------------------------------- the job's own SharePoint data list
@@ -266,53 +216,130 @@ def _list_match(job, display, web_url=''):
     return best
 
 
-def _find_list(job, opener=None):
-    """The job's "Data #<job>" list. Field lists put the job number first (Data #2219-HANDS-HMMA) while reports
-    often put it last (HANDS-HMMA-2219), so match on the job's parts in any order, then on the job number alone."""
+def _find_list(job, opener=None, *, site_id=None, list_id=None):
+    """Resolve exact identity or fail closed on an ambiguous job label.
+
+    Production callers should supply both IDs from a verified assignment. A job
+    number, modification time, or global registry default is not report identity.
+    """
+    if bool(site_id) != bool(list_id):
+        raise SharePointError('Both site_id and list_id are required for an exact source.')
+    if site_id:
+        path = f'/sites/{urllib.parse.quote(site_id, safe="")}/lists/{urllib.parse.quote(list_id, safe="")}'
+        lst = _get(path, opener)
+        if not lst or lst.get('id') != list_id:
+            raise SharePointNotFound('The assigned SharePoint list was not found. No alternate source was selected.')
+        # IDs, not a potentially stale display name, are authoritative here.
+        match = re.search(r'/sites/([^/]+)', urllib.parse.urlsplit(lst.get('webUrl') or '').path)
+        name = urllib.parse.unquote(match.group(1)) if match else site_id
+        return name, site_id, lst
     exact, near = [], []
     _seen_lists.clear()
-    for name, site_id, site_lists in client_sites(opener):
+    for name, sid, site_lists in client_sites(opener):
         for lst in site_lists:
             if (lst.get('displayName') or '').lower().startswith('data #'):
                 _seen_lists.append(lst['displayName'])
             score = _list_match(job, lst.get('displayName'), lst.get('webUrl'))
-            if score == 2:
-                exact.append((name, site_id, lst))
-            elif score == 1:
-                near.append((name, site_id, lst))
-    # The same job list can exist on two sites (e.g. SL Alabama's Alexander City site and the Hyundai Montgomery
-    # site). The one the tablets are writing to is the one changed most recently.
+            if score:
+                (exact if score == 2 else near).append((name, sid, lst))
+    found = exact or near
+    identities = {(f[1], f[2]['id']): f for f in found}
+    if len(identities) > 1:
+        raise SharePointError('Ambiguous SharePoint job: select the verified site_id and list_id. No newest-list fallback is allowed.')
+    return next(iter(identities.values()), None)
+
+
+def pagination_collection(url):
+    """Canonical Graph collection identity; continuation may change only query."""
+    if not isinstance(url, str) or not url or any(ord(c) < 32 for c in url):
+        raise SharePointError('Invalid SharePoint pagination destination.')
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.fragment or parsed.username or parsed.password:
+        raise SharePointError('Invalid SharePoint pagination credentials or fragment.')
+    path = parsed.path
+    if parsed.scheme or parsed.netloc:
+        if parsed.scheme != 'https' or parsed.netloc != 'graph.microsoft.com' or not path.startswith('/v1.0/'):
+            raise SharePointError('Unexpected SharePoint pagination destination.')
+        path = path[len('/v1.0'):]
+    elif not path.startswith('/') or path.startswith('//'):
+        raise SharePointError('Invalid SharePoint pagination destination.')
+    # Reject ambiguous separators, double encoding and path traversal rather than
+    # depending on how a proxy normalizes them before forwarding credentials.
+    if re.search(r'%(?:2f|5c|00)', path, re.I):
+        raise SharePointError('Encoded path separators are not allowed in pagination.')
+    try:
+        path = urllib.parse.unquote(path, errors='strict')
+    except (UnicodeError, ValueError):
+        raise SharePointError('Invalid encoded SharePoint pagination path.') from None
+    if any(ord(c) < 32 for c in path) or '%' in path or '\\' in path or '//' in path or any(p in ('.','..') for p in path.split('/')):
+        raise SharePointError('Ambiguous SharePoint pagination path.')
+    return path
+
+
+def _collection(url, opener=None, *, cap=None):
+    """Complete Graph collection or an explicit error; never return a partial success."""
+    out, visited = [], set()
+    collection = pagination_collection(url)
+    while url:
+        if url in visited:
+            raise SharePointError('SharePoint pagination repeated a cursor; capture is incomplete.')
+        visited.add(url)
+        if pagination_collection(url) != collection:
+            raise SharePointError('SharePoint pagination changed the requested collection; capture stopped.')
+        page = _get(url, opener)
+        if not isinstance(page, dict) or not isinstance(page.get('value'), list):
+            raise SharePointError('SharePoint collection page is unavailable or malformed; capture is incomplete.')
+        out.extend(page['value'])
+        url = page.get('@odata.nextLink')
+        if url is not None and (not isinstance(url, str) or not url):
+            raise SharePointError('Invalid SharePoint next-page cursor; capture is incomplete.')
+        if cap is not None and (len(out) > cap or (len(out) == cap and url)):
+            raise SharePointError(f'SharePoint capture reached its {cap}-item safety limit with incomplete coverage. No partial source was returned.')
+    return out
+
+
+def assignment_identity(assignment, opener=None):
+    """Convert an already resolved assignment to complete IDs; never infer from job."""
     from hosting import registry
-    pinned = {e['list_id'] for e in registry.SEED if e.get('list_id') and not e.get('separate') and e.get('job') and registry._same_job(job, e['job'])}
-    for found in (exact, near):
-        hit = [f for f in found if f[2].get('id') in pinned]
-        if hit:   # the verified registry decides between two sites with the same job label
-            return hit[0]
-        if found:
-            return max(found, key=lambda f: f[2].get('lastModifiedDateTime') or '')
-    return None
+    if assignment.get('status') not in registry.RESOLVED or not assignment.get('list_id'):
+        raise SharePointError('Resolve the report client and exact source assignment before checking SharePoint.')
+    sid = assignment.get('site_id')
+    if not sid and assignment.get('site'):
+        from hosting.reconcile import site_id_for
+        sid = site_id_for(assignment['site'], opener)
+    if not sid:
+        raise SharePointError('The assigned site ID is unavailable; no other source was selected.')
+    return dict(site_id=sid, list_id=assignment['list_id'])
 
 
-def _list_items(job, opener=None):
-    """(site name, list info, column display names, items) for the job's data list, cached briefly."""
-    key = job.upper()
-    hit = _list_cache.get(key)
+def _list_items(job, opener=None, *, site_id=None, list_id=None, refresh=False):
+    """Complete source capture cached by tenant, application and exact list identity.
+
+    The tuple API is retained; list metadata carries explicit capture evidence.
+    Test/custom openers bypass the shared cache to avoid crossing authentication contexts.
+    """
+    found = _find_list(job, opener, site_id=site_id, list_id=list_id)
+    if not found:
+        return None
+    name, sid, lst = found
+    key = (os.environ.get('MS_TENANT_ID'), os.environ.get('MS_CLIENT_ID'), sid, lst['id'])
+    hit = _list_cache.get(key) if opener is None and not refresh else None
     if hit and hit[0] > time.time():
         return hit[1]
-    found = _find_list(job, opener)
-    if not found:
-        _list_cache[key] = (time.time() + LIST_TTL, None)
-        return None
-    name, site_id, lst = found
-    cols = (_get(f'/sites/{site_id}/lists/{lst["id"]}/columns?$select=name,displayName,hidden,readOnly&$top=500', opener) or {}).get('value', [])
+    base = f'/sites/{urllib.parse.quote(sid, safe="")}/lists/{urllib.parse.quote(lst["id"], safe="")}'
+    cols = _collection(base + '/columns?$top=500', opener)
     names = {c['name']: c.get('displayName') or c['name'] for c in cols if not c.get('hidden') and not c.get('readOnly')}
-    items, url = [], f'/sites/{site_id}/lists/{lst["id"]}/items?$expand=fields&$top=999'
-    while url and len(items) < 50000:
-        page = _get(url, opener) or {}
-        items.extend(page.get('value', []))
-        url = page.get('@odata.nextLink')
+    items = _collection(base + '/items?$expand=fields&$top=999', opener, cap=50000)
+    identifiers = [it.get('id') for it in items]
+    if any(not i for i in identifiers) or len(set(identifiers)) != len(identifiers):
+        raise SharePointError('Missing or repeated item IDs across source pages; recapture required.')
+    from datetime import datetime, timezone
+    lst = dict(lst, _capture=dict(site_id=sid, list_id=lst['id'], terminal=True,
+               remaining_cursor=None, record_count=len(items), columns=cols,
+               captured_at=datetime.now(timezone.utc).isoformat()))
     value = (name, lst, names, items)
-    _list_cache[key] = (time.time() + LIST_TTL, value)
+    if opener is None:
+        _list_cache[key] = (time.time() + LIST_TTL, value)
     return value
 
 
@@ -321,31 +348,11 @@ def _stamp(item):
     return fields.get('Date0') or fields.get('Date') or item.get('createdDateTime')
 
 
-def _item_day(item, schedule=None):
-    """The report day a scan belongs to. With shift times, a scan after midnight in a shift that started the
-    evening before belongs to that earlier day."""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    from hosting.reconcile import is_local_midnight, business_day
-    business = (item.get('fields') or {}).get('Date')
-    if business and is_local_midnight(business):   # the date-only business Date wins over scan / submission times
-        return business_day(business, True)
-    if schedule:
-        from hosting.shifts import local_time, assign
-        local = local_time(_stamp(item))
-        if local is not None:
-            return assign(local, schedule)[1]
-    fields = item.get('fields') or {}
-    stamp = fields.get('Date0') or fields.get('Date') or item.get('createdDateTime')
-    if not stamp:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(stamp).replace('Z', '+00:00'))
-    except ValueError:
-        return str(stamp)[:10]
-    if dt.tzinfo is None:
-        return dt.date().isoformat()
-    return dt.astimezone(ZoneInfo('America/Chicago')).date().isoformat()
+def _item_day(item, schedule=None, columns=None):
+    """Business Date wins, even if typed dateTime; never silently use submission."""
+    from hosting.reconcile import item_day
+    day, basis = item_day(item.get('fields') or {}, columns or {}, schedule)
+    return day if basis in ('business_date', 'business_date_with_time') else None
 
 
 def _items_csv(names, items):
@@ -364,12 +371,13 @@ def _items_csv(names, items):
 
 
 def _by_time(names, rows, schedule):
-    """Rows with Shift set from the scan time (the inspector's pick kept as "Picked shift") and a Scan time column."""
+    """Preserve recorded Shift; expose any time-based alternative as a suggestion only."""
     from hosting.shifts import local_time, assign, number, label
     shift_key = next((k for k, v in names.items() if re.sub(r'[^a-z]', '', str(v).lower()) == 'shift'), None) or 'Shift'
     names = dict(names)
     names[shift_key] = names.get(shift_key, 'Shift')
     names['ShiftPicked'], names['ScanTime'] = 'Picked shift', 'Scan time'
+    names['ShiftFromTime'] = 'Time-based shift suggestion'
     out, scans = [], {}
     for it in rows:
         f = dict(it.get('fields') or {})
@@ -378,7 +386,7 @@ def _by_time(names, rows, schedule):
         f['ShiftPicked'] = f.get(shift_key)
         f['ScanTime'] = f'{local.month}/{local.day} at {(local.hour % 12) or 12}:{local.minute:02d} {"AM" if local.hour < 12 else "PM"}' if local else None
         if shift:
-            f[shift_key] = number(shift['name'])
+            f['ShiftFromTime'] = number(shift['name'])  # suggestion only; preserve recorded Shift
         ident = f.get('Identifier') or f.get('VIN') or f.get('Title')
         if ident:
             scans[re.sub(r'[^A-Z0-9]', '', str(ident).upper())] = dict(time=f['ScanTime'], shift=number(shift['name']) if shift else None,
@@ -464,37 +472,43 @@ def _hm(iso):
     return datetime.fromisoformat(iso).strftime('%I:%M %p').lstrip('0')
 
 
-def list_day(job, day, opener=None, schedule=None):
+def list_day(job, day, opener=None, schedule=None, *, site_id=None, list_id=None, refresh=False):
     """(filename, csv bytes, meta) built from the job's data list for one day, or None.
     With shift times, the day runs from the first shift's start to the last shift's end, and each scan's
     shift comes from its time."""
     if not configured() or not job or not day:
         return None
-    data = _list_items(job, opener)
+    data = _list_items(job, opener, site_id=site_id, list_id=list_id, refresh=refresh)
     if not data:
         return None
     site, lst, names, items = data
-    rows = [it for it in items if _item_day(it, schedule) == day]
+    columns = {c['name']: c for c in lst.get('_capture', {}).get('columns', [])}
+    if any(_item_day(it, schedule, columns) is None for it in items):
+        raise SharePointError('Source includes missing business dates or timestamps without a verified site/list timezone contract. Confirm source date settings before comparison; plain calendar dates remain usable.')
+    rows = [it for it in items if _item_day(it, schedule, columns) == day]
     if not rows:
         return None
     modified = max((it.get('lastModifiedDateTime') or '') for it in rows) or None
     meta = dict(site=site, path=f'list: {lst.get("displayName")}', web_url=lst.get('webUrl'), modified=modified,
-                job=job, day=day, source_kind='list', rows=len(rows))
+                job=job, day=day, source_kind='list', rows=len(rows), capture=lst.get('_capture'))
     if schedule:
         names, rows, scans = _by_time(names, rows, schedule)
         meta.update(scan_shifts=scans, shift_times=schedule, timeline=timeline(rows, schedule))
     return (f'{job} {day} (SharePoint list).csv', _items_csv(names, rows), meta)
 
 
-def list_history(job, before_day, limit=10, opener=None, schedule=None):
+def list_history(job, before_day, limit=10, opener=None, schedule=None, *, site_id=None, list_id=None, refresh=False):
     """[(day, filename, csv bytes)] from the job's data list for earlier days, newest first."""
-    data = _list_items(job, opener) if configured() and job and before_day else None
+    data = _list_items(job, opener, site_id=site_id, list_id=list_id, refresh=refresh) if configured() and job and before_day else None
     if not data:
         return []
-    _, _, names, items = data
+    _, lst, names, items = data
+    columns = {c['name']: c for c in lst.get('_capture', {}).get('columns', [])}
+    if any(_item_day(it, schedule, columns) is None for it in items):
+        raise SharePointError('History includes records without a confirmed business date or verified site/list timezone contract. Confirm source date settings before selecting history.')
     by_day = {}
     for it in items:
-        d = _item_day(it, schedule)
+        d = _item_day(it, schedule, columns)
         if d and d < before_day:
             by_day.setdefault(d, []).append(it)
     return [(d, f'{job} {d} (SharePoint list).csv', _items_csv(names, by_day[d])) for d in sorted(by_day, reverse=True)[:limit]]

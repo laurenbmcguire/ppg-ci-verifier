@@ -54,7 +54,7 @@ def _shift(formula, drow, dcol):
 # ---------------------------------------------------------------- formula evaluation
 TOKEN = re.compile(r"""\s*(?:
     (?P<str>"(?:[^"]|"")*")|
-    (?P<ref>(?:(?:'(?:[^']|'')+'|[A-Za-z_][\w.]*)!)?\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?)(?![\w(])|
+    (?P<ref>(?:(?:'(?:[^']|'')+'|[A-Za-z_][\w.]*)!)?(?:\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?|\$?[A-Z]{1,3}:\$?[A-Z]{1,3}))(?![\w(])|
     (?P<num>\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|
     (?P<func>[A-Za-z][A-Za-z0-9.]*)\s*\(|
     (?P<bool>TRUE|FALSE)\b|
@@ -168,6 +168,9 @@ class _Eval:
         text = text.replace('$', '')
         if ':' in text:
             a, b = text.split(':')
+            if a.isalpha() and b.isalpha():   # a whole column (G:G): every row this sheet uses
+                c1, c2 = _col(a), _col(b)
+                return [self.book.value(sheet, c, r) for r in range(1, self.book.last_row(sheet) + 1) for c in range(min(c1, c2), max(c1, c2) + 1)]
             (c1, r1), (c2, r2) = _split(a), _split(b)
             return [self.book.value(sheet, c, r) for r in range(min(r1, r2), max(r1, r2) + 1) for c in range(min(c1, c2), max(c1, c2) + 1)]
         c, r = _split(text)
@@ -330,6 +333,11 @@ def _criteria(c):
         target = val.lower()
     def test(x):
         if isinstance(target, float):
+            if isinstance(x, str) and op in ('=', '<>'):   # like Excel: "80139189" also matches the text 80139189 (a part number)
+                try:
+                    return _cmp(op, float(x.strip()), target)
+                except ValueError:
+                    return op == '<>'
             return isinstance(x, (int, float)) and not isinstance(x, bool) and _cmp(op, float(x), target)
         return _cmp(op, _text(x).lower(), target)
     return test
@@ -339,6 +347,13 @@ def _criteria(c):
 class _Book:
     def __init__(self, cells, formulas):
         self.cells, self.formulas, self.done, self.busy, self.failed = cells, formulas, {}, set(), set()
+
+    def last_row(self, sheet):
+        if not hasattr(self, '_last'):
+            self._last = {}
+            for (s_, _c, r) in list(self.cells) + list(self.formulas):
+                self._last[s_] = max(self._last.get(s_, 0), r)
+        return self._last.get(sheet, 0)
 
     def value(self, sheet, col, row):
         key = (sheet, col, row)

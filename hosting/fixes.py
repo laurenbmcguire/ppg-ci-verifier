@@ -47,6 +47,45 @@ def _addr(cell):
     return m.group(1), int(m.group(2))
 
 
+def merged_ranges(filename, raw):
+    """{sheet: [(min_col, min_row, max_col, max_row, 'B4:D4'), ...]} from the workbook's own mergeCell list."""
+    if not filename.lower().endswith('.xlsx'):
+        return {}
+    try:
+        from zipfile import ZipFile
+        from hosting.spreadsheet_demo import sheet_paths
+        out = {}
+        with ZipFile(io.BytesIO(raw)) as z:
+            for name, path in sheet_paths(raw).items():
+                xml = z.read(path).decode('utf-8', 'replace')
+                for ref in re.findall(r'<mergeCell\b[^>]*\bref="([A-Z]+[0-9]+:[A-Z]+[0-9]+)"', xml):
+                    a, b = ref.split(':')
+                    (ca, ra), (cb, rb) = _addr(a), _addr(b)
+                    out.setdefault(name, []).append((col_index(ca), ra, col_index(cb), rb, ref))
+        return out
+    except Exception:
+        return {}
+
+
+def merged_problem(merged, sheet, cell):
+    """Why a cell must not be written: it is inside a merged range but is not the range's top-left cell."""
+    letters, row = _addr(cell)
+    col = col_index(letters)
+    for c1, r1, c2, r2, ref in merged.get(sheet) or []:
+        if c1 <= col <= c2 and r1 <= row <= r2 and (col, row) != (c1, r1):
+            return f'{sheet}!{cell} is part of the merged cells {ref}; only {ref.split(":")[0]} holds a value there.'
+    return None
+
+
+def _is_merged_label(merged, sources, sheet, cell):
+    letters, row = _addr(cell)
+    col = col_index(letters)
+    if not any((c1, r1) == (col, row) for c1, r1, *_ in merged.get(sheet) or []):
+        return False
+    v = _cell_value(sources, sheet, cell)
+    return isinstance(v, str) and bool(v.strip()) and not re.search(r'\d', v)
+
+
 def _sources(filename, raw):
     if filename.lower().endswith('.xlsx'):
         from hosting.spreadsheets import _xlsx_rows, _cached_rows
@@ -141,6 +180,7 @@ def type_problem(sources, sheet, cell, after, before=None):
 
 def proposals(result, filename, raw, sharepoint_rows=None, context=None):
     """List of proposed fixes: {id, sheet, cell, before, after, kind, reason, source, confidence}."""
+    _merged = merged_ranges(filename, raw)
     sources, cached = _sources(filename, raw)
     sheets, records, _ = scan(sources, cached)
     detail = [r for r in records if r['table_kind'] == 'detail' and not r['is_total']]
@@ -149,6 +189,8 @@ def proposals(result, filename, raw, sharepoint_rows=None, context=None):
     def add(sheet, cell, after, reason, source, confidence='high', sure=None):
         if not sheet or not cell or len(out) >= MAX_PROPOSALS:
             return
+        if merged_problem(_merged, sheet, cell):
+            return   # never write into the covered part of a merged header or date
         try:
             before = _cell_value(sources, sheet, cell)
         except FixError:
@@ -189,35 +231,59 @@ def proposals(result, filename, raw, sharepoint_rows=None, context=None):
                     continue
             if f.get('field') in ('day', 'shift'):
                 continue
+            n = len(out)
             add(f.get('sheet'), f['cell'], value, f'SharePoint shows {f["sharepoint_value"]} for this scan ({f.get("message", "")})', 'SharePoint')
+            if len(out) > n:   # bound to the classic comparison it came from: a re-run with other values makes it stale
+                from hosting.review_summary import source_check_id
+                out[-1].update(snapshot_id='classic:' + str(source_check_id(result)), item=f.get('item') or f.get('row_id') or f'{f.get("sheet")}!{f["cell"]}',
+                               field=f.get('field') or 'value', source_value=f['sharepoint_value'])
 
     # 1a. The live SharePoint reconciliation: each value that differs takes the SharePoint value (SharePoint is the record).
     from hosting import reconcile as _rec
     rec = _rec.current(result) or {}
     if rec:
         for c in rec.get('proposed_corrections') or []:
-            if c.get('sheet') and c.get('column') and c.get('row') and c.get('after') not in (None, 'blank'):
+            if c.get('identity_verified') is True and c.get('sheet') and c.get('column') and c.get('row') and c.get('after') not in (None, 'blank'):
                 v = _num(c['after']) if _num(c['after']) is not None else c['after']
+                n = len(out)
                 add(c['sheet'], f'{col_letter(int(c["column"]) - 1)}{c["row"]}', v,
                     f'SharePoint item {c.get("item")} shows {c["after"]} for {c.get("field")}; the report shows {c.get("before")}.', 'SharePoint')
+                if len(out) > n:   # bound to the SharePoint read it came from: a newer read makes it stale
+                    out[-1].update(snapshot_id=rec.get('snapshot_id'), captured_at=rec.get('captured_at'), item=c.get('item'), field=c.get('field'),
+                                   source_value=c.get('after'))
 
     # 1c. Blanks on record rows that the report's own SharePoint export fills (matched by SharePoint item ID).
     try:
         from hosting.spreadsheets import report_and_export_records
         recs, exports = report_and_export_records(filename, raw)
-        by_item = {(e.get('source') or {}).get('item'): e for e in exports if (e.get('source') or {}).get('item')}
+        from hosting.sheet_roles import bound_source_key
+        by_identity, duplicate_keys = {}, set()
+        for e in exports:
+            key = bound_source_key(e.get('source'))
+            if key is None:
+                continue
+            if key in by_identity:
+                duplicate_keys.add(key)
+            by_identity[key] = e
         for r in recs:
-            e = by_item.get((r.get('source') or {}).get('item'))
+            key = bound_source_key(r.get('source'))
+            e = by_identity.get(key) if key is not None and key not in duplicate_keys else None
             if not e:
                 continue
             for field in ('inspected', 'certified', 'rejected', 'reworked'):
                 if field in r['values'] and r['values'][field] is None and e['values'].get(field) is not None:
+                    n = len(out)
                     add(r['sheet'], qty_cell(r, field), e['values'][field],
                         f'{field.title()} is blank here; SharePoint item {e["source"]["item"]} has {e["values"][field]}.', 'SharePoint')
+                    if len(out) > n:   # from the export inside this very file: it cannot change for this version
+                        out[-1].update(snapshot_id='export:' + str(result.get('file_hash')), item=e['source']['item'], field=field, source_value=e['values'][field])
             for kind in ('identifier', 'part', 'defect', 'condition', 'area', 'shift'):
                 if kind in r['labels'] and not r['labels'][kind] and e['labels'].get(kind):
+                    n = len(out)
                     add(r['sheet'], text_cell(r, kind), e['labels'][kind],
                         f'{kind.title()} is blank here; SharePoint item {e["source"]["item"]} has "{e["labels"][kind]}".', 'SharePoint')
+                    if len(out) > n:
+                        out[-1].update(snapshot_id='export:' + str(result.get('file_hash')), item=e['source']['item'], field=kind, source_value=e['labels'][kind])
     except Exception:
         pass   # filling from the export must never break the other fixes
 
@@ -374,10 +440,16 @@ def apply_fixes(filename, raw, approved):
     if not approved:
         raise FixError('Approve at least one change first.')
     sources, _ = _sources(filename, raw)
+    merged = merged_ranges(filename, raw)
     edits = []
     for change in approved:
         sheet, cell = change.get('sheet'), (change.get('cell') or '').upper()
         _addr(cell)
+        problem = merged_problem(merged, sheet, cell)
+        if problem:
+            raise FixError(problem + ' Nothing was applied.')
+        if change.get('source') in MACHINE_SOURCES and _is_merged_label(merged, sources, sheet, cell):
+            raise FixError(f'{sheet}!{cell} is a merged heading or label, not a value; a suggestion never replaces it. Nothing was applied.')
         current = _cell_value(sources, sheet, cell)
         if isinstance(current, str) and current.startswith('='):
             raise FixError(f'{sheet}!{cell} is a formula; change the cells it uses instead.')

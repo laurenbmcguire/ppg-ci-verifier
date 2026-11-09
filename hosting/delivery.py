@@ -24,25 +24,22 @@ def client_filename(filename):
     return re.sub(r'\s*\(fixed( \d+)?\)(?=\.[^.]+$)', '', filename)
 
 
-def approve(store, file_hash, approver, note='', override=False, withdraw=False):
+def approve(store, file_hash, approver, note='', override=False, withdraw=False, *, expected_check_hash=None, expected_run=None):
     with store.session() as directory:
-        return SpreadsheetInbox(directory).approve(file_hash, approver, note, override is True, withdraw is True)
+        return SpreadsheetInbox(directory).approve(file_hash, approver, note, override is True, withdraw is True,
+                                                 expected_check_hash=expected_check_hash, expected_run=expected_run)
 
 
 def info(store, file_hash):
     item, data, rv, saved = _load(store, file_hash)
     previous, lookup = None, None
-    if mailer.configured():
-        try:
-            previous = mailer.last_sent(rv.get('job'))
-        except mailer.MailError as exc:
-            lookup = str(exc)
+    # Delivery is paused: opening approval must not query a mailbox.
     shift = mailer.shift_of(item)
     subject, body = mailer.compose(rv.get('job'), rv.get('day'), shift, previous)
     to = previous['to'] if previous else (saved.get('to') or [])
     cc = previous['cc'] if previous else (saved.get('cc') or [])
     cc = cc + [a for a in mailer.always_cc() if a.lower() not in {x.lower() for x in to + cc}]
-    return dict(enabled=mailer.configured(), sender=mailer.sender(), job=rv.get('job'), day=rv.get('day'), shift=shift,
+    return dict(enabled=False, delivery_paused=True, sender=mailer.sender(), job=rv.get('job'), day=rv.get('day'), shift=shift,
                 previous=previous and {k: previous[k] for k in ('id', 'subject', 'sent_at', 'web_link', 'to', 'cc')}, lookup_error=lookup,
                 recipients_from='previous' if previous else ('saved' if saved.get('to') else 'none'),
                 to=to, cc=cc, subject=subject, body=body,
@@ -53,38 +50,10 @@ def info(store, file_hash):
 def send(store, file_hash, payload, defaults=None):
     """payload: mode ('send'|'draft'), to, cc, subject, body, attachment_name, reply_to, again, by.
     defaults: an info() result used for anything the payload leaves out (the API's 'send with the usual wording')."""
-    item, data, rv, _ = _load(store, file_hash)
-    approval = item.get('approval')
-    if not approval:
-        raise ValueError('Approve the report before sending it to the client.')
-    from hosting.review_summary import same_run
-    if item.get('checker_version') != _checker_version() or not same_run(approval.get('run'), item):
-        raise ValueError('The checks changed after this report was approved (re-checked, reconciled again, or approved before approvals were tied to a check run). Approve it again before sending.')
-    mode = 'draft' if payload.get('mode') == 'draft' else 'send'
-    done = [x for x in item.get('sent') or [] if x.get('sent')]
-    if done and mode == 'send' and payload.get('again') is not True:
-        raise ValueError(f'This report was already sent to the client on {done[-1].get("at", "")[:10]}. Tick "Send again" (again: true) to send it anyway.')
-    d = defaults or {}
-    pick = lambda key, fallback=None: payload[key] if payload.get(key) not in (None, '', []) else d.get(key, fallback)
-    to, cc = pick('to', []), pick('cc', [])
-    name = payload.get('attachment_name') or client_filename(item['filename'])
-    reply_to = payload.get('reply_to') if isinstance(payload.get('reply_to'), str) else (
-        (d.get('previous') or {}).get('id') if defaults is not None and payload.get('reply_all', True) else None)
-    try:
-        out = mailer.deliver(to, cc, pick('subject'), pick('body'), name, data, reply_to=reply_to, send_now=mode == 'send')
-    except mailer.MailError as exc:
-        raise ValueError(str(exc)) from None
-    record = dict(at=datetime.now(timezone.utc).isoformat(), sent=out['sent'], sender=out['sender'],
-                  web_link=None if out['sent'] else out.get('web_link'),
-                  to=mailer.clean_addresses(to, 'To'), cc=mailer.clean_addresses(cc, 'Cc'),
-                  subject=' '.join(str(pick('subject') or '').split()), attachment=name, reply_all=bool(reply_to),
-                  by=' '.join(str(payload.get('by') or approval.get('by') or '').split())[:80], version=item.get('version'),
-                  via=payload.get('via') or 'app')
-    with store.session() as directory:
-        inbox = SpreadsheetInbox(directory)
-        item = inbox.record_send(file_hash, record)
-        inbox.save_contacts(rv.get('job'), record['to'], record['cc'])
-    return item, record
+    # A provider timeout may mean the email was sent. Until a durable send reservation,
+    # immutable approved snapshot and reconciliation protocol exist, retries are unsafe.
+    # Fail before loading state or contacting Microsoft, including draft creation.
+    raise ValueError('Sending and draft creation are paused pending delivery safety checks. No email was sent. Use the approved download for manual delivery.')
 
 
 def _checker_version():

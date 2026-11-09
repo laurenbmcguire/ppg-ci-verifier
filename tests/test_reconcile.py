@@ -6,17 +6,22 @@ from unittest.mock import patch
 from hosting import reconcile
 from hosting.spreadsheet_inbox import SpreadsheetInbox
 from hosting.spreadsheets import report_and_export_records
-from tests.sl_daily_fixture import sl_daily
+from tests.sl_daily_fixture import sl_daily as _sl_daily
+
+
+def sl_daily(**kwargs):
+    # Successful reconciliation supplies measured reject counts, including explicit zeros.
+    return _sl_daily(**dict({"nok_blank": False}, **kwargs))
 
 SITE, LIST = 'SLAlabama_AlexanderCity', 'list-2214'
 COLS = [dict(name='Date', displayName='Date', dateTime=dict(format='dateOnly')), dict(name='Date0', displayName='Scan time', dateTime=dict(format='dateTime')),
         dict(name='Identifier', displayName='Identifier'), dict(name='QuantityInspected', displayName='Quantity Inspected'),
-        dict(name='QuantityOK', displayName='Quantity OK')]
+        dict(name='QuantityOK', displayName='Quantity OK'), dict(name='QtyNOK', displayName='Qty NOK')]
 
 
-def sp_item(i, inspected=80, date='2026-11-06T06:00:00Z', scan='2026-11-06T13:05:00Z', version='3.0'):
+def sp_item(i, inspected=80, date='2026-11-06', scan='2026-11-06T13:05:00Z', version='3.0'):
     return {'id': str(i), 'webUrl': f'https://ppg.sharepoint.com/sites/{SITE}/Lists/x/{i}_.000', 'lastModifiedDateTime': '2026-11-06T14:00:00Z',
-            'fields': {'Date': date, 'Date0': scan, 'Identifier': f'LOT-{i - 431:02d}', 'QuantityInspected': inspected, 'QuantityOK': inspected,
+            'fields': {'Date': date, 'Date0': scan, 'Identifier': f'LOT-{i - 431:02d}', 'QuantityInspected': inspected, 'QuantityOK': inspected, 'QtyNOK': 0,
                        '_UIVersionString': version}}
 
 
@@ -27,10 +32,10 @@ def graph(pages, columns=COLS, fail=None):
             return 200, {'id': LIST, 'displayName': 'Data #2214', 'webUrl': f'https://ppg.sharepoint.com/sites/{SITE}/Lists/Data%202214SLALSLAL'}
         if '/columns?' in url:
             return 200, {'value': columns}
-        n = 1 if '/items?' in url else int(url.rsplit('page', 1)[1])
+        n = int(url.rsplit('page=', 1)[1]) if 'page=' in url else 1
         if fail and n in fail:
             return fail[n], None
-        nxt = f'https://graph.microsoft.com/v1.0/page{n + 1}' if n < len(pages) else None
+        nxt = f'https://graph.microsoft.com/v1.0/sites/site-1/lists/{LIST}/items?page={n + 1}' if n < len(pages) else None
         return 200, dict({'value': pages[n - 1]}, **({'@odata.nextLink': nxt} if nxt else {}))
     return fetch
 
@@ -57,6 +62,13 @@ class Coverage(unittest.TestCase):
         self.assertEqual(r['status'], 'verified', r['rows'])
         self.assertTrue(r['captured_at'])
         self.assertEqual(r['day_basis'], ['business_date'])
+
+    def test_missing_reject_evidence_never_becomes_zero(self):
+        source_missing = [dict(it, fields={k: v for k, v in it['fields'].items() if k != 'QtyNOK'}) for it in ALL]
+        for workbook, source in ((sl_daily(nok_blank=True), ALL), (sl_daily(), source_missing)):
+            result = run(workbook, snap([source]))
+            self.assertFalse(result['verified'])
+            self.assertNotEqual(result['status'], 'verified')
 
     def test_a_throttled_page_is_incomplete_never_verified(self):
         r = run(sl_daily(), snap([ALL[:3], ALL[3:]], fail={2: 429}))
@@ -133,15 +145,15 @@ class BusinessDates(unittest.TestCase):
         self.assertEqual(reconcile.business_day('2026-03-08T06:00:00Z', True), '2026-03-08')  # spring forward day starts in CST
 
     def test_overnight_scan_belongs_to_its_business_date(self):
-        late = sp_item(436, date='2026-11-06T06:00:00Z', scan='2026-11-07T07:30:00Z')   # 01:30 on Nov 7 in Chicago
+        late = sp_item(436, date='2026-11-06', scan='2026-11-07T07:30:00Z')   # 01:30 on Nov 7 in Chicago
         day, basis = reconcile.item_day(late['fields'], {c['name']: c for c in COLS})
         self.assertEqual((day, basis), ('2026-11-06', 'business_date'))
         r = run(sl_daily(), snap([ALL[:4] + [late]]))
         self.assertEqual(r['status'], 'verified', r['rows'])
 
-    def test_without_a_business_date_the_scan_time_is_used_and_labelled(self):
+    def test_without_a_business_date_scan_time_remains_unconfirmed(self):
         day, basis = reconcile.item_day({'Date0': '2026-11-07T03:00:00Z'}, {})
-        self.assertEqual((day, basis), ('2026-11-06', 'submission_time'))
+        self.assertEqual((day, basis), (None, 'submission_time_unconfirmed'))
 
     def test_excel_serial_dates(self):
         self.assertEqual(reconcile.excel_serial_day(46332), '2026-11-06')
@@ -155,7 +167,7 @@ class SavedNotApplied(unittest.TestCase):
             raw = sl_daily()
             item = inbox.ingest('SL Alabama - 2214 - 2026-11-06.xlsx', raw)
             items = list(ALL); items[1] = sp_item(433, inspected=72)
-            out = inbox.source_reconcile(item['file_hash'], snap([items]), '2026-11-06')
+            out = inbox.source_reconcile(item['file_hash'], snap([items]), '2026-11-06', expected_check_hash=inbox.get(item['file_hash'])['check_hash'])
             self.assertEqual(out['source_reconciliation']['status'], 'discrepancies')
             again = SpreadsheetInbox(root)
             self.assertEqual(again.get(item['file_hash'])['source_reconciliation']['status'], 'discrepancies')
@@ -177,11 +189,11 @@ class Identity(unittest.TestCase):
         self.assertTrue(any(x['status'] == 'wrong_list' for x in r['rows']))
 
     def test_another_site_is_not_a_match(self):
-        s = snap([ALL]); s['site'] = 'Hyundai_Montgomery'
+        s = snap([ALL]); s['site'] = 'Hyundai_Montgomery'; s['list']['url'] = s['list']['url'].replace(SITE, 'Hyundai_Montgomery')
         self.assertTrue(any(x['status'] == 'wrong_list' for x in run(sl_daily(), s)['rows']))
 
     def test_report_values_with_no_source_column_are_not_verified(self):
-        r = run(sl_daily(nok_blank=False), snap([ALL]))   # the report has rejects (0); the list has no rejected column
+        r = run(sl_daily(nok_blank=False), snap([ALL], columns=[c for c in COLS if c['name'] != 'QtyNOK']))   # report has actual zeros; source mapping is absent
         self.assertIn('rejected', r['fields_not_checked'])
         self.assertTrue(any(x['status'] == 'field_not_in_source' for x in r['rows']))
         self.assertNotEqual(r['status'], 'verified')
@@ -195,9 +207,11 @@ class MissingDates(unittest.TestCase):
         self.assertEqual(r['status'], 'incomplete')
         self.assertEqual(r['coverage']['undated'], 1)
 
-    def test_a_datetime_typed_date_column_is_still_the_business_date(self):
+    def test_timestamp_business_date_requires_verified_timezone(self):
         cols = [dict(c, dateTime=dict(format='dateTime')) if c['name'] == 'Date' else c for c in COLS]
         items = [sp_item(i, date='2026-11-06T14:30:00Z') for i in range(432, 437)]
         r = run(sl_daily(), snap([items], columns=cols))
-        self.assertEqual(r['sharepoint_items_for_day'], 5)
-        self.assertEqual(r['day_basis'], ['business_date_with_time'])
+        self.assertEqual(r['sharepoint_items_for_day'], 0)
+        self.assertEqual(r['coverage']['timezone_unconfirmed'], 5)
+        self.assertFalse(r['verified'])
+        self.assertEqual(r['count_reconciliation']['exclusions'], [])

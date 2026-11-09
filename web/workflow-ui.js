@@ -54,8 +54,11 @@
  async function ingest(manifest){const d=await api('/api/workflow/import',manifest);selected=d.item.manifest_hash;draw(d.item);await refresh();message(d.item.idempotent?'This exact report version was already imported.':'Report version stored. Findings and proposals are ready; nothing was sent or released.')}
  const isSpreadsheet=async file=>{if(/\.(csv|xlsx|xlsm|xls|tsv)$/i.test(file.name))return true;const head=new Uint8Array(await file.slice(0,8).arrayBuffer());return head[0]===0x50&&head[1]===0x4b};
  node('workflow-file').addEventListener('change',async e=>{const file=e.target.files[0];node('workflow-file').value='';if(!file||pending)return;
-  if(await isSpreadsheet(file)&&window.ciUploadSpreadsheet){message(`"${file.name}" is a spreadsheet, so it was sent to "Check a spreadsheet" above.`);await window.ciUploadSpreadsheet(file);return}
-  operation(async()=>{if(file.size>2*1024*1024)throw Error('Use a manifest no larger than 2 MiB.');await ingest(await file.text())})});
+  // Lock before the first asynchronous byte read, including format detection and handoff.
+  return operation(async()=>{
+   if(await isSpreadsheet(file)&&window.ciUploadSpreadsheet){message(`"${file.name}" is a spreadsheet, so it was sent to "Check a spreadsheet" above.`);await window.ciUploadSpreadsheet(file);return}
+   if(file.size>2*1024*1024)throw Error('Use a manifest no larger than 2 MiB.');await ingest(await file.text())
+  })});
  node('workflow-sample').addEventListener('click',()=>operation(async()=>ingest(await api('/api/workflow/sample'))));
  node('workflow-refresh').addEventListener('click',()=>operation(async()=>{await refresh();if(selected)draw(await api('/api/workflow/version?hash='+encodeURIComponent(selected)));message('Report versions and selected evidence refreshed.')}));
  node('workflow-more').addEventListener('click',()=>operation(()=>refresh(true)));
