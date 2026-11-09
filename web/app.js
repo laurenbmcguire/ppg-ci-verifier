@@ -24,6 +24,7 @@
     set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* per-browser convenience only */ } },
   };
   async function api(path, body) {
+    if (body !== undefined && gridDirty() && !gridRequestAllowed(path, body)) throw new Error('Preview or discard the spreadsheet draft before another operation. Nothing changed.');
     const response = await fetch(path, body === undefined ? {headers: {Accept: 'application/json'}} : {
       method: 'POST', headers: {'Content-Type': 'application/json', 'X-Review-Token': 'same-origin'}, body: JSON.stringify(body)});
     let data = {};
@@ -404,6 +405,7 @@
   function select(hash) { state.lastSelected = hash; state.queueScroll = {page: window.scrollY, list: $('queue-list').scrollTop}; if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
   window.addEventListener('hashchange', route);
   async function route() {
+    if (state.gridDraft && !gridDiscard()) { history.replaceState(null, '', '#r=' + state.gridDraft.binding.file_hash); $('grid-cell-input')?.focus(); return; }
     document.body.classList.remove('reportmode');
     document.querySelectorAll('dialog[open]:not(#signin-dialog)').forEach(d => d.close());   // a window left open must not cover the next page
     document.body.dataset.page = (location.hash.match(/^#(today|overview|kpis|periods|checks|api|users)$/) || [])[1] || 'reports';
@@ -444,6 +446,7 @@
 
   // ---------------------------------------------------------------- report detail
   async function openReport(hash, keepScroll) {
+    if (state.gridDraft && !gridDiscard()) return;
     const report = $('report');
     if (!keepScroll) report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Opening report…')));
     try {
@@ -1081,6 +1084,7 @@
   }
   // A review scope is separate from the correction basket. Opening/selecting never writes data.
   function fdReviewDialog(initialScope = null, initialAction = null, filterLabel = null) {
+    if (state.gridDraft && !gridDiscard()) return;
     if (!state.report || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation) return;
     if (Array.isArray(initialScope) && initialScope.some(it => JSON.stringify(it.binding) !== JSON.stringify(reviewBinding(state.report)))) { toast('The report changed. Reopen this review action.', true); return; }
     const report = state.report, binding = reviewBinding(report);
@@ -1707,7 +1711,8 @@
         h('button', {type: 'button', class: 'btn small', disabled: at >= flat.length - 1, onclick: () => fdOpen(flat[at + 1]), 'aria-keyshortcuts': 'j'}, 'Next ', icon('next', 15))));
   }
   // open a correction: its exact cell is scrolled into view and highlighted; the sheet switches if needed
-  async function fdOpen(it) {
+  async function fdOpen(it, selectedCell = null) {
+    if (selectedCell && [...document.querySelectorAll('#side input:not([type=checkbox]):not([type=radio]), #side textarea')].some(el => el.value !== el.defaultValue)) { toast('Finish the correction-panel draft before selecting another spreadsheet cell.', true); return; }
     if (!it) return;
     const report = state.report, request = state.fdOpenRequest = (state.fdOpenRequest || 0) + 1;
     state.gridRequest = (state.gridRequest || 0) + 1; // A newer local focus also cancels an older sheet request.
@@ -1717,7 +1722,7 @@
     if (it.sheet && (it.cell || it.row) && state.grid?.sheet !== it.sheet) {
       state.gridCell = null; state.gridRow = null; drawSide(); drawGrid(); return;
     }
-    state.gridCell = it.cell || (it.row ? `A${it.row}` : null); state.gridRow = it.row || null;
+    state.gridCell = selectedCell || it.cell || (it.row ? `A${it.row}` : null); state.gridRow = it.row || null;
     drawSide(); drawGrid();
     const td = state.gridCell && document.querySelector(`#sheet-block td[data-cell="${state.gridCell}"]`), wrap = document.querySelector('#sheet-block .gridwrap');
     if (td && wrap) reveal(wrap, td, true);
@@ -1898,6 +1903,7 @@
   // Pending -> saved / failed. A lost answer is reconciled (was it saved?) before anything is retried, and the same
   // request ID is reused, so a retry can never record a decision twice.
   async function fdSendDecision(req) {
+    if (state.gridDraft && gridDirty()) { toast('Preview or discard the spreadsheet draft before deciding findings.', true); return; }
     if (state.decisionPending || state.busy || state.rechecking || state.aiProposalOperation || !state.report) return;
     const binding = req.file_hash ? req : req.from ? findingBinding([req.from]) : null;
     if (!binding) { toast('Reload this review before deciding.', true); return; }
@@ -2036,7 +2042,7 @@
           const applyButton = e.currentTarget; // DOM Event.currentTarget is null after awaiting.
           setSaving(true); errorMessage.textContent = ''; applyButton.textContent = `Saving v${next} and re-checking…`;
           let hash = null;
-          try { hash = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding, recommendedOnly: c.recommendedOnly, independentScope: c.independentScope}); }
+          try { hash = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding, recommendedOnly: c.recommendedOnly, independentScope: c.independentScope, gridDraft: c.gridDraft}); }
           catch (error) { toast('The save could not be confirmed. Reload the report before retrying.', true); }
           finally { setSaving(false); }
           if (hash) d.close();
@@ -2060,6 +2066,7 @@
     } catch (e) { toast(e.message, true); if (btn) { btn.disabled = false; btn.textContent = 'Approve internally'; } }
   }
   async function fdRecheck() {
+    if (state.gridDraft && gridDirty()) { toast('Preview or discard the spreadsheet draft before re-checking. Nothing changed.', true); return; }
     if (state.decisionPending || state.busy || state.rechecking || state.aiProposalOperation) { toast('Wait for the current save or operation to finish before re-checking.', true); return; }
     const report = state.report, hash = report?.file_hash; if (!hash) return;
     if ([...document.querySelectorAll('#side input:not([type="checkbox"]):not([type="radio"]), #side textarea')].some(node => node.value !== node.defaultValue)) {
@@ -2882,6 +2889,7 @@
           change_set: e.change_set || undefined, change_set_size: e.change_set_size || undefined});
       }
       const answer = await api('/api/spreadsheets/apply-fixes', {...binding, changes, ...(opts.recommendedOnly ? {recommended_only: true} : {})});
+      if (opts.gridDraft && state.gridDraft === opts.gridDraft) state.gridDraft = null;
       if (state.celebrate) state.celebrate.hash = answer.item.file_hash;
       // Do not carry local review markers into a new file or erase edits made while this request ran.
       if (!opts.independentScope) for (const [key, shown] of [['rd-fixes:' + binding.file_hash, dec], ['rd-edits:' + binding.file_hash, edits]]) {
@@ -2905,6 +2913,61 @@
   }
   const isDupRow = i => i.code === 'duplicate_row';
 
+  // A single exact-cell draft, kept in memory only. Typing never writes a workbook.
+  function gridDirty() { const d = state.gridDraft; return !!d && d.after !== d.before; }
+  function gridCurrent(d) { return !!d && state.report === d.report && state.selected === d.binding.file_hash && JSON.stringify(reviewBinding(state.report)) === JSON.stringify(d.binding); }
+  function gridDiscard() {
+    if (gridDirty() && !window.confirm('Discard the typed spreadsheet cell draft?')) return false;
+    state.gridDraft = null; state.gridEditRequest = (state.gridEditRequest || 0) + 1; return true;
+  }
+  function gridRequestAllowed(path, body) {
+    if (['/api/spreadsheets/chat', '/api/spreadsheets/sheet', '/api/spreadsheets/cells', '/api/spreadsheets/fixes', '/api/spreadsheets/findings'].includes(path)) return true;
+    const d = state.gridDraft, x = body.changes?.[0];
+    return path === '/api/spreadsheets/apply-fixes' && d?.previewing && gridCurrent(d) && Array.isArray(body.changes) && body.changes.length === 1 && !!x &&
+      Object.entries(d.binding).every(([k,v]) => JSON.stringify(body[k]) === JSON.stringify(v)) && x.sheet === d.sheet && x.cell === d.cell && x.before === d.before && x.after === d.after && x.kind === 'auto';
+  }
+  window.addEventListener('beforeunload', e => { if (gridDirty()) { e.preventDefault(); e.returnValue = ''; } });
+  function gridCellScope(sheet, cell) {
+    const row = splitCell(cell)?.[1], items = fdItems();
+    if (!row || fdManualCellHeld(items, sheet, row, cell)) return false;
+    return items.some(it => it.sheet === sheet && (it.cell === cell || !it.cell && it.row === row) && !fdConflict(it) && ['open','selected','confirmed'].includes(it.state));
+  }
+  async function gridStartEdit(sheet, cell) {
+    if ([...document.querySelectorAll('#side input:not([type=checkbox]):not([type=radio]), #side textarea')].some(el => el.value !== el.defaultValue)) { toast('Finish the correction-panel draft before editing the spreadsheet.', true); return; }
+    if (state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation) return;
+    if (state.gridDraft && !gridDiscard()) return;
+    const report = state.report, binding = reviewBinding(report), row = splitCell(cell)?.[1], g = state.grid;
+    const unavailable = () => !gridCellScope(sheet, cell) || g.sheet !== sheet || g.hash !== binding.file_hash ||
+      (g.formulas || []).includes(cell) || (g.merges || []).some(ref => { const [a,b] = ref.split(':').map(splitCell), c = splitCell(cell); return a && b && c[0] >= a[0] && c[0] <= b[0] && c[1] >= a[1] && c[1] <= b[1]; });
+    if (unavailable()) { toast('This cell is not editable here. Review its source or reopen its finding first.', true); return; }
+    const ticket = state.gridEditRequest = (state.gridEditRequest || 0) + 1;
+    try {
+      const data = await api('/api/spreadsheets/cells', {file_hash: binding.file_hash, sheet, row});
+      if (state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || ticket !== state.gridEditRequest || state.report !== report || state.selected !== binding.file_hash || state.grid !== g || JSON.stringify(reviewBinding(report)) !== JSON.stringify(binding)) return;
+      const exact = data.sheet === sheet && data.row === row && Array.isArray(data.cells) && data.cells.find(c => c.cell === cell);
+      if (!exact || exact.formula || typeof exact.before !== 'string' || unavailable()) throw new Error('Exact editable cell is unavailable. No value was guessed.');
+      state.gridDraft = {report, binding, sheet, cell, before: exact.before, after: exact.before, header: exact.header || '', included: true};
+      state.gridCell = cell; document.body.classList.remove('fd-panel-open'); drawGrid(); $('grid-cell-input')?.focus();
+    } catch (e) { toast(e.message, true); }
+  }
+  function gridPreview() {
+    const d = state.gridDraft;
+    if (!gridCurrent(d) || !gridCellScope(d.sheet, d.cell)) { toast('The report or finding changed. Discard this draft and reopen the current cell.', true); return; }
+    if (!gridDirty() || !d.included) return;
+    d.previewing = true;
+    const edits = {[editId(d.sheet,d.cell)]: {sheet:d.sheet,cell:d.cell,before:d.before,after:d.after,header:d.header,kind:'auto',source:'Your edit',reason:'Typed by reviewer in spreadsheet cell'}};
+    fdPreview({...captureCorrections([], {}, edits, d.binding, d.report), independentScope:true, gridDraft:d,
+      onRemove: () => { d.included = false; d.previewing = false; drawGrid(); }, onApplied: () => { if (state.gridDraft === d) state.gridDraft = null; }});
+  }
+  function gridDraftControls() {
+    const d = state.gridDraft;
+    if (!d) return null;
+    return h('div', {class:'fd-grid-draft', role:'group', 'aria-label':'Spreadsheet draft'},
+      h('span', {role:'status'}, `Draft: ${d.sheet}!${d.cell}. Not applied. ${d.after === '' ? 'Empty clears the cell, not zero.' : ''}`),
+      h('label', {}, h('input', {type:'checkbox', checked:d.included, onchange:e => { d.included=e.target.checked; drawGrid(); }}), ' Include cell in preview'),
+      h('button', {type:'button',class:'btn primary',id:'grid-preview',disabled:!gridDirty() || !d.included,onclick:gridPreview}, 'Preview changes'),
+      h('button', {type:'button',class:'btn',onclick:() => { if(gridDiscard()) drawGrid(); }}, 'Discard cell draft'));
+  }
   // ---------------- spreadsheet view
   const colNum = l => [...l].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
   const colName = i => { let s = '', n = i + 1; while (n) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
@@ -3025,15 +3088,29 @@
       td.append(h('a', {href: mediaUrl(p), target: '_blank', rel: 'noopener', class: 'cell-pic', title: `Picture at ${p.cell}${p.item ? ' · SharePoint item ' + p.item : ''}${p.historical ? ' · reference only' : ''}`},
         h('img', {src: mediaUrl(p), alt: `Photo at ${sheet} ${p.cell}${p.item ? ', item ' + p.item : ''}`, loading: 'lazy'})));
     }
+    const draft = state.gridDraft;
+    if (draft && gridCurrent(draft) && draft.sheet === sheet) {
+      const td = [...table.querySelectorAll('td[data-cell]')].find(td => td.dataset.cell === draft.cell);
+      if (td) {
+        const input = h('input', {id:'grid-cell-input',type:'text',value:draft.after,'aria-label':`New value in spreadsheet ${sheet}!${draft.cell}`,
+          oninput:e => { draft.after=e.target.value; draft.previewing=false; const button=$('grid-preview'); if(button) button.disabled=!gridDirty() || !draft.included; },
+          onkeydown:e => { if(e.key === 'Enter') { e.preventDefault(); $('grid-preview')?.focus(); } if(e.key === 'Escape') { e.preventDefault(); $('grid-preview')?.focus(); } }});
+        td.replaceChildren(input); td.classList.add('grid-editing');
+      }
+    }
+    table.addEventListener('keydown', e => { if (e.target.matches('td[data-cell]') && ['Enter',' '].includes(e.key)) { e.preventDefault(); e.target.click(); } });
+    table.querySelectorAll('td[data-cell]').forEach(td => td.setAttribute('tabindex','0'));
     const flagged = Object.entries(m.cells).filter(([k, l]) => k.startsWith(sheet + '!') && l.some(x => x.kind === 'issue')).length + Object.keys(m.rows).filter(k => k.startsWith(sheet + '!')).length;
     const tabs = h('div', {class: 'fd-tabs', role: 'tablist', 'aria-label': 'Sheets'}, (g.sheets || []).map(n => h('button', {type: 'button', role: 'tab', class: n === sheet ? 'on' : '', 'aria-selected': String(n === sheet),
       onclick: e => { if (n === sheet) return; fdKeepScroll(); state.gridCell = null; state.gridRow = null; e.currentTarget.classList.add('loading'); e.currentTarget.setAttribute('aria-busy', 'true');
         block.querySelector('.gridwrap')?.classList.add('loading'); loadGrid(n); }}, n, m.perSheet[n] ? h('i', {'aria-label': `${m.perSheet[n]} flagged`}, String(m.perSheet[n])) : null)));
     table.addEventListener('click', e => {
+      if (e.target.closest('input,button,a')) return;
       const td = e.target.closest('td[data-cell]'); if (!td) return;
       const addr = td.dataset.cell, row = splitCell(addr)[1];
       const hit = (state.fdItems || []).find(x => x.sheet === sheet && x.cell === addr) || (state.fdItems || []).find(x => x.sheet === sheet && !x.cell && x.row === row);
-      if (hit) { if (state.sideTab !== 'fixes') state.sideTab = 'fixes'; fdOpen(hit); return; }
+      state.gridCell = addr; state.gridRow = row;
+      if (hit) { if (state.sideTab !== 'fixes') state.sideTab = 'fixes'; fdOpen(hit, addr); return; }
       state.gridRequest = (state.gridRequest || 0) + 1; state.fdOpenRequest = (state.fdOpenRequest || 0) + 1;
       state.gridCell = addr; state.gridRow = row; state.fdCur = null; drawGrid(); if (state.sideTab === 'fixes') drawSide();
     });
@@ -3050,6 +3127,8 @@
         h('label', {class: 'fd-zoom'}, 'Zoom ', h('select', {'aria-label': 'Sheet zoom', onchange: e => { state.gridZoom = Number(e.target.value); drawGrid(); }},
           [80, 100, 125, 150].map(z => h('option', {value: String(z), selected: (state.gridZoom || 100) === z ? true : null}, z + '%')))),
         state.fdAsideHidden ? h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdAsideHidden = false; $('fd-work')?.classList.remove('aside-hidden'); drawSide(); }}, icon('panel', 15), ' Show corrections') : null),
+      gridDraftControls(),
+      !state.gridDraft && state.gridCell ? h('button', {type:'button',class:'btn',id:'grid-edit-cell',onclick:() => gridStartEdit(sheet,state.gridCell)}, `Edit this cell (${sheet}!${state.gridCell})`) : null,
       h('p', {class: 'fd-grid-context', role: 'status'}, `${table.querySelectorAll('tbody tr').length} rows shown on ${sheet}. `,
         contextText,
         'Filtering does not select a correction or change your draft. Click a flagged cell to inspect it.'),

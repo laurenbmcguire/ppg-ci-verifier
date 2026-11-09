@@ -1722,3 +1722,6 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-summary-compact .fd-summary-scroll {max-height:none;overflow:visible}
 .fd-summary-compact .fd-summary-text {margin:8px 0;white-space:pre-wrap}
 .fd-summary-compact details {margin:8px 0}
+
+/* Explicit in-cell draft controls remain reachable on narrow screens. */
+.fd-grid-draft{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:10px;border:1px solid #b7791f;background:#fff8e6}.grid td.grid-editing{padding:2px}.grid-editing input{box-sizing:border-box;width:100%;min-width:90px;font-size:16px;padding:8px}.fd-grid-draft button,#grid-edit-cell{min-height:44px}.grid td:focus{outline:2px solid #2563eb;outline-offset:-2px}
