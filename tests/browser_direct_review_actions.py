@@ -24,16 +24,16 @@ from eos_fixture import build,ROWS
 from openpyxl import load_workbook
 store=PostgresWorkspace('postgresql://test.invalid/synthetic',FakeDatabase().connect)
 rows=[list(r) for r in ROWS];rows[1][4]='Holes /  Glue ';rows[2][4]='Pinch /  Gap '
-raw=build([tuple(r) for r in rows]);rows[3][5]='Synthetic manual fixture';manual_raw=build([tuple(r) for r in rows])
+raw=build([tuple(r) for r in rows]);rows[3][5]='Synthetic manual fixture';manual_raw=build([tuple(r) for r in rows]);rows[3][5]='Synthetic group fixture';group_raw=build([tuple(r) for r in rows])
 with store.session() as directory:
-    box=SpreadsheetInbox(directory);decision=box.ingest('2230-SYNTHETIC-decisions.xlsx',raw);manual=box.ingest('2230-SYNTHETIC-manual.xlsx',manual_raw)
+    box=SpreadsheetInbox(directory);decision=box.ingest('2230-SYNTHETIC-decisions.xlsx',raw);manual=box.ingest('2230-SYNTHETIC-manual.xlsx',manual_raw);group=box.ingest('2230-SYNTHETIC-group.xlsx',group_raw)
     issues=lambda r:[i for i in summarize(r)['issues'] if i['code']=='extra_spaces']
     selected=issues(decision);manual_issues=issues(manual)
     assert len(selected)==2 and len(manual_issues)==2,(selected,manual_issues)
     assert box.holds(manual)==[],'Fixture must genuinely satisfy existing guards; never patch holds.'
     proposal=next(p for p in box.fix_proposals(manual['file_hash'])['proposals'] if p['source']=='Clean-up' and p['cell']=='I17')
     linked=next((i for i in summarize(manual)['issues'] if i.get('sheet')==proposal['sheet'] and str(i.get('row'))==''.join(c for c in proposal['cell'] if c.isdigit()) and str(proposal['before']).strip() in i.get('text','')),None)
-    config=dict(decision_hash=decision['file_hash'],ids=[i['key'] for i in selected],manual_hash=manual['file_hash'],manual_id=linked['key'] if linked else 'fix:'+proposal['id'],sheet=proposal['sheet'],cell=proposal['cell'],before=proposal['before'],after='00124')
+    config=dict(group_hash=group['file_hash'],group_ids=[i['key'] for i in issues(group)],decision_hash=decision['file_hash'],ids=[i['key'] for i in selected],manual_hash=manual['file_hash'],manual_id=linked['key'] if linked else 'fix:'+proposal['id'],sheet=proposal['sheet'],cell=proposal['cell'],before=proposal['before'],after='00124')
 requests=[];decisions=[];applies=[]
 class LocalHandler(handler):
     def log_message(self,*args):pass
@@ -44,7 +44,9 @@ class LocalHandler(handler):
         if self.path in ('/api/spreadsheets/decide','/api/spreadsheets/apply-fixes'):
             data=self.rfile.read(int(self.headers.get('Content-Length','0')));payload=json.loads(data);self.rfile=io.BytesIO(data)
             if self.path.endswith('/decide'):
-                if payload.get('file_hash')!=config['decision_hash'] or payload.get('ids') not in ([config['ids'][0]],[config['ids'][1]]) or payload.get('action') not in ('reject','defer'):
+                single=payload.get('file_hash')==config['decision_hash'] and payload.get('ids') in ([config['ids'][0]],[config['ids'][1]]) and payload.get('action') in ('reject','defer')
+                batch=payload.get('file_hash')==config['group_hash'] and sorted(payload.get('ids',[]))==sorted(config['group_ids']) and payload.get('action')=='reject'
+                if not(single or batch):
                     return self.fail(409,'Only the named synthetic decision scope is allowed.')
                 decisions.append(payload)
             else:
@@ -62,6 +64,9 @@ try:
     with store.session() as directory:
         box=SpreadsheetInbox(directory);saved=box.get(config['decision_hash']);old=box.get(config['manual_hash'])
         assert box.download(config['decision_hash'])[1]==raw and box.download(config['manual_hash'])[1]==manual_raw
+        group=box.get(config['group_hash']);assert box.download(config['group_hash'])[1]==group_raw
+        assert len(group['finding_decision_log'])==1 and set(group['finding_decisions'])==set(config['group_ids'])
+        assert all(group['finding_decisions'][key]['action']=='reject' for key in config['group_ids'])
         assert len(saved['finding_decision_log'])==2
         assert saved['finding_decisions'][config['ids'][0]]['action']=='reject'
         assert saved['finding_decisions'][config['ids'][1]]['action']=='defer'
@@ -74,7 +79,7 @@ try:
                 for cell in row:
                     if cell.value!=after[ws.title][cell.coordinate].value:diffs.append((ws.title,cell.coordinate,cell.value,after[ws.title][cell.coordinate].value))
         assert diffs==[(config['sheet'],config['cell'],config['before'],config['after'])],diffs
-        assert not new.get('sent') and not new.get('approval') and box.list()['count']==3
-    assert len(decisions)==2 and len(applies)==1 and not external
-    print(json.dumps(dict(passed=True,width=WIDTH,actual_handler=True,recorded_keep_and_defer=True,source_hold_preserved=True,manual_preview_cancel_preserved=True,one_explicit_cell_change=True,originals_unchanged=True,no_provider_traffic=True)))
+        assert not new.get('sent') and not new.get('approval') and box.list()['count']==4
+    assert len(decisions)==3 and len(applies)==1 and not external
+    print(json.dumps(dict(passed=True,width=WIDTH,actual_handler=True,recorded_keep_and_defer=True,two_item_group_saved=True,unrelated_findings_unchanged=True,source_hold_preserved=True,manual_preview_cancel_preserved=True,one_explicit_cell_change=True,originals_unchanged=True,no_provider_traffic=True)))
 finally:server.shutdown();server.server_close()

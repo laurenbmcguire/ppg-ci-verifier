@@ -10,7 +10,7 @@ test('selected-scope advances never enter unselected findings and external revis
 });
 test('chooser never calls direct AI apply or mutates existing correction basket',()=>{
  const popup=between('  function fdReviewDialog(', '  function fdOccurrenceList(');
- assert.ok(popup.includes('findingBinding(scope)'));assert.ok(popup.includes('captureCorrections(accepted, dec, {}, binding, report)'));
+ assert.ok(popup.includes('findingBinding(chosen)'));assert.ok(popup.includes('const chosen = scope.filter(it => included.has(it.key))'));assert.ok(popup.includes('ids: chosen.map(it => it.key)'));assert.ok(popup.includes('captureCorrections(accepted, dec, {}, binding, report)'));
  assert.ok(!popup.includes('store.set'));assert.ok(!popup.includes('aiFix('));assert.ok(!popup.includes('/ai-fix'));
  assert.ok(popup.includes('scope.length <= 1000'));assert.ok(popup.includes('byType'));assert.ok(popup.includes("['open', 'selected', 'deferred', 'confirmed', 'claude']"));
 });

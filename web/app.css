@@ -1703,3 +1703,5 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .queue-scope { margin: 0; padding: 12px 16px; font-size: 13px; color: var(--muted, #516b65); }
 
 .fd-direct-actions{margin:8px 0;padding:8px;border:1px solid var(--line,#ccd5d2);border-radius:6px}.fd-direct-actions p{margin:4px 0;font-size:12px}.fd-inline-cell{padding:12px 0;border-top:1px solid var(--line,#ccd5d2)}.fd-inline-manual{padding:12px;border:2px solid var(--accent,#33756b);border-radius:8px}
+
+.fd-review-dialog.fd-manual-active .fd-review-toolbar{display:none}.fd-manual-preview{position:sticky;top:-20px;z-index:3;background:var(--paper,#fff);padding:10px 0;display:flex;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--line,#ccd5d2)}
