@@ -25,7 +25,7 @@ test('coverage dominates status ledger even when stored categories add up',()=>{
   state.report.review.coverage=coverage;state.report.review.reconcile={total:70,adds_up:true};
   const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);
   const ledger=text(nodes(body).find(n=>n.class==='fd-recon'));assert.match(ledger,/Listed findings/);assert.doesNotMatch(ledger,/All .*accounted for|✓/);
-  assert.equal(text(body).includes('Some potential errors are unavailable'),coverage.truncated);
+  assert.equal(text(body).includes('Some potential errors are unavailable'),false);   // Nov 9: no coverage warning box; approval stays blocked by the server's hold
   const mode=ctx.fdModeSelector(state.report);assert.equal(text(mode),'Review potential errors');
  }
  state.report.review.page={complete:false};state.report.review.coverage={};state.report.review.reconcile.adds_up=false;
@@ -50,8 +50,8 @@ test('successful explicit recheck refreshes recovery controls after releasing it
 
 test('queue summary never calls known incomplete finding coverage clear',()=>{
  const ctx=vm.createContext({});vm.runInContext(source.split('\n').find(line=>line.includes('const statusNote ='))+'\nthis.note=statusNote;',ctx);
- assert.equal(ctx.note({status:'clear',counts:{},coverage:{truncated:true}}),'Finding coverage incomplete');
- assert.equal(ctx.note({status:'clear',counts:{},page:{complete:false}}),'Finding coverage incomplete');
+ assert.equal(ctx.note({status:'clear',counts:{},coverage:{truncated:true}}),'Recheck needed');
+ assert.equal(ctx.note({status:'clear',counts:{},page:{complete:false}}),'Recheck needed');
  assert.equal(ctx.note({status:'hold',counts:{high:1}}),'1 high-severity finding');
 });
 

@@ -43,7 +43,7 @@
   const shortDay = d => { if (!d) return ''; const x = new Date(d + 'T12:00:00'); return isNaN(x) ? d : x.toLocaleDateString('en-US', {weekday: 'short', month: 'short', day: 'numeric'}); };
   const ago = iso => { const s = (Date.now() - new Date(iso)) / 1000; if (!(s >= 0)) return ''; if (s < 90) return 'just now'; if (s < 3600) return `${Math.round(s / 60)} min ago`; if (s < 86400) return `${Math.round(s / 3600)} h ago`; return new Date(iso).toLocaleDateString('en-US', {month: 'short', day: 'numeric'}); };
   const STATUS = {hold: 'Hold', check: 'Check', clear: 'Clear'};
-  const statusNote = r => { const c = r.counts || {}; if (r.coverage?.truncated || r.coverage?.not_listed || r.page?.complete === false) return 'Finding coverage incomplete'; if (r.status === 'hold') return `${c.high || 0} high-severity finding${c.high === 1 ? '' : 's'}`; if (r.status === 'check') return `${(c.medium || 0) + (c.low || 0)} medium/low finding${(c.medium || 0) + (c.low || 0) === 1 ? '' : 's'}`; return 'Nothing flagged'; };
+  const statusNote = r => { const c = r.counts || {}; if (r.coverage?.truncated || r.coverage?.not_listed || r.page?.complete === false) return 'Recheck needed'; if (r.status === 'hold') return `${c.high || 0} high-severity finding${c.high === 1 ? '' : 's'}`; if (r.status === 'check') return `${(c.medium || 0) + (c.low || 0)} medium/low finding${(c.medium || 0) + (c.low || 0) === 1 ? '' : 's'}`; return 'Nothing flagged'; };
 
   // ---------------------------------------------------------------- state
   const state = {list: [], filter: store.get('rd-filter', 'attention'), search: '', selected: null, report: null, fixes: null, issueSource: 'All', showAll: false, busy: false};
@@ -155,7 +155,7 @@
     const rv = r.review, c = rv?.counts || {};
     if (!rv || r.internal_check_status === 'could_not_load_latest_check') return ['Check unavailable', 'check'];
     if (r.internal_check_status === 'outdated_checks_require_recheck') return ['Checks out of date', 'check'];
-    if (rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false) return ['Finding coverage incomplete', 'check'];
+    if (rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false) return ['Recheck needed', 'check'];
     if (rv.status === 'clear') return ['No open findings', 'clear'];
     const high = c.high, other = Number.isFinite(c.medium) && Number.isFinite(c.low) ? c.medium + c.low : null;
     if (rv.status === 'hold') return [high == null ? 'High-severity findings' : `${high} high-severity finding${high === 1 ? '' : 's'}`, 'hold'];
@@ -938,9 +938,7 @@
       }
     }}, 'AI Summary of Errors', h('small', {class: 'fd-summary-disclosure'}, requested ? 'Open saved summary for this review' : state.aiOn ? 'Click to generate with Claude using finding-group metadata' : 'AI is off; open recorded findings and review actions')),
       fdSummaryPanel(r, binding, owner, current, true),
-      (r.review.page?.complete === false || r.review.coverage?.truncated || r.review.coverage?.not_listed) ? h('p', {class: 'fd-coverage'}, 'Some findings are unavailable. These actions cover only eligible loaded items; approval remains blocked.') : null,
-      h('p', {class: 'fd-hint'}, `${eligible.length} eligible proposed cell changes available. Accept All opens a before/after preview; remove any change there and confirm Apply to create a new version.`),
-      !eligible.length ? h('p', {}, 'No eligible proposed changes are available. Review individual findings and the reasons preventing changes below.') : null,
+      !eligible.length ? h('p', {class: 'fd-hint'}, 'No suggested fixes yet. Use Manually Edit or Ignore, or AI fix on a group below.') : null,
       h('div', {class: 'fd-cardacts'},
         h('button', {type: 'button', class: 'btn', disabled: busy || !eligible.length, onclick: () => { if (current()) fdPreviewRecommended(binding); }}, `Accept All · ${eligible.length} proposed changes`),
         h('button', {type: 'button', class: 'btn', disabled: busy, onclick: () => { if (current()) fdReviewDialog(open, 'manual'); }}, 'Manually Edit'),
@@ -1027,8 +1025,9 @@
         return;
       }
       output.replaceChildren(inventory, h('h4', {}, answer.narrative_status === 'done' ? 'AI explanation of available findings' : 'AI explanation unavailable'),
-          h('p', {class: 'fd-coverage'}, answer.coverage.label), h('p', {}, answer.narrative_notice), answer.reply ? h('details', {open: true}, h('summary', {}, 'Read AI explanation'), h('p', {class: 'fd-summary-text fd-summary-scroll', tabindex: '0', 'aria-label': 'AI explanation text'}, answer.reply)) : null, h('p', {class: 'fd-hint'}, answer.notice),
-          h('p', {class: 'fd-hint'}, 'AI text is not verification or approval. Use the recorded groups below to request AI proposals, fix manually, or ignore with a reason. Only previewed changes can be applied.'));
+          h('p', {class: 'fd-hint fd-summary-scope'}, `${answer.coverage.label} ${answer.narrative_notice || ''}`.trim()),
+          answer.reply ? h('details', {open: true}, h('summary', {}, 'Read AI explanation'), h('p', {class: 'fd-summary-text fd-summary-scroll', tabindex: '0', 'aria-label': 'AI explanation text'}, answer.reply)) : null, h('p', {class: 'fd-hint'}, answer.notice),
+          null);
     };
     if (state.fdSummaryCache?.report === report && state.fdSummaryCache?.context === context && state.fdSummaryCache?.key === JSON.stringify(binding)) {
       const answer = state.fdSummaryCache.answer;
@@ -1247,31 +1246,31 @@
     const direct = scope => fdDirectControls(scope, act);
     const draw = () => {
       const scope = picked(), eligible = fdRecommended(scope), canDecide = scope.length > 0 && scope.length <= 1000 && scope.every(it => it.fp && ['open', 'claude'].includes(it.state));
-      status.textContent = `${scope.length} of ${items.length} loaded review items selected.${filterKeys && selected.size > scope.length ? ' ' + (selected.size - scope.length) + ' selections outside this status are saved and excluded from these actions.' : ''} ${eligible.length} supported cell changes in this selection.${scope.length && !canDecide ? ' Keep/defer unavailable: choose at most 1000 open findings, excluding standalone proposals and previously decided items.' : ''}`;
+      status.textContent = `${scope.length} of ${items.length} selected.${filterKeys && selected.size > scope.length ? ' ' + (selected.size - scope.length) + ' selections outside this status are saved and excluded from these actions.' : ''} ${eligible.length} supported cell changes in this selection.${scope.length && !canDecide ? ' Keep/defer unavailable: choose at most 1000 open findings, excluding standalone proposals and previously decided items.' : ''}`;
       actions.replaceChildren(
-        h('button', {type: 'button', class: 'btn', disabled: !state.aiOn || !scope.length || scope.length > 120 || scope.some(it => !it.fp || it.state !== 'open'), onclick: () => act(picked(), 'ai')}, state.aiOn ? 'Prepare AI proposals for selected findings' : 'AI proposals unavailable'),
+        h('button', {type: 'button', class: 'btn', disabled: !state.aiOn || !scope.length || scope.length > 120 || scope.some(it => !it.fp || it.state !== 'open'), onclick: () => act(picked(), 'ai')}, state.aiOn ? 'AI fix selected' : 'AI fix unavailable (AI is off)'),
         h('button', {type: 'button', class: 'btn primary', disabled: !eligible.length, onclick: () => {
           if (!guard() || !discard()) return;
           const accepted = eligible.map(it => it.fix), dec = Object.fromEntries(accepted.map(f => [f.id, {state: 'accepted', after: f.after}]));
           const capture = {...captureCorrections(accepted, dec, {}, binding, report), recommendedOnly: true};
           dlg.close(); fdPreview(capture);
         }}, `Preview ${eligible.length} supported changes`),
-        h('button', {type: 'button', class: 'btn', disabled: !scope.length, onclick: () => act(picked(), 'manual')}, 'Review / edit selected'),
-        h('button', {type: 'button', class: 'btn', disabled: !canDecide, onclick: () => act(picked(), 'ignore')}, 'Ignore: keep as recorded…'),
+        h('button', {type: 'button', class: 'btn', disabled: !scope.length, onclick: () => act(picked(), 'manual')}, 'Fix selected manually'),
+        h('button', {type: 'button', class: 'btn', disabled: !canDecide, onclick: () => act(picked(), 'ignore')}, 'Ignore selected…'),
         h('button', {type: 'button', class: 'btn', disabled: !canDecide, onclick: () => { if (discard()) { actionVersion++; decisionForm('defer'); } }}, 'Defer to source owner…'));
       types.replaceChildren(h('h3', {}, 'Select by error type across groups'), ...[...byType].map(([type, list]) => {
         const count = list.filter(it => selected.has(it.key)).length;
         const toggle = h('input', {type: 'checkbox', checked: count === list.length || null, 'aria-label': 'Select error type ' + type, onchange: e => choose(list, e.target.checked)});
         toggle.indeterminate = count > 0 && count < list.length;
         const label = kindNames(list[0].kind || list[0].issue || {})[1] || kindNames(list[0].kind || list[0].issue || {})[0] || type;
-        return h('label', {}, toggle, ` ${label} (${type}): ${count} of ${list.length} loaded items across all groups and pages`);
+        return h('label', {}, toggle, ` ${label}: ${count} of ${list.length} selected`);
       }));
       content.replaceChildren(...groups.map((g, index) => {
         const page = pages.get(g.key) || 0, count = g.items.filter(it => selected.has(it.key)).length;
         const toggle = h('input', {type: 'checkbox', checked: count === g.items.length || null, 'aria-label': `Select error group ${index + 1}: ${g.title}`, onchange: e => choose(g.items, e.target.checked)});
         toggle.indeterminate = count > 0 && count < g.items.length;
         return h('section', {class: 'fd-review-group'}, h('h3', {}, g.title),
-          h('label', {}, toggle, ` Select this group: ${count} of ${g.items.length} items across all its pages`),
+          h('label', {}, toggle, ` Select this group (${count} of ${g.items.length} selected)`),
           direct(g.items),
           h('p', {}, `Items ${page * 25 + 1}–${Math.min((page + 1) * 25, g.items.length)} of ${g.items.length}`),
           h('ul', {}, g.items.slice(page * 25, (page + 1) * 25).map(it => h('li', {'data-direct-finding': it.key}, h('label', {},
@@ -1282,16 +1281,15 @@
       }));
     };
     dlg.append(h('h2', {id: 'fd-review-title', tabindex: '-1'}, filterLabel || 'Needs review'),
-      h('p', {}, `${report.filename || 'Report'} · File v${report.version ?? 'unknown'} · Revision ${report.revision ?? 'unknown'} · ID ${report.file_hash.slice(0, 12)}. ${filterLabel ? 'Only this selected status is listed below; actions affect selected items in this list.' : 'All loaded non-informational findings, set-aside records and suggested changes are listed below.'}`),
-      report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed ? h('p', {class: 'fd-coverage'}, 'Coverage incomplete: this list includes only loaded items. Unavailable findings cannot be selected; approval remains blocked.') : null,
-      h('p', {}, `${fdHoldSummary(report)}. ${state.aiOn ? 'On request, selected findings and relevant cell context are sent to configured Claude (Anthropic), up to 120 findings. No full workbook or unrelated reports are sent.' : 'AI proposals are unavailable while AI is off.'} All proposals require preview and explicit Apply; opening this review does not run AI.`),
-      fdSummaryPanel(report, binding, dlg, current),
+      h('p', {}, `${report.filename || 'Report'} · v${report.version ?? '?'}. ${filterLabel ? 'Only this selected status is listed below. ' : ''}Tick one, a few, or all, then choose AI fix, Fix manually or Ignore.`),
+      h('p', {class: 'fd-hint'}, state.aiOn ? 'AI fix sends only the selected findings and their cells to Claude (Anthropic). Nothing changes until you preview and apply.' : 'AI fix is off.'),
+      filterLabel ? null : fdSummaryPanel(report, binding, dlg, current),
       !items.length ? h('section', {}, h('h3', {}, 'No loaded review items'), h('p', {}, 'No selectable findings does not establish readiness. Client, job, business date, source verification or coverage may still need attention.'), ...(report.holds || []).map(hold => h('p', {}, hold.text || hold.code)), h('button', {type: 'button', class: 'btn', onclick: () => { if (!guard()) return; close(); state.fdView = 'sources'; drawReport(); }}, 'Open source and report context')) : null,
       h('div', {class: 'fd-review-toolbar'}, status, h('div', {class: 'fd-cardacts'},
-        h('button', {type: 'button', class: 'btn', onclick: () => choose(unresolved, true)}, `Select all ${unresolved.length} unresolved loaded items`),
+        h('button', {type: 'button', class: 'btn', onclick: () => choose(unresolved, true)}, `Select all (${unresolved.length})`),
         h('button', {type: 'button', class: 'btn', onclick: () => choose(items, false)}, 'Select none'),
         h('button', {type: 'button', class: 'btn', 'data-ai-cancel': 'true', onclick: close}, 'Close review')), actions),
-      h('p', {class: 'fd-hint'}, 'Selection is a review scope, not approval. Preview includes only eligible cell changes. Review / edit selected opens the same scoped manual editor; only typed, included cells enter preview. Keep/defer applies to at most 1000 open findings with recorded evidence identities. Blockers must be kept one at a time with evidence.'), decision, types, content);
+      h('p', {class: 'fd-hint'}, 'Blockers are ignored one at a time, with evidence.'), decision, types, content);
     document.body.append(dlg); draw(); dlg.showModal(); dlg.querySelector('h2').focus();
     if (Array.isArray(initialScope) && initialAction) { const keys = new Set(initialScope.map(it => it.key)); act(items.filter(it => keys.has(it.key)), initialAction); }
   }
@@ -1496,8 +1494,6 @@
         const scope = items.filter(it => states.includes(it.state));
         return h('button', {type: 'button', class: 'btn', disabled: !scope.length, onclick: () => fdReviewDialog(scope, null, label)}, `${label} · ${scope.length}`);
       }))));
-    if (cov.truncated || cov.not_listed) body.append(h('p', {class: 'fd-coverage', role: 'note'},
-      'Some potential errors are unavailable in this review. Approval stays blocked. Recheck this report below, then review the updated results.'));
     if (dc.stale) body.append(h('p', {class: 'fd-coverage', role: 'note'}, icon('warn', 14), ` ${plural(dc.stale, 'earlier decision')} no longer match${dc.stale === 1 ? 'es' : ''} what the finding says now, so ${dc.stale === 1 ? 'it is' : 'they are'} not applied. Decide again.`));
     if (state.decisionPending) body.append(h('p', {class: 'fd-saving', role: 'status'}, h('span', {class: 'spin'}), ' Saving your decision…'));
     if (state.decisionFailed) body.append(h('div', {class: 'fd-failed', role: 'alert'}, icon('warn', 14), ' ', state.decisionFailed.message,
@@ -2171,6 +2167,29 @@
       candidates.length && !isAdmin ? h('p', {class: 'fd-coverage'}, 'Ask an admin to confirm these source columns. Your account can review the evidence but cannot change the source mapping.') : null,
       message, candidates.length ? confirm : null, compare);
   }
+  // One difference between the report and SharePoint, in plain words.
+  function fdDifferenceText(row) {
+    const v = x => x == null ? 'unknown' : x === '' ? 'blank' : String(x);
+    const where = [row.sheet, row.row ? 'row ' + row.row : null].filter(Boolean).join(' ');
+    const item = row.item != null && row.item !== '' ? `SharePoint item ${row.item}` : null;
+    const field = row.field ? String(row.field).replaceAll('_', ' ') : 'value';
+    const at = where || item || 'Report';
+    const said = {
+      value_differs: `${at}: ${field} is ${v(row.report)} in the report but ${v(row.sharepoint)} in SharePoint${item && where ? ` (${item})` : ''}.`,
+      export_value_differs: `${at}: ${field} is ${v(row.report)} in the report but ${v(row.sharepoint)} in SharePoint${item && where ? ` (${item})` : ''}.`,
+      changed_since_export: `${item || at}: ${field} was changed in SharePoint after this report was made (now ${v(row.sharepoint)}).`,
+      missing_from_report: `${item || 'A SharePoint item'} is in SharePoint for this day but missing from the report.`,
+      not_on_sharepoint_for_day: `${at}: this row is not in SharePoint for this day${item && where ? ` (${item})` : ''}.`,
+      not_on_sharepoint: `${at}: this row is not in SharePoint${item && where ? ` (${item} does not exist in the list)` : ''}.`,
+      item_listed_twice: `${at}: duplicate row. ${item || 'The same SharePoint item'} appears more than once in the report.`,
+      report_row_without_item_id: `${at}: this row has no SharePoint item number, so it could not be matched.`,
+      wrong_list: `${at}: this row links to a different SharePoint list.`,
+      field_not_in_source: `${field[0].toUpperCase() + field.slice(1)} is not recorded in SharePoint, so it could not be compared.`,
+      export_item_not_on_sharepoint: `${item || at} is in the report's export but not in SharePoint.`,
+      export_source_unconfirmed: `${at}: the report does not say which SharePoint list this row came from.`,
+    }[row.status];
+    return said || `${at}: ${String(row.status || 'difference').replaceAll('_', ' ')}${row.note ? '. ' + String(row.note).replace(/\.$/, '') : ''}.`;
+  }
   function fdComparison(r) {
     const rec = r.source_reconciliation || {}, counts = rec.count_reconciliation, sp = r.review?.sharepoint || {};
     const value = v => v == null ? 'Unknown' : v === '' ? 'Blank' : String(v);
@@ -2183,31 +2202,53 @@
     const verified = fdSourceVerified(r);
     const differences = (rec.rows || []).filter(row => row.status && row.status !== 'matched');
     const complete = fdSourceComplete(r);
+    // "No" needs the same complete, current evidence as "Yes": a difference read through an unconfirmed column or an
+    // incomplete read may not be real, so it is listed as unconfirmed instead
     const differs = complete && sp.status === 'differences' && differences.length > 0;
+    // totals that disagree, in plain words (records count rows; inspected and rejected count parts)
+    const totals = [];
+    const q = counts?.quantities || {};
+    for (const [key, label] of [['inspected', 'Parts inspected'], ['rejected', 'Parts rejected']])
+      if (q[key]?.status === 'differs') totals.push(`${label}: ${value(q[key].report?.total)} in the report, ${value(q[key].source?.total)} in SharePoint.`);
+    if (rows.report_rows != null && rows.matched_unique_items != null && rows.report_rows !== rows.matched_unique_items && differs)
+      totals.push(`Records: ${value(rows.report_rows)} rows in the report, ${value(rows.matched_unique_items)} matched in SharePoint.`);
+    if (rows.duplicate_report_rows) totals.push(`${rows.duplicate_report_rows} duplicate row${rows.duplicate_report_rows === 1 ? '' : 's'} in the report.`);
+    const answer = verified ? 'Yes' : differs ? 'No' : 'Not verified';
     return h('details', {class: 'fd-comparison'},
-      h('summary', {}, `Match SharePoint? ${verified ? 'Yes' : differs ? 'No' : 'Not verified'}`),
-      differences.length ? h('section', {}, h('h3', {}, `${differs ? 'Current comparison' : 'Earlier comparison, not verified'} · ${differences.length} recorded differences${rec.rows_truncated ? ' shown (incomplete)' : ''}`),
-        h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Recorded differences'}, differences.map(row => h('li', {}, `${row.sheet || 'Report'}${row.row ? ' row ' + row.row : ''}${row.item != null ? ' · source item ' + row.item : ''}: ${String(row.status).replaceAll('_', ' ')}${row.field ? ' · ' + row.field + ': report ' + value(row.report) + ', SharePoint ' + value(row.sharepoint) : ''}${row.note ? ' · ' + row.note : ''}`)))) : null,
-      !verified ? h('p', {class: 'fd-coverage', role: 'note'}, sp.message || 'Current exact-source verification is unavailable. Stored totals do not establish client readiness.') : null,
-      sourceHolds.length ? h('ul', {class: 'fd-coverage'}, sourceHolds.map(hold => h('li', {}, hold.text || hold.code))) : null,
-      h('p', {}, 'Inspection records count rows. Inspected and rejected quantities count units. A match is evidence for this snapshot only, not permission to send to a client.'),
-      h('p', {}, `Source: ${rec.list?.name || (typeof rec.list === 'string' ? rec.list : null) || sp.source || 'Unknown'} · Site ID: ${rec.site_id || 'Unknown'} · List ID: ${rec.list_id || rec.list?.id || 'Unknown'} · Snapshot: ${rec.snapshot_id || sp.snapshot_id || 'Unknown'} · Captured: ${rec.captured_at || sp.captured_at || 'Unknown'}`),
-      h('p', {}, `Compared workbook: ${bound.file_hash || 'Unknown'} · Checker: ${bound.checker_version || 'Unknown'}${current ? '' : ' · Binding is missing or out of date; re-check before relying on these totals.'}`),
-      counts ? h('dl', {},
-        h('dt', {}, 'Inspection records'), h('dd', {}, `Report: ${value(rows.report_rows)} · Source rows read: ${value(rows.source_rows)} · Unique source items matched: ${value(rows.matched_unique_items)}`),
-        h('dt', {}, 'Coverage gaps'), h('dd', {}, `Duplicate report rows: ${value(rows.duplicate_report_rows)} · Missing source items: ${value(rows.missing_source_items)} · Unmatched report rows: ${value(rows.unmatched_report_rows)}`),
-        pair('Inspected quantity', counts.quantities?.inspected), pair('Rejected quantity', counts.quantities?.rejected), pair('Records with rejected quantity', counts.rejected_records))
-        : h('p', {}, 'Record and quantity comparison is unavailable for this snapshot. Unknown counts are not zero.'),
-      rec.coverage?.complete !== true ? h('p', {class: 'fd-coverage', role: 'note'}, 'Source coverage is incomplete or unknown. Rows read are not a complete source total; no missing quantity is treated as zero.') : null,
-      h('p', {}, `Fields checked: ${(rec.fields_checked || sp.fields_checked || []).join(', ') || 'Unknown'}. Fields not checked: ${(rec.fields_not_checked || sp.fields_not_checked || []).join(', ') || 'Not specified'}. This does not verify photos, source correctness or release readiness.`),
-      (rec.not_verified_because || []).length ? h('ul', {}, rec.not_verified_because.map(reason => h('li', {}, reason))) : null,
-      ...[['duplicates', 'Duplicate report references'], ['exclusions', 'Source records outside the confirmed business date']].map(([key, title]) =>
-        (counts?.[key] || []).length ? h('details', {}, h('summary', {}, `${title} · ${counts[key].length}`), h('ul', {}, counts[key].map((x, n) =>
-          h('li', {'data-comparison-id': `${key}:${n}`}, `${x.sheet ? x.sheet + ' · row ' + x.row + ' · ' : ''}Source item ${value(x.item)}${x.day ? ' · ' + x.day : ''}: ${x.evidence || x.reason || 'Evidence unavailable'}`,
-            x.day_basis ? h('small', {}, ` Date basis: ${x.day_basis}`) : null)))) : null),
-      h('p', {}, counts?.note || 'No report rows are deleted or excluded by this display.'),
+      h('summary', {}, `Match SharePoint? ${answer}`),
+      verified ? h('p', {}, 'Every record and quantity in this report matches SharePoint.') : null,
+      differs ? h('section', {}, h('h3', {}, `What is different (${differences.length}${rec.rows_truncated ? '+' : ''})`),
+        totals.length ? h('ul', {class: 'fd-difference-totals'}, totals.map(t => h('li', {}, t))) : null,
+        h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Differences from SharePoint'}, differences.map(row => h('li', {}, fdDifferenceText(row),
+          row.url ? [' ', h('a', {href: row.url, target: '_blank', rel: 'noopener'}, 'Open in SharePoint')] : null))),
+        null) : null,
+      !verified && !differs ? h('p', {}, current && rec.rows ? 'SharePoint was read, but the comparison is not complete or not confirmed, so this report is not verified yet.'
+        : 'This report has not been compared with SharePoint yet, so it is not verified.') : null,
+      !verified && !differs && differences.length ? h('details', {}, h('summary', {}, `Earlier comparison, not verified · ${differences.length} possible difference${differences.length === 1 ? '' : 's'}`),
+        h('p', {class: 'fd-hint'}, 'Not confirmed: these may not be real differences until the comparison is complete.'),
+        h('ul', {class: 'fd-difference-list'}, differences.map(row => h('li', {}, fdDifferenceText(row))))) : null,
       fdSourceRecovery(r),
-      sp.web_url ? h('a', {href: sp.web_url, target: '_blank', rel: 'noopener'}, 'Open exact source (read only)') : null);
+      sp.web_url ? h('a', {href: sp.web_url, target: '_blank', rel: 'noopener'}, 'Open the SharePoint list (read only)') : null,
+      h('details', {class: 'fd-comparison-tech'}, h('summary', {}, 'Technical details'),
+      !verified ? h('p', {class: 'fd-coverage', role: 'note'}, sp.message || 'Current exact-source verification is unavailable. Stored totals do not establish client readiness.') : null,
+        sourceHolds.length ? h('ul', {class: 'fd-coverage'}, sourceHolds.map(hold => h('li', {}, hold.text || hold.code))) : null,
+        h('p', {}, 'Inspection records count rows. Inspected and rejected quantities count units. A match is evidence for this snapshot only, not permission to send to a client.'),
+        h('p', {}, `Source: ${rec.list?.name || (typeof rec.list === 'string' ? rec.list : null) || sp.source || 'Unknown'} · Site ID: ${rec.site_id || 'Unknown'} · List ID: ${rec.list_id || rec.list?.id || 'Unknown'} · Snapshot: ${rec.snapshot_id || sp.snapshot_id || 'Unknown'} · Captured: ${rec.captured_at || sp.captured_at || 'Unknown'}`),
+        h('p', {}, `Compared workbook: ${bound.file_hash || 'Unknown'} · Checker: ${bound.checker_version || 'Unknown'}${current ? '' : ' · Binding is missing or out of date; re-check before relying on these totals.'}`),
+        counts ? h('dl', {},
+          h('dt', {}, 'Inspection records'), h('dd', {}, `Report: ${value(rows.report_rows)} · Source rows read: ${value(rows.source_rows)} · Unique source items matched: ${value(rows.matched_unique_items)}`),
+          h('dt', {}, 'Coverage gaps'), h('dd', {}, `Duplicate report rows: ${value(rows.duplicate_report_rows)} · Missing source items: ${value(rows.missing_source_items)} · Unmatched report rows: ${value(rows.unmatched_report_rows)}`),
+          pair('Inspected quantity', counts.quantities?.inspected), pair('Rejected quantity', counts.quantities?.rejected), pair('Records with rejected quantity', counts.rejected_records))
+          : h('p', {}, 'Record and quantity comparison is unavailable for this snapshot. Unknown counts are not zero.'),
+        rec.coverage?.complete !== true ? h('p', {class: 'fd-coverage', role: 'note'}, 'Source coverage is incomplete or unknown. Rows read are not a complete source total; no missing quantity is treated as zero.') : null,
+        h('p', {}, `Fields checked: ${(rec.fields_checked || sp.fields_checked || []).join(', ') || 'Unknown'}. Fields not checked: ${(rec.fields_not_checked || sp.fields_not_checked || []).join(', ') || 'Not specified'}. This does not verify photos, source correctness or release readiness.`),
+        (rec.not_verified_because || []).length ? h('ul', {}, rec.not_verified_because.map(reason => h('li', {}, reason))) : null,
+        ...[['duplicates', 'Duplicate report references'], ['exclusions', 'Source records outside the confirmed business date']].map(([key, title]) =>
+          (counts?.[key] || []).length ? h('details', {}, h('summary', {}, `${title} · ${counts[key].length}`), h('ul', {}, counts[key].map((x, n) =>
+            h('li', {'data-comparison-id': `${key}:${n}`}, `${x.sheet ? x.sheet + ' · row ' + x.row + ' · ' : ''}Source item ${value(x.item)}${x.day ? ' · ' + x.day : ''}: ${x.evidence || x.reason || 'Evidence unavailable'}`,
+              x.day_basis ? h('small', {}, ` Date basis: ${x.day_basis}`) : null)))) : null),
+        h('p', {}, counts?.note || 'No report rows are deleted or excluded by this display.'),
+        null));
   }
   function fdSources(r) {
     const rec = r.source_reconciliation || {}, sp = r.review.sharepoint || {}, sel = r.dataset_selection || {}, cov = rec.coverage || {};

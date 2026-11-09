@@ -195,10 +195,10 @@ test('blocker and approval-hold counts live beside sheet, not in report title',(
 
 test('SharePoint verdict distinguishes identity joins from values and requires complete current evidence',()=>{
  const r={file_hash:'h',checker_version:'v',review:{sharepoint:{status:'differences',source_verified:false}},source_reconciliation:{snapshot_id:'snapshot',site_id:'site',list_id:'list',bound_to:{file_hash:'h',checker_version:'v'},snapshot_id:'snap',site_id:'site',list_id:'list',coverage:{complete:true},rows:[{sheet:'Detail',row:3,item:'2',status:'value_differs',field:'rejected',report:'2',sharepoint:'3'}],count_reconciliation:{record_counts:{report_rows:2,source_rows:2,matched_unique_items:2}}}};
- let text=comparison(r);assert.match(text,/Match SharePoint\? No/);assert.match(text,/Detail row 3 · source item 2: value differs · rejected: report 2, SharePoint 3/);assert.doesNotMatch(text,/100%/);
+ let text=comparison(r);assert.match(text,/Match SharePoint\? No/);assert.match(text,/Detail row 3: rejected is 2 in the report but 3 in SharePoint \(SharePoint item 2\)/);assert.doesNotMatch(text,/100%/);
  for(const patch of [{stale:true},{rows_truncated:true},{unconfirmed_rows:1},{coverage:{complete:false}},{coverage:{complete:true,timezone_unconfirmed:true}},{column_mapping:{rejected:{status:'needs_confirmation'}}},{snapshot_id:null}]){const x=structuredClone(r);Object.assign(x.source_reconciliation,patch);assert.match(comparison(x),/Match SharePoint\? Not verified/);}
- r.source_reconciliation.rows[0].report='';r.source_reconciliation.rows[0].sharepoint=0;assert.match(comparison(r),/report Blank, SharePoint 0/);
- r.source_reconciliation.rows[0].report=null;assert.match(comparison(r),/report Unknown, SharePoint 0/);
+ r.source_reconciliation.rows[0].report='';r.source_reconciliation.rows[0].sharepoint=0;assert.match(comparison(r),/rejected is blank in the report but 0 in SharePoint/);
+ r.source_reconciliation.rows[0].report=null;assert.match(comparison(r),/rejected is unknown in the report but 0 in SharePoint/);
  r.holds=[{code:'source_assignment_changed'}];assert.match(comparison(r),/Match SharePoint\? Not verified/);
 });
 
