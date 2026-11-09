@@ -135,6 +135,12 @@
     return inventory.filter(other => other.file_hash !== r.file_hash && queueFamily(other) === queueFamily(r) && Date.parse(other.received_at || '') > saved)
       .sort((a, b) => Date.parse(b.received_at) - Date.parse(a.received_at));
   }
+  // Final = the newest saved copy of a report with no errors left to fix. It is kept in "Final reports".
+  function queueFinal(r, inventory) {
+    const rv = r.review;
+    return !!rv && rv.status === 'clear' && !rv.coverage?.truncated && !rv.coverage?.not_listed && rv.page?.complete !== false &&
+      !['could_not_load_latest_check', 'outdated_checks_require_recheck'].includes(r.internal_check_status) && queueNewerCopies(r, inventory).length === 0;
+  }
   function queueClient(r) {
     const a = r.assignment;
     return a && SETTLED.includes(a.status) && a.client ? a.client : 'Client not confirmed';
@@ -169,11 +175,12 @@
     let rows = shown.filter(r => inClientR(r) && (!q || queueSearch(r).includes(q)));
     if (state.filter === 'attention') rows = rows.filter(queueNeedsAttention);
     if (state.filter === 'review') rows = rows.filter(r => r.review?.review_state === 'waiting');
+    if (state.filter === 'final') rows = rows.filter(r => queueFinal(r, shown));
     const mine = shown.filter(r => inClientR(r));
     const attention = mine.filter(queueNeedsAttention).length, waiting = mine.filter(r => r.review?.review_state === 'waiting').length;
-    const label = {attention: 'To do', all: 'All', review: 'Review requested'};
+    const label = {attention: 'To do', all: 'All', review: 'Review requested', final: 'Final reports'};
     document.querySelectorAll('.segmented button').forEach(b => {
-      const n = b.dataset.filter === 'attention' ? attention : b.dataset.filter === 'review' ? waiting : 0;
+      const n = b.dataset.filter === 'attention' ? attention : b.dataset.filter === 'review' ? waiting : b.dataset.filter === 'final' ? mine.filter(r => queueFinal(r, shown)).length : 0;
       b.classList.toggle('on', b.dataset.filter === state.filter);
       b.setAttribute('aria-pressed', String(b.dataset.filter === state.filter));
       if (b.dataset.filter === 'attention') { b.setAttribute('title', `${attention} saved versions needing attention, including earlier copies. Findings are not combined across versions.`); b.setAttribute('aria-label', `To do: ${attention} saved versions needing attention`); }
@@ -209,7 +216,7 @@
     }
     if (!rows.length) {
       list.append(h('p', {class: 'queue-empty'}, state.list.length
-        ? (state.client && !q && !state.list.some(r => inClientR(r)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'No reports have a review request. Use To do to find reports with findings.' : state.filter === 'attention' && !q ? h('span', {}, 'No matching to-do reports in this loaded list. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
+        ? (state.client && !q && !state.list.some(r => inClientR(r)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'No reports have a review request. Use To do to find reports with findings.' : state.filter === 'final' && !q ? 'No final reports yet. A report lands here once it has no errors left to fix.' : state.filter === 'attention' && !q ? h('span', {}, 'No matching to-do reports in this loaded list. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
         : 'No reports yet. Upload an end-of-shift report to start.'));
       return;
     }
@@ -231,7 +238,7 @@
         h('span', {class: 'queue-name'}, name),
         h('span', {class: 'queue-identity'}, identity),
         h('span', {class: 'queue-quantities'}, h('b', {}, 'Report values'), ...quantities.map(text => h('span', {}, text))),
-        h('span', {class: 'queue-state'}, h('span', {class: 'tag tag-' + tone}, check), h('span', {}, queueSource(r)), workflow ? h('span', {}, workflow) : null),
+        h('span', {class: 'queue-state'}, queueFinal(r, shown) ? h('span', {class: 'tag tag-final'}, 'FINAL VERSION') : null, h('span', {class: 'tag tag-' + tone}, check), h('span', {}, queueSource(r)), workflow ? h('span', {}, workflow) : null),
         h('span', {class: 'queue-version'}, rv.fixed_from ? 'Corrected copy' : 'Uploaded file', earlier ? ' · Earlier saved copy' : '', ` · ${version} · Uploaded ${uploaded}`, current ? ' · Last opened' : ''),
         rv.sharepoint?.source ? h('span', {class: 'queue-source'}, `Source: ${rv.sharepoint.source}`) : null);
       return h('div', {class: 'queue-entry' + (earlier ? ' older-entry' : '')}, open,
@@ -1424,7 +1431,7 @@
     };
     const pending = readyChanges().total;
     return h('div', {class: 'fd-sheetbar'},
-      h('span', {class: 'fd-sheetbar-what'}, `Working copy: version ${revisionOf(r)}${r.fixed_from ? ` · ${plural((r.fixed_from.changes || []).length, 'change')} saved` : ' · original'}${pending ? ` · ${pending} typed, not saved yet` : ''}`),
+      h('span', {class: 'fd-sheetbar-what'}, `${r.review?.status === 'clear' && !(r.fixes_applied || []).length ? 'FINAL version' : 'Working copy'}: version ${revisionOf(r)}${r.fixed_from ? ` · ${plural((r.fixed_from.changes || []).length, 'change')} saved` : ' · original'}${pending ? ` · ${pending} typed, not saved yet` : ''}`),
       h('button', {type: 'button', class: 'btn', onclick: download}, 'Download'),
       h('button', {type: 'button', class: 'btn primary', onclick: email}, 'Email to client'));
   }
@@ -1572,6 +1579,16 @@
     const historyApplied = historyGroups.filter(g => ['applied', 'removed', 'moved'].includes(g.status)).reduce((n, g) => n + g.entries.length, 0);
     const historyRecommendations = historyGroups.filter(g => g.status === 'recommendation').reduce((n, g) => n + g.entries.length, 0);
     const appendHistory = () => { if (auto) body.append(h('details', {class: 'fd-history-overview'}, h('summary', {}, `History · ${plural(historyApplied, 'applied change')} · ${plural(historyRecommendations, 'AI recommendation')}`), auto)); };
+    const leftNow = items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length;
+    const isFinal = !leftNow && r.review.status === 'clear' && !(r.fixes_applied || []).length && !cov.truncated && !cov.not_listed;
+    if (isFinal) {
+      body.append(h('div', {class: 'fd-final', role: 'status'}, icon('ok', 22),
+        h('div', {}, h('b', {}, `Final version (version ${revisionOf(r)})`), h('p', {}, 'No errors left. This copy is saved in the library under Final reports.'),
+          h('div', {class: 'fd-cardacts'}, h('a', {class: 'btn small', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download final copy'),
+            h('button', {type: 'button', class: 'btn small', onclick: () => { state.filter = 'final'; store.set('rd-filter', 'final'); location.hash = ''; }}, 'Open Final reports')))));
+      state.fdFinalTold ||= {};
+      if (!state.fdFinalTold[r.file_hash] && r.fixed_from) { state.fdFinalTold[r.file_hash] = true; toast(`This is the final version (version ${revisionOf(r)}). A copy is saved in Final reports.`); }
+    }
     if (state.fdAIRun?.hash === r.file_hash) body.append(fdAIRunBanner(state.fdAIRun, items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length));
     if (!items.length) { body.append(fdClean(r, st), recon); appendHistory(); return; }
     const cur = items.find(x => x.key === state.fdCur) || null;
