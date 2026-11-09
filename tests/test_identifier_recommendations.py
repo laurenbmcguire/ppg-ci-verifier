@@ -88,3 +88,55 @@ class GenericOverviewGuidance(unittest.TestCase):
                 self.assertIn(evidence_limit, result["why"])
                 for unsupported in ("same car", "two logins", "come from typing", "usually mean", "skipped field"):
                     self.assertNotIn(unsupported, result["why"])
+
+
+class RecommendationCompleteness(unittest.TestCase):
+    def facts(self, mutate=None):
+        report = dict(filename="Synthetic.csv", file_hash="synthetic", checker_version=CHECKER_VERSION,
+                      record_count=1, findings=[], finding_count=0, finding_counts={})
+        review = summarize(report)
+        if mutate:
+            mutate(review)
+        return recommend.report_facts(report, review, 0)
+
+    def guidance(self, facts):
+        return next(r["why"] for r in recommend.report_rules(facts) if r["do"] == "send_for_review")
+
+    def test_missing_stored_findings_cannot_produce_all_clear(self):
+        facts = self.facts(lambda rv: rv["coverage"].update(findings_total=30, not_listed=30, truncated=True))
+        self.assertEqual(facts["counts"]["high"], 0)
+        self.assertFalse(facts["review_detail"]["workbook_storage_complete"])
+        self.assertIn("incomplete or unknown", self.guidance(facts))
+
+    def test_classification_mismatch_cannot_produce_all_clear(self):
+        facts = self.facts(lambda rv: rv["reconcile"].update(open=1))
+        self.assertFalse(facts["review_detail"]["classification_complete"])
+        self.assertIn("incomplete or unknown", self.guidance(facts))
+        mismatched_counts = self.facts(lambda rv: rv["counts"].update(medium=1))
+        self.assertFalse(mismatched_counts["review_detail"]["classification_complete"])
+        self.assertIn("incomplete or unknown", self.guidance(mismatched_counts))
+
+    def test_missing_and_partial_details_cannot_produce_all_clear(self):
+        for mutate in (lambda rv: rv.pop("coverage"), lambda rv: rv.pop("issues"),
+                       lambda rv: rv.update(page=dict(issues_total=1, dismissed_total=0, complete=False))):
+            with self.subTest(mutate=mutate):
+                self.assertIn("incomplete or unknown", self.guidance(self.facts(mutate)))
+
+    def test_complete_no_required_correction_is_qualified_not_source_verification(self):
+        facts = self.facts()
+        self.assertTrue(all(facts["review_detail"][k] for k in ("workbook_storage_complete", "classification_complete", "finding_details_complete")))
+        self.assertIn("No high-severity findings", self.guidance(facts))
+        self.assertIn("does not establish source completeness or release readiness", self.guidance(facts))
+        self.assertNotIn("Nothing must be fixed", self.guidance(facts))
+
+    def test_completeness_changes_and_legacy_facts_invalidate_cached_all_clear(self):
+        complete = self.facts()
+        legacy = copy.deepcopy(complete)
+        legacy.pop("review_detail")
+        partial = self.facts(lambda rv: rv["coverage"].update(findings_total=30, not_listed=30, truncated=True))
+        for old, current in ((legacy, complete), (complete, partial)):
+            cached = dict(fp=recommend.fingerprint(old), recs=dict(items=[dict(why="Nothing must be fixed")], source="ai"))
+            out, saved = recommend.answer(cached, current, recommend.report_rules, "report", False, False)
+            self.assertEqual(out["source"], "rules")
+            self.assertIsNone(saved)
+            self.assertNotIn("Nothing must be fixed", str(out["items"]))

@@ -56,9 +56,11 @@ class Rules(unittest.TestCase):
         self.assertTrue(all(r['priority'] in ('high', 'medium', 'low') for r in recs))
         clean = recommend.report_rules(self.facts(status='ready', counts=dict(high=0), fixes_waiting=0, sharepoint=dict(status='matched'), timeline_flags=[]))
         self.assertEqual(clean[-1]['do'], 'send_for_review')
+        self.assertIn('incomplete or unknown', clean[-1]['why'])
+        self.assertNotIn('Nothing must be fixed', clean[-1]['why'])
         self.assertEqual(recommend.report_rules(self.facts(approved=True, counts=dict(high=0), fixes_waiting=0, sharepoint={'status': 'matched'}))[-1]['do'], 'approve_send')
         other = recommend.report_rules(self.facts(vins_on_other_days_count=2, vins_on_other_days=[dict(vin='X1', day='2026-10-06')]))
-        self.assertTrue(any('another day' in r['title'] for r in other))
+        self.assertTrue(any('normalized identifier/day matches across reports' in r['title'] for r in other))
 
     def test_empty_week_is_not_called_clean(self):
         p = dict(kind='week', totals=dict(reports=0, sent=0), findings=[])

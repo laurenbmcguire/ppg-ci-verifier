@@ -26,12 +26,39 @@ def _rec(title, why, priority='medium', kind='check', who='you', do=None, target
 
 
 # ---------------------------------------------------------------- facts (what Claude sees) and rules (no AI)
+def _review_detail(rv):
+    """Finding storage/classification/loading only; never a source-verification verdict."""
+    cov, rc, page = (rv.get(k) or {} for k in ('coverage', 'reconcile', 'page'))
+    count = lambda x: isinstance(x, int) and not isinstance(x, bool) and x >= 0
+    total, listed = cov.get('findings_total'), cov.get('findings_listed')
+    storage = (count(total) and count(listed) and total == listed
+               and cov.get('not_listed') == 0 and cov.get('truncated') is False)
+    parts = [rc.get(k) for k in ('open', 'informational', 'kept_by_person', 'kept_earlier_record',
+                               'set_aside_by_claude', 'deferred', 'confirmed', 'corrected')]
+    classified = (rc.get('adds_up') is True and count(rc.get('total'))
+                  and all(count(n) for n in parts) and sum(parts) == rc['total']
+                  and cov.get('all_findings') == rc['total']
+                  and count(cov.get('shown')) and count(cov.get('dismissed'))
+                  and cov['shown'] + cov['dismissed'] == rc['total'])
+    severity_counts = [(rv.get('counts') or {}).get(k) for k in ('high', 'medium', 'low', 'info')]
+    classified = classified and all(count(n) for n in severity_counts) and sum(severity_counts) == cov.get('shown')
+    loaded = all(isinstance(rv.get(name), list) and count(cov.get(key))
+                 and len(rv[name]) == cov[key] for name, key in (('issues', 'shown'), ('dismissed', 'dismissed')))
+    if page:
+        loaded = loaded and page.get('complete') is not False and all(
+            count(page.get(name + '_total')) and len(rv.get(name) or []) == page[name + '_total']
+            for name in ('issues', 'dismissed'))
+    return dict(version=1, workbook_storage_complete=storage,
+                classification_complete=classified, finding_details_complete=loaded)
+
+
 def report_facts(item, rv, fixes_waiting):
     sp = item.get('sharepoint') or {}
     one = rv.get('sharepoint') or {}   # the one source verdict the header shows (item-by-item reconciliation when there is one)
     bl = item.get('baseline') or {}
     tl = sp.get('timeline') or {}
     return dict(job=rv.get('job'), day=rv.get('day'), status=rv['status'], counts=rv['counts'],
+                review_detail=_review_detail(rv),
                 numbers={k: rv.get(k) for k in ('scans', 'inspected', 'rejected', 'rejected_unit')},
                 issues=[{k: i.get(k) for k in ('severity', 'source', 'where', 'text', 'code', 'verdict') if i.get(k)} for i in rv.get('issues', [])[:40]],
                 sharepoint=dict(status=one.get('status') or sp.get('status'), message=one.get('message') or sp.get('message'), captured_at=one.get('captured_at'),
@@ -84,7 +111,14 @@ def report_rules(f):
         elif f['review'] == 'waiting':
             out.append(_rec('Waiting for the reviewer', 'Copy the link to the reviewer if they have not seen it.', 'low', 'send', 'manager'))
         elif not must and not f['fixes_waiting']:
-            out.append(_rec('Send it for review', 'Nothing must be fixed. Until you are signed off, the report goes to Chris before the client.', 'medium', 'send', 'you', 'send_for_review'))
+            detail = f.get('review_detail') or {}
+            complete = all(detail.get(k) is True for k in ('workbook_storage_complete', 'classification_complete', 'finding_details_complete'))
+            why = ('No high-severity findings or suggested cell changes are listed in this complete finding review. '
+                   'This does not establish source completeness or release readiness.' if complete else
+                   'Finding storage, classification or loaded details are incomplete or unknown. '
+                   'Review the coverage before concluding that no corrections are required.')
+            out.append(_rec('Send it for review', why + ' The report still needs reviewer assessment.',
+                            'medium', 'send', 'you', 'send_for_review'))
     return out[:8]
 
 
