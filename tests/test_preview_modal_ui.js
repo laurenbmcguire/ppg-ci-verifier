@@ -43,22 +43,13 @@ test('preview is singleton, back closes once, repeated clicks and reopen stay si
  vm.runInContext('fdPreview(c)',context);dialogs()[0].close();assert.equal(dialogs().length,0,'native close/Escape needs no second dismissal');
 });
 
-test('AI preparation submits displayed binding and never selects or applies suggestions',async()=>{
- const calls=[],writes=[];
- const old={file_hash:'file',check_hash:'old'},fresh={file_hash:'file',check_hash:'fresh'};
- const ctx=vm.createContext({state:{report:old,selected:'file',aiOn:true},
-  api:async(path,payload)=>{calls.push({path,payload});return {report:fresh,ai_fixes:{fixes:[{id:'guess'}]}}},
-  fillPages:async r=>r,loadFixes:async()=>{},drawReport(){},toast(){},store:{set:(...args)=>writes.push(args)}});
+test('legacy AI entry opens exact-version chooser without a broad provider request',async()=>{
+ const calls=[],opened=[];
+ const ctx=vm.createContext({state:{report:{file_hash:'file',check_hash:'fresh'},aiOn:true},api:(...args)=>calls.push(args),fdReviewDialog:()=>opened.push(true),toast(){}});
  vm.runInContext(between('  async function runAiFixes(', '  const restoredKey'),ctx);
- await vm.runInContext("runAiFixes(false,{file_hash:'file',expected_check_hash:'old'})",ctx);
- assert.equal(calls.length,1);assert.equal(calls[0].path,'/api/spreadsheets/ai-fixes');
- assert.equal(calls[0].payload.expected_check_hash,'old');assert.equal(ctx.state.report.check_hash,'fresh');
- assert.deepEqual(writes,[],'no accepted/selected edits written');
- await vm.runInContext("runAiFixes(false,{file_hash:'file',expected_check_hash:'old'})",ctx);
- assert.equal(calls.length,1,'stale rendered preparation is not sent');
- ctx.state.aiOn=false;
- await vm.runInContext("runAiFixes(false,{file_hash:'file',expected_check_hash:'fresh'})",ctx);
- assert.equal(calls.length,1,'unconfigured preparation is unavailable');
+ await ctx.runAiFixes(false,{file_hash:'file',expected_check_hash:'old'});assert.equal(opened.length,0);
+ await ctx.runAiFixes(false,{file_hash:'file',expected_check_hash:'fresh'});assert.equal(opened.length,1);
+ ctx.state.aiOn=false;await ctx.runAiFixes(false,{file_hash:'file',expected_check_hash:'fresh'});assert.equal(opened.length,1);assert.deepEqual(calls,[]);
 });
 
 test('preview visibly identifies sheet and cell and keeps removal control unbroken',()=>{

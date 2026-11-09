@@ -924,14 +924,49 @@
       h('p', {class: 'fd-hint'}, 'Preview shows exact cells, before and after values, and reasons. Apply only after confirming. Originals and unresolved holds remain.'),
       !recommended.length && state.fixes ? h('p', {class: 'fd-hint'}, r.review.page?.complete === false ? 'Findings are only partly loaded. Reopen the report before selecting across pages.' : (r.holds || []).length ? 'Current holds prevent combined recommendations. Open hold details under Corrections; individual review remains available.' : 'No supported bulk fixes right now. Inspect the findings manually; uncertain values are not filled in.') : null);
   }
+  // Own the read-only proposal request without taking ownership of another save/recheck.
+  async function fdPrepareAI(scope, binding, view) {
+    if (state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending || !state.aiOn) return;
+    const report = state.report, selectedReport = state.selected;
+    if (!report || selectedReport != null && selectedReport !== report.file_hash || JSON.stringify(reviewBinding(report)) !== JSON.stringify(binding) || !scope.length || scope.length > 120 || scope.some(it => !it.fp || it.state !== 'open')) return;
+    if ([...document.querySelectorAll('#side input:not([type="checkbox"]):not([type="radio"]), #side textarea, .fd-review-dialog textarea')].some(node => node.value !== node.defaultValue)) {
+      toast('Finish or save your typed draft before requesting AI proposals. Your text is unchanged.', true); return;
+    }
+    const controls = new Map();
+    const operation = {owner: view.owner, cancel: () => {
+      if (state.aiProposalOperation !== operation) return;
+      state.aiProposalOperation = null;
+      if (!state.busy && !state.rechecking && !state.decisionPending) controls.forEach((disabled, node) => { if (node.isConnected) node.disabled = disabled; });
+    }, lock: () => {
+      if (state.report !== report || state.selected !== selectedReport) { operation.cancel(); return; }
+      document.querySelectorAll('#side button, #side input, #side textarea, #side select, #fd-preview-btn, .fd-mode-selector button, .fd-review-dialog button, .fd-review-dialog input, .fd-review-dialog textarea, dialog .primary').forEach(node => {
+        if (node.dataset?.aiCancel === 'true') return;
+        if (!controls.has(node)) controls.set(node, node.disabled);
+        node.disabled = true;
+      });
+    }};
+    state.aiProposalOperation = operation; operation.lock(); view.pending();
+    const current = () => state.aiProposalOperation === operation && state.report === report && state.selected === selectedReport && JSON.stringify(reviewBinding(report)) === JSON.stringify(binding) && view.active();
+    try {
+      const result = await api('/api/spreadsheets/ai-proposals', {file_hash: binding.file_hash, expected_check_hash: binding.expected_check_hash,
+        expected_rev: binding.expected_rev, run: binding.expected_run, ids: scope.map(it => it.key), seen: Object.fromEntries(scope.map(it => [it.key, it.fp]))});
+      if (!current()) return;
+      const answer = result.ai_proposals;
+      if (!answer || answer.status !== 'done' || answer.file_hash !== binding.file_hash || answer.check_hash !== binding.expected_check_hash ||
+          JSON.stringify([...(answer.ids || [])].sort()) !== JSON.stringify(scope.map(it => it.key).sort()) || !Array.isArray(answer.proposals) ||
+          answer.proposals.some(p => !scope.some(it => it.key === p.finding_id) || p.source !== 'AI fix (asked)' || p.sure !== false || p.recommendation_eligible !== false)) throw new Error('The AI response did not match the selected scope and safety labels. No proposals were used.');
+      view.success(answer);
+    } catch (error) { if (current()) view.failure(error); }
+    finally { operation.cancel(); }
+  }
   // A review scope is separate from the correction basket. Opening/selecting never writes data.
   function fdReviewDialog() {
-    if (!state.report || state.busy || state.rechecking || state.decisionPending) return;
+    if (!state.report || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation) return;
     const report = state.report, binding = reviewBinding(report), items = fdItems(), groups = fdGroups(items);
     const saved = state.fdReviewSelection;
     const selected = new Set(saved?.binding === JSON.stringify(binding) ? saved.keys : []), pages = new Map(), opener = document.activeElement;
     const dlg = h('dialog', {class: 'fd-review-dialog', 'aria-labelledby': 'fd-review-title'});
-    const current = () => state.report === report && JSON.stringify(reviewBinding(state.report)) === JSON.stringify(binding);
+    const current = () => state.report === report && (state.selected == null || state.selected === report.file_hash) && JSON.stringify(reviewBinding(state.report)) === JSON.stringify(binding);
     const guard = () => { if (current()) return true; toast('The report changed. Close and reopen Needs review before continuing.', true); return false; };
     const picked = () => items.filter(it => selected.has(it.key));
     const status = h('p', {role: 'status'}), actions = h('div', {class: 'fd-cardacts'}), decision = h('div');
@@ -940,14 +975,38 @@
     for (const it of items) { const type = it.issue?.code || it.kind?.code || it.group || 'Other findings'; if (!byType.has(type)) byType.set(type, []); byType.get(type).push(it); }
     const unresolved = items.filter(it => ['open', 'selected', 'deferred', 'confirmed', 'claude'].includes(it.state));
     const close = () => dlg.close();
-    dlg.addEventListener('close', () => { dlg.remove(); if (opener?.isConnected && opener.getClientRects().length) opener.focus(); else { const fallback = document.getElementById('fd-open-review'); fallback?.focus(); } });
+    dlg.addEventListener('close', () => { if (state.aiProposalOperation?.owner === dlg) state.aiProposalOperation.cancel(); dlg.remove(); if (opener?.isConnected && opener.getClientRects().length) opener.focus(); else { const fallback = document.getElementById('fd-open-review'); fallback?.focus(); } });
     const choose = (list, on) => {
-      const label = document.activeElement?.getAttribute('aria-label');
+      if (state.aiProposalOperation) return;
+      const label = document.activeElement?.getAttribute('aria-label'), focusKey = document.activeElement?.getAttribute('data-review-key');
       list.forEach(it => on ? selected.add(it.key) : selected.delete(it.key));
       state.fdReviewSelection = {binding: JSON.stringify(binding), keys: [...selected]};
       decision.replaceChildren(); draw();
-      if (label) [...dlg.querySelectorAll('input')].find(el => el.getAttribute('aria-label') === label)?.focus();
+      if (label || focusKey) [...dlg.querySelectorAll('input')].find(el => focusKey ? el.getAttribute('data-review-key') === focusKey : el.getAttribute('aria-label') === label)?.focus();
     };
+    const prepareAI = () => fdPrepareAI(picked(), binding, {
+      owner: dlg,
+      active: () => dlg.isConnected && current(),
+      pending: () => decision.replaceChildren(h('p', {role: 'status'}, 'Preparing Claude proposals for your exact selection. No workbook changes will be made.')),
+      failure: error => decision.replaceChildren(h('p', {role: 'alert'}, `AI proposals unavailable: ${error.message}. No workbook changes were made. Review manually or keep/defer findings.`)),
+      success: answer => {
+        const include = new Set(), proposals = answer.proposals;
+        const preview = h('button', {type: 'button', class: 'btn primary', disabled: true, onclick: () => {
+          if (!guard() || state.aiProposalOperation) return;
+          const accepted = proposals.filter((p, i) => include.has(i)); if (!accepted.length) return;
+          const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
+          const capture = captureCorrections(accepted, dec, {}, binding, report); close(); fdPreview(capture);
+        }}, 'Preview selected AI proposals');
+        decision.replaceChildren(h('h3', {}, `${proposals.length} AI proposals, not applied`),
+          h('p', {}, 'AI suggestions are not verified source values. Check each proposal before including it. Existing cell safety checks and source holds still apply.'),
+          h('ul', {}, proposals.map((p, i) => h('li', {}, h('label', {}, h('input', {type: 'checkbox', 'aria-label': `Include AI proposal ${p.sheet} ${p.cell}`, onchange: e => {
+            e.target.checked ? include.add(i) : include.delete(i); preview.disabled = !include.size; preview.textContent = `Preview ${include.size} selected AI proposals`;
+          }}), ` ${p.sheet} ${p.cell}: ${showWs(p.before)} → ${showWs(p.after)}. ${p.reason}`)))),
+          ...(answer.skipped || []).map(p => h('p', {class: 'fd-hint'}, `No proposal for ${p.finding_id}: ${p.reason}`)), preview);
+        decision.querySelector('h3')?.setAttribute('tabindex', '-1'); decision.querySelector('h3')?.focus({preventScroll: true});
+        decision.scrollIntoView({block: 'nearest'});
+      }
+    });
     const decisionForm = action => {
       if (!guard()) return;
       const scope = picked(), defer = action === 'defer';
@@ -976,6 +1035,7 @@
       const scope = picked(), eligible = fdRecommended(scope), canDecide = scope.length > 0 && scope.length <= 1000 && scope.every(it => it.fp && ['open', 'claude'].includes(it.state));
       status.textContent = `${scope.length} of ${items.length} loaded review items selected. ${eligible.length} supported cell changes in this selection.${scope.length && !canDecide ? ' Keep/defer unavailable: choose at most 1000 open findings, excluding standalone proposals and previously decided items.' : ''}`;
       actions.replaceChildren(
+        h('button', {type: 'button', class: 'btn', disabled: !state.aiOn || !scope.length || scope.length > 120 || scope.some(it => !it.fp || it.state !== 'open'), onclick: prepareAI}, state.aiOn ? 'Prepare AI proposals for selected findings' : 'AI proposals unavailable'),
         h('button', {type: 'button', class: 'btn primary', disabled: !eligible.length, onclick: () => {
           if (!guard()) return;
           const accepted = eligible.map(it => it.fix), dec = Object.fromEntries(accepted.map(f => [f.id, {state: 'accepted', after: f.after}]));
@@ -1000,20 +1060,21 @@
           h('label', {}, toggle, ` Select this group: ${count} of ${g.items.length} items across all its pages`),
           h('p', {}, `Items ${page * 25 + 1}–${Math.min((page + 1) * 25, g.items.length)} of ${g.items.length}`),
           h('ul', {}, g.items.slice(page * 25, (page + 1) * 25).map(it => h('li', {}, h('label', {},
-            h('input', {type: 'checkbox', checked: selected.has(it.key) || null, 'aria-label': `Select ${it.key}: ${it.sheet || 'Report'} ${it.cell || ''}`, onchange: e => choose([it], e.target.checked)}),
+            h('input', {type: 'checkbox', checked: selected.has(it.key) || null, 'data-review-key': it.key, 'aria-label': `Select ${it.sheet || 'Report'} ${it.cell || 'report finding'}, occurrence ${items.indexOf(it) + 1} of ${items.length}`, onchange: e => choose([it], e.target.checked)}),
             ` ${it.sheet || 'Report'} ${it.cell || (it.row ? 'row ' + it.row : '')} · ${it.state}: ${it.text || it.reason}`)))),
           h('div', {class: 'fd-cardacts'}, ...[['Previous items', -1], ['Next items', 1]].map(([label, step]) => h('button', {type: 'button', class: 'btn small', disabled: step < 0 ? page === 0 : (page + 1) * 25 >= g.items.length,
             onclick: () => { pages.set(g.key, page + step); draw(); const heading = content.children[index]?.querySelector('h3'); heading?.setAttribute('tabindex', '-1'); heading?.focus(); }}, label))));
       }));
     };
     dlg.append(h('h2', {id: 'fd-review-title', tabindex: '-1'}, 'Needs review'),
-      h('p', {}, `${report.filename || 'Report'} · version ${revisionOf(report)}. All loaded non-informational findings, set-aside records and suggested changes are listed below.`),
+      h('p', {}, `${report.filename || 'Report'} · File v${report.version ?? 'unknown'} · Revision ${report.revision ?? 'unknown'} · ID ${report.file_hash.slice(0, 12)}. All loaded non-informational findings, set-aside records and suggested changes are listed below.`),
       report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed ? h('p', {class: 'fd-coverage'}, 'Coverage incomplete: this list includes only loaded items. Unavailable findings cannot be selected; approval remains blocked.') : null,
-      h('p', {}, `${fdHoldSummary(report)}. AI workbook changes are unavailable here. Existing source-supported or previously generated proposals require preview and explicit Apply; opening this review does not run AI.`),
+      h('p', {}, `${fdHoldSummary(report)}. ${state.aiOn ? 'On request, selected findings and relevant cell context are sent to configured Claude (Anthropic), up to 120 findings. No full workbook or unrelated reports are sent.' : 'AI proposals are unavailable while AI is off.'} All proposals require preview and explicit Apply; opening this review does not run AI.`),
+      !items.length ? h('section', {}, h('h3', {}, 'No loaded review items'), h('p', {}, 'No selectable findings does not establish readiness. Client, job, business date, source verification or coverage may still need attention.'), ...(report.holds || []).map(hold => h('p', {}, hold.text || hold.code)), h('button', {type: 'button', class: 'btn', onclick: () => { if (!guard()) return; close(); state.fdView = 'sources'; drawReport(); }}, 'Open source and report context')) : null,
       h('div', {class: 'fd-review-toolbar'}, status, h('div', {class: 'fd-cardacts'},
         h('button', {type: 'button', class: 'btn', onclick: () => choose(unresolved, true)}, `Select all ${unresolved.length} unresolved loaded items`),
         h('button', {type: 'button', class: 'btn', onclick: () => choose(items, false)}, 'Select none'),
-        h('button', {type: 'button', class: 'btn', onclick: close}, 'Close review')), actions),
+        h('button', {type: 'button', class: 'btn', 'data-ai-cancel': 'true', onclick: close}, 'Close review')), actions),
       h('p', {class: 'fd-hint'}, 'Selection is a review scope, not approval. Preview includes only eligible cell changes. Manual review walks the selected items with Previous / Next. Keep/defer applies to at most 1000 open findings with recorded evidence identities. Blockers must be kept one at a time with evidence.'), decision, types, content);
     document.body.append(dlg); draw(); dlg.showModal(); dlg.querySelector('h2').focus();
   }
@@ -1129,6 +1190,7 @@
       h('button', {type: 'button', class: 'btn fd-mobile-panel', onclick: () => document.body.classList.toggle('fd-panel-open'), 'aria-controls': 'side'}, 'Corrections', h('i', {id: 'fd-mobile-count'}, '')),
       h('button', {type: 'button', class: 'btn ' + (sel ? 'primary' : ''), id: 'fd-preview-btn', disabled: !sel || state.busy, onclick: correctionAction(fdPreview)}, icon('eye', 16), ' Preview selected changes'));
     $('report').replaceChildren(h('div', {class: 'fd'}, rail, h('div', {class: 'fd-main'}, head, fdModeSelector(r), metrics, main), foot));
+    state.aiProposalOperation?.lock?.();
     const w = store.get('fd-aside-w', null); if (w) fdAsideWidth(w);
     if (state.fdView !== 'review') return;
     state.grid = state.grid?.hash === r.file_hash ? state.grid : null;
@@ -1613,7 +1675,7 @@
   // Pending -> saved / failed. A lost answer is reconciled (was it saved?) before anything is retried, and the same
   // request ID is reused, so a retry can never record a decision twice.
   async function fdSendDecision(req) {
-    if (state.decisionPending || state.busy || state.rechecking || !state.report) return;
+    if (state.decisionPending || state.busy || state.rechecking || state.aiProposalOperation || !state.report) return;
     const binding = req.file_hash ? req : req.from ? findingBinding([req.from]) : null;
     if (!binding) { toast('Reload this review before deciding.', true); return; }
     const hash = binding.file_hash;
@@ -1773,7 +1835,7 @@
     } catch (e) { toast(e.message, true); if (btn) { btn.disabled = false; btn.textContent = 'Approve internally'; } }
   }
   async function fdRecheck() {
-    if (state.decisionPending || state.busy || state.rechecking) { toast('Wait for the current save or operation to finish before re-checking.', true); return; }
+    if (state.decisionPending || state.busy || state.rechecking || state.aiProposalOperation) { toast('Wait for the current save or operation to finish before re-checking.', true); return; }
     const report = state.report, hash = report?.file_hash; if (!hash) return;
     if ([...document.querySelectorAll('#side input:not([type="checkbox"]):not([type="radio"]), #side textarea')].some(node => node.value !== node.defaultValue)) {
       toast('Finish or save the text you are editing before re-checking. Nothing changed.', true); return;
@@ -1972,7 +2034,7 @@
       drawChat();
       body.querySelector('textarea')?.focus();
     }
-    state.rechecking?.lock?.();
+    state.rechecking?.lock?.(); state.aiProposalOperation?.lock?.();
   }
   // the selected cell (and the issue being stepped through) at the top of the Fixes tab
   function drawCellSlot() {
@@ -2137,36 +2199,16 @@
     // nothing is changed automatically on opening: suggestions are prepared, and a person selects, previews and applies them
   }
   async function runReview(hash) {
-    (state.reviewTried ||= new Set()).add(hash);
-    state.reviewing = hash; drawChat();
-    try { await api('/api/spreadsheets/ai-review', {file_hash: hash}); } catch (e) { /* the double-check and fixes still run */ }
-    finally { state.reviewing = null; }
-    if (state.selected === hash) { await openReport(hash, true); loadList(); }
+    if (hash === state.report?.file_hash) fdReviewDialog();
   }
   async function runVerify(hash) {
-    (state.verifyTried ||= new Set()).add(hash);
-    state.verifying = hash; drawChat();
-    try {
-      const out = await api('/api/spreadsheets/ai-verify', {file_hash: hash});
-      state.verifyResult = {hash, ...out};
-    } catch (e) { state.verifyResult = {hash, error: e.message}; }
-    finally { state.verifying = null; }
-    if (state.selected === hash) { await openReport(hash, true); loadList(); }
+    if (hash === state.report?.file_hash) fdReviewDialog();
   }
   async function runAiFixes(auto, binding) {
-    if (!binding || !state.aiOn || state.aiFixing) return;
-    const hash = binding.file_hash;
-    if (state.report?.file_hash !== hash || state.report?.check_hash !== binding.expected_check_hash) { toast('The report changed. Review the current version before preparing suggestions.', true); return; }
-    state.aiFixing = true; drawReport();
-    try {
-      const out = await api('/api/spreadsheets/ai-fixes', {...binding});
-      if (state.selected !== hash) return;
-      if (!out.report || out.report.file_hash !== hash) throw new Error('Preparation did not return a current review. Reopen the report before continuing.');
-      state.report = await fillPages(out.report); state.fixes = null;
-      drawReport(); await loadFixes(hash);
-      toast(`${(out.ai_fixes?.fixes || []).length} AI suggestions prepared. Review and include each change before applying. The workbook is unchanged.`);
-    } catch (e) { toast(e.message, true); }
-    finally { state.aiFixing = false; if (state.selected === hash) drawReport(); }
+    if (!binding || !state.aiOn) return;
+    if (state.report?.file_hash !== binding.file_hash || state.report?.check_hash !== binding.expected_check_hash) { toast('The report changed. Review the current version before preparing suggestions.', true); return; }
+    // Legacy entrypoints only open the selection chooser. They never broaden a request to the whole report.
+    fdReviewDialog();
   }
   const restoredKey = () => 'rd-restored:' + state.report.file_hash;
   function allIssues(rv) {
@@ -2466,7 +2508,7 @@
         : state.aiFixing ? 'Dex is reading the report and writing fixes for the issues above…' : 'No fixes yet. Let AI fix the issues, or click any cell in the sheet to change it.'),
       h('div', {class: 'right'},
         state.aiOn ? h('button', {type: 'button', class: 'btn small' + (state.aiFix?.status === 'done' ? '' : ' primary'), disabled: state.aiFixing, onclick: (() => { const binding = reviewBinding(state.report); return () => runAiFixes(false, binding); })()},
-          state.aiFixing ? [h('span', {class: 'spin'}), ' Dex is fixing…'] : state.aiFix?.status === 'done' ? 'Prepare AI suggestions again' : 'Prepare AI suggestions') : null,
+          'Choose findings for AI proposals') : null,
         fixes.length ? h('button', {type: 'button', class: 'btn small', onclick: () => {
           const d = store.get(decisionsKey(), {}); fixes.filter(f => f.confidence === 'high' || f.source === 'AI fix').forEach(f => { d[f.id] = {state: 'accepted', after: d[f.id]?.after ?? f.after}; }); save(d);
         }}, 'Accept all') : null)));
@@ -2593,7 +2635,7 @@
     if (!captured?.binding?.expected_check_hash) { toast('Reopen the correction preview before applying.', true); return null; }
     ({accepted, dec, edits} = captured);
     const binding = captured.binding;
-    if (state.busy || state.decisionPending || state.rechecking) return; state.busy = true; drawFixes(); updateDownloads();
+    if (state.busy || state.decisionPending || state.rechecking || state.aiProposalOperation) return; state.busy = true; drawFixes(); updateDownloads();
     toast('Building the fixed copy with your changes…');
     try {
       const changes = accepted.map(f => {
@@ -4060,6 +4102,7 @@
   }
 
   async function rerun(kind, message) {
+    if (['ai-review', 'ai-verify', 'ai-fixes'].includes(kind)) { fdReviewDialog(); return; }
     if (state.busy || !state.report) return;
     state.busy = true; toast(message);
     try {
