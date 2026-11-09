@@ -24,11 +24,19 @@ from eos_fixture import build,ROWS
 from openpyxl import load_workbook
 store=PostgresWorkspace('postgresql://test.invalid/synthetic',FakeDatabase().connect)
 raw=b'Date,Shift,Area,Part number,Identifier / lot,Inspected for,Quantity Inspected,Condition,Reject reason,Reject Quantity,Quantity Certified,Comments\n2026-11-09,1,A,Part-1,,,10,NOK,,2,8,\n'
+format_name=sys.argv[2] if len(sys.argv)>2 else 'csv'
+assert format_name in ('csv','xlsx')
+if format_name=='xlsx':
+    import csv
+    from openpyxl import Workbook
+    workbook=Workbook();workbook.active.title='Synthetic'
+    for values in csv.reader(io.StringIO(raw.decode())):workbook.active.append(values)
+    output=io.BytesIO();workbook.save(output);raw=output.getvalue()
 with store.session() as directory:
-    box=SpreadsheetInbox(directory); report=box.ingest('synthetic-row-context.csv',raw)
+    box=SpreadsheetInbox(directory); report=box.ingest('synthetic-row-context.'+format_name,raw)
     issues=summarize(report)['issues']; targets=[i for i in issues if i['code'] in ('missing_identifier','missing_defect_reason')]
     assert len(targets)==2 and all(not i.get('cell') and i.get('row')==2 for i in targets)
-    config=dict(file_hash=report['file_hash'], ids=[i['key'] for i in targets])
+    config=dict(sheet=targets[0]['sheet'], file_hash=report['file_hash'], ids=[i['key'] for i in targets])
 requests=[]
 class LocalHandler(handler):
     def log_message(self,*args):pass
