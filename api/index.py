@@ -627,6 +627,17 @@ class handler(BaseHTTPRequestHandler):
                 refused = self.gate('GET', route)
                 if refused:
                     return refused
+            # TEMPORARY fixed-synthetic test UI; every asset requires an admin session.
+            probe_assets = {
+                '/api/admin/ask-dex-connection-test/page': ('ask-dex-probe.html', 'text/html; charset=utf-8'),
+                '/api/admin/ask-dex-connection-test/script.js': ('ask-dex-probe.js', 'text/javascript; charset=utf-8'),
+                '/api/admin/ask-dex-connection-test/style.css': ('ask-dex-probe.css', 'text/css; charset=utf-8'),
+            }
+            if route in probe_assets:
+                if not self.is_admin():
+                    return self.fail(403, 'Only an admin can view this connection test.')
+                name, content_type = probe_assets[route]
+                return self.send(200, (ROOT / 'web' / name).read_bytes(), content_type)
             if route == '/api/me':
                 from hosting import access, mailer
                 user = self.current_user()

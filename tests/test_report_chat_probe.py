@@ -138,3 +138,20 @@ def test_probe_never_returns_invalid_usage_or_transport_fields(monkeypatch):
     out=report_chat_probe.run_fixed_synthetic()
     assert out['usage']=={'cache_read_input_tokens':4}
     assert 'PRIVATE-HEADER-SENTINEL' not in json.dumps(out)
+
+@pytest.mark.parametrize('asset,content_type',[('page','text/html'),('script.js','text/javascript'),('style.css','text/css')])
+def test_temporary_page_and_assets_are_admin_only_under_unchanged_csp(service,asset,content_type):
+    server,_=service
+    def get():
+        request=urllib.request.Request(f'http://127.0.0.1:{server.server_port}/api/admin/ask-dex-connection-test/'+asset)
+        try:
+            with urllib.request.urlopen(request,timeout=5) as response:return response.status,response.headers,response.read()
+        except urllib.error.HTTPError as exc:
+            with exc:return exc.code,exc.headers,exc.read()
+    code,headers,body=get()
+    assert code==200 and headers['Content-Type'].startswith(content_type)
+    assert "script-src 'self'" in headers['Content-Security-Policy'] and 'unsafe-inline' not in headers['Content-Security-Policy']
+    assert 'no-store' in headers['Cache-Control']
+    if asset=='page':assert b'/app.js' not in body and b'<script defer src=' in body and b'onclick=' not in body
+    server.user={'role':'member'};assert get()[0]==403
+    server.user=None;assert get()[0]==401

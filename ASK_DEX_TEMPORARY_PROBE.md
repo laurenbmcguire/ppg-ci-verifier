@@ -27,3 +27,18 @@ Focused tests use fabricated storage, fake providers or a fake HTTP transport on
 Focused offline acceptance: 59 Python tests passed. The unchanged JavaScript aggregate also passed all 134 tests. No live request, push or deployment was performed by this preparation.
 
 The required restored core tree ID is `52669b64cd1f1ae519e40b6801db758200ac929f`.
+
+
+## Temporary normal-browser interface
+
+Open `/api/admin/ask-dex-connection-test/page` on the same authorized verifier origin. The page and its external script/CSS require the existing admin session. The default CSP is unchanged: no inline script/style exception. It does not load the application bundle, report lists or report content. Authentication uses the existing session; the fixed POST uses the same-origin review-token convention, not a new credential.
+
+The button explains the fabricated data and sends the same fixed request only after a click. It disables synchronously before sending, never enables a retry, and records only a non-secret attempted flag in sessionStorage so reloading the page cannot repeat the request in that browser session. The result is plain text. If browser session storage cannot record the flag, no request is sent. No answer or usage is persisted. Separate browser sessions can still invoke the route, so the controlled test procedure remains exactly one approved attempt.
+
+Remove this entire UI commit and the earlier temporary route commit, newest first. The final tree must still be exactly the frozen core tree stated above. Page/script/CSS GETs must return 404 after removal; test POST route absence only with {} as described above.
+
+UI acceptance uses the real loopback HTTP handler and headless Chromium at 1200 and 390 pixels, with a fabricated admin and fake provider. It covers no request on page load, unchanged CSP, one click, disabled pending/completed controls, plain-text output, reload prevention and uncertain network failure without retry. The Python route checks also deny anonymous/member requests for every UI asset. No live-provider call is part of these tests.
+
+Keep the test page open through cleanup deployment. After the synthetic attempt finishes, its secondary “Verify test removal” button sends only `{}` once, under the same browser request guards. It cannot invoke the provider, including against the older temporary edge. It is disabled during provider work and after its own check. A 404 verifies absence, 400 means the old temporary edge remains, and 401 means sign-in expired; neither of the latter outcomes claims removal.
+
+Final UI-focused checks: 62 Python tests passed, six dedicated one-shot/removal UI tests passed, and broader Node discovery passed 140 tests (the frozen 133-test list plus the existing standalone request-guard test and six temporary UI tests). Headless 1200/390 success and 390 network-failure cases passed, with exactly two fake provider calls, zero external calls, zero report-store access and no automatic retries. The removal checks on the old fake edge returned 400 without additional provider calls.
