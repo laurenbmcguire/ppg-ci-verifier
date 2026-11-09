@@ -92,11 +92,11 @@
     const go = key => { location.hash = key ? 'c=' + encodeURIComponent(key) : ''; };
     const tab = (key, label, title) => { const n = need(key);
       return h('button', {type: 'button', role: 'tab', class: state.client === key ? 'on' : '', 'aria-selected': String(state.client === key), title: title || null, onclick: () => go(key)},
-        label, n ? h('i', {title: `${n} report${n === 1 ? '' : 's'} need attention`}, String(n)) : null); };
+        label, n ? h('i', {title: `${n} saved version${n === 1 ? '' : 's'} need attention`}, String(n)) : null); };
     if (rail) {
       const onList = !location.hash.match(/^#(today|overview|kpis|periods|checks|api|users)$/);
       const item = (key, label, title) => { const n = need(key), href = '#c=' + encodeURIComponent(key);
-        return h('a', {class: 'nav client' + (onList && state.client === key ? ' active' : ''), href, title: title || null}, h('span', {}, label), n ? h('i', {title: `${n} need attention`}, String(n)) : null); };
+        return h('a', {class: 'nav client' + (onList && state.client === key ? ' active' : ''), href, title: title || null}, h('span', {}, label), n ? h('i', {title: `${n} saved version${n === 1 ? '' : 's'} need attention`}, String(n)) : null); };
       rail.replaceChildren(h('div', {class: 'rail-head'}, 'Clients'),
         ...[...cl.map(c => item(c.key, c.client, `${c.sites.map(x => x.location || x.site).join(', ')}: ${c.jobs.length} job${c.jobs.length === 1 ? '' : 's'} on SharePoint`)),
           state.list.some(r => !clientOfReport(r)) ? item('_none', 'Needs client', 'Reports whose client or job is not settled yet') : null].filter(Boolean));
@@ -127,6 +127,12 @@
   const queueNeedsAttention = r => !r.review?.sent_at && (!r.review || r.review.status !== 'clear' || r.review.coverage?.truncated || r.review.coverage?.not_listed || r.review.page?.complete === false ||
     !r.review.day || !r.review.job || !r.assignment || !SETTLED.includes(r.assignment.status) || r.assignment.needs_person || r.review.sharepoint?.status !== 'match' ||
     r.internal_check_status === 'outdated_checks_require_recheck' || r.internal_check_status === 'could_not_load_latest_check');
+  function queueNewerCopies(r, inventory) {
+    const saved = Date.parse(r.received_at || '');
+    if (!Number.isFinite(saved)) return []; // An unknown save time cannot establish chronology.
+    return inventory.filter(other => other.file_hash !== r.file_hash && queueFamily(other) === queueFamily(r) && Date.parse(other.received_at || '') > saved)
+      .sort((a, b) => Date.parse(b.received_at) - Date.parse(a.received_at));
+  }
   function queueClient(r) {
     const a = r.assignment;
     return a && SETTLED.includes(a.status) && a.client ? a.client : 'Client not confirmed';
@@ -168,11 +174,13 @@
       const n = b.dataset.filter === 'attention' ? attention : b.dataset.filter === 'review' ? waiting : 0;
       b.classList.toggle('on', b.dataset.filter === state.filter);
       b.setAttribute('aria-pressed', String(b.dataset.filter === state.filter));
+      if (b.dataset.filter === 'attention') { b.setAttribute('title', `${attention} saved versions needing attention, including earlier copies. Findings are not combined across versions.`); b.setAttribute('aria-label', `To do: ${attention} saved versions needing attention`); }
       b.replaceChildren(label[b.dataset.filter] || b.textContent, n ? h('i', {class: 'segn'}, String(n)) : null);
     });
     const todo = shown.filter(queueNeedsAttention).length;
     document.title = (todo ? `(${todo}) ` : '') + 'PPG Verifier';
     const list = $('queue-list'); list.replaceChildren();
+    if (state.filter === 'attention') list.append(h('p', {class: 'queue-scope'}, `${rows.length} saved version${rows.length === 1 ? '' : 's'} match this To do view. Earlier copies keep their own findings.`));
     if (state.listPartial) list.append(h('p', {class: 'queue-notice', role: 'status'}, 'Only the most recent saved reports are loaded. Search, filters and counts cover this loaded list, not the full report history.'));
     if (state.listError) {
       list.append(h('div', {class: 'listerror', role: 'alert'}, h('b', {}, 'The report list could not be loaded.'),
@@ -210,21 +218,26 @@
     const line = (r, older) => {
       const rv = r.review || {}, [check, tone] = queueCheck(r), current = r.file_hash === (state.selected || state.lastSelected);
       const name = r.filename || 'Report name unavailable', client = queueClient(r), day = queueDay(r);
+      const newer = queueNewerCopies(r, shown), earlier = older || newer.length > 0;
       const identity = `${client} · ${rv.job ? 'Job ' + rv.job : 'Job not found'} · ${day ? 'Report date ' + day : 'Report date not found'}`;
       const version = `${queueVersion(r.version) === 'unknown' ? 'Version unknown' : 'File v' + queueVersion(r.version)}${r.revision == null ? '' : ' · Revision ' + queueVersion(r.revision)} · ID ${String(r.file_hash || '').slice(0, 12) || 'unknown'}`;
       const uploaded = r.received_at && !isNaN(new Date(r.received_at)) ? new Date(r.received_at).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : 'Unknown';
       const workflow = rv.sent_at ? 'Previously sent' : rv.approved ? (rv.approval_current ? 'Approved for this version' : 'Earlier approval; review again') : rv.review_state === 'waiting' ? 'Review requested' : rv.review_state === 'sent_back' ? 'Sent back' : '';
       const quantities = [['inspected', 'Inspected'], ['certified', 'OK'], ['rejected', 'Rejected']].map(([key, label]) => `${label}: ${queueQuantity(r, key)}`);
-      const open = h('button', {type: 'button', class: 'item' + (current ? ' sel' : '') + (older ? ' older' : ''), 'data-report-hash': r.file_hash,
-        onclick: () => select(r.file_hash), 'aria-label': `Open ${name}. ${identity}. ${version}. ${rv.fixed_from ? 'Corrected copy' : 'Uploaded file'}. ${check}. ${queueSource(r)}. ${workflow}. Report values: ${quantities.join('. ')}. Uploaded ${uploaded}`},
+      const open = h('button', {type: 'button', class: 'item' + (current ? ' sel' : '') + (earlier ? ' older' : ''), 'data-report-hash': r.file_hash,
+        onclick: () => select(r.file_hash), 'aria-label': `Open ${name}. ${identity}. ${version}. ${rv.fixed_from ? 'Corrected copy' : 'Uploaded file'}. ${earlier ? 'Earlier saved copy. ' : ''}${newer.length ? newer.length + ' newer saved copies available. ' : ''}${check}. ${queueSource(r)}. ${workflow}. Report values: ${quantities.join('. ')}. Uploaded ${uploaded}`},
         h('span', {class: 'queue-name'}, name),
         h('span', {class: 'queue-identity'}, identity),
         h('span', {class: 'queue-quantities'}, h('b', {}, 'Report values'), ...quantities.map(text => h('span', {}, text))),
         h('span', {class: 'queue-state'}, h('span', {class: 'tag tag-' + tone}, check), h('span', {}, queueSource(r)), workflow ? h('span', {}, workflow) : null),
-        h('span', {class: 'queue-version'}, rv.fixed_from ? 'Corrected copy' : 'Uploaded file', older ? ' · Earlier version' : '', ` · ${version} · Uploaded ${uploaded}`, current ? ' · Last opened' : ''),
+        h('span', {class: 'queue-version'}, rv.fixed_from ? 'Corrected copy' : 'Uploaded file', earlier ? ' · Earlier saved copy' : '', ` · ${version} · Uploaded ${uploaded}`, current ? ' · Last opened' : ''),
         rv.sharepoint?.source ? h('span', {class: 'queue-source'}, `Source: ${rv.sharepoint.source}`) : null);
-      return h('div', {class: 'queue-entry' + (older ? ' older-entry' : '')}, open,
-        queueNeedsAttention(r) ? h('button', {type: 'button', class: 'queue-review', 'aria-label': `Needs review: ${name}, ${version}`, onclick: () => { state.openReviewFor = r.file_hash; select(r.file_hash); }}, 'Needs review') : null);
+      return h('div', {class: 'queue-entry' + (earlier ? ' older-entry' : '')}, open,
+        queueNeedsAttention(r) ? h('button', {type: 'button', class: 'queue-review', 'aria-label': `Needs review: ${name}, ${version}`, onclick: () => { state.openReviewFor = r.file_hash; select(r.file_hash); }}, 'Needs review') : null,
+        newer.length ? h('details', {class: 'queue-newer'}, h('summary', {class: 'linkish'}, `${newer.length} newer saved cop${newer.length === 1 ? 'y' : 'ies'} available`),
+          h('p', {class: 'hint'}, 'These copies may be parallel branches. Each keeps its own findings and decisions.'),
+          ...newer.map(copy => h('button', {type: 'button', class: 'linkish queue-newer-copy', 'data-newer-hash': copy.file_hash,
+            onclick: () => select(copy.file_hash)}, `Open ${copy.filename || 'saved copy'} · File v${queueVersion(copy.version)} · Revision ${queueVersion(copy.revision)} · ID ${copy.file_hash.slice(0, 12)}`))) : null);
     };
     let lastDay = null;
     for (const [k, members] of groups) {

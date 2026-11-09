@@ -35,3 +35,20 @@ test('client tab and rail attention badges use exactly the To do predicate and v
  assert.equal(badge(bar.children.find(node=>node.children[0]==='Alpha')),0);
  assert.equal(badge(rail.children.find(node=>node.tag==='a'&&node.children[0].children[0]==='Alpha')),0);
 });
+
+test('filtered historical attention retains newer same-family context without declaring a current branch',()=>{
+ const original={file_hash:'original',filename:'Same.xlsx',received_at:'2026-11-09T01:00:00Z',assignment:{status:'manual',client_key:'alpha'},review:{status:'clear',job:'1234',day:'2026-11-06',sharepoint:{status:'differences'}}};
+ const corrected={...original,file_hash:'corrected',root_hash:'original',revision:2,received_at:'2026-11-09T02:00:00Z',review:{...original.review,sharepoint:{status:'match'}}};
+ const parallel={...corrected,file_hash:'parallel',received_at:'2026-11-09T03:00:00Z'};
+ const unrelated={...corrected,file_hash:'unrelated',root_hash:null};
+ const inventory=[original,corrected,parallel,unrelated];
+ assert.ok(ctx.queueNeedsAttention(original));assert.equal(ctx.queueNeedsAttention(corrected),false);
+ assert.deepEqual(Array.from(ctx.queueNewerCopies(original,inventory),r=>r.file_hash),['parallel','corrected']);
+ assert.deepEqual(Array.from(ctx.queueNewerCopies(corrected,inventory),r=>r.file_hash),['parallel']);
+ assert.equal(ctx.queueNewerCopies(unrelated,inventory).length,0);
+ assert.equal(ctx.queueNewerCopies({...original,received_at:null},inventory).length,0);
+ corrected.review={...corrected.review,status:'check'};assert.ok(ctx.queueNeedsAttention(corrected));
+ assert.deepEqual(Array.from(ctx.queueNewerCopies(original,inventory),r=>r.file_hash),['parallel','corrected']);
+ assert.ok(source.includes('queueNewerCopies(r, shown)'));assert.ok(source.includes('Earlier saved copy'));
+ assert.ok(source.includes('copies may be parallel branches'));assert.ok(source.includes('saved versions needing attention'));
+});

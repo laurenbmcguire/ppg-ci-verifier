@@ -7,6 +7,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
   const context=await browser.newContext({viewport:{width,height:900}}),page=await context.newPage(),errors=[],external=[];
   await context.route('**/*',route=>{if(route.request().url().startsWith(base+'/'))return route.continue();external.push(route.request().url());return route.abort();});
   page.on('pageerror',e=>errors.push(String(e)));
+  let latestClear=false;
   await page.route('**/api/spreadsheets',async route=>{
    const response=await route.fetch(),data=await response.json(),r=data.spreadsheets[0];
    r.review={...r.review,day:'2026-10-07',job:'SYNTHETIC-2230',counts:{high:0,medium:3,low:1},status:'check',auto_hidden:[],quantities:{inspected:{value:120,partial:true,unit:'parts'},certified:{value:100,partial:false,unit:'parts'},rejected:{value:0,partial:false,unit:'rows'}},sharepoint:{status:'incomplete',source:'Synthetic exact source list'}};
@@ -15,7 +16,9 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
    const separate=structuredClone(r);Object.assign(separate,{file_hash:'c'.repeat(64),version:2,received_at:'2026-11-09T02:00:00Z'});separate.review.coverage={truncated:true,not_listed:30};
    const missing=structuredClone(r);Object.assign(missing,{file_hash:'d'.repeat(64),version:null,assignment:{status:'ambiguous',client:'DO NOT INFER'},review:{status:'clear',day:null,job:null,counts:{high:0,medium:0,low:0},quantities:{},sharepoint:{status:'error'}}});
    const sent=structuredClone(r);Object.assign(sent,{file_hash:'e'.repeat(64)});sent.review.sent_at='2026-11-09T05:00:00Z';sent.review.day='2026-10-08';sent.assignment={status:'manual',client:'Synthetic Beta',client_key:'beta'};
-   await route.fulfill({response,json:{...data,spreadsheets:[newer,r,separate,missing,sent],count:130,has_more:true}});
+   const extra=[];
+   if(latestClear){newer.review={...newer.review,status:'clear',coverage:{},counts:{high:0,medium:0,low:0},sharepoint:{status:'match'}};const parallel=structuredClone(newer);Object.assign(parallel,{file_hash:'f'.repeat(64),received_at:'2026-11-09T06:00:00Z'});extra.push(parallel);}
+   await route.fulfill({response,json:{...data,spreadsheets:[newer,r,separate,missing,sent,...extra],count:130,has_more:true}});
   });
   await page.goto(base+'/app',{waitUntil:'networkidle'});
   await page.locator('.queue-name').first().waitFor();
@@ -49,7 +52,14 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
   await search.fill('No matching synthetic record');assert.match(await page.locator('.queue-empty').innerText(),/No reports match/);
   await search.fill('');await page.getByRole('button',{name:'Review requested',exact:true}).click();assert.match(await page.locator('.queue-empty').innerText(),/Use To do/);
   await page.getByRole('button',{name:/^To do/}).click();assert.equal(await page.locator('.item[data-report-hash="'+'e'.repeat(64)+'"]').count(),0,'sent excluded consistently from count and rows');
+  latestClear=true;await page.reload({waitUntil:'networkidle'});await page.locator('.queue-name').first().waitFor();
+  const historical=page.locator('.item[data-report-hash="'+hash+'"]');await historical.waitFor();assert.match(await historical.innerText(),/Earlier saved copy/);assert.match(await page.locator('.queue-scope').innerText(),/saved versions match this To do view/);assert.match(await page.getByRole('button',{name:/^To do/}).getAttribute('aria-label'),/saved versions needing attention/);
+  const newerLinks=historical.locator('..').locator('.queue-newer');assert.match(await newerLinks.innerText(),/2 newer saved copies available/);
+  await newerLinks.locator('summary').click();assert.match(await newerLinks.innerText(),/parallel branches/);
+  assert.equal(await newerLinks.locator('.queue-newer-copy').count(),2);assert.equal(await page.locator('.item[data-report-hash="'+'b'.repeat(64)+'"]').count(),0,'clear newer copy is context, not an extra to-do');
+  const oldOnly=page.getByRole('searchbox',{name:'Search reports'});await oldOnly.fill(hash);await historical.waitFor();assert.equal(await page.locator('.item').count(),1);assert.match(await historical.locator('..').innerText(),/2 newer saved copies available/);
+  await historical.locator('..').locator('.queue-newer summary').click();await page.screenshot({path:'../report-list-historical-'+width+'.png',fullPage:true});await historical.locator('..').locator('[data-newer-hash="'+'b'.repeat(64)+'"]').click();await page.waitForFunction(hash=>location.hash==='#r='+hash,'b'.repeat(64));
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
-  console.log(JSON.stringify({width,passed:true,full_app:true,unknown_date_labeled:true,partial_and_zero_distinct:true,lineage_only:true,complete_names_wrap:true,no_horizontal_overflow:true,keyboard_focus_restored:true,search_filter_preserved:true,no_mutations:true}));await context.close();
+  console.log(JSON.stringify({width,passed:true,full_app:true,unknown_date_labeled:true,partial_and_zero_distinct:true,lineage_only:true,historical_filter_context:true,parallel_copy_links:true,complete_names_wrap:true,no_horizontal_overflow:true,keyboard_focus_restored:true,search_filter_preserved:true,no_mutations:true}));await context.close();
  }} finally {await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
