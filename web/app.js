@@ -934,7 +934,8 @@
         queueMicrotask(() => { if (current() && owner.isConnected) owner.querySelector('.fd-summary-request')?.click(); });
       }
     }}, 'AI Summary of Errors', h('small', {class: 'fd-summary-disclosure'}, requested ? 'Open saved summary for this review' : state.aiOn ? 'Click to generate with Claude using finding-group metadata' : 'AI is off; open recorded findings and review actions')),
-      fdSummaryPanel(r, binding, owner, current),
+      fdSummaryPanel(r, binding, owner, current, true),
+      (r.review.page?.complete === false || r.review.coverage?.truncated || r.review.coverage?.not_listed) ? h('p', {class: 'fd-coverage'}, 'Some findings are unavailable. These actions cover only eligible loaded items; approval remains blocked.') : null,
       h('p', {class: 'fd-hint'}, `${eligible.length} eligible proposed cell changes available. Accept All opens a before/after preview; remove any change there and confirm Apply to create a new version.`),
       !eligible.length ? h('p', {}, 'No eligible proposed changes are available. Review individual findings and the reasons preventing changes below.') : null,
       h('div', {class: 'fd-cardacts'},
@@ -1005,13 +1006,23 @@
     return JSON.stringify({assignment: report.assignment, holds: report.holds, source: report.source_reconciliation,
       sharepoint: report.review?.sharepoint, coverage: report.review?.coverage, page: report.review?.page});
   }
-  function fdSummaryPanel(report, binding, owner, current) {
+  function fdSummaryPanel(report, binding, owner, current, compact = false) {
     const context = fdSummaryContext(report), stillCurrent = () => current() && fdSummaryContext(report) === context;
     const issues = [...new Map([...allIssues(report.review), ...(report.review.dismissed || [])].map(i => [i.key, i])).values()];
     const incomplete = report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed;
     const counts = ['high', 'medium', 'low', 'info'].map(severity => `${issues.filter(i => i.severity === severity).length} ${severity === 'high' ? 'high severity' : severity === 'info' ? 'informational' : severity}`).join(' · ');
     const output = h('div', {class: 'fd-summary-answer', 'aria-live': 'polite'});
     const renderAnswer = (answer, inventory) => {
+      if (compact) {
+        const narrative = answer.reply.trim(), short = narrative.length > 360 ? narrative.slice(0, 357) + '…' : narrative;
+        output.replaceChildren(h('p', {class: 'fd-summary-text'}, short || 'AI explanation unavailable. Recorded findings remain available below.'),
+          h('p', {class: 'fd-hint'}, `${answer.counts.available} available findings. ${answer.coverage.label}`),
+          h('details', {class: 'fd-summary-more'}, h('summary', {}, 'Full explanation, findings and review reasons'),
+            h('div', {class: 'fd-summary-detail-body', tabindex: '0'},
+              narrative ? h('p', {}, narrative) : null, h('p', {}, answer.narrative_notice), inventory,
+              ...(report.holds || []).map(hold => h('p', {}, hold.text || hold.code)), h('p', {}, answer.notice))));
+        return;
+      }
       output.replaceChildren(inventory, h('h4', {}, answer.narrative_status === 'done' ? 'AI explanation of available findings' : 'AI explanation unavailable'),
           h('p', {class: 'fd-coverage'}, answer.coverage.label), h('p', {}, answer.narrative_notice), answer.reply ? h('details', {open: true}, h('summary', {}, 'Read AI explanation'), h('p', {class: 'fd-summary-text fd-summary-scroll', tabindex: '0', 'aria-label': 'AI explanation text'}, answer.reply)) : null, h('p', {class: 'fd-hint'}, answer.notice),
           h('p', {class: 'fd-hint'}, 'AI text is not verification or approval. Use the recorded groups below to request AI proposals, fix manually, or ignore with a reason. Only previewed changes can be applied.'));
@@ -1053,6 +1064,11 @@
       } catch (error) { if (active()) output.replaceChildren(h('p', {role: 'alert'}, `Summary unavailable: ${error.message}. The recorded findings and actions below are unchanged.`)); else if (owner.isConnected && !stillCurrent()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); }
       finally { operation.cancel(); }
     }}, state.aiOn ? 'Ask AI to summarize available findings' : 'AI summary unavailable: AI is off');
+    if (compact) return h('section', {class: 'fd-review-summary fd-summary-compact', 'aria-label': 'Findings summary'},
+      output,
+      h('details', {}, h('summary', {}, 'Summary options and data use'),
+        h('p', {class: 'fd-hint'}, `${issues.length} loaded finding records, including information and history. Claude receives bounded finding-group metadata for this report, not workbook contents. Summary text never applies changes.`),
+        button, h('button', {type: 'button', class: 'btn', onclick: () => { if (stillCurrent()) fdReviewDialog(); }}, 'Go to review actions')));
     return h('section', {class: 'fd-review-summary', 'aria-label': 'Findings summary'}, h('h3', {}, 'Findings summary'),
       h('p', {}, `${issues.length} loaded finding records, including set-aside history and information: ${counts}.`),
       incomplete ? h('p', {class: 'fd-coverage'}, 'Coverage incomplete. This is not a summary of every possible error; unavailable or unlisted findings remain outside this review.') : h('p', {}, 'All currently loaded finding records are counted. A finding-free report is not proof of source completeness or readiness.'),
@@ -1374,6 +1390,7 @@
         h('h1', {}, ...crumb.flatMap((x, n) => n ? [h('span', {class: 'sep', 'aria-hidden': 'true'}, '/'), x] : [x])),
         h('p', {class: 'fd-meta'},
           h('span', {}, `v${revisionOf(r)}${r.fixed_from ? ` · made from v${r.fixed_from.revision || 1}` : ' · original upload'}`),
+          r.fixed_from ? h('span', {class: 'fd-saved-summary', role: 'status'}, `Corrected version v${revisionOf(r)}: ${plural((r.fixed_from.changes || []).length, 'recorded cell change')}. Original preserved. ${r.sent?.some(x => x.sent) ? 'Delivery recorded in History.' : 'Not sent.'}`) : null,
           h('span', {}, icon('db', 14), ' ', recordsChecked),
           sp.captured_at ? h('span', {}, `Source captured ${when2(sp.captured_at)}`) : null,
           (sp.fields_checked || []).length ? h('span', {title: (sp.fields_not_checked || []).length ? 'Not checked: ' + sp.fields_not_checked.join(', ') : null},

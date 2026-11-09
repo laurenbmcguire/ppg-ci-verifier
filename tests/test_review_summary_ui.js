@@ -17,7 +17,7 @@ test('summary cache is reused only for the identical report evidence and changed
  for(const mutate of [r=>r.assignment={client:'Changed'},r=>r.holds.push({code:'source_mapping_changed',text:'New mapping'}),r=>r.review.coverage={truncated:true},r=>r.source_reconciliation={snapshot_id:'new'}]){
   const h=setup(),p=h.go();h.resolve(h.answer());await p;assert.match(JSON.stringify(h.render()),/One finding group needs review/);
   mutate(h.report);assert.doesNotMatch(JSON.stringify(h.render()),/One finding group needs review/);
-  const pending=setup(),run=pending.go();mutate(pending.report);pending.resolve(pending.answer());await run;assert.equal(pending.state.fdSummaryCache,undefined);assert.doesNotMatch(JSON.stringify(pending.panel),/One finding group needs review/);
+  const pending=setup(),run=pending.go();mutate(pending.report);pending.resolve(pending.answer());await run;assert.equal(pending.state.fdSummaryCache,undefined);assert.doesNotMatch(JSON.stringify(pending.panel),/One finding group needs review/);assert.match(JSON.stringify(pending.panel),/Report changed; summary discarded/);
  }
 });
 test('every successful same-hash report replacement invalidates cached summaries',async()=>{

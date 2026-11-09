@@ -1717,4 +1717,8 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 
 .fd-summary-disclosure {display:block;font-weight:400;font-size:12px;margin-top:4px}
 
-.fd-report-summary .fd-review-summary {max-height:300px;overflow:auto;overscroll-behavior:contain}
+.fd-report-summary .fd-review-summary {max-height:none;overflow:visible}
+.fd-summary-detail-body {max-height:300px;overflow:auto;overscroll-behavior:contain}
+.fd-summary-compact .fd-summary-scroll {max-height:none;overflow:visible}
+.fd-summary-compact .fd-summary-text {margin:8px 0;white-space:pre-wrap}
+.fd-summary-compact details {margin:8px 0}
