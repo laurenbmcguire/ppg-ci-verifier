@@ -1707,3 +1707,5 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-review-dialog.fd-manual-active .fd-review-toolbar{display:none}.fd-manual-preview{position:sticky;top:-20px;z-index:3;background:var(--paper,#fff);padding:10px 0;display:flex;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--line,#ccd5d2)}
 
 .fd-review-summary{padding:12px;margin:12px 0;border:1px solid var(--line,#ccd5d2);border-radius:8px}.fd-summary-text{white-space:pre-wrap;overflow-wrap:anywhere}
+
+.fd-summary-scroll{max-height:220px;overflow:auto;overscroll-behavior:contain;overflow-wrap:anywhere}.fd-server-inventory{border-top:1px solid var(--line,#ccd5d2);margin-top:12px;padding-top:8px}.fd-review-summary details>summary{cursor:pointer;padding:8px 0}

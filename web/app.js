@@ -787,7 +787,8 @@
   function fdItems() {
     const r = state.report, rv = r.review, dec = store.get(decisionsKey(), {}), decided = r.review_decisions || {}, edits = store.get(editsKey(), {});
     // findings a person kept as recorded are listed too (from the server's decisions), so they can be seen and undone
-    const issues = [...allIssues(rv), ...(rv.dismissed || []).filter(i => !i.restored)].filter(i => i.severity !== 'info'), fixes = state.fixes || [], used = new Set(), items = [];
+    const loadedIssues = allIssues(rv), loadedKeys = new Set(loadedIssues.map(i => i.key));
+    const issues = [...new Map([...loadedIssues, ...(rv.dismissed || []).filter(i => !loadedKeys.has(i.key))].map(i => [i.key, i])).values()].filter(i => i.severity !== 'info'), fixes = state.fixes || [], used = new Set(), items = [];
     const make = (i, f) => {
       const key = i ? i.key : 'fix:' + f.id, fd = i?.decision || null, d = fd || decided[key] || (f ? decided['fix:' + f.id] : null);
       const fmt = f && fmtKind(f);
@@ -973,6 +974,28 @@
     finally { operation.cancel(); }
   }
   // AI provides a read-only explanation; the recorded inventory and action scopes stay authoritative.
+  function fdSummaryInventory(answer, loadedKeys) {
+    const counts = answer.counts, groups = answer.groups;
+    const validCount = n => Number.isSafeInteger(n) && n >= 0;
+    if (!counts || !['available', 'active', 'dismissed'].every(k => validCount(counts[k])) || counts.active + counts.dismissed !== counts.available || !Array.isArray(groups)) throw new Error('The server finding inventory is inconsistent. Reload this review.');
+    const ids = new Set(), groupIds = new Set(); let total = 0;
+    for (const group of groups) {
+      if (!group || typeof group.id !== 'string' || groupIds.has(group.id) || !validCount(group.count) || !Array.isArray(group.ids) || group.ids.length !== group.count ||
+          ['code', 'source', 'severity', 'state'].some(k => typeof group[k] !== 'string')) throw new Error('The server finding groups are inconsistent. Reload this review.');
+      groupIds.add(group.id); total += group.count;
+      for (const id of group.ids) { if (typeof id !== 'string' || ids.has(id)) throw new Error('The server finding identities are ambiguous. Reload this review.'); ids.add(id); }
+    }
+    if (total !== counts.available) throw new Error('The server finding totals do not match the groups. Reload this review.');
+    const loaded = [...ids].filter(id => loadedKeys.has(id)).length;
+    return h('section', {class: 'fd-server-inventory', 'aria-label': 'Server finding inventory'},
+      h('h4', {}, 'Server finding inventory'),
+      h('p', {}, `${counts.available} available findings: ${counts.active} active records and ${counts.dismissed} set-aside records, across ${groups.length} groups.`),
+      h('p', {class: 'fd-hint'}, `${loaded} of these finding identities are loaded in this review. This inventory is read-only; the separate review actions below apply only to their exact loaded scope. Informational and historical records may not have actions.`),
+      loaded < ids.size ? h('p', {class: 'fd-coverage'}, `${ids.size - loaded} available findings are not loaded here. Close and reopen the report to load its current finding pages before acting on missing items. No partial group action is offered from this inventory.`) : null,
+      h('details', {open: true}, h('summary', {}, `Recorded finding groups (${groups.length})`),
+        h('ul', {class: 'fd-summary-scroll', tabindex: '0', 'aria-label': 'Read-only recorded finding groups'}, groups.map(group => h('li', {},
+          h('b', {}, `${group.code}: ${group.count}`), ` · ${group.severity} · ${group.source} · ${group.state}. ${group.ids.filter(id => loadedKeys.has(id)).length} of ${group.count} identities loaded.`)))));
+  }
   function fdSummaryPanel(report, binding, owner, current) {
     const issues = [...new Map([...allIssues(report.review), ...(report.review.dismissed || [])].map(i => [i.key, i])).values()];
     const incomplete = report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed;
@@ -1002,20 +1025,21 @@
       try {
         const answer = await api('/api/spreadsheets/review-summary', {scope: 'available_findings', file_hash: binding.file_hash,
           expected_check_hash: binding.expected_check_hash, expected_rev: binding.expected_rev, run: binding.expected_run});
-        if (!active()) return;
+        if (!active()) { if (owner.isConnected && !current()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); return; }
         if (!answer || answer.read_only !== true || answer.file_hash !== binding.file_hash || answer.check_hash !== binding.expected_check_hash ||
             answer.expected_rev !== binding.expected_rev || JSON.stringify(answer.run) !== JSON.stringify(binding.expected_run) || typeof answer.reply !== 'string' || typeof answer.notice !== 'string' || typeof answer.coverage?.label !== 'string' || typeof answer.narrative_notice !== 'string') throw new Error('The summary did not match the current report review. Reload before trying again.');
-        output.replaceChildren(h('h4', {}, answer.narrative_status === 'done' ? 'AI explanation of available findings' : 'AI explanation unavailable'),
-          h('p', {class: 'fd-coverage'}, answer.coverage.label), h('p', {}, answer.narrative_notice), h('p', {class: 'fd-summary-text'}, answer.reply), h('p', {class: 'fd-hint'}, answer.notice),
+        const inventory = fdSummaryInventory(answer, new Set(issues.map(i => i.key)));
+        output.replaceChildren(inventory, h('h4', {}, answer.narrative_status === 'done' ? 'AI explanation of available findings' : 'AI explanation unavailable'),
+          h('p', {class: 'fd-coverage'}, answer.coverage.label), h('p', {}, answer.narrative_notice), answer.reply ? h('details', {open: true}, h('summary', {}, 'Read AI explanation'), h('p', {class: 'fd-summary-text fd-summary-scroll', tabindex: '0', 'aria-label': 'AI explanation text'}, answer.reply)) : null, h('p', {class: 'fd-hint'}, answer.notice),
           h('p', {class: 'fd-hint'}, 'AI text is not verification or approval. Use the recorded groups below to request AI proposals, fix manually, or ignore with a reason. Only previewed changes can be applied.'));
-      } catch (error) { if (active()) output.replaceChildren(h('p', {role: 'alert'}, `Summary unavailable: ${error.message}. The recorded findings and actions below are unchanged.`)); }
+      } catch (error) { if (active()) output.replaceChildren(h('p', {role: 'alert'}, `Summary unavailable: ${error.message}. The recorded findings and actions below are unchanged.`)); else if (owner.isConnected && !current()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); }
       finally { operation.cancel(); }
     }}, state.aiOn ? 'Ask AI to summarize available findings' : 'AI summary unavailable: AI is off');
     return h('section', {class: 'fd-review-summary', 'aria-label': 'Findings summary'}, h('h3', {}, 'Findings summary'),
       h('p', {}, `${issues.length} loaded finding records, including set-aside history and information: ${counts}.`),
       incomplete ? h('p', {class: 'fd-coverage'}, 'Coverage incomplete. This is not a summary of every possible error; unavailable or unlisted findings remain outside this review.') : h('p', {}, 'All currently loaded finding records are counted. A finding-free report is not proof of source completeness or readiness.'),
       ...(report.holds || []).map(hold => h('p', {class: 'fd-coverage'}, hold.text || hold.code)),
-      h('p', {class: 'fd-hint'}, 'On request, Claude receives bounded finding-group metadata for this report only, not workbook contents or unrelated reports. AI summarizes; it cannot apply changes or ignore findings.'), button, output);
+      h('p', {class: 'fd-hint'}, 'On request, Claude receives bounded finding-group metadata for this report only, not workbook contents or unrelated reports. AI summarizes; it cannot apply changes or ignore findings.'), button, h('button', {type: 'button', class: 'btn', onclick: () => { const toolbar = owner.querySelector('.fd-review-toolbar'); toolbar?.scrollIntoView({block: 'start'}); toolbar?.querySelector('button')?.focus({preventScroll: true}); }}, 'Go to review actions'), output);
   }
   function fdManualCellHeld(items, sheet, row, cell) {
     return items.some(other => other.sheet === sheet && (other.cell === cell || !other.cell && other.row === row) &&

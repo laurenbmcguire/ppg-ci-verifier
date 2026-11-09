@@ -27,7 +27,7 @@ provider_calls=[]
 def fake_provider(body):
     provider_calls.append(body)
     assert 'tools' not in body
-    return 'Synthetic AI explanation: review the available finding groups below. Nothing has changed.'
+    return ('Synthetic AI explanation: review the available finding groups below. Nothing has changed.\n' * 90)
 finding_summary.ask=fake_provider
 from legacy_storage_fake import PostgresWorkspace
 from test_vercel import FakeDatabase
