@@ -1604,6 +1604,9 @@
   async function fdRecheck() {
     if (state.decisionPending || state.busy || state.rechecking) { toast('Wait for the current save or operation to finish before re-checking.', true); return; }
     const report = state.report, hash = report?.file_hash; if (!hash) return;
+    if ([...document.querySelectorAll('#side input:not([type="checkbox"]):not([type="radio"]), #side textarea')].some(node => node.value !== node.defaultValue)) {
+      toast('Finish or save the text you are editing before re-checking. Nothing changed.', true); return;
+    }
     const operation = {}; state.rechecking = operation;
     const controls = [...document.querySelectorAll('#side button, #fd-preview-btn, .fd-mode-selector button, dialog .primary')].map(node => [node, node.disabled]);
     controls.forEach(([node]) => { node.disabled = true; });

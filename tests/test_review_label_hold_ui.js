@@ -75,3 +75,8 @@ test('failed old report refresh never paints over a newer selected report',async
  let reject,paints=0;const state={selected:'one'};const ctx=vm.createContext({state,$:()=>({replaceChildren:()=>paints++}),api:()=>new Promise((r,j)=>reject=j),fillPages:x=>x,h:()=>({})});
  vm.runInContext(between('  async function openReport(', '  // Reports uploaded before'),ctx);const pending=ctx.openReport('one',true);state.selected='two';reject(Error('Old refresh failed'));await pending;assert.equal(paints,0);
 });
+
+test('dirty unsubmitted reviewer text stops recheck before any request',async()=>{
+ let calls=0;const state={report:{file_hash:'one'},selected:'one'};const ctx=vm.createContext({state,toast:()=>{},document:{querySelectorAll:()=>[{value:'unsaved',defaultValue:''}]},api:()=>calls++});
+ vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile('),ctx);await ctx.fdRecheck();assert.equal(calls,0);assert.equal(state.rechecking,undefined);
+});
