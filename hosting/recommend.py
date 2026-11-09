@@ -7,12 +7,12 @@ import json
 
 ACTIONS = ('fix_issues', 'review_fixes', 'fix_shifts', 'recheck_sharepoint', 'send_for_review', 'approve_send', 'open_report', 'open_week')
 TIPS = {
-    'Duplicate VINs or rows': 'Most duplicates are the same car scanned on two logins a few minutes apart. Remind inspectors to log out at hand-over and to check the scan went through before scanning again.',
+    'Duplicate VINs or rows': 'Compare the underlying rows, identifiers, timestamps and source records. A repeated identifier alone does not prove a duplicate inspection; verify what each row represents before proposing a correction.',
     'Scans on the wrong shift': 'The shift is whatever the inspector picks at login. Ask inspectors to pick the shift carefully and to log out at shift change; the verifier re-sorts by scan time either way.',
-    'Typos in VINs or part numbers': 'Typos come from typing instead of scanning. Ask the site to scan every VIN and part label, and to re-scan unreadable stickers rather than type them.',
+    'Typos in VINs or part numbers': 'Compare the recorded identifier or part number with the original source and confirm the expected format with the site. An unusual value does not establish a typo or how it was entered.',
     'Did not match SharePoint': 'When the report and SharePoint disagree, fix both: clients are sometimes given SharePoint access and it must match what was emailed.',
     'Totals that did not add up': 'Keep the template\'s total formulas; typed totals drift from the rows. Use yesterday\'s file as the template and change the date once in the header.',
-    'Blank or missing values': 'Blank VINs or quantities usually mean an unreadable sticker or a skipped field on the tablet. Ask the site to fill the gap the same shift.',
+    'Blank or missing values': 'Ask the site to verify missing values against the original source and clarify whether each field is required. Keep unknown values unknown; a blank does not establish its cause or mean zero.',
     'Numbers stored as text or bad values': 'Paste values into the template with Paste Special > Values so quantities stay numbers and add into the totals.',
 }
 

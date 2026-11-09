@@ -63,3 +63,28 @@ class ListedFindingCoverage(unittest.TestCase):
         self.assertEqual(historical["reconcile"]["open"], 0)
         self.assertEqual(len(historical["dismissed"]), 2)
         self.assertEqual(historical["coverage"]["not_listed"], 30)
+
+
+class GenericOverviewGuidance(unittest.TestCase):
+    def test_generic_findings_use_evidence_based_guidance_without_assumed_cause(self):
+        from hosting.report_statistics import category
+        cases = [
+            ("duplicate_identifier", "Duplicate VINs or rows", "does not prove a duplicate inspection"),
+            ("identifier_unusual", "Typos in VINs or part numbers", "does not establish a typo"),
+            ("missing_identifier", "Blank or missing values", "Keep unknown values unknown"),
+        ]
+        for code, expected_category, evidence_limit in cases:
+            with self.subTest(code=code):
+                reason = category(dict(code=code))
+                self.assertEqual(reason, expected_category, "Existing category contract is unchanged")
+                overview = dict(categories=[dict(reason=reason, count=1)], jobs=[],
+                                totals=dict(on_time_pct=None, reports=1, sent=1))
+                before = copy.deepcopy(overview)
+                result = recommend.overview_rules(overview)[0]
+                self.assertEqual(overview, before)
+                self.assertEqual(result["kind"], "process")
+                self.assertIsNone(result["do"])
+                self.assertIn(expected_category, result["title"])
+                self.assertIn(evidence_limit, result["why"])
+                for unsupported in ("same car", "two logins", "come from typing", "usually mean", "skipped field"):
+                    self.assertNotIn(unsupported, result["why"])
