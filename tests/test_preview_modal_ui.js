@@ -15,6 +15,7 @@ class Element {
  close(){this.open=false;this.fire('close');}
  remove(){this.removed=true;}
  querySelector(selector){return this.walk().find(x=>selector==='#'+x.id);}
+ querySelectorAll(selector){return this.walk().filter(x=>x.tag===selector);}
  walk(){return this.children.flatMap(x=>x instanceof Element?[x,...x.walk()]:[]);}
 }
 function harness(){
@@ -124,4 +125,18 @@ test('failed apply retains preview, busy click makes no request, and Escape is b
  let prevented=false;d.listeners.cancel[0]({preventDefault(){prevented=true;}});assert.equal(prevented,true);
  context.state.busy=false;prevented=false;d.listeners.cancel[0]({preventDefault(){prevented=true;}});assert.equal(prevented,false);
  await button.onclick({currentTarget:button});assert.equal(calls,1);assert.equal(dialogs().length,1);assert.equal(button.disabled,false);assert.match(d.querySelector('#fd-preview-error').textContent,/Not confirmed saved/);
+});
+
+test('pending save disables Back and Remove; failed response restores controls and visible error even when event.currentTarget clears',async()=>{
+ const {context,dialogs}=harness();let finish,calls=0,removed=0;context.fdRemovePreview=()=>removed++;
+ context.applyFixes=()=>{calls++;return new Promise(resolve=>finish=resolve);};
+ const c={binding:{file_hash:'h',expected_check_hash:'c'},report:{file_hash:'h',revision:1},accepted:[{id:'p',sheet:'Synthetic',cell:'A2',before:'1',after:'2'}],dec:{},edits:{},total:1};
+ context.fdPreview(c);const d=dialogs()[0],apply=d.querySelector('#fd-apply'),back=d.walk().find(x=>x.tag==='button'&&x.children.includes('Back to review')),remove=d.walk().find(x=>x.tag==='button'&&x.children.includes('Remove'));
+ const event={currentTarget:apply};const pending=apply.onclick(event);event.currentTarget=null;
+ assert.equal(back.disabled,true);assert.equal(remove.disabled,true);assert.equal(apply.disabled,true);
+ back.onclick();remove.onclick();await apply.onclick({currentTarget:apply});assert.equal(calls,1);assert.equal(removed,0);assert.equal(dialogs().length,1);
+ let canceled=false;d.listeners.cancel[0]({preventDefault(){canceled=true;}});assert.equal(canceled,true,'local pending guard works before/without global busy');
+ finish(null);await pending;
+ assert.equal(dialogs().length,1);assert.equal(back.disabled,false);assert.equal(remove.disabled,false);assert.equal(apply.disabled,false);assert.match(d.querySelector('#fd-preview-error').textContent,/Not confirmed saved/);
+ back.onclick();assert.equal(dialogs().length,0);
 });
