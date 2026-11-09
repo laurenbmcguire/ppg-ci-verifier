@@ -916,7 +916,7 @@
       h('p', {}, !state.fixes ? 'Loading supported recommendations…' : state.fixesError ? 'Recommendations could not be loaded. Reopen the report to retry.' : `${plural(recommended.length, 'supported cell change')} available for a combined preview. Findings and cell changes are counted separately.`),
       h('div', {class: 'fd-cardacts'},
         h('button', {type: 'button', class: 'btn primary', disabled: busy || !recommended.length, onclick: () => fdPreviewRecommended(binding)}, `Preview all ${recommended.length} recommended fixes`),
-        h('button', {type: 'button', class: 'btn', disabled: busy || !state.fixes, onclick: fdReviewDialog}, 'Needs review: choose items'),
+        h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: busy || !state.fixes, onclick: fdReviewDialog}, 'Needs review: choose items'),
         h('button', {type: 'button', class: 'btn', disabled: busy, 'aria-pressed': String(mode === 'manual'), onclick: () => fdChooseMode('manual', binding)}, 'Review manually'),
         h('button', {type: 'button', class: 'btn', disabled: busy, 'aria-pressed': String(mode === 'unchanged'), onclick: () => fdChooseMode('unchanged', binding)}, 'Leave file unchanged for now')),
       h('p', {class: 'fd-hint'}, 'Preview shows exact cells, before and after values, and reasons. Apply only after confirming. Originals and unresolved holds remain.'),
@@ -938,7 +938,7 @@
     for (const it of items) { const type = it.issue?.code || it.kind?.code || it.group || 'Other findings'; if (!byType.has(type)) byType.set(type, []); byType.get(type).push(it); }
     const unresolved = items.filter(it => ['open', 'selected', 'deferred', 'confirmed', 'claude'].includes(it.state));
     const close = () => dlg.close();
-    dlg.addEventListener('close', () => { dlg.remove(); if (opener?.isConnected) opener.focus(); });
+    dlg.addEventListener('close', () => { dlg.remove(); if (opener?.isConnected && opener.getClientRects().length) opener.focus(); else { const fallback = document.getElementById('fd-open-review'); fallback?.focus(); } });
     const choose = (list, on) => {
       const label = document.activeElement?.getAttribute('aria-label');
       list.forEach(it => on ? selected.add(it.key) : selected.delete(it.key));
@@ -987,7 +987,8 @@
         const count = list.filter(it => selected.has(it.key)).length;
         const toggle = h('input', {type: 'checkbox', checked: count === list.length || null, 'aria-label': 'Select error type ' + type, onchange: e => choose(list, e.target.checked)});
         toggle.indeterminate = count > 0 && count < list.length;
-        return h('label', {}, toggle, ` ${type}: ${count} of ${list.length} loaded items across all groups and pages`);
+        const label = kindNames(list[0].kind || list[0].issue || {})[1] || kindNames(list[0].kind || list[0].issue || {})[0] || type;
+        return h('label', {}, toggle, ` ${label} (${type}): ${count} of ${list.length} loaded items across all groups and pages`);
       }));
       content.replaceChildren(...groups.map((g, index) => {
         const page = pages.get(g.key) || 0, count = g.items.filter(it => selected.has(it.key)).length;
@@ -1007,11 +1008,11 @@
       h('p', {}, `${report.filename || 'Report'} · version ${revisionOf(report)}. All loaded non-informational findings, set-aside records and suggested changes are listed below.`),
       report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed ? h('p', {class: 'fd-coverage'}, 'Coverage incomplete: this list includes only loaded items. Unavailable findings cannot be selected; approval remains blocked.') : null,
       h('p', {}, `${fdHoldSummary(report)}. AI workbook changes are unavailable here. Existing source-supported or previously generated proposals require preview and explicit Apply; opening this review does not run AI.`),
-      status, h('div', {class: 'fd-cardacts fd-review-toolbar'},
+      h('div', {class: 'fd-review-toolbar'}, status, h('div', {class: 'fd-cardacts'},
         h('button', {type: 'button', class: 'btn', onclick: () => choose(unresolved, true)}, `Select all ${unresolved.length} unresolved loaded items`),
         h('button', {type: 'button', class: 'btn', onclick: () => choose(items, false)}, 'Select none'),
-        h('button', {type: 'button', class: 'btn', onclick: close}, 'Close review')),
-      actions, h('p', {class: 'fd-hint'}, 'Selection is a review scope, not approval. Preview includes only eligible cell changes. Manual review walks the selected items with Previous / Next. Keep/defer applies to at most 1000 open findings with recorded evidence identities. Blockers must be kept one at a time with evidence.'), decision, types, content);
+        h('button', {type: 'button', class: 'btn', onclick: close}, 'Close review')), actions),
+      h('p', {class: 'fd-hint'}, 'Selection is a review scope, not approval. Preview includes only eligible cell changes. Manual review walks the selected items with Previous / Next. Keep/defer applies to at most 1000 open findings with recorded evidence identities. Blockers must be kept one at a time with evidence.'), decision, types, content);
     document.body.append(dlg); draw(); dlg.showModal(); dlg.querySelector('h2').focus();
   }
   function fdOccurrenceList(g) {

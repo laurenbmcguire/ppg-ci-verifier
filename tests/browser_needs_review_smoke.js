@@ -3,12 +3,12 @@ const fs=require('node:fs'),http=require('node:http'),assert=require('node:asser
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
 const source=fs.readFileSync('web/app.js','utf8'),css=fs.readFileSync('web/app.css');
 const between=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
-const fixture=Array.from({length:31},(_,i)=>({key:`k${i}`,fp:`fp${i}`,sheet:'Synthetic',cell:`B${i+1}`,state:'open',text:'Synthetic unknown quantity',reason:'Unknown stays unknown',issue:{severity:i===30?'high':'medium'},fix:i<2?{id:`f${i}`,after:7}:null}));
+const fixture=Array.from({length:31},(_,i)=>({key:`k${i}`,fp:`fp${i}`,sheet:'Synthetic',cell:`B${i+1}`,state:'open',text:'Synthetic unknown quantity',reason:'Unknown stays unknown',issue:{code:i===29?'format_case':'quantity_unknown',severity:i===30?'high':'medium'},fix:i<2?{id:`f${i}`,after:7}:null}));
 const js=between('  const h = (','  const store =')+between('  function reviewBinding(', '  function findingBinding(')+between('  function findingBinding(', '  function fdItems(')+between('  function fdReviewDialog(', '  function fdOccurrenceList(')+`
 const state={report:{filename:'Synthetic.xlsx',file_hash:'hash',check_hash:'check',review:{decisions:{rev:1},run:{id:'run'},page:{complete:true}}}};
 let items=${JSON.stringify(fixture)};items.forEach(it=>it.binding=reviewBinding(state.report));
 const fdItems=()=>items,fdGroups=x=>[{key:'medium',title:'Unknown quantities · open',items:x.slice(0,30)},{key:'high',title:'Source blocker · open',items:x.slice(30)}];
-const fdRecommended=x=>x.filter(it=>it.fix),fdHoldSummary=()=> '1 blocking hold',revisionOf=()=>1;
+const kindNames=x=>[x.code==='format_case'?'Capitalization':'Unknown quantity',x.code==='format_case'?'Capitalization differences':'Unknown quantities'];const fdRecommended=x=>x.filter(it=>it.fix),fdHoldSummary=()=> '1 blocking hold',revisionOf=()=>1;
 const calls=[];const toast=t=>calls.push({toast:t});const captureCorrections=(accepted,dec,edits,binding)=>({accepted,dec,edits,binding});
 const fdPreview=c=>calls.push({preview:c});const fdSendDecision=c=>calls.push({decision:c});const fdChooseMode=()=>{};const fdOpen=it=>calls.push({manual:it.key});
 document.getElementById('open').onclick=fdReviewDialog;
@@ -18,6 +18,7 @@ window.testState=state;window.calls=calls;
 const base=`http://127.0.0.1:${server.address().port}`,browser=await chromium.launch({executablePath:process.env.CHROMIUM_EXECUTABLE,headless:true});
 try{for(const width of [1200,390]){const context=await browser.newContext({viewport:{width,height:850}}),page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(String(e)));await context.route('**/*',r=>r.request().url().startsWith(base+'/')?r.continue():r.abort());await page.goto(base);
 await page.getByRole('button',{name:'Needs review',exact:true}).click();const dialog=page.getByRole('dialog');assert.equal(await dialog.count(),1);assert.match(await dialog.innerText(),/31 loaded review items/);assert.match(await dialog.innerText(),/AI workbook changes are unavailable/);
+await dialog.getByRole('checkbox',{name:'Select error type quantity_unknown',exact:true}).check();assert.match(await dialog.getByRole('status').innerText(),/30 of 31/);assert.equal(await dialog.getByRole('checkbox',{name:/Select k29:/}).count(),0);await dialog.getByRole('button',{name:'Select none',exact:true}).click();
 await dialog.getByRole('checkbox',{name:/Select error group 1/}).check();assert.match(await dialog.getByRole('status').innerText(),/30 of 31/);assert.equal(await dialog.getByRole('checkbox',{name:/Select error group 1/}).evaluate(e=>e===document.activeElement),true);
 await dialog.getByRole('button',{name:'Next items',exact:true}).first().click();await dialog.getByRole('checkbox',{name:/Select k29:/}).uncheck();assert.match(await dialog.getByRole('status').innerText(),/29 of 31/);assert.equal(await dialog.getByRole('checkbox',{name:/Select error group 1/}).evaluate(e=>e.indeterminate),true);
 await page.screenshot({path:`../needs-review-${width}.png`,fullPage:true});await dialog.getByRole('button',{name:'Select none',exact:true}).click();assert.match(await dialog.getByRole('status').innerText(),/0 of 31/);
