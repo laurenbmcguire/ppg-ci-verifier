@@ -1690,15 +1690,33 @@
     const go = n => { state.fdManual.at = n; const next = list[n]; if (next) fdOpen(next); else drawSide(); };
     const end = () => { state.fdManual = null; state.fdCur = null; drawSide(); drawGrid(); };
     const where = [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' · ') || 'Whole report';
-    const input = it.cell ? h('input', {class: 'fd-manual-input', 'aria-label': `New value for ${where}`,
-      value: mine ? mine.after : it.source != null ? String(it.source) : it.proposed != null ? String(it.proposed) : it.report ?? '',
-      placeholder: 'Type the correct value'}) : null;
+    // An error about a whole row (a part number, a duplicate, a record not on SharePoint) opens every cell of that row to type in.
+    const rowKey = !it.cell && it.sheet && it.row ? JSON.stringify([state.report.file_hash, it.sheet, it.row]) : null;
+    state.fdManualRows ||= {};
+    let rowCells = null, rowNote = null;
+    if (rowKey) {
+      const got = state.fdManualRows[rowKey];
+      if (!got) { state.fdManualRows[rowKey] = 'loading'; const report = state.report;
+        api('/api/spreadsheets/cells', {file_hash: report.file_hash, sheet: it.sheet, row: it.row})
+          .then(row => { state.fdManualRows[rowKey] = row; }, e => { state.fdManualRows[rowKey] = {error: e.message}; })
+          .finally(() => { if (state.report === report && state.fdManual) drawSide(); });
+        rowNote = 'Loading this row…'; }
+      else if (got === 'loading') rowNote = 'Loading this row…';
+      else if (got.error) rowNote = `This row could not be opened: ${got.error}`;
+      else rowCells = (got.cells || []).filter(c => !c.formula && typeof c.before === 'string');
+    }
+    const field = (cell, before, value, label) => h('input', {class: 'fd-manual-input', 'data-cell': cell, 'data-before': before, 'aria-label': `New value for ${label}`, value, placeholder: 'Type the correct value'});
+    const input = it.cell ? field(it.cell, it.report ?? '', mine ? mine.after : it.source != null ? String(it.source) : it.proposed != null ? String(it.proposed) : it.report ?? '', where) : null;
+    const rowFields = rowCells ? rowCells.map(c => h('label', {class: 'fd-manual-rowfield'}, h('span', {}, `${c.header || 'Column'} (${c.cell})`),
+      field(c.cell, c.before, edits[editId(it.sheet, c.cell)]?.after ?? c.before, `${c.header || c.cell}`))) : null;
     const keep = () => {
-      if (!input || !state.report) return;
-      const before = it.report ?? '', value = input.value;
-      const all = store.get(editsKey(), {}), id = editId(it.sheet, it.cell);
-      if (value === String(before)) delete all[id];
-      else all[id] = {sheet: it.sheet, cell: it.cell, before, after: value, header: '', source: 'Your edit', reason: 'Typed by the reviewer'};
+      if (!state.report) return;
+      const all = store.get(editsKey(), {});
+      for (const el of document.querySelectorAll('.fd-manual input[data-cell]')) {
+        const cell = el.getAttribute('data-cell'), before = el.getAttribute('data-before') ?? '', id = editId(it.sheet, cell);
+        if (el.value === String(before)) delete all[id];
+        else all[id] = {sheet: it.sheet, cell, before, after: el.value, header: '', source: 'Your edit', reason: 'Typed by the reviewer'};
+      }
       store.set(editsKey(), all);
     };
     const save = async () => {
@@ -1720,7 +1738,10 @@
       it.cell ? h('p', {class: 'fd-hint'}, `Now: ${it.report === '' || it.report == null ? 'blank' : '“' + it.report + '”'}${it.source != null ? ` · SharePoint: “${it.source}”` : ''}`) : null,
       input ? h('form', {class: 'fd-manual-form', onsubmit: e => { e.preventDefault(); keep(); if (at < list.length - 1) go(at + 1); else save(); }},
         input, h('button', {type: 'submit', class: 'btn primary'}, at < list.length - 1 ? 'Next' : 'Save my changes')) :
-        h('p', {class: 'fd-hint'}, 'This error is not one cell. Change it in the spreadsheet, or ignore it.'),
+      rowFields && rowFields.length ? h('form', {class: 'fd-manual-rowform', onsubmit: e => { e.preventDefault(); keep(); if (at < list.length - 1) go(at + 1); else save(); }},
+        h('p', {class: 'fd-hint'}, `Row ${it.row}: change any cell you want.`), ...rowFields,
+        h('button', {type: 'submit', class: 'btn primary'}, at < list.length - 1 ? 'Next' : 'Save my changes')) :
+        h('p', {class: 'fd-hint'}, rowNote || (rowFields ? 'This row has no cells that can be typed in (formulas only).' : 'This error is about the whole report, not one row. Click a cell in the spreadsheet to change it, or ignore the error.')),
       h('div', {class: 'fd-cardacts'},
         h('button', {type: 'button', class: 'btn small', disabled: at === 0 || null, onclick: () => { keep(); go(at - 1); }}, 'Previous'),
         at < list.length - 1 ? h('button', {type: 'button', class: 'btn small', onclick: () => { keep(); go(at + 1); }}, 'Skip') : null,
