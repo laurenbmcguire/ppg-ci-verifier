@@ -974,9 +974,9 @@
   }
   // AI provides a read-only explanation; the recorded inventory and action scopes stay authoritative.
   function fdSummaryPanel(report, binding, owner, current) {
-    const issues = [...allIssues(report.review), ...(report.review.dismissed || []).filter(i => !i.restored)];
+    const issues = [...new Map([...allIssues(report.review), ...(report.review.dismissed || [])].map(i => [i.key, i])).values()];
     const incomplete = report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed;
-    const counts = ['high', 'medium', 'low', 'info'].map(severity => `${issues.filter(i => i.severity === severity).length} ${severity === 'high' ? 'blockers' : severity === 'info' ? 'informational' : severity}`).join(' · ');
+    const counts = ['high', 'medium', 'low', 'info'].map(severity => `${issues.filter(i => i.severity === severity).length} ${severity === 'high' ? 'high severity' : severity === 'info' ? 'informational' : severity}`).join(' · ');
     const output = h('div', {class: 'fd-summary-answer', 'aria-live': 'polite'});
     const button = h('button', {type: 'button', class: 'btn', disabled: !state.aiOn, onclick: async () => {
       if (!current() || !state.aiOn || state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending) return;
