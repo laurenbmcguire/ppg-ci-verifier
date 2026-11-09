@@ -208,9 +208,10 @@ class handler(BaseHTTPRequestHandler):
             else:
                 inbox = SpreadsheetInbox(directory)
                 user = access.session_user(inbox, token) if token else None
-                needed = access.required(inbox)
-        if not user and not needed:
-            user = dict(access.OWNER)       # sign-in not required yet: Vercel's sign-in is the gate
+                needed = hosted_preview() or access.required(inbox)
+        if not user and not needed and local_environment() and os.environ.get('CI_LOCAL_DEV') == '1':
+            user = dict(access.OWNER)       # explicit loopback development only; never infer hosted identity
+        self._signin_required = hosted_preview() or needed
         self._user_cache = (cookie_header, user)
         return user
 
@@ -394,6 +395,8 @@ class handler(BaseHTTPRequestHandler):
             with self.store().session() as directory:
                 inbox = SpreadsheetInbox(directory)
                 if route == '/api/access/required':
+                    if hosted_preview() and payload.get('on') is not True:
+                        raise access.AccessError('Hosted sign-in cannot be disabled.')
                     access.set_required(inbox, payload.get('on') is True, self.current_user())
                 elif route == '/api/users/save':
                     saved = access.save_user(inbox, payload, valid or None)
@@ -419,12 +422,12 @@ class handler(BaseHTTPRequestHandler):
                                       f'{access.LINK_MINUTES} minutes. After that, sign in with your PPG Microsoft account or ask for a new link at {self.origin()}/app')
                     return self.send(200, encode_json({'sent': True, 'email': user['email']}))
                 users = access.list_users(inbox)
-                needed = access.required(inbox)
+                needed = hosted_preview() or access.required(inbox)
         except access.AccessError as exc:
             raise Conflict(str(exc))
         except mailer.MailError as exc:
             raise Conflict(str(exc))
-        return self.send(200, encode_json({'users': users, 'required': needed, 'microsoft': access.microsoft_ready(), 'email': mailer.configured(),
+        return self.send(200, encode_json({'users': users, 'required': needed, 'hosted_signin_required': hosted_preview(), 'microsoft': access.microsoft_ready(), 'email': mailer.configured(),
                                            'callback': self.origin() + '/auth/microsoft/callback', 'me': self.current_user()}))
 
     def demo_enabled(self):
@@ -627,7 +630,7 @@ class handler(BaseHTTPRequestHandler):
             if route == '/api/me':
                 from hosting import access, mailer
                 user = self.current_user()
-                return self.send(200, encode_json({'user': user, 'microsoft': access.microsoft_ready(), 'email': mailer.configured()}))
+                return self.send(200, encode_json({'user': user, 'required': self._signin_required, 'hosted_signin_required': hosted_preview(), 'microsoft': access.microsoft_ready(), 'email': mailer.configured()}))
             if route in ('/api/spreadsheets/demo/review','/api/spreadsheets/demo/download'):
                 if not self.demo_enabled():return self.fail(403,'Synthetic workbook simulation is disabled.')
                 file_hash=parse_qs(urlsplit(self.path).query).get('id',[''])[0]

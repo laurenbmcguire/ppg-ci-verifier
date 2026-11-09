@@ -2,8 +2,8 @@
 
 Admins see everything and manage people. Members see only the clients assigned to them: every report, search,
 download, weekly/monthly page and overview is filtered on the server. People sign in with their PPG Microsoft
-account or a one-time email link. Until an admin turns on "Require sign-in", the app stays behind Vercel's sign-in
-and treats whoever gets through as the owner, so setting this up can never lock anyone out.
+account or a one-time email link. Hosted browser APIs always require an app session.
+Only explicitly enabled loopback development may use a virtual owner before sign-in is required.
 """
 import base64
 import hashlib

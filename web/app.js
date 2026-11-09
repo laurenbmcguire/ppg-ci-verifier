@@ -270,7 +270,7 @@
     const admin = me.role === 'admin';
     document.querySelectorAll('.rail [data-admin], .mnav [data-admin]').forEach(a => { a.hidden = !admin; });
     box.replaceChildren(me.virtual
-      ? h('div', {}, h('b', {}, 'Signed in through Vercel'), h('button', {type: 'button', class: 'linkish', onclick: () => showSignIn()}, 'Sign in with your own account'))
+      ? h('div', {}, h('b', {}, 'Local development access'), h('button', {type: 'button', class: 'linkish', onclick: () => showSignIn()}, 'Sign in with your own account'))
       : h('div', {}, h('b', {}, me.name || me.email), h('span', {}, `${me.email} · ${admin ? 'Admin' : 'Member'}`),
           h('button', {type: 'button', class: 'linkish', onclick: async () => { await api('/api/auth/signout', {}); location.href = '/app'; }}, 'Sign out')));
   }
@@ -317,13 +317,13 @@
       wrap.replaceChildren(
         h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Users & access'), h('div', {class: 'meta'}, 'Who can use the verifier and which clients each person sees. Members only ever get their own clients’ reports, searches, downloads and numbers.'))),
         h('section', {class: 'block accessstate ' + (data.required ? 'on' : 'off')}, h('header', {}, h('h2', {}, data.required ? 'Sign-in is required' : 'Sign-in is not required yet'),
-          h('p', {}, data.required ? 'Everyone signs in and sees only their clients. You can now turn off Vercel’s protection so coworkers can reach the app.'
-            : 'Right now Vercel’s sign-in is the only gate, and anyone who gets through sees everything. Add people, sign in yourself, then turn this on.'),
-          h('div', {class: 'right'}, data.required
+          h('p', {}, data.required ? 'Everyone signs in and sees only their assigned clients. Hosted sign-in cannot be disabled. Keep deployment protection enabled as an additional safeguard.'
+            : 'This local development workspace allows owner access without sign-in. Add people, sign in yourself, then require sign-in.'),
+          h('div', {class: 'right'}, data.hosted_signin_required ? h('span', {class: 'hint'}, 'Required for hosted access') : data.required
             ? h('button', {type: 'button', class: 'btn', onclick: () => run('/api/access/required', {on: false}, 'Sign-in is no longer required.')}, 'Turn off')
             : h('button', {type: 'button', class: 'btn primary', disabled: !canRequire, title: canRequire ? '' : 'Sign in with your own account first', onclick: () => run('/api/access/required', {on: true}, 'Sign-in is now required.')}, 'Require sign-in'))),
           !canRequire && !data.required ? h('p', {class: 'hint'}, me.virtual ? 'First add yourself as an admin below, copy your own sign-in link, open it, then come back and turn this on.' : '') : null,
-          data.required ? h('ol', {class: 'steps'}, h('li', {}, 'In Vercel, open ppg-ci-verifier → Settings → Deployment Protection.'), h('li', {}, 'Set Vercel Authentication to Disabled and save.'), h('li', {}, 'Share the app link with the people you added.')) : null),
+          data.hosted_signin_required ? h('p', {class: 'hint'}, 'An existing admin account and a working Microsoft or email sign-in method are required. Deployment protection does not replace app sign-in.') : null),
         h('section', {class: 'block'}, h('header', {}, h('h2', {}, `People (${data.users.length})`), h('p', {}, `${admins} admin${admins === 1 ? '' : 's'}. Changes to roles and clients save as you click.`)),
           prompt,
           data.users.length ? h('ul', {class: 'people'}, data.users.map(row)) : h('p', {class: 'note'}, 'Nobody yet. Add yourself first, as an admin.')),
