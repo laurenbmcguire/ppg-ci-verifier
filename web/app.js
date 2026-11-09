@@ -1277,7 +1277,10 @@
     state.gridRequest = (state.gridRequest || 0) + 1; // A newer local focus also cancels an older sheet request.
     state.fdCur = it.key; state.fdTier = it.tier;
     if (it.sheet && (it.cell || it.row) && (!state.grid || state.grid.sheet !== it.sheet)) { fdKeepScroll(); await loadGrid(it.sheet, true); }
-    if (state.report !== report || state.fdCur !== it.key || state.fdOpenRequest !== request || (it.sheet && (it.cell || it.row) && state.grid?.sheet !== it.sheet)) return;
+    if (state.report !== report || state.fdCur !== it.key || state.fdOpenRequest !== request) return;
+    if (it.sheet && (it.cell || it.row) && state.grid?.sheet !== it.sheet) {
+      state.gridCell = null; state.gridRow = null; drawSide(); drawGrid(); return;
+    }
     state.gridCell = it.cell || (it.row ? `A${it.row}` : null); state.gridRow = it.row || null;
     drawSide(); drawGrid();
     const td = state.gridCell && document.querySelector(`#sheet-block td[data-cell="${state.gridCell}"]`), wrap = document.querySelector('#sheet-block .gridwrap');
