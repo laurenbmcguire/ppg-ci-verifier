@@ -1014,6 +1014,7 @@
       h('summary', {}, `${plural(approvalHolds.length, 'approval hold')} · review details`),
       h('p', {class: 'fd-hint'}, 'Corrections do not release approval holds. Resolve and re-check the evidence separately.'),
       h('ul', {}, approvalHolds.map(hold => h('li', {}, hold.text || hold.code)))));
+    if (approvalHolds.length) { const action = fdHoldAction(r, st); if (action) body.append(action); }
     else { const nextStep = fdNextStep(r, st); if (nextStep) body.append(nextStep); }
     const cov = r.review.coverage || {}, dc = r.review.decisions || {};
     body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(c.detected, 'open issue')}${r.review.counts?.info ? ` (+${r.review.counts.info} for information)` : ''} · ${c.kept} kept as recorded · ${c.deferred} waiting on the source · ${c.confirmed} confirmed · ${plural(c.suggestions, 'suggestion')} · ${c.selected} selected · ${c.applied} applied in this version`));
@@ -1154,6 +1155,12 @@
       }),
       s.from_hash ? h('a', {href: '#r=' + s.from_hash}, 'Open the version before these changes') : null,
       (s.notes || []).length ? h('details', {}, h('summary', {}, 'Recorded notes'), h('p', {}, s.notes.join(' '))) : null);
+  }
+  function fdHoldAction(r, st) {
+    // Keep recovery reachable without repeating the hold's long explanation.
+    if (st.next === 'recheck') return h('button', {type: 'button', class: 'btn primary', onclick: fdRecheck}, 'Re-check this report');
+    if (st.next === 'client') return h('button', {type: 'button', class: 'btn primary', onclick: e => assignForm(r, e.currentTarget)}, 'Choose client and job');
+    return null;
   }
   function fdNextStep(r, st) {
     const box = (title, text, button) => h('div', {class: 'fd-next ' + st.tone}, h('b', {}, title), text ? h('p', {}, text) : null, button);

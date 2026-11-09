@@ -32,3 +32,13 @@ test('selection focus uses stable finding identity when accessible labels repeat
  const ctx=vm.createContext({document:{activeElement:input('finding:second'),querySelectorAll:()=>[input('finding:first'),input('finding:second')]},state:{fixes:[]},store:{get:()=>({}),set(){}},decisionsKey:()=>'',editsKey:()=>'',toast(){},fdRefresh(){},plural(){}});
  vm.runInContext(between('  function fdSelect(', '  // what the reviewer'),ctx);ctx.fdSelect([],false);assert.equal(focused,'finding:second');
 });
+
+test('held reports retain only the relevant recovery action without repeated warning text',()=>{
+ let rechecked=0,assigned=null;const ctx=vm.createContext({h:(tag,attrs,...kids)=>({tag,...attrs,kids}),fdRecheck:()=>rechecked++,assignForm:(report,button)=>assigned={report,button}});
+ vm.runInContext(between('  function fdHoldAction(', '  function fdNextStep('),ctx);
+ const report={holds:[{hard:true,text:'A long source warning'}]};
+ const recheck=ctx.fdHoldAction(report,{next:'recheck',why:'A long source warning'});assert.equal(recheck.kids[0],'Re-check this report');recheck.onclick();assert.equal(rechecked,1);
+ const client=ctx.fdHoldAction(report,{next:'client',why:'A long source warning'});assert.equal(client.kids[0],'Choose client and job');client.onclick({currentTarget:client});assert.equal(assigned.report,report);
+ assert.ok(!JSON.stringify(recheck).includes('A long source warning'));assert.equal(ctx.fdHoldAction(report,{next:'blockers'}),null);
+ assert.ok(between('  function fdCorrections(', '  // ---------- the app fixes').includes('const action = fdHoldAction(r, st)'));
+});
