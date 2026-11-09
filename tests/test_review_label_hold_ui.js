@@ -28,7 +28,8 @@ test('coverage dominates status ledger even when stored categories add up',()=>{
   assert.ok(ledger.includes(coverage.truncated?'coverage incomplete':'categories add up'));
   const mode=ctx.fdModeSelector(state.report);assert.equal(!!nodes(mode).find(n=>n.class==='fd-priority'),coverage.truncated);
  }
- state.report.review.page={complete:false};state.report.review.coverage={};
+ state.report.review.page={complete:false};state.report.review.coverage={};state.report.review.reconcile.adds_up=false;
+ const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);assert.match(text(body),/categories do not add up: report this · coverage incomplete/);
  assert.match(text(ctx.fdModeSelector(state.report)),/Finding coverage incomplete/);
 });
 

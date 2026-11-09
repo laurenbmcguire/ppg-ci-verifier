@@ -1038,7 +1038,7 @@
     const cov = r.review.coverage || {}, dc = r.review.decisions || {};
     body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(c.detected, 'active finding')}${r.review.counts?.info ? ` (+${r.review.counts.info} for information)` : ''} · ${c.kept} kept as recorded · ${c.deferred} waiting on the source · ${c.confirmed} confirmed · ${plural(c.suggestions, 'suggestion')} · ${c.selected} selected · ${c.applied} applied in this version`));
     const rc = r.review.reconcile;
-    if (rc) body.append(h('details', {class: 'fd-recon'}, h('summary', {}, `Listed finding status breakdown: ${fmt(rc.total)} findings · ${cov.truncated || cov.not_listed || r.review.page?.complete === false ? 'coverage incomplete' : rc.adds_up ? 'categories add up' : 'categories do not add up: report this'}`),
+    if (rc) body.append(h('details', {class: 'fd-recon'}, h('summary', {}, `Listed finding status breakdown: ${fmt(rc.total)} findings · ${rc.adds_up ? 'categories add up' : 'categories do not add up: report this'}${cov.truncated || cov.not_listed || r.review.page?.complete === false ? ' · coverage incomplete' : ''}`),
       h('dl', {class: 'fd-kv'}, ...[['Open, need a decision', rc.open], ['Waiting on the source owner', rc.deferred], ['Confirmed, need a correction', rc.confirmed],
         ['Kept as recorded by a person on this version', rc.kept_by_person], ['Kept by an earlier record (no cell named on some)', rc.kept_earlier_record],
         ['Set aside by Dex (recommendation, not a decision)', rc.set_aside_by_claude], ['Corrected in a later version', rc.corrected], ['For information only', rc.informational]]
@@ -1275,7 +1275,7 @@
     state.gridRequest = (state.gridRequest || 0) + 1; // A newer local focus also cancels an older sheet request.
     state.fdCur = it.key; state.fdTier = it.tier;
     if (it.sheet && (it.cell || it.row) && (!state.grid || state.grid.sheet !== it.sheet)) { fdKeepScroll(); await loadGrid(it.sheet, true); }
-    if (state.report !== report || state.fdCur !== it.key || state.fdOpenRequest !== request || (it.sheet && state.grid?.sheet !== it.sheet)) return;
+    if (state.report !== report || state.fdCur !== it.key || state.fdOpenRequest !== request || (it.sheet && (it.cell || it.row) && state.grid?.sheet !== it.sheet)) return;
     state.gridCell = it.cell || (it.row ? `A${it.row}` : null); state.gridRow = it.row || null;
     drawSide(); drawGrid();
     const td = state.gridCell && document.querySelector(`#sheet-block td[data-cell="${state.gridCell}"]`), wrap = document.querySelector('#sheet-block .gridwrap');
@@ -1606,7 +1606,10 @@
       toast(out.reconciled ? 'Checked again, and SharePoint compared again.' : 'Checked again. Compare with SharePoint to verify it.');
       await openReport(hash, true); loadList();
     } catch (e) { if (state.report === report) toast(e.message, true); }
-    finally { state.rechecking = false; }
+    finally {
+      state.rechecking = false;
+      if (state.selected === hash && state.report?.file_hash === hash) document.querySelector('.fd-mode-selector')?.replaceWith(fdModeSelector(state.report));
+    }
   }
   async function fdReconcile() {
     toast('Comparing every record with its SharePoint item…');
@@ -2577,7 +2580,7 @@
         h('label', {class: 'fd-zoom'}, 'Zoom ', h('select', {'aria-label': 'Sheet zoom', onchange: e => { state.gridZoom = Number(e.target.value); drawGrid(); }},
           [80, 100, 125, 150].map(z => h('option', {value: String(z), selected: (state.gridZoom || 100) === z ? true : null}, z + '%')))),
         state.fdAsideHidden ? h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdAsideHidden = false; $('fd-work')?.classList.remove('aside-hidden'); drawSide(); }}, icon('panel', 15), ' Show corrections') : null),
-      h('p', {class: 'fd-grid-context', role: 'status'}, `${only ? only.size : g.height} rows shown on ${sheet}. `,
+      h('p', {class: 'fd-grid-context', role: 'status'}, `${table.querySelectorAll('tbody tr').length} rows shown on ${sheet}. `,
         contextText,
         'Filtering does not select a correction or change your draft. Click a flagged cell to inspect it.'),
       empty ? h('div', {class: 'fd-empty'}, h('b', {}, q ? 'No matching rows' : 'No exceptions on this sheet'), h('p', {}, q ? `Nothing on "${sheet}" contains “${state.gridSearch}”.` : 'Every row on this sheet is clear.')) : scroller,
