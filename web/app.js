@@ -845,16 +845,15 @@
       const own = String(first.issue?.text || first.text || '').replace(/\s*\(Day-level comparison[^)]*\)/, '');
       const generic = /…/.test(one) || !one;
       g.title = (generic ? (n === 1 ? own : `${own.slice(0, 70)}${own.length > 70 ? '…' : ''} (and ${n - 1} more like it)`) : n === 1 ? one : (many || one)).replace(/^./, c => c.toUpperCase());
-      const ac = first.state === 'claude' ? 'Set aside by Dex (a recommendation): ' : first.state === 'kept_earlier' ? 'Kept as is by an earlier record: ' : first.state === 'corrected' ? 'Corrected in a later version: ' : '';
+      const ac = first.state === 'claude' ? 'AI says this is fine: ' : first.state === 'kept_earlier' ? 'Ignored earlier: ' : first.state === 'corrected' ? 'Fixed in a later version: ' : '';
       if (ac) g.title = ac + g.title.replace(/^./, c => c.toLowerCase());
-      if (first.issue?.legacy_note && !ac) g.title = `Earlier “fine as is” did not say which cell: ${(String(first.cell || '').match(/^[A-Z]+/) || ['?'])[0] ? 'column ' + (String(first.cell || '').match(/^[A-Z]+/) || ['?'])[0] : first.issue.code}, review again`;
       if (g.title.length > 120) g.title = g.title.slice(0, 117) + '…';
       const selection = fdGroupSelection(g.items, fdRecommended(g.items));
       const selectionLabel = selection.eligible && selection.selected === selection.eligible ? 'All eligible changes selected'
         : selection.selected ? `${selection.selected} of ${selection.eligible} eligible changes selected`
         : g.items.some(x => x.state === 'selected') && g.items.some(x => x.state === 'open') ? 'Individual selections; review remaining items'
         : {open: 'Needs review', selected: 'Selected, not applied', deferred: 'Waiting on source', confirmed: 'Correction confirmed', kept: 'Kept as recorded', rejected: 'Excluded'}[first.state] || first.state;
-      g.title += ` · ${first.sheet || 'Whole report'} · ${selectionLabel}${selection.eligible && selection.individualReview ? ` · ${selection.individualReview} ${selection.individualReview === 1 ? 'item needs' : 'items need'} individual review` : ''}`;
+      g.status = selectionLabel;
       g.records = fdRecordCount(g.items);
       g.open = g.items.filter(x => x.state === 'open').length;
       g.unresolved = g.items.filter(x => ['open', 'selected', 'deferred', 'confirmed'].includes(x.state)).length;
@@ -1243,7 +1242,7 @@
       else if (action === 'manual') manual(scope);
       else decisionForm('reject', scope);
     };
-    const direct = scope => fdDirectControls(scope, act);
+    const direct = scope => fdDirectControls(scope, act, true);
     const draw = () => {
       const scope = picked(), eligible = fdRecommended(scope), canDecide = scope.length > 0 && scope.length <= 1000 && scope.every(it => it.fp && ['open', 'claude'].includes(it.state));
       status.textContent = `${scope.length} of ${items.length} selected.${filterKeys && selected.size > scope.length ? ' ' + (selected.size - scope.length) + ' selections outside this status are saved and excluded from these actions.' : ''} ${eligible.length} supported cell changes in this selection.${scope.length && !canDecide ? ' Keep/defer unavailable: choose at most 1000 open findings, excluding standalone proposals and previously decided items.' : ''}`;
@@ -1280,8 +1279,9 @@
             onclick: () => { pages.set(g.key, page + step); draw(); const heading = content.children[index]?.querySelector('h3'); heading?.setAttribute('tabindex', '-1'); heading?.focus(); }}, label))));
       }));
     };
-    dlg.append(h('h2', {id: 'fd-review-title', tabindex: '-1'}, filterLabel || 'Needs review'),
-      h('p', {}, `${report.filename || 'Report'} · v${report.version ?? '?'}. ${filterLabel ? 'Only this selected status is listed below. ' : ''}Tick one, a few, or all, then choose AI fix, Fix manually or Ignore.`),
+    dlg.append(h('button', {type: 'button', class: 'fd-dialog-x', 'aria-label': 'Close', title: 'Close', onclick: close}, icon('x', 18)),
+      h('h2', {id: 'fd-review-title', tabindex: '-1'}, filterLabel || 'Needs review'),
+      h('p', {}, `${filterLabel ? 'Only this selected status is listed below. ' : ''}Tick one, a few, or all. Then choose: AI fix, Fix manually (you edit the spreadsheet), or Ignore.`),
       h('p', {class: 'fd-hint'}, state.aiOn ? 'AI fix sends only the selected findings and their cells to Claude (Anthropic). Nothing changes until you preview and apply.' : 'AI fix is off.'),
       filterLabel ? null : fdSummaryPanel(report, binding, dlg, current),
       !items.length ? h('section', {}, h('h3', {}, 'No loaded review items'), h('p', {}, 'No selectable findings does not establish readiness. Client, job, business date, source verification or coverage may still need attention.'), ...(report.holds || []).map(hold => h('p', {}, hold.text || hold.code)), h('button', {type: 'button', class: 'btn', onclick: () => { if (!guard()) return; close(); state.fdView = 'sources'; drawReport(); }}, 'Open source and report context')) : null,
@@ -1293,17 +1293,28 @@
     document.body.append(dlg); draw(); dlg.showModal(); dlg.querySelector('h2').focus();
     if (Array.isArray(initialScope) && initialAction) { const keys = new Set(initialScope.map(it => it.key)); act(items.filter(it => keys.has(it.key)), initialAction); }
   }
-  function fdDirectControls(scope, run = (items, action) => fdReviewDialog(items, action)) {
+  function fdDirectControls(scope, run = (items, action) => fdReviewDialog(items, action), listed = false) {
     const ai = state.aiOn && scope.length > 0 && scope.length <= 120 && scope.every(it => it.fp && it.state === 'open');
     const ignore = scope.length > 0 && scope.length <= 1000 && scope.every(it => it.fp && ['open', 'claude'].includes(it.state)) && !(scope.length > 1 && scope.some(it => it.issue?.severity === 'high'));
     return h('div', {class: 'fd-direct-actions'},
-      h('p', {class: 'fd-hint'}, scope.length > 1 ? `Direct action scope: all ${scope.length} items in this group across all pages. Other selections are unchanged.` : 'Direct action scope: this item only. Other selections are unchanged.'),
+      scope.length > 1 && !listed ? fdProblemList(scope) : null,
       h('div', {class: 'fd-cardacts'},
         h('button', {type: 'button', class: 'btn small', disabled: !ai, onclick: () => run(scope, 'ai')}, 'AI fix'),
         h('button', {type: 'button', class: 'btn small', onclick: () => run(scope, 'manual')}, 'Fix manually'),
         h('button', {type: 'button', class: 'btn small', disabled: !ignore, onclick: () => run(scope, 'ignore')}, 'Ignore')),
-      !ai ? h('p', {class: 'fd-hint'}, !state.aiOn ? 'AI unavailable: AI is off. Fix manually or review the source.' : 'AI unavailable for this scope: choose up to 120 open findings with recorded identities; review other items manually.') : null,
-      !ignore ? h('p', {class: 'fd-hint'}, scope.some(it => it.issue?.severity === 'high') && scope.length > 1 ? 'Ignore blockers individually with evidence; group ignore is unavailable.' : 'Ignore unavailable: only current open findings with recorded identities can be kept as recorded. Review the existing decision or source.') : null);
+      !ai ? h('p', {class: 'fd-hint'}, !state.aiOn ? 'AI fix is off. Fix manually or ignore.' : 'AI fix works on up to 120 errors that still need fixing. Fix these manually, or open fewer.') : null,
+      !ignore ? h('p', {class: 'fd-hint'}, scope.some(it => it.issue?.severity === 'high') && scope.length > 1 ? 'Blockers are ignored one at a time, with a reason.' : 'Already decided. Open it to change the decision.') : null);
+  }
+  // The problems the three buttons act on, in plain words: where, and what is wrong.
+  function fdProblemList(scope, max = 4) {
+    const line = it => {
+      const where = [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ');
+      const value = it.report == null ? '' : it.report === '' ? ' (blank)' : ` (now “${String(it.report).slice(0, 40)}”)`;
+      return h('li', {}, h('b', {}, where || 'Whole report'), `${value}: ${String(it.text || it.reason || '').slice(0, 140)}`);
+    };
+    return h('div', {class: 'fd-problems'},
+      h('ul', {}, scope.slice(0, max).map(line)),
+      scope.length > max ? h('p', {class: 'fd-hint'}, `and ${scope.length - max} more (Show all below).`) : null);
   }
   function fdOccurrenceList(g) {
     const eligible = fdRecommended(g.items), picked = eligible.filter(it => it.state === 'selected');
@@ -1417,13 +1428,13 @@
           h('div', {id: 'fd-evidence'})),
         h('div', {class: 'fd-split', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': 'Resize the corrections panel', tabindex: '0',
           onpointerdown: fdDragStart, onkeydown: e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { fdAsideWidth(fdAsideWidth() + (e.key === 'ArrowLeft' ? 24 : -24)); e.preventDefault(); } }}),
-        h('aside', {class: 'sidepane fd-aside', id: 'side', 'aria-label': 'Corrections'}));
+        h('aside', {class: 'sidepane fd-aside', id: 'side', 'aria-label': 'Errors'}));
     }
     const sel = readyChanges().total;
     const foot = h('div', {class: 'fd-foot', role: 'region', 'aria-label': 'Selected changes'},
       h('span', {class: 'fd-foot-state'}, icon('lock', 16), h('b', {id: 'fd-selcount'}, sel ? plural(sel, 'change') + ' selected' : 'No changes selected'),
         h('span', {class: 'fd-foot-note'}, `Original v1 is kept unchanged${r.fixed_from ? '; this is v' + revisionOf(r) : ''}`)),
-      h('button', {type: 'button', class: 'btn fd-mobile-panel', onclick: () => document.body.classList.toggle('fd-panel-open'), 'aria-controls': 'side'}, 'Corrections', h('i', {id: 'fd-mobile-count'}, '')),
+      h('button', {type: 'button', class: 'btn fd-mobile-panel', onclick: () => document.body.classList.toggle('fd-panel-open'), 'aria-controls': 'side'}, 'Errors', h('i', {id: 'fd-mobile-count'}, '')),
       h('button', {type: 'button', class: 'btn ' + (sel ? 'primary' : ''), id: 'fd-preview-btn', disabled: !sel || state.busy, onclick: correctionAction(fdPreview)}, icon('eye', 16), ' Preview selected changes'));
     $('report').replaceChildren(h('div', {class: 'fd'}, rail, h('div', {class: 'fd-main'}, head, fdModeSelector(r), metrics, main), foot));
     state.aiProposalOperation?.lock?.();
@@ -1475,8 +1486,8 @@
     const items = state.fdItems = fdItems(), groups = fdGroups(items);
     const tier = state.fdTier && groups.some(g => g.tier === state.fdTier) ? state.fdTier : (groups.find(g => g.open)?.tier || groups[0]?.tier || 'blocker');
     state.fdTier = tier;
-    body.append(h('div', {class: 'fd-panelhead'}, h('h2', {}, 'Corrections'),
-      h('button', {type: 'button', class: 'fd-iconbtn fd-collapse', 'aria-label': 'Hide the corrections panel', title: 'Hide panel', onclick: () => { state.fdAsideHidden = true; $('fd-work')?.classList.add('aside-hidden'); }}, icon('panel', 18))));
+    body.append(h('div', {class: 'fd-panelhead'}, h('p', {class: 'fd-panel-intro'}, 'For each error: let AI fix it, fix it yourself in the spreadsheet, or ignore it.'),
+      h('button', {type: 'button', class: 'fd-iconbtn fd-collapse', 'aria-label': 'Hide the errors panel', title: 'Hide panel', onclick: () => { state.fdAsideHidden = true; $('fd-work')?.classList.add('aside-hidden'); }}, icon('panel', 18))));
     const approvalHolds = r.holds || []; // Advisory holds also exclude bulk selection and must remain inspectable.
     if (approvalHolds.length) body.append(h('details', {class: 'fd-hold-details'},
       h('summary', {}, `${fdHoldSummary(r)} · review details`),
@@ -1485,14 +1496,20 @@
     if (approvalHolds.length && st.next !== 'recheck') { const action = fdHoldAction(r, st); if (action) body.append(action); }
     else if (st.next !== 'recheck') { const nextStep = fdNextStep(r, st); if (nextStep) body.append(nextStep); }
     const cov = r.review.coverage || {}, dc = r.review.decisions || {};
-    body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(c.detected, 'active finding')}${r.review.counts?.info ? ` (+${r.review.counts.info} for information)` : ''} · Review items: ${c.kept} kept as recorded · ${c.deferred} waiting on the source · ${c.confirmed} confirmed · ${plural(c.suggestions, 'cell-change proposal')} · Cell changes: ${c.selected} selected · ${c.applied} applied in this version`));
-    const statuses = [['Open, need a decision', ['open', 'selected']], ['Waiting on the source owner', ['deferred']],
-      ['Confirmed, need a correction', ['confirmed']], ['Ignored / kept as recorded', ['kept', 'rejected']],
-      ['Earlier decisions', ['kept_earlier']], ['AI recommendations set aside', ['claude']], ['Corrected in a later version', ['corrected']]];
-    body.append(h('details', {class: 'fd-recon'}, h('summary', {}, 'Listed findings'),
+    // Every error in the report is reviewed: a saved check that listed fewer than it found is checked again once, by itself.
+    if ((cov.truncated || cov.not_listed) && !r.approval && !(r.sent || []).some(x => x.sent)) {
+      state.fdAutoRecheck ||= {};
+      if (!state.fdAutoRecheck[r.file_hash]) { state.fdAutoRecheck[r.file_hash] = true; globalThis.setTimeout?.(() => { if (state.report === r && !state.rechecking) fdRecheck(); }, 0); }
+      body.append(h('p', {class: 'fd-hint', role: 'status'}, state.rechecking ? 'Checking the whole report again so every error is listed…' : 'Some errors were not listed by the last check. Recheck this report to list them all.'));
+    }
+    body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length, 'error')} to fix · ${c.applied} fixed in this version · ${c.kept} ignored`));
+    const statuses = [['To fix', ['open', 'selected']], ['Waiting on the SharePoint owner', ['deferred']],
+      ['Confirmed, to fix', ['confirmed']], ['Ignored', ['kept', 'rejected']],
+      ['Ignored earlier', ['kept_earlier']], ['AI says fine', ['claude']], ['Fixed in a later version', ['corrected']]];
+    body.append(h('details', {class: 'fd-recon'}, h('summary', {}, 'Possible errors'),
       h('div', {class: 'fd-cardacts'}, statuses.map(([label, states]) => {
         const scope = items.filter(it => states.includes(it.state));
-        return h('button', {type: 'button', class: 'btn', disabled: !scope.length, onclick: () => fdReviewDialog(scope, null, label)}, `${label} · ${scope.length}`);
+        return scope.length ? h('button', {type: 'button', class: 'btn', onclick: () => fdReviewDialog(scope, null, label)}, `${label} · ${scope.length}`) : null;
       }))));
     if (dc.stale) body.append(h('p', {class: 'fd-coverage', role: 'note'}, icon('warn', 14), ` ${plural(dc.stale, 'earlier decision')} no longer match${dc.stale === 1 ? 'es' : ''} what the finding says now, so ${dc.stale === 1 ? 'it is' : 'they are'} not applied. Decide again.`));
     if (state.decisionPending) body.append(h('p', {class: 'fd-saving', role: 'status'}, h('span', {class: 'spin'}), ' Saving your decision…'));
@@ -1507,15 +1524,16 @@
     const historyRecommendations = historyGroups.filter(g => g.status === 'recommendation').reduce((n, g) => n + g.entries.length, 0);
     const appendHistory = () => { if (auto) body.append(h('details', {class: 'fd-history-overview'}, h('summary', {}, `History · ${plural(historyApplied, 'applied change')} · ${plural(historyRecommendations, 'AI recommendation')}`), auto)); };
     if (!items.length) { body.append(fdClean(r, st)); appendHistory(); return; }
-    const tierGroups = groups;
     const cur = items.find(x => x.key === state.fdCur) || null;
+    const tierGroups = groups.filter(g => g.unresolved || (cur && cur.group === g.key));
+    if (!tierGroups.length) body.append(h('p', {class: 'fd-hint'}, 'No errors left to fix. Decided ones are under Possible errors above.'));
     if (cur) body.append(h('p', {id: 'fd-correction-context', class: 'fd-grid-context', role: 'status'}, `Current correction: ${cur.sheet || 'Report'} · ${cur.cell || (cur.row ? 'row ' + cur.row : 'report-level')}. Filtering the sheet does not change this correction.`), fdCard(cur, groups));
     body.append(h('div', {class: 'fd-groups'}, tierGroups.map(g => {
       const selectable = g.items.filter(x => x.selectable && x.state === 'open' && (x.evidence === 'source' || x.evidence === 'mechanical'));
       return h('section', {class: 'fd-group' + (cur && cur.group === g.key ? ' cur' : '')},
         h('button', {type: 'button', class: 'fd-grouphead', 'aria-expanded': String(!!cur && cur.group === g.key), onclick: () => fdReviewDialog(g.items, null, g.title)},
           h('span', {class: 'fd-gtitle'}, g.unresolved ? '' : icon('ok', 14), g.unresolved ? '' : ' ', g.title),
-          h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'item')} · ${plural(g.records, 'record')}${g.unresolved ? ` · ${g.unresolved} unresolved` : ''}`)),
+          h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'error')}${g.unresolved && g.unresolved < g.items.length ? ` · ${g.unresolved} to fix` : ''}${g.status && g.status !== 'Needs review' ? ` · ${g.status}` : ''}`)),
         fdDirectControls(g.items), fdOccurrenceList(g),
         r.review.page?.complete !== false && g.tier !== 'format' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null,
           onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'open'}; drawSide(); }}, `Keep ${g.open} as recorded…`) : null,
@@ -2024,6 +2042,7 @@
     let saving = false;
     const errorMessage = h('p', {id: 'fd-preview-error', role: 'alert', tabindex: '-1'});
     const d = h('dialog', {id: 'fd-preview-dialog', class: 'fd-modal', 'aria-labelledby': 'fd-prev-title'},
+      h('button', {type: 'button', class: 'fd-dialog-x', 'aria-label': 'Close', title: 'Close', onclick: () => { if (!saving && !state.busy) d.close(); }}, icon('x', 18)),
       h('p', {class: 'fd-eyebrow'}, 'Check before applying'),
       h('h2', {id: 'fd-prev-title'}, plural(rows.length, 'change')),
       h('p', {}, `These cells change in a new version (v${next}). v${revisionOf(r)} stays exactly as it is, and the checks run again on v${next}. Source comparison runs when available.`),
@@ -2291,7 +2310,7 @@
     const done = reviewedSet(), open = walkIssues().filter(i => !done.has(i.key)).length, tab = state.sideTab;
     const btn = (id, label, badge) => h('button', {type: 'button', role: 'tab', class: tab === id ? 'on' : '', 'aria-selected': String(tab === id),
       onclick: () => { if (id === 'claude') state.chatUnread = false; showSide(id); }}, label, badge ? h('i', {}, badge) : null);
-    bar.replaceChildren(btn('fixes', 'Corrections', null), btn('claude', 'Ask Dex', state.chatUnread ? 'new' : null));
+    bar.replaceChildren(btn('fixes', 'Errors', null), btn('claude', 'Ask Dex', state.chatUnread ? 'new' : null));
     const mc = $('fd-mobile-count'); if (mc) mc.textContent = '';
     void open;
   }
@@ -2305,7 +2324,7 @@
     if (tab === 'fixes') {
       fdCorrections(body);
       body.append(fdComparison(r));
-      body.append(h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all listed findings'));
+      body.append(h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors'));
       body.append(h('button', {type: 'button', class: 'btn', disabled: state.busy || state.rechecking || state.decisionPending || !!state.aiProposalOperation, onclick: fdRecheck}, 'Recheck this report'));
       body.append(h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'sources'; drawReport(); }}, 'Source evidence and coverage'));
       const sc = shiftCard(rv); if (sc) body.append(h('div', {id: 'shiftfix'}, sc));

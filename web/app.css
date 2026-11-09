@@ -1725,3 +1725,10 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 
 /* Explicit in-cell draft controls remain reachable on narrow screens. */
 .fd-grid-draft{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:10px;border:1px solid #b7791f;background:#fff8e6}.grid td.grid-editing{padding:2px}.grid-editing input{box-sizing:border-box;width:100%;min-width:90px;font-size:16px;padding:8px}.fd-grid-draft button,#grid-edit-cell{min-height:44px}.grid td:focus{outline:2px solid #2563eb;outline-offset:-2px}
+/* plain close button at the top of review dialogs */
+.fd-dialog-x{position:sticky;top:0;float:right;z-index:5;margin:-6px -6px 6px 12px;width:36px;height:36px;display:grid;place-items:center;border:1px solid #8c98a5;border-radius:50%;background:var(--paper,#fff);color:inherit;cursor:pointer}
+.fd-dialog-x:hover{background:#eef2f1}.fd-dialog-x:focus-visible{outline:3px solid #1f6feb;outline-offset:2px}
+/* the errors a group's buttons act on, right above the buttons */
+.fd-problems{margin:6px 0 8px}.fd-problems-head{margin:0 0 4px;font-weight:600}
+.fd-problems ul{margin:0;padding-left:18px}.fd-problems li{margin:2px 0;overflow-wrap:anywhere}
+.fd-panel-intro{margin:0;font-size:14px;line-height:1.4}

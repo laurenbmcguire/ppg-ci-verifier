@@ -22,7 +22,7 @@ function harness(){
  const body=new Element('body');
  const context=vm.createContext({document:{body,createElement:tag=>new Element(tag)},
    $:id=>body.walk().find(x=>x.id===id&&!x.removed),state:{busy:false},
-   plural:(n,s)=>`${n} ${s}`,revisionOf:r=>r.revision||1,showWs:String,applyFixes(){throw Error('No apply expected')},toast(){}});
+   plural:(n,s)=>`${n} ${s}`,revisionOf:r=>r.revision||1,showWs:String,icon:()=>new Element('svg'),applyFixes(){throw Error('No apply expected')},toast(){}});
  vm.runInContext(between('  const h = (','  const store =')+between('  function fdPreview(c) {','  async function fdApprove('),context);
  return {context,body,dialogs:()=>body.walk().filter(x=>x.tag==='dialog'&&x.open&&!x.removed)};
 }

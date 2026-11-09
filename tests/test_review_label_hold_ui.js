@@ -24,7 +24,7 @@ test('coverage dominates status ledger even when stored categories add up',()=>{
  for(const coverage of [{truncated:true,findings_total:80,findings_listed:50,not_listed:30},{truncated:false,findings_total:50,findings_listed:50,not_listed:0}]){
   state.report.review.coverage=coverage;state.report.review.reconcile={total:70,adds_up:true};
   const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);
-  const ledger=text(nodes(body).find(n=>n.class==='fd-recon'));assert.match(ledger,/Listed findings/);assert.doesNotMatch(ledger,/All .*accounted for|✓/);
+  const ledger=text(nodes(body).find(n=>n.class==='fd-recon'));assert.match(ledger,/Possible errors/);assert.doesNotMatch(ledger,/All .*accounted for|✓/);
   assert.equal(text(body).includes('Some potential errors are unavailable'),false);   // Nov 9: no coverage warning box; approval stays blocked by the server's hold
   const mode=ctx.fdModeSelector(state.report);assert.equal(text(mode),'Review potential errors');
  }
