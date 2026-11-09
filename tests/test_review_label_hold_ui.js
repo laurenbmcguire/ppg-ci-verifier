@@ -31,3 +31,12 @@ test('coverage dominates status ledger even when stored categories add up',()=>{
  state.report.review.page={complete:false};state.report.review.coverage={};
  assert.match(text(ctx.fdModeSelector(state.report)),/Finding coverage incomplete/);
 });
+
+test('recheck waits for pending decisions and never reloads a different report after navigation',async()=>{
+ let resolve,calls=0,reloads=0;const state={report:{file_hash:'one'},selected:'one',decisionPending:true};
+ const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},api:()=>{calls++;return new Promise(r=>resolve=r)},openReport:()=>{reloads++},loadList:()=>{}});
+ vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile('),ctx);
+ await ctx.fdRecheck();assert.equal(calls,0);state.decisionPending=false;
+ const running=ctx.fdRecheck();await ctx.fdRecheck();assert.equal(calls,1);state.report={file_hash:'two'};state.selected='two';resolve({});await running;
+ assert.equal(reloads,0);assert.equal(state.rechecking,false);
+});

@@ -860,7 +860,7 @@
       incomplete || (r.holds || []).length ? h('section', {class: 'fd-priority', 'aria-label': 'Coverage and recovery'},
         h('b', {}, incomplete ? 'Finding coverage incomplete' : fdHoldSummary(r)),
         h('p', {}, cov.truncated || cov.not_listed ? `${cov.findings_listed ?? 'Unknown'} stored workbook findings of ${cov.findings_total ?? 'unknown'} detected; ${cov.not_listed ?? 'unknown'} not stored and unavailable for review. Approval remains blocked.` : r.review.page?.complete === false ? 'Only part of the stored findings is loaded. Reopen the report before selecting across pages.' : 'Review current holds and recovery options before selecting corrections.'),
-        cov.truncated || cov.not_listed ? h('button', {type: 'button', class: 'btn', disabled: busy, onclick: () => fdRecheck()}, 'Re-check coverage') : null,
+        cov.truncated || cov.not_listed ? h('button', {type: 'button', class: 'btn', disabled: busy || state.decisionPending || state.rechecking, onclick: () => { if (state.report?.file_hash !== binding.file_hash || state.report?.check_hash !== binding.expected_check_hash) { toast('The report changed. Review its current coverage first.', true); return; } fdRecheck(); }}, 'Re-check coverage') : null,
         h('button', {type: 'button', class: 'btn', onclick: () => { state.fdView = 'sources'; drawReport(); const details = document.querySelector('.fd-comparison'); if (details) details.open = true; document.querySelector('.fd-source-recovery')?.scrollIntoView({block: 'center'}); }}, 'Review coverage and recovery')) : null,
       r.fixed_from ? h('p', {class: 'fd-saved-summary', role: 'status'}, `Corrected version v${revisionOf(r)}: ${plural((r.fixed_from.changes || []).length, 'recorded cell change')}. Original preserved. ${plural(found, 'active finding')} remain; ${fdHoldSummary(r)}. ${r.sent?.some(x => x.sent) ? 'Delivery is recorded in History.' : 'Not sent.'}`) : null,
       h('h2', {}, incomplete ? `Review loaded ${plural(found, 'active finding')}` : `Review found ${plural(found, 'active finding')}`),
@@ -1596,12 +1596,17 @@
     } catch (e) { toast(e.message, true); if (btn) { btn.disabled = false; btn.textContent = 'Approve internally'; } }
   }
   async function fdRecheck() {
+    if (state.decisionPending || state.busy || state.rechecking) { toast('Wait for the current save or operation to finish before re-checking.', true); return; }
+    const report = state.report, hash = report?.file_hash; if (!hash) return;
+    state.rechecking = true;
     const name = myName() || 'Reviewer';
     toast('Re-checking with the current checks…');
-    try { const out = await api('/api/spreadsheets/recheck', {file_hash: state.report.file_hash, apply: true, by: name});
+    try { const out = await api('/api/spreadsheets/recheck', {file_hash: hash, apply: true, by: name});
+      if (state.report !== report || state.selected !== hash) return;
       toast(out.reconciled ? 'Checked again, and SharePoint compared again.' : 'Checked again. Compare with SharePoint to verify it.');
-      await openReport(state.report.file_hash, true); loadList();
-    } catch (e) { toast(e.message, true); }
+      await openReport(hash, true); loadList();
+    } catch (e) { if (state.report === report) toast(e.message, true); }
+    finally { state.rechecking = false; }
   }
   async function fdReconcile() {
     toast('Comparing every record with its SharePoint item…');
