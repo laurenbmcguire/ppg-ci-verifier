@@ -22,7 +22,10 @@ try{
  const group=chooser().locator('[data-direct-finding='+JSON.stringify(c.manual_id)+']').locator('xpath=ancestor::section[contains(@class,"fd-review-group")]');
  await group.locator(':scope > .fd-direct-actions').getByRole('button',{name:'Fix manually',exact:true}).click();
  const editor=chooser().getByRole('region',{name:'Fix manually in this review'});
- const input=editor.getByRole('textbox',{name:`New value for ${c.sheet}!${c.cell}`,exact:true});await input.waitFor();await input.fill(c.after);await editor.getByLabel(`Include manual change ${c.sheet}!${c.cell}`,{exact:true}).check();
+ const input=editor.getByRole('textbox',{name:`New value for ${c.sheet}!${c.cell}`,exact:true});await input.waitFor();await input.fill(c.after);assert.equal(await editor.getByRole('button',{name:'Preview 1 manual changes',exact:true}).isEnabled(),true);
+ await input.fill(c.before);assert.equal(await editor.getByRole('button',{name:'Preview 0 manual changes',exact:true}).isDisabled(),true);
+ await input.fill('');assert.match(await editor.innerText(),/will clear the cell to blank, not zero/);
+ await editor.getByLabel(`Include manual change ${c.sheet}!${c.cell}`,{exact:true}).uncheck();await input.fill(c.after);assert.equal(await editor.getByRole('button',{name:'Preview 0 manual changes',exact:true}).isDisabled(),true);assert.match(await editor.innerText(),/Changed but excluded/);await editor.getByLabel(`Include manual change ${c.sheet}!${c.cell}`,{exact:true}).check();
  assert.equal(await chooser().locator('input[data-review-key='+JSON.stringify(c.manual_id)+']').isChecked(),true);
  page.once('dialog',d=>d.dismiss());await chooser().locator('input[data-review-key='+JSON.stringify(c.manual_id)+']').click();assert.equal(await input.inputValue(),c.after);assert.equal(await chooser().locator('input[data-review-key='+JSON.stringify(c.manual_id)+']').isChecked(),true);
  page.once('dialog',d=>d.dismiss());await chooser().locator('[data-direct-finding='+JSON.stringify(c.manual_id)+']').getByRole('button',{name:'Ignore',exact:true}).click();assert.equal(await input.inputValue(),c.after);

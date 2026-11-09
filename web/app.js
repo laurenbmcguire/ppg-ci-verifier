@@ -972,6 +972,51 @@
     } catch (error) { if (current()) view.failure(error); }
     finally { operation.cancel(); }
   }
+  // AI provides a read-only explanation; the recorded inventory and action scopes stay authoritative.
+  function fdSummaryPanel(report, binding, owner, current) {
+    const issues = [...allIssues(report.review), ...(report.review.dismissed || []).filter(i => !i.restored)];
+    const incomplete = report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed;
+    const counts = ['high', 'medium', 'low', 'info'].map(severity => `${issues.filter(i => i.severity === severity).length} ${severity === 'high' ? 'blockers' : severity === 'info' ? 'informational' : severity}`).join(' · ');
+    const output = h('div', {class: 'fd-summary-answer', 'aria-live': 'polite'});
+    const button = h('button', {type: 'button', class: 'btn', disabled: !state.aiOn, onclick: async () => {
+      if (!current() || !state.aiOn || state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending) return;
+      if ([...document.querySelectorAll('#side input:not([type=checkbox]):not([type=radio]), #side textarea, .fd-review-dialog input:not([type=checkbox]), .fd-review-dialog textarea')].some(node => node.value !== node.defaultValue)) {
+        toast('Finish or save your typed draft before asking for a summary. Your text is unchanged.', true); return;
+      }
+      const controls = new Map();
+      const operation = {owner, cancel: () => {
+        if (state.aiProposalOperation !== operation) return;
+        state.aiProposalOperation = null;
+        if (!state.busy && !state.rechecking && !state.decisionPending) controls.forEach((disabled, node) => { if (node.isConnected) node.disabled = disabled; });
+      }, lock: () => {
+        if (!current()) { operation.cancel(); return; }
+        document.querySelectorAll('#side button, #side input, #side textarea, #side select, #fd-preview-btn, .fd-mode-selector button, .fd-review-dialog button, .fd-review-dialog input, .fd-review-dialog textarea, dialog .primary').forEach(node => {
+          if (node.dataset?.aiCancel === 'true') return;
+          if (!controls.has(node)) controls.set(node, node.disabled);
+          node.disabled = true;
+        });
+      }};
+      state.aiProposalOperation = operation; operation.lock();
+      output.replaceChildren(h('p', {role: 'status'}, 'Summarizing the available findings for this exact report version. No changes are being made.'));
+      const active = () => state.aiProposalOperation === operation && current() && owner.isConnected;
+      try {
+        const answer = await api('/api/spreadsheets/review-summary', {scope: 'available_findings', file_hash: binding.file_hash,
+          expected_check_hash: binding.expected_check_hash, expected_rev: binding.expected_rev, run: binding.expected_run});
+        if (!active()) return;
+        if (!answer || answer.read_only !== true || answer.file_hash !== binding.file_hash || answer.check_hash !== binding.expected_check_hash ||
+            answer.expected_rev !== binding.expected_rev || JSON.stringify(answer.run) !== JSON.stringify(binding.expected_run) || typeof answer.reply !== 'string' || typeof answer.notice !== 'string' || typeof answer.coverage?.label !== 'string' || typeof answer.narrative_notice !== 'string') throw new Error('The summary did not match the current report review. Reload before trying again.');
+        output.replaceChildren(h('h4', {}, answer.narrative_status === 'done' ? 'AI explanation of available findings' : 'AI explanation unavailable'),
+          h('p', {class: 'fd-coverage'}, answer.coverage.label), h('p', {}, answer.narrative_notice), h('p', {class: 'fd-summary-text'}, answer.reply), h('p', {class: 'fd-hint'}, answer.notice),
+          h('p', {class: 'fd-hint'}, 'AI text is not verification or approval. Use the recorded groups below to request AI proposals, fix manually, or ignore with a reason. Only previewed changes can be applied.'));
+      } catch (error) { if (active()) output.replaceChildren(h('p', {role: 'alert'}, `Summary unavailable: ${error.message}. The recorded findings and actions below are unchanged.`)); }
+      finally { operation.cancel(); }
+    }}, state.aiOn ? 'Ask AI to summarize available findings' : 'AI summary unavailable: AI is off');
+    return h('section', {class: 'fd-review-summary', 'aria-label': 'Findings summary'}, h('h3', {}, 'Findings summary'),
+      h('p', {}, `${issues.length} loaded finding records, including set-aside history and information: ${counts}.`),
+      incomplete ? h('p', {class: 'fd-coverage'}, 'Coverage incomplete. This is not a summary of every possible error; unavailable or unlisted findings remain outside this review.') : h('p', {}, 'All currently loaded finding records are counted. A finding-free report is not proof of source completeness or readiness.'),
+      ...(report.holds || []).map(hold => h('p', {class: 'fd-coverage'}, hold.text || hold.code)),
+      h('p', {class: 'fd-hint'}, 'On request, Claude receives bounded finding-group metadata for this report only, not workbook contents or unrelated reports. AI summarizes; it cannot apply changes or ignore findings.'), button, output);
+  }
   // A review scope is separate from the correction basket. Opening/selecting never writes data.
   function fdReviewDialog(initialScope = null, initialAction = null) {
     if (!state.report || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation) return;
@@ -1072,16 +1117,21 @@
       box.append(h('h3', {}, `Fix manually: ${scope.length} review items`), h('p', {}, 'Loading exact recorded cells. Nothing is selected for Apply yet.'), h('button', {type: 'button', class: 'btn', onclick: close}, 'Close review'));
       const rows = new Map(), cells = new Map(), unavailable = [];
       for (const it of scope) {
-        if (!it.cell || !it.sheet || fdConflict(it) || !['open', 'selected', 'confirmed'].includes(it.state)) {
+        if (!it.sheet || !it.row || fdConflict(it) || !['open', 'selected', 'confirmed'].includes(it.state)) {
           unavailable.push(`${it.sheet || 'Report'} ${it.cell || 'row ' + (it.row || 'unknown')}: ${fdConflict(it) ? 'Source conflict: await the source owner, then use coordinated correction.' : 'No editable current cell. Review source evidence or reopen the finding.'}`); continue;
         }
         try {
           const key = JSON.stringify([it.sheet, it.row]);
           if (!rows.has(key)) rows.set(key, await api('/api/spreadsheets/cells', {file_hash: binding.file_hash, sheet: it.sheet, row: it.row}));
           if (!current() || !dlg.isConnected || version !== actionVersion) return;
-          const row = rows.get(key), cell = row.sheet === it.sheet && row.cells?.find(c => c.cell === it.cell);
-          if (!cell || cell.formula || typeof cell.before !== 'string') throw new Error('Cell is unavailable or is a protected formula');
-          cells.set(editId(it.sheet, it.cell), {it, cell});
+          const row = rows.get(key);
+          const candidates = row.sheet === it.sheet && Array.isArray(row.cells) ? row.cells.filter(c => it.cell ? c.cell === it.cell : true) : [];
+          const editable = candidates.filter(c => !c.formula && typeof c.before === 'string' && splitCell(c.cell)?.[1] === it.row &&
+            !items.some(other => other.sheet === it.sheet && (other.cell === c.cell || !other.cell && other.row === it.row) &&
+              (fdConflict(other) || !['open', 'selected', 'confirmed'].includes(other.state))));
+          if (editable.length < candidates.length) unavailable.push(`${it.sheet} row ${it.row}: ${candidates.length - editable.length} protected, formula, or previously decided cells are not editable here.`);
+          if (!editable.length) throw new Error('Cell is unavailable or is a protected formula');
+          for (const cell of editable) cells.set(editId(it.sheet, cell.cell), {it: {...it, cell: cell.cell}, cell, rowContext: !it.cell});
         } catch (error) { unavailable.push(`${it.sheet} ${it.cell}: ${error.message}. Review the original and source evidence; do not guess a value.`); }
       }
       if (!current() || !dlg.isConnected || version !== actionVersion) return;
@@ -1093,20 +1143,29 @@
         if (!Object.keys(included).length) return;
         // Keep this modal and its typed draft behind the preview, including on Back.
         fdPreview({...captureCorrections([], {}, included, binding, report), independentScope: true, onApplied: () => dlg.close(), onRemove: row => {
-          for (const e of edits.values()) if (e.it.sheet === row.sheet && e.it.cell === row.cell) e.include.checked = false;
+          for (const e of edits.values()) if (e.it.sheet === row.sheet && e.it.cell === row.cell) { e.include.checked = false; e.include.dispatchEvent(new Event('change')); }
           update();
         }});
       }}, 'Preview manual changes');
-      const update = () => { const n = [...edits.values()].filter(e => e.include.checked && e.input.value !== e.cell.before).length; preview.disabled = !n; preview.textContent = `Preview ${n} manual changes`; };
+      const update = () => {
+        const n = [...edits.values()].filter(e => e.include.checked && e.input.value !== e.cell.before).length;
+        preview.disabled = !n; preview.textContent = `Preview ${n} manual changes`;
+        for (const e of edits.values()) e.status.textContent = e.input.value === e.cell.before ? 'Unchanged: not included in preview.' : !e.include.checked ? 'Changed but excluded from preview. Check Include to use this value.' : e.input.value === '' ? 'Included: this will clear the cell to blank, not zero.' : 'Included in preview. Nothing is applied yet.';
+      };
       box.replaceChildren(h('h3', {}, `Fix manually: ${scope.length} review items`),
-        h('p', {}, `${cells.size} distinct editable cells · ${unavailable.length} unavailable items. Shared-cell findings use one edit. Include only the cells you want; all source holds remain.`),
+        h('p', {}, `${cells.size} distinct editable cells · ${unavailable.length} unavailable items. Shared-cell findings use one edit. Typing a changed value includes it in preview; uncheck Include to leave it out. Empty means clear to blank, not zero. All source holds remain.`),
         h('div', {class: 'fd-manual-preview'}, preview, h('button', {type: 'button', class: 'btn', onclick: close}, 'Close review')),
         ...[...cells].map(([id, e]) => {
-          const input = h('input', {value: e.cell.before, 'aria-label': `New value for ${e.it.sheet}!${e.it.cell}`, oninput: update});
-          const include = h('input', {type: 'checkbox', 'aria-label': `Include manual change ${e.it.sheet}!${e.it.cell}`, onchange: update});
-          edits.set(id, {...e, input, include});
+          let explicitExclude = false;
+          const input = h('input', {value: e.cell.before, 'aria-label': `New value for ${e.it.sheet}!${e.it.cell}`, oninput: () => {
+            if (!explicitExclude) include.checked = input.value !== e.cell.before;
+            update();
+          }});
+          const include = h('input', {type: 'checkbox', 'aria-label': `Include manual change ${e.it.sheet}!${e.it.cell}`, onchange: () => { explicitExclude = !include.checked; update(); }});
+          const status = h('p', {class: 'fd-hint', role: 'status'}, 'Unchanged: not included in preview.');
+          edits.set(id, {...e, input, include, status});
           return h('div', {class: 'fd-inline-cell'}, h('b', {}, `${e.it.sheet} ${e.it.cell}`), h('p', {}, e.it.text || e.it.reason),
-            h('p', {}, `Recorded: ${showWs(e.cell.before)}`), h('label', {}, 'Your value', input), h('label', {}, include, ' Include this cell in preview'));
+            h('p', {}, `${e.cell.header || 'Column ' + e.it.cell.replace(/[0-9]+$/, '')} · Recorded: ${showWs(e.cell.before)}`), e.rowContext ? h('p', {class: 'fd-hint'}, 'This finding names a row, not a specific cell. Choose the correct field using source evidence; do not guess missing values.') : null, h('label', {}, 'Your value', input), h('label', {}, include, ' Include this cell in preview'), status);
         }), ...unavailable.map(text => h('p', {class: 'fd-coverage'}, text)),
         unavailable.length ? h('button', {type: 'button', class: 'btn', onclick: () => { if (!discard()) return; dlg.close(); state.fdView = 'sources'; drawReport(); }}, 'Review source evidence and recovery') : null);
       box.querySelector('h3').setAttribute('tabindex', '-1'); box.querySelector('h3').focus();
@@ -1159,6 +1218,7 @@
       h('p', {}, `${report.filename || 'Report'} · File v${report.version ?? 'unknown'} · Revision ${report.revision ?? 'unknown'} · ID ${report.file_hash.slice(0, 12)}. All loaded non-informational findings, set-aside records and suggested changes are listed below.`),
       report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed ? h('p', {class: 'fd-coverage'}, 'Coverage incomplete: this list includes only loaded items. Unavailable findings cannot be selected; approval remains blocked.') : null,
       h('p', {}, `${fdHoldSummary(report)}. ${state.aiOn ? 'On request, selected findings and relevant cell context are sent to configured Claude (Anthropic), up to 120 findings. No full workbook or unrelated reports are sent.' : 'AI proposals are unavailable while AI is off.'} All proposals require preview and explicit Apply; opening this review does not run AI.`),
+      fdSummaryPanel(report, binding, dlg, current),
       !items.length ? h('section', {}, h('h3', {}, 'No loaded review items'), h('p', {}, 'No selectable findings does not establish readiness. Client, job, business date, source verification or coverage may still need attention.'), ...(report.holds || []).map(hold => h('p', {}, hold.text || hold.code)), h('button', {type: 'button', class: 'btn', onclick: () => { if (!guard()) return; close(); state.fdView = 'sources'; drawReport(); }}, 'Open source and report context')) : null,
       h('div', {class: 'fd-review-toolbar'}, status, h('div', {class: 'fd-cardacts'},
         h('button', {type: 'button', class: 'btn', onclick: () => choose(unresolved, true)}, `Select all ${unresolved.length} unresolved loaded items`),
@@ -2681,8 +2741,9 @@
     if (!f || !i || i.sheet !== f.sheet) return false;
     const cell = String(f.cell || '').toUpperCase();
     if (i.cell && String(i.cell).toUpperCase() === cell) return true;
-    const row = cell.replace(/^[A-Z]+/, ''), val = String(f.before ?? '').trim();
-    return !!val && String(i.row) === row && String(i.text || '').includes(val);
+    // A value mentioned in a row-level explanation is not a cell identity.
+    // Keep row-only findings separate from proposals until a reviewer chooses a field.
+    return false;
   }
   function needsCheck() {
     if (!state.report) return {fixes: [], issues: [], total: 0};
