@@ -50,6 +50,7 @@
   // ---------------------------------------------------------------- connections
   api('/api/health').then(hh => { state.health = hh;
     state.aiOn = !!hh.ai_review_configured;
+    if (!state.aiOn) state.fdSummaryCache = null;
     if (state.report) drawChat();
     const box = $('connections'); box.replaceChildren(
       h('span', {class: 'conn' + (hh.storage === 'vercel-postgres' ? ' on' : '')}, h('i'), 'Saved in the cloud'),
@@ -448,7 +449,7 @@
     try {
       const data = await fillPages(await api('/api/spreadsheet?id=' + hash));
       if (state.selected !== hash) return;
-      if (state.report?.file_hash !== hash) { state.fdView = 'review'; state.fdCur = null; state.fdTier = null; state.gridSearch = ''; state.sheetScroll = {}; state.gridOnlyMarked = false; state.gridRow = null; document.body.classList.remove('fd-panel-open'); }
+      if (state.report?.file_hash !== hash) { state.fdSummaryCache = null; state.fdView = 'review'; state.fdCur = null; state.fdTier = null; state.gridSearch = ''; state.sheetScroll = {}; state.gridOnlyMarked = false; state.gridRow = null; document.body.classList.remove('fd-panel-open'); }
       state.report = data; state.fixes = null; state.showAll = false;
       const top = report.scrollTop;
       drawReport();
@@ -916,27 +917,30 @@
       + (linked > 1 ? `. ${linked} findings share this cell change; their selections stay together.` : '');
   }
   function fdModeSelector(r) {
-    const binding = reviewBinding(r), mode = fdMode(), busy = state.aiFixing || state.busy || state.rechecking;
-    const found = allIssues(r.review).filter(i => i.severity !== 'info').length;
-    const recommended = state.fixes ? fdRecommended() : [];
-    const cov = r.review.coverage || {}, incomplete = cov.truncated || cov.not_listed || r.review.page?.complete === false;
     return h('section', {class: 'fd-mode-selector', 'aria-label': 'Choose how to review'},
-      incomplete || (r.holds || []).length ? h('section', {class: 'fd-priority', 'aria-label': 'Coverage and recovery'},
-        h('b', {}, incomplete ? 'Finding coverage incomplete' : fdHoldSummary(r)),
-        h('p', {}, cov.truncated || cov.not_listed ? `${cov.findings_listed ?? 'Unknown'} stored workbook findings of ${cov.findings_total ?? 'unknown'} detected; ${cov.not_listed ?? 'unknown'} not stored and unavailable for review. Approval remains blocked.` : r.review.page?.complete === false ? 'Only part of the stored findings is loaded. Reopen the report before selecting across pages.' : 'Review current holds and recovery options before selecting corrections.'),
-        cov.truncated || cov.not_listed ? h('button', {type: 'button', class: 'btn', disabled: busy || state.decisionPending || state.rechecking, onclick: () => { if (state.report?.file_hash !== binding.file_hash || state.report?.check_hash !== binding.expected_check_hash) { toast('The report changed. Review its current coverage first.', true); return; } fdRecheck(); }}, 'Re-check coverage') : null,
-        h('button', {type: 'button', class: 'btn', onclick: () => { state.fdView = 'sources'; drawReport(); const details = document.querySelector('.fd-comparison'); if (details) details.open = true; document.querySelector('.fd-source-recovery')?.scrollIntoView({block: 'center'}); }}, 'Review coverage and recovery')) : null,
-      r.fixed_from ? h('p', {class: 'fd-saved-summary', role: 'status'}, `Corrected version v${revisionOf(r)}: ${plural((r.fixed_from.changes || []).length, 'recorded cell change')}. Original preserved. ${plural(found, 'active finding')} remain; ${fdHoldSummary(r)}. ${r.sent?.some(x => x.sent) ? 'Delivery is recorded in History.' : 'Not sent.'}`) : null,
-      h('h2', {}, incomplete ? `Review loaded ${plural(found, 'active finding')}` : `Review found ${plural(found, 'active finding')}`),
-      h('p', {class: 'fd-hint'}, 'Active non-informational findings. Deferred and confirmed findings remain active; set-aside history and cell changes are counted separately.'),
-      h('p', {}, !state.fixes ? 'Loading supported recommendations…' : state.fixesError ? 'Recommendations could not be loaded. Reopen the report to retry.' : `${plural(recommended.length, 'supported cell change')} available for a combined preview. Findings and cell changes are counted separately.`),
+      h('h2', {}, 'Review potential errors'));
+  }
+  function fdReportSummary(r) {
+    const binding = reviewBinding(r), owner = h('details', {class: 'fd-report-summary'});
+    const current = () => state.report === r && JSON.stringify(reviewBinding(r)) === JSON.stringify(binding);
+    const eligible = fdRecommended(), open = fdItems().filter(it => ['open', 'selected'].includes(it.state));
+    const ignorable = open.filter(it => it.fp && it.state === 'open');
+    const busy = state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation;
+    let requested = state.fdSummaryCache?.key === JSON.stringify(binding);
+    owner.append(h('summary', {onclick: () => {
+      if (!owner.open && !requested && state.aiOn && !state.aiProposalOperation && !state.busy && !state.rechecking && !state.decisionPending) {
+        requested = true;
+        queueMicrotask(() => { if (current() && owner.isConnected) owner.querySelector('.fd-summary-request')?.click(); });
+      }
+    }}, 'AI Summary of Errors'),
+      fdSummaryPanel(r, binding, owner, current),
+      h('p', {class: 'fd-hint'}, `${eligible.length} eligible proposed cell changes available. Accept All opens a before/after preview; remove any change there and confirm Apply to create a new version.`),
+      !eligible.length ? h('p', {}, 'No eligible proposed changes are available. Review individual findings and the reasons preventing changes below.') : null,
       h('div', {class: 'fd-cardacts'},
-        h('button', {type: 'button', class: 'btn primary', disabled: busy || !recommended.length, onclick: () => fdPreviewRecommended(binding)}, `Preview all ${recommended.length} recommended fixes`),
-        h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: busy || !state.fixes, onclick: fdReviewDialog}, 'Needs review: choose items'),
-        h('button', {type: 'button', class: 'btn', disabled: busy, 'aria-pressed': String(mode === 'manual'), onclick: () => fdChooseMode('manual', binding)}, 'Review manually'),
-        h('button', {type: 'button', class: 'btn', disabled: busy, 'aria-pressed': String(mode === 'unchanged'), onclick: () => fdChooseMode('unchanged', binding)}, 'Leave file unchanged for now')),
-      h('p', {class: 'fd-hint'}, 'Preview shows exact cells, before and after values, and reasons. Apply only after confirming. Originals and unresolved holds remain.'),
-      !recommended.length && state.fixes ? h('p', {class: 'fd-hint'}, r.review.page?.complete === false ? 'Findings are only partly loaded. Reopen the report before selecting across pages.' : (r.holds || []).length ? 'Current holds prevent combined recommendations. Open hold details under Corrections; individual review remains available.' : 'No supported bulk fixes right now. Inspect the findings manually; uncertain values are not filled in.') : null);
+        h('button', {type: 'button', class: 'btn', disabled: busy || !eligible.length, onclick: () => { if (current()) fdPreviewRecommended(binding); }}, `Accept All · ${eligible.length} proposed changes`),
+        h('button', {type: 'button', class: 'btn', disabled: busy, onclick: () => { if (current()) fdReviewDialog(open, 'manual'); }}, 'Manually Edit'),
+        h('button', {type: 'button', class: 'btn', disabled: busy || !ignorable.length, onclick: () => { if (current()) fdReviewDialog(ignorable, null, 'Choose open items to ignore'); }}, `Ignore · ${ignorable.length} open items`)));
+    return owner;
   }
   // Own the read-only proposal request without taking ownership of another save/recheck.
   async function fdPrepareAI(scope, binding, view) {
@@ -1001,7 +1005,16 @@
     const incomplete = report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed;
     const counts = ['high', 'medium', 'low', 'info'].map(severity => `${issues.filter(i => i.severity === severity).length} ${severity === 'high' ? 'high severity' : severity === 'info' ? 'informational' : severity}`).join(' · ');
     const output = h('div', {class: 'fd-summary-answer', 'aria-live': 'polite'});
-    const button = h('button', {type: 'button', class: 'btn', disabled: !state.aiOn, onclick: async () => {
+    const renderAnswer = (answer, inventory) => {
+      output.replaceChildren(inventory, h('h4', {}, answer.narrative_status === 'done' ? 'AI explanation of available findings' : 'AI explanation unavailable'),
+          h('p', {class: 'fd-coverage'}, answer.coverage.label), h('p', {}, answer.narrative_notice), answer.reply ? h('details', {open: true}, h('summary', {}, 'Read AI explanation'), h('p', {class: 'fd-summary-text fd-summary-scroll', tabindex: '0', 'aria-label': 'AI explanation text'}, answer.reply)) : null, h('p', {class: 'fd-hint'}, answer.notice),
+          h('p', {class: 'fd-hint'}, 'AI text is not verification or approval. Use the recorded groups below to request AI proposals, fix manually, or ignore with a reason. Only previewed changes can be applied.'));
+    };
+    if (state.fdSummaryCache?.key === JSON.stringify(binding)) {
+      const answer = state.fdSummaryCache.answer;
+      renderAnswer(answer, fdSummaryInventory(answer, new Set(issues.map(i => i.key))));
+    }
+    const button = h('button', {type: 'button', class: 'btn fd-summary-request', disabled: !state.aiOn, onclick: async () => {
       if (!current() || !state.aiOn || state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending) return;
       if ([...document.querySelectorAll('#side input:not([type=checkbox]):not([type=radio]), #side textarea, .fd-review-dialog input:not([type=checkbox]), .fd-review-dialog textarea')].some(node => node.value !== node.defaultValue)) {
         toast('Finish or save your typed draft before asking for a summary. Your text is unchanged.', true); return;
@@ -1029,9 +1042,8 @@
         if (!answer || answer.read_only !== true || answer.file_hash !== binding.file_hash || answer.check_hash !== binding.expected_check_hash ||
             answer.expected_rev !== binding.expected_rev || JSON.stringify(answer.run) !== JSON.stringify(binding.expected_run) || typeof answer.reply !== 'string' || typeof answer.notice !== 'string' || typeof answer.coverage?.label !== 'string' || typeof answer.narrative_notice !== 'string') throw new Error('The summary did not match the current report review. Reload before trying again.');
         const inventory = fdSummaryInventory(answer, new Set(issues.map(i => i.key)));
-        output.replaceChildren(inventory, h('h4', {}, answer.narrative_status === 'done' ? 'AI explanation of available findings' : 'AI explanation unavailable'),
-          h('p', {class: 'fd-coverage'}, answer.coverage.label), h('p', {}, answer.narrative_notice), answer.reply ? h('details', {open: true}, h('summary', {}, 'Read AI explanation'), h('p', {class: 'fd-summary-text fd-summary-scroll', tabindex: '0', 'aria-label': 'AI explanation text'}, answer.reply)) : null, h('p', {class: 'fd-hint'}, answer.notice),
-          h('p', {class: 'fd-hint'}, 'AI text is not verification or approval. Use the recorded groups below to request AI proposals, fix manually, or ignore with a reason. Only previewed changes can be applied.'));
+        state.fdSummaryCache = {key: JSON.stringify(binding), answer};
+        renderAnswer(answer, inventory);
       } catch (error) { if (active()) output.replaceChildren(h('p', {role: 'alert'}, `Summary unavailable: ${error.message}. The recorded findings and actions below are unchanged.`)); else if (owner.isConnected && !current()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); }
       finally { operation.cancel(); }
     }}, state.aiOn ? 'Ask AI to summarize available findings' : 'AI summary unavailable: AI is off');
@@ -1039,17 +1051,19 @@
       h('p', {}, `${issues.length} loaded finding records, including set-aside history and information: ${counts}.`),
       incomplete ? h('p', {class: 'fd-coverage'}, 'Coverage incomplete. This is not a summary of every possible error; unavailable or unlisted findings remain outside this review.') : h('p', {}, 'All currently loaded finding records are counted. A finding-free report is not proof of source completeness or readiness.'),
       ...(report.holds || []).map(hold => h('p', {class: 'fd-coverage'}, hold.text || hold.code)),
-      h('p', {class: 'fd-hint'}, 'On request, Claude receives bounded finding-group metadata for this report only, not workbook contents or unrelated reports. AI summarizes; it cannot apply changes or ignore findings.'), button, h('button', {type: 'button', class: 'btn', onclick: () => { const toolbar = owner.querySelector('.fd-review-toolbar'); toolbar?.scrollIntoView({block: 'start'}); toolbar?.querySelector('button')?.focus({preventScroll: true}); }}, 'Go to review actions'), output);
+      h('p', {class: 'fd-hint'}, 'On request, Claude receives bounded finding-group metadata for this report only, not workbook contents or unrelated reports. AI summarizes; it cannot apply changes or ignore findings.'), button, h('button', {type: 'button', class: 'btn', onclick: () => { const toolbar = owner.querySelector('.fd-review-toolbar'); if (!toolbar) { fdReviewDialog(); return; } toolbar?.scrollIntoView({block: 'start'}); toolbar?.querySelector('button')?.focus({preventScroll: true}); }}, 'Go to review actions'), output);
   }
   function fdManualCellHeld(items, sheet, row, cell) {
     return items.some(other => other.sheet === sheet && (other.cell === cell || !other.cell && other.row === row) &&
       (fdConflict(other) || ['kept', 'deferred', 'rejected', 'kept_earlier'].includes(other.state)));
   }
   // A review scope is separate from the correction basket. Opening/selecting never writes data.
-  function fdReviewDialog(initialScope = null, initialAction = null) {
+  function fdReviewDialog(initialScope = null, initialAction = null, filterLabel = null) {
     if (!state.report || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation) return;
     if (Array.isArray(initialScope) && initialScope.some(it => JSON.stringify(it.binding) !== JSON.stringify(reviewBinding(state.report)))) { toast('The report changed. Reopen this review action.', true); return; }
-    const report = state.report, binding = reviewBinding(report), items = fdItems(), groups = fdGroups(items);
+    const report = state.report, binding = reviewBinding(report);
+    const filterKeys = filterLabel && Array.isArray(initialScope) ? new Set(initialScope.map(it => it.key)) : null;
+    const items = fdItems().filter(it => !filterKeys || filterKeys.has(it.key)), groups = fdGroups(items);
     const saved = state.fdReviewSelection;
     const selected = new Set(saved?.binding === JSON.stringify(binding) ? saved.keys : []), pages = new Map(), opener = document.activeElement;
     const dlg = h('dialog', {class: 'fd-review-dialog', 'aria-labelledby': 'fd-review-title'});
@@ -1155,7 +1169,7 @@
           const row = rows.get(key);
           const candidates = row.sheet === it.sheet && Array.isArray(row.cells) ? row.cells.filter(c => it.cell ? c.cell === it.cell : true) : [];
           const editable = candidates.filter(c => !c.formula && typeof c.before === 'string' && splitCell(c.cell)?.[1] === it.row &&
-            !fdManualCellHeld(items, it.sheet, it.row, c.cell));
+            !fdManualCellHeld(fdItems(), it.sheet, it.row, c.cell));
           if (editable.length < candidates.length) unavailable.push(`${it.sheet} row ${it.row}: ${candidates.length - editable.length} protected, formula, or previously decided cells are not editable here.`);
           if (!editable.length) throw new Error('Cell is unavailable or is a protected formula');
           for (const cell of editable) cells.set(editId(it.sheet, cell.cell), {it: {...it, cell: cell.cell}, cell, rowContext: !it.cell});
@@ -1207,7 +1221,7 @@
     const direct = scope => fdDirectControls(scope, act);
     const draw = () => {
       const scope = picked(), eligible = fdRecommended(scope), canDecide = scope.length > 0 && scope.length <= 1000 && scope.every(it => it.fp && ['open', 'claude'].includes(it.state));
-      status.textContent = `${scope.length} of ${items.length} loaded review items selected. ${eligible.length} supported cell changes in this selection.${scope.length && !canDecide ? ' Keep/defer unavailable: choose at most 1000 open findings, excluding standalone proposals and previously decided items.' : ''}`;
+      status.textContent = `${scope.length} of ${items.length} loaded review items selected.${filterKeys && selected.size > scope.length ? ' ' + (selected.size - scope.length) + ' selections outside this status are saved and excluded from these actions.' : ''} ${eligible.length} supported cell changes in this selection.${scope.length && !canDecide ? ' Keep/defer unavailable: choose at most 1000 open findings, excluding standalone proposals and previously decided items.' : ''}`;
       actions.replaceChildren(
         h('button', {type: 'button', class: 'btn', disabled: !state.aiOn || !scope.length || scope.length > 120 || scope.some(it => !it.fp || it.state !== 'open'), onclick: () => act(picked(), 'ai')}, state.aiOn ? 'Prepare AI proposals for selected findings' : 'AI proposals unavailable'),
         h('button', {type: 'button', class: 'btn primary', disabled: !eligible.length, onclick: () => {
@@ -1241,8 +1255,8 @@
             onclick: () => { pages.set(g.key, page + step); draw(); const heading = content.children[index]?.querySelector('h3'); heading?.setAttribute('tabindex', '-1'); heading?.focus(); }}, label))));
       }));
     };
-    dlg.append(h('h2', {id: 'fd-review-title', tabindex: '-1'}, 'Needs review'),
-      h('p', {}, `${report.filename || 'Report'} · File v${report.version ?? 'unknown'} · Revision ${report.revision ?? 'unknown'} · ID ${report.file_hash.slice(0, 12)}. All loaded non-informational findings, set-aside records and suggested changes are listed below.`),
+    dlg.append(h('h2', {id: 'fd-review-title', tabindex: '-1'}, filterLabel || 'Needs review'),
+      h('p', {}, `${report.filename || 'Report'} · File v${report.version ?? 'unknown'} · Revision ${report.revision ?? 'unknown'} · ID ${report.file_hash.slice(0, 12)}. ${filterLabel ? 'Only this selected status is listed below; actions affect selected items in this list.' : 'All loaded non-informational findings, set-aside records and suggested changes are listed below.'}`),
       report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed ? h('p', {class: 'fd-coverage'}, 'Coverage incomplete: this list includes only loaded items. Unavailable findings cannot be selected; approval remains blocked.') : null,
       h('p', {}, `${fdHoldSummary(report)}. ${state.aiOn ? 'On request, selected findings and relevant cell context are sent to configured Claude (Anthropic), up to 120 findings. No full workbook or unrelated reports are sent.' : 'AI proposals are unavailable while AI is off.'} All proposals require preview and explicit Apply; opening this review does not run AI.`),
       fdSummaryPanel(report, binding, dlg, current),
@@ -1313,7 +1327,7 @@
   function fdSourceVerified(r) {
     const rec = r.source_reconciliation || {}, sp = r.review?.sharepoint || {}, bound = rec.bound_to || {};
     return sp.source_verified === true && sp.status === 'match' && rec.verified === true && rec.coverage?.complete === true &&
-      rec.count_reconciliation?.status === 'verified' && !rec.stale && bound.file_hash === r.file_hash &&
+      rec.count_reconciliation?.status === 'verified' && !rec.rows_truncated && !rec.coverage?.timezone_unconfirmed && !rec.coverage?.truncated && !rec.unidentified_rows && !rec.unconfirmed_rows && !(r.assignment || {}).needs_person && !rec.stale && bound.file_hash === r.file_hash &&
       !!bound.checker_version && bound.checker_version === r.checker_version && !(r.holds || []).some(hold => String(hold.code || '').startsWith('source_'));
   }
   function fdSourceSummary(r) {
@@ -1435,28 +1449,25 @@
       h('summary', {}, `${fdHoldSummary(r)} · review details`),
       h('p', {class: 'fd-hint'}, 'Blocking holds prevent approval. All listed holds exclude combined recommendations; individual review remains available.'),
       h('ul', {}, approvalHolds.map(hold => h('li', {}, `${hold.hard ? 'Blocking' : 'Advisory'}: ${hold.text || hold.code}`)))));
-    if (approvalHolds.length) { const action = fdHoldAction(r, st); if (action) body.append(action); }
-    else { const nextStep = fdNextStep(r, st); if (nextStep) body.append(nextStep); }
+    if (approvalHolds.length && st.next !== 'recheck') { const action = fdHoldAction(r, st); if (action) body.append(action); }
+    else if (st.next !== 'recheck') { const nextStep = fdNextStep(r, st); if (nextStep) body.append(nextStep); }
     const cov = r.review.coverage || {}, dc = r.review.decisions || {};
     body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(c.detected, 'active finding')}${r.review.counts?.info ? ` (+${r.review.counts.info} for information)` : ''} · Review items: ${c.kept} kept as recorded · ${c.deferred} waiting on the source · ${c.confirmed} confirmed · ${plural(c.suggestions, 'cell-change proposal')} · Cell changes: ${c.selected} selected · ${c.applied} applied in this version`));
-    const rc = r.review.reconcile;
-    if (rc) body.append(h('details', {class: 'fd-recon'}, h('summary', {}, `Listed finding status breakdown: ${fmt(rc.total)} findings · ${rc.adds_up ? 'categories add up' : 'categories do not add up: report this'}${cov.truncated || cov.not_listed || r.review.page?.complete === false ? ' · coverage incomplete' : ''}`),
-      h('dl', {class: 'fd-kv'}, ...[['Open, need a decision', rc.open], ['Waiting on the source owner', rc.deferred], ['Confirmed, need a correction', rc.confirmed],
-        ['Kept as recorded by a person on this version', rc.kept_by_person], ['Kept by an earlier record (no cell named on some)', rc.kept_earlier_record],
-        ['Set aside by Dex (recommendation, not a decision)', rc.set_aside_by_claude], ['Corrected in a later version (findings)', rc.corrected], ['For information only', rc.informational]]
-        .flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, fmt(v))])),
-      rc.ambiguous_earlier_records ? h('p', {class: 'fd-hint'}, `${rc.ambiguous_earlier_records} open findings sit on rows where an earlier “fine as is” did not say which cell; they are open until reviewed again.`) : null));
-    if (cov.truncated || cov.not_listed) body.append(h('p', {class: 'fd-coverage', role: 'alert'}, icon('lock', 14),
-      ` Workbook checks detected ${fmt(cov.findings_total)} findings but this version stored only ${fmt(cov.findings_listed)}, so ${fmt(cov.not_listed)} cannot be reviewed here `
-      + `(${Object.entries(cov.by_code || {}).filter(([, v]) => v.total > v.listed).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${fmt(v.listed)} of ${fmt(v.total)} stored`).join('; ')}). `
-      + 'Approval is blocked. Re-check explicitly, then verify the resulting coverage before continuing.'));
+    const statuses = [['Open, need a decision', ['open', 'selected']], ['Waiting on the source owner', ['deferred']],
+      ['Confirmed, need a correction', ['confirmed']], ['Ignored / kept as recorded', ['kept', 'rejected']],
+      ['Earlier decisions', ['kept_earlier']], ['AI recommendations set aside', ['claude']], ['Corrected in a later version', ['corrected']]];
+    body.append(h('details', {class: 'fd-recon'}, h('summary', {}, 'Listed findings'),
+      h('div', {class: 'fd-cardacts'}, statuses.map(([label, states]) => {
+        const scope = items.filter(it => states.includes(it.state));
+        return h('button', {type: 'button', class: 'btn', disabled: !scope.length, onclick: () => fdReviewDialog(scope, null, label)}, `${label} · ${scope.length}`);
+      }))));
+    if (cov.truncated || cov.not_listed) body.append(h('p', {class: 'fd-coverage', role: 'note'},
+      'Some potential errors are unavailable in this review. Approval stays blocked. Recheck this report below, then review the updated results.'));
     if (dc.stale) body.append(h('p', {class: 'fd-coverage', role: 'note'}, icon('warn', 14), ` ${plural(dc.stale, 'earlier decision')} no longer match${dc.stale === 1 ? 'es' : ''} what the finding says now, so ${dc.stale === 1 ? 'it is' : 'they are'} not applied. Decide again.`));
     if (state.decisionPending) body.append(h('p', {class: 'fd-saving', role: 'status'}, h('span', {class: 'spin'}), ' Saving your decision…'));
     if (state.decisionFailed) body.append(h('div', {class: 'fd-failed', role: 'alert'}, icon('warn', 14), ' ', state.decisionFailed.message,
       state.decisionFailed.retry ? h('button', {type: 'button', class: 'btn small', onclick: () => fdSendDecision(state.decisionFailed.retry)}, 'Try again') : null,
       h('button', {type: 'button', class: 'btn small subtle', onclick: () => { state.decisionFailed = null; drawSide(); }}, 'Dismiss')));
-    const step = c.selected ? 2 : 1;
-    body.append(h('ol', {class: 'fd-steps', 'aria-label': 'Steps'}, ['Compare', 'Preview', 'Recheck'].map((t, n) => h('li', {class: n + 1 === step ? 'on' : n + 1 < step ? 'done' : '', 'aria-current': n + 1 === step ? 'step' : null}, `${n + 1} ${t}`))));
     // a report that is not ready says why, with one clear next step
     if (r.review.page && !r.review.page.complete) body.append(h('p', {class: 'fd-coverage', role: 'alert'}, `Only ${(r.review.issues || []).length} of ${r.review.page.issues_total} active and ${(r.review.dismissed || []).length} of ${r.review.page.dismissed_total} set-aside findings loaded. Counts below cover loaded occurrences only. Reopen the report to load the rest; do not treat missing items as resolved.`));
     const auto = fdAutoSummary(r);
@@ -1465,15 +1476,7 @@
     const historyRecommendations = historyGroups.filter(g => g.status === 'recommendation').reduce((n, g) => n + g.entries.length, 0);
     const appendHistory = () => { if (auto) body.append(h('details', {class: 'fd-history-overview'}, h('summary', {}, `History · ${plural(historyApplied, 'applied change')} · ${plural(historyRecommendations, 'AI recommendation')}`), auto)); };
     if (!items.length) { body.append(fdClean(r, st)); appendHistory(); return; }
-    body.append(h('div', {class: 'fd-tiers', role: 'tablist', 'aria-label': 'Kinds of correction'}, TIERS.map(([id, label]) => {
-      const gs = groups.filter(g => g.tier === id), recs = fdRecordCount(gs.flatMap(g => g.items));
-      return h('button', {type: 'button', role: 'tab', class: id === tier ? 'on' : '', 'aria-selected': String(id === tier), disabled: !gs.length,
-        onclick: () => { state.fdTier = id; state.fdCur = null; drawSide(); if (id === 'review') fdReviewDialog(); }},
-        h('span', {}, label), id === 'aside' ? h('b', {'aria-label': 'set aside'}, String(gs.reduce((n, g) => n + g.items.length, 0))) : h('b', {'aria-label': 'unresolved'}, String(gs.reduce((n, g) => n + g.unresolved, 0))),
-        h('small', {}, gs.length ? `${plural(gs.length, 'group')} · ${plural(recs, 'record')}${gs.some(g => g.unresolved < g.items.length) ? ` · ${gs.reduce((n, g) => n + g.items.length - g.unresolved, 0)} set aside` : ''}` : 'none'));
-    })));
-    if (!fdMode() || fdMode() === 'unchanged') { body.append(h('p', {class: 'fd-hint'}, 'Choose Review manually above to select individual corrections, or preview all supported recommendations.')); appendHistory(); return; }
-    const tierGroups = groups.filter(g => g.tier === tier);
+    const tierGroups = groups;
     const cur = items.find(x => x.key === state.fdCur) || null;
     if (cur) body.append(h('p', {id: 'fd-correction-context', class: 'fd-grid-context', role: 'status'}, `Current correction: ${cur.sheet || 'Report'} · ${cur.cell || (cur.row ? 'row ' + cur.row : 'report-level')}. Filtering the sheet does not change this correction.`), fdCard(cur, groups));
     body.append(h('div', {class: 'fd-groups'}, tierGroups.map(g => {
@@ -2132,7 +2135,7 @@
   }
   function fdComparison(r) {
     const rec = r.source_reconciliation || {}, counts = rec.count_reconciliation, sp = r.review?.sharepoint || {};
-    const value = v => v == null ? 'Unknown' : String(v);
+    const value = v => v == null ? 'Unknown' : v === '' ? 'Blank' : String(v);
     const rows = counts?.record_counts || {};
     const total = side => `${value(side?.total)} (${value(side?.known_rows)} known rows; ${value(side?.unknown_rows)} unknown rows)`;
     const pair = (label, data) => h('div', {class: 'fd-comparison-pair'}, h('dt', {}, label),
@@ -2140,8 +2143,18 @@
     const bound = rec.bound_to || {}, current = !rec.stale && bound.file_hash === r.file_hash && !!bound.checker_version && bound.checker_version === r.checker_version;
     const sourceHolds = (r.holds || []).filter(hold => String(hold.code || '').startsWith('source_'));
     const verified = fdSourceVerified(r);
+    const differences = (rec.rows || []).filter(row => row.status && row.status !== 'matched');
+    const complete = current && rec.coverage?.complete === true && !rec.rows_truncated &&
+      !rec.unidentified_rows && !rec.unconfirmed_rows && !(r.assignment || {}).needs_person &&
+      !!rec.snapshot_id && !!rec.site_id && !!(rec.list_id || rec.list?.id) &&
+      !rec.coverage?.timezone_unconfirmed && !rec.coverage?.truncated && !rec.coverage?.denied && !rec.coverage?.throttled && !(rec.coverage?.failed_pages || []).length &&
+      !Object.values(rec.column_mapping || {}).some(mapping => ['needs_confirmation', 'conflict'].includes(mapping.status)) &&
+      !sourceHolds.some(hold => /mapping|timezone|identity|incomplete|stale|assignment/.test(hold.code || ''));
+    const differs = complete && sp.status === 'differences' && differences.length > 0;
     return h('details', {class: 'fd-comparison'},
-      h('summary', {}, `Comparison details · ${verified ? 'exact-source quantities matched' : 'not verified; review required'}`),
+      h('summary', {}, `Match SharePoint? ${verified ? 'Yes' : differs ? 'No' : 'Not verified'}`),
+      differences.length ? h('section', {}, h('h3', {}, `${differences.length} recorded differences${rec.rows_truncated ? ' shown (incomplete)' : ''}`),
+        h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Recorded differences'}, differences.map(row => h('li', {}, `${row.sheet || 'Report'}${row.row ? ' row ' + row.row : ''}${row.item != null ? ' · source item ' + row.item : ''}: ${String(row.status).replaceAll('_', ' ')}${row.field ? ' · ' + row.field + ': report ' + value(row.report) + ', SharePoint ' + value(row.sharepoint) : ''}${row.note ? ' · ' + row.note : ''}`)))) : null,
       !verified ? h('p', {class: 'fd-coverage', role: 'note'}, sp.message || 'Current exact-source verification is unavailable. Stored totals do not establish client readiness.') : null,
       sourceHolds.length ? h('ul', {class: 'fd-coverage'}, sourceHolds.map(hold => h('li', {}, hold.text || hold.code))) : null,
       h('p', {}, 'Inspection records count rows. Inspected and rejected quantities count units. A match is evidence for this snapshot only, not permission to send to a client.'),
@@ -2213,11 +2226,13 @@
     if (state.sideTab === 'facts') state.sideTab = 'fixes';
     const rv = r.review, tab = state.sideTab || 'fixes';
     const body = h('div', {class: 'sidebody', id: 'side-body'});
-    side.replaceChildren(h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
+    side.replaceChildren(fdReportSummary(r), h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
     drawSideTabs();
     if (tab === 'fixes') {
       fdCorrections(body);
       body.append(fdComparison(r));
+      body.append(h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all listed findings'));
+      body.append(h('button', {type: 'button', class: 'btn', disabled: state.busy || state.rechecking || state.decisionPending || !!state.aiProposalOperation, onclick: fdRecheck}, 'Recheck this report'));
       body.append(h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'sources'; drawReport(); }}, 'Source evidence and coverage'));
       const sc = shiftCard(rv); if (sc) body.append(h('div', {id: 'shiftfix'}, sc));
     } else {

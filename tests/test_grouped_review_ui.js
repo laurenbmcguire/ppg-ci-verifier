@@ -51,8 +51,8 @@ function comparison(report){const ctx=vm.createContext({state:{report},document:
 test('exact-source comparison keeps unknown distinct from explicit zero and decimal precision',()=>{
  const pair=(report,source,status)=>({report:{total:report,known_rows:1,unknown_rows:report==null?1:0},source:{total:source,known_rows:1,unknown_rows:0},status});
  const report={review:{sharepoint:{status:'match',snapshot_id:'snapshot-1',source:'Exact list'}},source_reconciliation:{verified:false,coverage:{complete:false},fields_checked:['inspected','rejected'],fields_not_checked:['photos'],not_verified_because:['One source page missing'],count_reconciliation:{status:'held',record_counts:{report_rows:2,source_rows:1,matched_unique_items:1,duplicate_report_rows:0,missing_source_items:1,unmatched_report_rows:0},quantities:{inspected:pair(null,'9007199254740993.25','unavailable'),rejected:pair('0','0','matched')},rejected_records:pair('0','0','matched'),duplicates:[{sheet:'Synthetic',row:7,item:'17',evidence:'Both rows retained'}],exclusions:[{item:'19',day:'2026-01-02',day_basis:'business_date',reason:'Outside exact day'}]}}};
- const text=comparison(report);assert.match(text,/Report: Unknown/);assert.match(text,/9007199254740993\.25/);assert.match(text,/Report: 0/);assert.match(text,/not verified; review required/);assert.match(text,/Inspection records/);assert.match(text,/Records with rejected quantity/);assert.match(text,/Source item 17/);assert.match(text,/Source item 19/);assert.match(text,/One source page missing/);assert.match(text,/Rows read are not a complete source total/);
- report.source_reconciliation.verified=true;report.source_reconciliation.count_reconciliation.status='verified';report.review.sharepoint.status='stale';assert.match(comparison(report),/not verified; review required/,'old snapshot never looks current');
+ const text=comparison(report);assert.match(text,/Report: Unknown/);assert.match(text,/9007199254740993\.25/);assert.match(text,/Report: 0/);assert.match(text,/Match SharePoint\? Not verified/);assert.match(text,/Inspection records/);assert.match(text,/Records with rejected quantity/);assert.match(text,/Source item 17/);assert.match(text,/Source item 19/);assert.match(text,/One source page missing/);assert.match(text,/Rows read are not a complete source total/);
+ report.source_reconciliation.verified=true;report.source_reconciliation.count_reconciliation.status='verified';report.review.sharepoint.status='stale';assert.match(comparison(report),/Match SharePoint\? Not verified/,'old snapshot never looks current');
 });
 test('missing count contract and completion do not imply client readiness',()=>{
  assert.match(comparison({review:{sharepoint:{}}}),/comparison is unavailable/);
@@ -73,10 +73,10 @@ test('record totals do not double-count the same row across correction groups',(
 });
 test('current backend source verdict and reassignment holds override a stored matching receipt',()=>{
  const report={file_hash:'file',checker_version:'old',review:{sharepoint:{status:'match',source_verified:true}},source_reconciliation:{bound_to:{file_hash:'file',checker_version:'old'},coverage:{complete:true},verified:true,count_reconciliation:{status:'verified'}}};
- assert.match(comparison(report),/exact-source quantities matched/);
- for(const verdict of [false,undefined]){report.review.sharepoint.source_verified=verdict;assert.match(comparison(report),/not verified; review required/);}
+ assert.match(comparison(report),/Match SharePoint\? Yes/);
+ for(const verdict of [false,undefined]){report.review.sharepoint.source_verified=verdict;assert.match(comparison(report),/Match SharePoint\? Not verified/);}
  report.review.sharepoint.source_verified=true;report.holds=[{code:'source_assignment_changed',text:'Resolved source assignment has changed'}];
- assert.match(comparison(report),/not verified; review required/);assert.match(comparison(report),/Resolved source assignment has changed/);
+ assert.match(comparison(report),/Match SharePoint\? Not verified/);assert.match(comparison(report),/Resolved source assignment has changed/);
 });
 test('Nexus clipboard refuses incomplete/null captures and preserves explicit zero',async()=>{
  const writes=[],ctx=vm.createContext({document:{createElement:t=>new Element(t)},navigator:{clipboard:{writeText:async text=>writes.push(text)}},toast(){},hm12:x=>x,fmt:x=>x==null?'—':String(x)});
@@ -191,4 +191,13 @@ test('blocker and approval-hold counts live beside sheet, not in report title',(
  assert.ok(between('  function drawReport(', '  function fdMetrics(').includes('fd-global-status'));
  assert.ok(between('  function fdCorrections(', '  // ---------- the app fixes').includes('fd-hold-details'));
  assert.ok(!source.includes("btn('facts', 'Facts')"));assert.ok(source.includes("btn('claude', 'Ask Dex'"));
+});
+
+test('SharePoint verdict distinguishes identity joins from values and requires complete current evidence',()=>{
+ const r={file_hash:'h',checker_version:'v',review:{sharepoint:{status:'differences',source_verified:false}},source_reconciliation:{bound_to:{file_hash:'h',checker_version:'v'},snapshot_id:'snap',site_id:'site',list_id:'list',coverage:{complete:true},rows:[{sheet:'Detail',row:3,item:'2',status:'value_differs',field:'rejected',report:'2',sharepoint:'3'}],count_reconciliation:{record_counts:{report_rows:2,source_rows:2,matched_unique_items:2}}}};
+ let text=comparison(r);assert.match(text,/Match SharePoint\? No/);assert.match(text,/Detail row 3 · source item 2: value differs · rejected: report 2, SharePoint 3/);assert.doesNotMatch(text,/100%/);
+ for(const patch of [{stale:true},{rows_truncated:true},{unconfirmed_rows:1},{coverage:{complete:false}},{coverage:{complete:true,timezone_unconfirmed:true}},{column_mapping:{rejected:{status:'needs_confirmation'}}},{snapshot_id:null}]){const x=structuredClone(r);Object.assign(x.source_reconciliation,patch);assert.match(comparison(x),/Match SharePoint\? Not verified/);}
+ r.source_reconciliation.rows[0].report='';r.source_reconciliation.rows[0].sharepoint=0;assert.match(comparison(r),/report Blank, SharePoint 0/);
+ r.source_reconciliation.rows[0].report=null;assert.match(comparison(r),/report Unknown, SharePoint 0/);
+ r.holds=[{code:'source_assignment_changed'}];assert.match(comparison(r),/Match SharePoint\? Not verified/);
 });

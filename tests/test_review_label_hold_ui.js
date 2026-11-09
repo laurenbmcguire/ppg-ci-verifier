@@ -6,7 +6,7 @@ const nodes=n=>n?.kids?.flat(Infinity).flatMap(x=>x&&typeof x==='object'?[x,...n
 function harness(holds){const state={fixes:[],report:{file_hash:'h',check_hash:'c',fixed_from:{changes:[]},holds,review:{issues:[]}}};const h=(tag,attrs,...kids)=>({tag,...attrs,kids});const ctx=vm.createContext({state,h,plural:(n,s)=>`${n} ${s}${n===1?'':'s'}`,fdMode:()=> 'manual',reviewBinding:()=>({}),allIssues:r=>r.issues,fdRecommended:()=>[],revisionOf:()=>2,fdChooseMode(){},fdPreviewRecommended(){},fdStatus:()=>({next:'blockers'}),fdCounts:()=>({}),fdItems:()=>[],fdGroups:()=>[],icon:()=>null,fdHoldAction:()=>null,fdNextStep:()=>null,fdAutoSummary:()=>null,fdClean:()=>null});vm.runInContext(between('  function fdHoldSummary(', '  function fdOccurrenceList(')+between('  function fdCorrections(', '  // ---------- the app fixes'),ctx);return {ctx,state};}
 test('saved summary and disclosure share blocking/advisory counts, and no hold disappears',()=>{
  for(const [holds,expected] of [[[],'0 blocking holds · 0 advisory holds'],[[{hard:true,text:'Blocked'}],'1 blocking hold · 0 advisory holds'],[[{hard:false,text:'Advisory'}],'0 blocking holds · 1 advisory hold'],[[{hard:true,text:'Blocked'},{hard:false,text:'Advisory'}, {text:'Unclassified advisory'}],'1 blocking hold · 2 advisory holds']]){
-  const {ctx,state}=harness(holds);assert.equal(ctx.fdHoldSummary(state.report),expected);const mode=ctx.fdModeSelector(state.report);assert.ok(text(nodes(mode).find(n=>n.class==='fd-saved-summary')).includes(expected));
+  const {ctx,state}=harness(holds);assert.equal(ctx.fdHoldSummary(state.report),expected);const mode=ctx.fdModeSelector(state.report);assert.equal(text(mode),'Review potential errors');
   const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);const details=nodes(body).find(n=>n.class==='fd-hold-details');
   if(!holds.length){assert.equal(details,undefined);continue;}
   assert.ok(text(nodes(details).find(n=>n.tag==='summary')).includes(expected));const listed=nodes(details).filter(n=>n.tag==='li');assert.equal(listed.length,holds.length);
@@ -24,13 +24,13 @@ test('coverage dominates status ledger even when stored categories add up',()=>{
  for(const coverage of [{truncated:true,findings_total:80,findings_listed:50,not_listed:30},{truncated:false,findings_total:50,findings_listed:50,not_listed:0}]){
   state.report.review.coverage=coverage;state.report.review.reconcile={total:70,adds_up:true};
   const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);
-  const ledger=text(nodes(body).find(n=>n.class==='fd-recon'));assert.match(ledger,/Listed finding status breakdown: 70 findings/);assert.doesNotMatch(ledger,/All .*accounted for|✓/);
-  assert.ok(ledger.includes(coverage.truncated?'coverage incomplete':'categories add up'));
-  const mode=ctx.fdModeSelector(state.report);assert.equal(!!nodes(mode).find(n=>n.class==='fd-priority'),coverage.truncated);
+  const ledger=text(nodes(body).find(n=>n.class==='fd-recon'));assert.match(ledger,/Listed findings/);assert.doesNotMatch(ledger,/All .*accounted for|✓/);
+  assert.equal(text(body).includes('Some potential errors are unavailable'),coverage.truncated);
+  const mode=ctx.fdModeSelector(state.report);assert.equal(text(mode),'Review potential errors');
  }
  state.report.review.page={complete:false};state.report.review.coverage={};state.report.review.reconcile.adds_up=false;
- const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);assert.match(text(body),/categories do not add up: report this · coverage incomplete/);
- assert.match(text(ctx.fdModeSelector(state.report)),/Finding coverage incomplete/);
+ const body={kids:[],append(...kids){this.kids.push(...kids)}};ctx.fdCorrections(body);assert.match(text(body),/Reopen the report to load the rest/);
+ assert.equal(text(ctx.fdModeSelector(state.report)),'Review potential errors');
 });
 
 test('recheck waits for pending decisions and never reloads a different report after navigation',async()=>{
