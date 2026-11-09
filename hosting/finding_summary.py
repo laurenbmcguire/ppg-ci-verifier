@@ -8,6 +8,7 @@ import json
 import os
 import re
 from collections import Counter
+from http.client import IncompleteRead
 from hosting import ai_review
 from hosting.review_summary import summarize, check_run
 
@@ -169,7 +170,7 @@ def prepare(inbox, payload, authorize, provider=None):
                 result.update(reply=reply, narrative_status='done', narrative_notice='AI received aggregate metadata for every available finding group, not workbook or cell values.', narrative_group_count=len(result['groups']))
             except ai_review.AIReviewNotConfigured:
                 result.update(narrative_status='not_configured', narrative_notice='Claude is not configured. The complete available finding inventory remains below; no report changes were made.')
-            except (ai_review.AIReviewError, TimeoutError, ValueError, TypeError):
+            except (ai_review.AIReviewError, OSError, IncompleteRead, ValueError, TypeError):
                 result.update(narrative_status='unavailable', narrative_notice='Claude could not return a usable summary. The complete available finding inventory remains below; no report changes were made.')
     if snapshot(inbox, payload, authorize)[2] != binding:
         raise ValueError('Report access, source, assignment, findings or review changed. Discard the summary and reload.')

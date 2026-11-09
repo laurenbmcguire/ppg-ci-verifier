@@ -260,3 +260,68 @@ def test_source_mapping_revision_race_rejected_even_if_holds_unchanged(setup, mo
         box.set_setting(box.source_mapping_key('synthetic-site', 'synthetic-list'), {'revision': 'changed', 'mapping': {'inspected': 'synthetic'}})
         return provider(body)
     with pytest.raises(ValueError, match='changed'): fs.prepare(box, p, lambda: True, change)
+
+
+@pytest.mark.parametrize('failure', ['reset', 'oserror', 'incomplete', 'urlerror', 'json'])
+def test_transport_reader_failure_preserves_inventory_once_without_writes(setup, monkeypatch, failure):
+    """Exercise real ask -> _post -> _send, substituting only the network opener."""
+    from http.client import IncompleteRead
+    from urllib.error import URLError
+    box, item, p = setup
+    before = box.get(item['file_hash']); raw = box.original_bytes(item['file_hash'])[1]
+    calls = []
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'synthetic-unused-test-key')
+    class BrokenResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self):
+            if failure == 'reset': raise ConnectionResetError('PRIVATE-TRANSPORT-SENTINEL')
+            if failure == 'oserror': raise OSError('PRIVATE-TRANSPORT-SENTINEL')
+            if failure == 'incomplete': raise IncompleteRead(b'PRIVATE-TRANSPORT-SENTINEL', 200)
+            if failure == 'urlerror': raise URLError('PRIVATE-TRANSPORT-SENTINEL')
+            return b'PRIVATE-TRANSPORT-SENTINEL invalid JSON'
+    def opener(request, **kwargs):
+        calls.append(True)
+        return BrokenResponse()
+    monkeypatch.setattr(ai_review.urllib.request, 'urlopen', opener)
+    result = fs.prepare(box, p, lambda: True)
+    assert len(calls) == 1 and result['narrative_status'] == 'unavailable'
+    assert result['counts']['available'] > 0 and not result['reply']
+    assert sum(g['count'] for g in result['groups']) == result['counts']['available']
+    assert 'PRIVATE-TRANSPORT-SENTINEL' not in json.dumps(result)
+    assert box.get(item['file_hash']) == before and box.original_bytes(item['file_hash'])[1] == raw
+    assert box.list()['count'] == 1
+
+
+def test_transport_failure_still_rechecks_current_access(setup, monkeypatch):
+    box, item, p = setup
+    allowed = [True]; calls = []
+    before = box.get(item['file_hash'])
+    def fail(body):
+        calls.append(True)
+        allowed[0] = False
+        raise ConnectionResetError('PRIVATE-TRANSPORT-SENTINEL')
+    with pytest.raises(ValueError, match='access changed'):
+        fs.prepare(box, p, lambda: allowed[0], fail)
+    assert len(calls) == 1 and box.get(item['file_hash']) == before
+
+
+@pytest.mark.parametrize('field,value', [('checker_version', 'synthetic-new-checker'), ('finding_decisions_rev', 1)])
+def test_persisted_check_run_or_decision_revision_race_discards_summary(setup, field, value):
+    box, item, p = setup
+    displayed = copy.deepcopy(p)
+    original = box.original_bytes(item['file_hash'])[1]
+    calls = []; changed = []
+    def update_storage(body):
+        calls.append(True)
+        changed.append(box._update(item['file_hash'], lambda result: result.update({field: value})))
+        return 'This response must be discarded.'
+    with pytest.raises(ValueError, match='changed'):
+        fs.prepare(box, p, lambda: True, update_storage)
+    stored = box.get(item['file_hash'])
+    assert len(calls) == 1 and p == displayed and stored[field] == value
+    assert stored['check_hash'] == changed[0]['check_hash'] != displayed['expected_check_hash']
+    if field == 'checker_version': assert check_run(stored) != displayed['run']
+    else: assert stored['finding_decisions_rev'] != displayed['expected_rev']
+    assert not stored.get('ai_fixes') and not stored.get('finding_summary')
+    assert box.original_bytes(item['file_hash'])[1] == original and box.list()['count'] == 1
