@@ -41,3 +41,9 @@ test('recheck waits for pending decisions and never reloads a different report a
  const running=ctx.fdRecheck();await ctx.fdRecheck();assert.equal(calls,1);state.report={file_hash:'two'};state.selected='two';resolve({});await running;
  assert.equal(reloads,0);assert.equal(state.rechecking,false);
 });
+
+test('successful explicit recheck refreshes recovery controls after releasing its lock',async()=>{
+ const state={report:{file_hash:'one'},selected:'one'};let refreshed=0;
+ const ctx=vm.createContext({state,myName:()=> 'Synthetic',toast:()=>{},api:async()=>({}),openReport:async()=>{state.report={file_hash:'one'}},loadList:()=>{},fdModeSelector:()=>{assert.equal(state.rechecking,false);return {}},document:{querySelector:()=>({replaceWith:()=>refreshed++})}});
+ vm.runInContext(between('  async function fdRecheck(', '  async function fdReconcile('),ctx);await ctx.fdRecheck();assert.equal(refreshed,1);assert.equal(state.rechecking,false);
+});

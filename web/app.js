@@ -864,7 +864,7 @@
         h('button', {type: 'button', class: 'btn', onclick: () => { state.fdView = 'sources'; drawReport(); const details = document.querySelector('.fd-comparison'); if (details) details.open = true; document.querySelector('.fd-source-recovery')?.scrollIntoView({block: 'center'}); }}, 'Review coverage and recovery')) : null,
       r.fixed_from ? h('p', {class: 'fd-saved-summary', role: 'status'}, `Corrected version v${revisionOf(r)}: ${plural((r.fixed_from.changes || []).length, 'recorded cell change')}. Original preserved. ${plural(found, 'active finding')} remain; ${fdHoldSummary(r)}. ${r.sent?.some(x => x.sent) ? 'Delivery is recorded in History.' : 'Not sent.'}`) : null,
       h('h2', {}, incomplete ? `Review loaded ${plural(found, 'active finding')}` : `Review found ${plural(found, 'active finding')}`),
-      h('p', {class: 'fd-hint'}, 'Active non-informational findings from workbook and source checks. Deferred and confirmed findings remain active; set-aside history and cell changes are counted separately.'),
+      h('p', {class: 'fd-hint'}, 'Active non-informational findings. Deferred and confirmed findings remain active; set-aside history and cell changes are counted separately.'),
       h('p', {}, !state.fixes ? 'Loading supported recommendations…' : state.fixesError ? 'Recommendations could not be loaded. Reopen the report to retry.' : `${plural(recommended.length, 'supported cell change')} available for a combined preview. Findings and cell changes are counted separately.`),
       h('div', {class: 'fd-cardacts'},
         h('button', {type: 'button', class: 'btn primary', disabled: busy || !recommended.length, onclick: () => fdPreviewRecommended(binding)}, `Preview all ${recommended.length} recommended fixes`),
