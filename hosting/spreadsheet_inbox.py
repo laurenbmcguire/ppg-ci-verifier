@@ -1029,7 +1029,7 @@ class SpreadsheetInbox:
         candidates = []
         for p in props:
             reason = global_reason
-            if not reason and (p.get('sure') is not True or str(p.get('source') or '').startswith(('AI', 'Suggested'))):
+            if not reason and (p.get('sure') is not True or str(p.get('source') or '').startswith(('AI', 'Suggested', 'Known detail'))):
                 reason = 'This suggestion needs an individual review.'
             if not reason and p.get('kind') == 'text' and p.get('before') == p.get('after'):
                 reason = 'This cell is already unchanged.'

@@ -27,7 +27,7 @@ class RecommendationEligibility(unittest.TestCase):
         self.assertEqual(self.mark([self.proposal(),self.proposal(id='p2',after='b')]),[False,False])
         self.assertEqual(self.mark([self.proposal(change_set='coordinated')]),[False])
     def test_ai_guess_noop_and_unknown_are_not_invented(self):
-        for kw in [dict(source='AI fix',sure=False),dict(source='Suggested'),dict(sure=False),dict(before='a',after='a')]:
+        for kw in [dict(source='AI fix',sure=False),dict(source='Suggested'),dict(source='Known detail'),dict(sure=False),dict(before='a',after='a')]:
             self.assertEqual(self.mark([self.proposal(**kw)]),[False])
         # Zero is an explicit proposed value, not a fallback for unknown/blank.
         p=self.proposal(before='',after='0');self.assertEqual(self.mark([p]),[True]);self.assertEqual(p['after'],'0')
@@ -62,3 +62,19 @@ class RecommendationApplyGate(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Recommendations changed'):
             box.apply_fixes(item['file_hash'],[dict(p,after='9999')],expected_check_hash=item['check_hash'],recommended_only=True)
         self.assertEqual(box.download(item['file_hash'])[1],raw);self.assertFalse(box.get(item['file_hash']).get('fixes_applied'))
+
+class ContextRecommendationBoundary(unittest.TestCase):
+    def test_context_only_prepared_by_is_inspectable_but_not_advertised_for_bulk(self):
+        import tempfile
+        from unittest.mock import patch
+        from tests.eos_fixture import build, ROWS
+        box=SpreadsheetInbox(self.enterContext(tempfile.TemporaryDirectory()))
+        raw=build(ROWS, overrides={('Summary','B5'):'Prepared by'})
+        item=box.ingest('2230-OWENS-BASCO - EOS - 2026-10-07.xlsx',raw)
+        with patch.object(box,'holds',return_value=[]):
+            props=box.fix_proposals(item['file_hash'])['proposals']
+        contextual=[p for p in props if p['source']=='Known detail']
+        self.assertTrue(contextual, 'The fabricated header generates the exact context-only case.')
+        self.assertTrue(all(not p['recommendation_eligible'] for p in contextual))
+        self.assertTrue(all(p['recommendation_reason'] for p in contextual))
+        self.assertEqual(box.download(item['file_hash'])[1],raw)

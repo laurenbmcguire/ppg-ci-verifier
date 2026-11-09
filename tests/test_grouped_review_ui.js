@@ -162,7 +162,7 @@ test('header reports receipt matches, never parsed report rows as matched source
 test('next action and unresolved tabs precede optional collapsed recorded history',()=>{
  const ui=between('  function fdCorrections(', '  // ---------- the app fixes');
  assert.ok(ui.indexOf('const nextStep')<ui.indexOf('const auto ='));
- assert.ok(ui.includes("class: 'fd-history-overview'"));assert.ok(ui.includes('History · ${plural(historyApplied'));assert.ok(ui.includes("${plural(hardHolds.length, 'approval hold')} · review details"));
+ assert.ok(ui.includes("class: 'fd-history-overview'"));assert.ok(ui.includes('History · ${plural(historyApplied'));assert.ok(ui.includes("${plural(approvalHolds.length, 'approval hold')} · review details"));
  assert.ok(ui.indexOf("class: 'fd-tiers'")<ui.lastIndexOf('appendHistory();'));
 });
 

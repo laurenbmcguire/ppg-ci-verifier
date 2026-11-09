@@ -997,11 +997,11 @@
     state.fdTier = tier;
     body.append(h('div', {class: 'fd-panelhead'}, h('h2', {}, 'Corrections'),
       h('button', {type: 'button', class: 'fd-iconbtn fd-collapse', 'aria-label': 'Hide the corrections panel', title: 'Hide panel', onclick: () => { state.fdAsideHidden = true; $('fd-work')?.classList.add('aside-hidden'); }}, icon('panel', 18))));
-    const hardHolds = (r.holds || []).filter(hold => hold.hard);
-    if (hardHolds.length) body.append(h('details', {class: 'fd-hold-details'},
-      h('summary', {}, `${plural(hardHolds.length, 'approval hold')} · review details`),
+    const approvalHolds = r.holds || []; // Advisory holds also exclude bulk selection and must remain inspectable.
+    if (approvalHolds.length) body.append(h('details', {class: 'fd-hold-details'},
+      h('summary', {}, `${plural(approvalHolds.length, 'approval hold')} · review details`),
       h('p', {class: 'fd-hint'}, 'Corrections do not release approval holds. Resolve and re-check the evidence separately.'),
-      h('ul', {}, hardHolds.map(hold => h('li', {}, hold.text || hold.code)))));
+      h('ul', {}, approvalHolds.map(hold => h('li', {}, hold.text || hold.code)))));
     else { const nextStep = fdNextStep(r, st); if (nextStep) body.append(nextStep); }
     const cov = r.review.coverage || {}, dc = r.review.decisions || {};
     body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(c.detected, 'open issue')}${r.review.counts?.info ? ` (+${r.review.counts.info} for information)` : ''} · ${c.kept} kept as recorded · ${c.deferred} waiting on the source · ${c.confirmed} confirmed · ${plural(c.suggestions, 'suggestion')} · ${c.selected} selected · ${c.applied} applied in this version`));
