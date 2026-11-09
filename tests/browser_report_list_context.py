@@ -21,7 +21,9 @@ from test_vercel import FakeDatabase
 from eos_fixture import build, ROWS
 from hosting.spreadsheet_inbox import SpreadsheetInbox
 store = PostgresWorkspace('postgresql://test.invalid/synthetic', FakeDatabase().connect)
-raw = build(ROWS)
+rows = [list(r) for r in ROWS]
+rows[2][4] = 'Holes /  Glue '
+raw = build([tuple(r) for r in rows])
 with store.session() as directory:
     box = SpreadsheetInbox(directory)
     report = box.ingest('SYNTHETIC_2230_Long_Report_Name_For_Assembly_Quality_Review_2026-10-07_With_Clear_Version_Context.xlsx', raw)

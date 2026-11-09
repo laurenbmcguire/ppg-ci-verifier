@@ -38,6 +38,14 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
   await page.getByRole('button',{name:'Back to all reports',exact:true}).click();await original.waitFor({state:'visible'});await page.waitForFunction(hash=>document.activeElement?.getAttribute('data-report-hash')===hash,hash);
   assert.equal(await search.inputValue(),'Synthetic Alpha');assert.equal(await page.getByRole('button',{name:'All',exact:true}).getAttribute('aria-pressed'),'true');assert.equal(await original.evaluate(el=>document.activeElement===el),true);
   assert.match(await original.innerText(),/Last opened/);
+  await original.locator('..').locator('.queue-review').click();
+  const chooser=page.getByRole('dialog',{name:'Needs review',exact:true});await chooser.waitFor();
+  assert.match(await chooser.innerText(),/loaded review items selected/);assert.match(await chooser.innerText(),/Selection is a review scope, not approval/);
+  await chooser.getByRole('button',{name:/^Select all/}).click();assert.ok(!/^0 of/.test(await chooser.getByRole('status').innerText()),'direct entry loads actual synthetic review items');
+  await chooser.getByRole('button',{name:'Select none',exact:true}).click();assert.match(await chooser.getByRole('status').innerText(),/^0 of/);
+  await page.keyboard.press('Escape');assert.equal(await chooser.count(),0);
+  await page.getByRole('button',{name:'Back to all reports',exact:true}).click();await original.waitFor({state:'visible'});
+
   await search.fill('No matching synthetic record');assert.match(await page.locator('.queue-empty').innerText(),/No reports match/);
   await search.fill('');await page.getByRole('button',{name:'Review requested',exact:true}).click();assert.match(await page.locator('.queue-empty').innerText(),/Use To do/);
   await page.getByRole('button',{name:/^To do/}).click();assert.equal(await page.locator('.item[data-report-hash="'+'e'.repeat(64)+'"]').count(),0,'sent excluded consistently from count and rows');
