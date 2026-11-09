@@ -72,7 +72,7 @@ test('record totals do not double-count the same row across correction groups',(
  assert.equal(ctx.fdRecordCount([{key:'quantity',sheet:'A',row:7},{key:'source',sheet:'A',row:7},{key:'other',sheet:'B',row:7}]),2);
 });
 test('current backend source verdict and reassignment holds override a stored matching receipt',()=>{
- const report={file_hash:'file',checker_version:'old',review:{sharepoint:{status:'match',source_verified:true}},source_reconciliation:{bound_to:{file_hash:'file',checker_version:'old'},coverage:{complete:true},verified:true,count_reconciliation:{status:'verified'}}};
+ const report={file_hash:'file',checker_version:'old',review:{sharepoint:{status:'match',source_verified:true}},source_reconciliation:{snapshot_id:'snapshot',site_id:'site',list_id:'list',bound_to:{file_hash:'file',checker_version:'old'},coverage:{complete:true},verified:true,count_reconciliation:{status:'verified'}}};
  assert.match(comparison(report),/Match SharePoint\? Yes/);
  for(const verdict of [false,undefined]){report.review.sharepoint.source_verified=verdict;assert.match(comparison(report),/Match SharePoint\? Not verified/);}
  report.review.sharepoint.source_verified=true;report.holds=[{code:'source_assignment_changed',text:'Resolved source assignment has changed'}];
@@ -151,10 +151,10 @@ test('reachable source confirmation freezes exact scope, rejects stale clicks an
 
 test('header reports receipt matches, never parsed report rows as matched source evidence',()=>{
  const ctx=vm.createContext({});vm.runInContext(between('  function fdSourceVerified(', '  function drawReport('),ctx);
- const r={file_hash:'file',checker_version:'checker',review:{scans:13,sharepoint:{status:'incomplete',source_verified:false,matched:13}},source_reconciliation:{bound_to:{file_hash:'file',checker_version:'checker'},coverage:{complete:false},verified:false,count_reconciliation:{status:'held',record_counts:{report_rows:13,source_rows:0,matched_unique_items:0}}}};
+ const r={file_hash:'file',checker_version:'checker',review:{scans:13,sharepoint:{status:'incomplete',source_verified:false,matched:13}},source_reconciliation:{snapshot_id:'snapshot',site_id:'site',list_id:'list',bound_to:{file_hash:'file',checker_version:'checker'},coverage:{complete:false},verified:false,count_reconciliation:{status:'held',record_counts:{report_rows:13,source_rows:0,matched_unique_items:0}}}};
  assert.equal(ctx.fdSourceSummary(r),'Source comparison incomplete · 0 unique source items matched / 13 report rows in the recorded capture');
  assert.ok(!ctx.fdSourceSummary(r).includes('13 of 13'));assert.ok(!ctx.fdSourceSummary(r).includes('Source verified'));
- r.source_reconciliation.coverage.complete=true;r.source_reconciliation.verified=true;r.source_reconciliation.count_reconciliation={status:'verified',record_counts:{report_rows:13,source_rows:13,matched_unique_items:13}};r.review.sharepoint={status:'match',source_verified:true};
+ Object.assign(r.source_reconciliation,{snapshot_id:'snapshot',site_id:'site',list_id:'list'});r.source_reconciliation.coverage.complete=true;r.source_reconciliation.verified=true;r.source_reconciliation.count_reconciliation={status:'verified',record_counts:{report_rows:13,source_rows:13,matched_unique_items:13}};r.review.sharepoint={status:'match',source_verified:true};
  assert.equal(ctx.fdSourceSummary(r),'Source verified · 13 unique source items matched / 13 report rows');
  r.holds=[{code:'source_assignment_changed'}];assert.match(ctx.fdSourceSummary(r),/^Source not verified/);
  delete r.source_reconciliation.count_reconciliation;assert.match(ctx.fdSourceSummary(r),/matched count unavailable/);
@@ -175,7 +175,7 @@ test('Sources and header use the same current match-count evidence',()=>{
 test('Sources article title cannot reuse a stale match label over current holds',()=>{
  const ctx=vm.createContext({document:{createElement:t=>new Element(t)},shortDay:x=>x,when2:x=>x,readBlock:()=>new Element('div'),fdComparison:()=>new Element('details')});
  vm.runInContext(between('  const h = (','  const store =')+between('  function fdSourceVerified(', '  function drawReport(')+between('  function fdSources(', '  // switching sheets'),ctx);
- const report={file_hash:'synthetic',checker_version:'current',review:{sharepoint:{status:'match',source_verified:true}},source_reconciliation:{bound_to:{file_hash:'synthetic',checker_version:'current'},verified:true,coverage:{complete:true},count_reconciliation:{status:'verified'}}};
+ const report={file_hash:'synthetic',checker_version:'current',review:{sharepoint:{status:'match',source_verified:true}},source_reconciliation:{snapshot_id:'snapshot',site_id:'site',list_id:'list',bound_to:{file_hash:'synthetic',checker_version:'current'},verified:true,coverage:{complete:true},count_reconciliation:{status:'verified'}}};
  const title=()=>textOf(ctx.fdSources(report).children.find(x=>x.tag==='article').children[0]);
  assert.equal(title(),'SharePoint: matches item by item');
  report.holds=[{code:'source_assignment_changed',hard:true}];assert.equal(title(),'SharePoint: not verified');
@@ -194,10 +194,19 @@ test('blocker and approval-hold counts live beside sheet, not in report title',(
 });
 
 test('SharePoint verdict distinguishes identity joins from values and requires complete current evidence',()=>{
- const r={file_hash:'h',checker_version:'v',review:{sharepoint:{status:'differences',source_verified:false}},source_reconciliation:{bound_to:{file_hash:'h',checker_version:'v'},snapshot_id:'snap',site_id:'site',list_id:'list',coverage:{complete:true},rows:[{sheet:'Detail',row:3,item:'2',status:'value_differs',field:'rejected',report:'2',sharepoint:'3'}],count_reconciliation:{record_counts:{report_rows:2,source_rows:2,matched_unique_items:2}}}};
+ const r={file_hash:'h',checker_version:'v',review:{sharepoint:{status:'differences',source_verified:false}},source_reconciliation:{snapshot_id:'snapshot',site_id:'site',list_id:'list',bound_to:{file_hash:'h',checker_version:'v'},snapshot_id:'snap',site_id:'site',list_id:'list',coverage:{complete:true},rows:[{sheet:'Detail',row:3,item:'2',status:'value_differs',field:'rejected',report:'2',sharepoint:'3'}],count_reconciliation:{record_counts:{report_rows:2,source_rows:2,matched_unique_items:2}}}};
  let text=comparison(r);assert.match(text,/Match SharePoint\? No/);assert.match(text,/Detail row 3 · source item 2: value differs · rejected: report 2, SharePoint 3/);assert.doesNotMatch(text,/100%/);
  for(const patch of [{stale:true},{rows_truncated:true},{unconfirmed_rows:1},{coverage:{complete:false}},{coverage:{complete:true,timezone_unconfirmed:true}},{column_mapping:{rejected:{status:'needs_confirmation'}}},{snapshot_id:null}]){const x=structuredClone(r);Object.assign(x.source_reconciliation,patch);assert.match(comparison(x),/Match SharePoint\? Not verified/);}
  r.source_reconciliation.rows[0].report='';r.source_reconciliation.rows[0].sharepoint=0;assert.match(comparison(r),/report Blank, SharePoint 0/);
  r.source_reconciliation.rows[0].report=null;assert.match(comparison(r),/report Unknown, SharePoint 0/);
  r.holds=[{code:'source_assignment_changed'}];assert.match(comparison(r),/Match SharePoint\? Not verified/);
+});
+
+
+test('Yes and No share complete-source guards and invalid differences are explicitly earlier evidence',()=>{
+ const r={file_hash:'h',checker_version:'v',review:{sharepoint:{status:'match',source_verified:true}},source_reconciliation:{snapshot_id:'snap',site_id:'site',list_id:'list',bound_to:{file_hash:'h',checker_version:'v'},coverage:{complete:true},verified:true,count_reconciliation:{status:'verified'},rows:[]}};
+ assert.match(comparison(r),/Match SharePoint\? Yes/);
+ for(const patch of [{snapshot_id:null},{site_id:null},{list_id:null},{rows_truncated:true},{stale:true},{coverage:{complete:true,denied:1}},{coverage:{complete:true,failed_pages:[2]}},{column_mapping:{rejected:{status:'conflict'}}}]){
+  const x=structuredClone(r);Object.assign(x.source_reconciliation,patch);x.source_reconciliation.rows=[{status:'value_differs',field:'rejected',report:0,sharepoint:1}];assert.match(comparison(x),/Match SharePoint\? Not verified/);assert.match(comparison(x),/Earlier comparison, not verified/);
+ }
 });

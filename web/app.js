@@ -450,6 +450,7 @@
       const data = await fillPages(await api('/api/spreadsheet?id=' + hash));
       if (state.selected !== hash) return;
       if (state.report?.file_hash !== hash) { state.fdSummaryCache = null; state.fdView = 'review'; state.fdCur = null; state.fdTier = null; state.gridSearch = ''; state.sheetScroll = {}; state.gridOnlyMarked = false; state.gridRow = null; document.body.classList.remove('fd-panel-open'); }
+      state.fdSummaryCache = null;
       state.report = data; state.fixes = null; state.showAll = false;
       const top = report.scrollTop;
       drawReport();
@@ -926,13 +927,13 @@
     const eligible = fdRecommended(), open = fdItems().filter(it => ['open', 'selected'].includes(it.state));
     const ignorable = open.filter(it => it.fp && it.state === 'open');
     const busy = state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation;
-    let requested = state.fdSummaryCache?.key === JSON.stringify(binding);
+    let requested = state.fdSummaryCache?.report === r && state.fdSummaryCache?.key === JSON.stringify(binding) && state.fdSummaryCache?.context === fdSummaryContext(r);
     owner.append(h('summary', {onclick: () => {
       if (!owner.open && !requested && state.aiOn && !state.aiProposalOperation && !state.busy && !state.rechecking && !state.decisionPending) {
         requested = true;
         queueMicrotask(() => { if (current() && owner.isConnected) owner.querySelector('.fd-summary-request')?.click(); });
       }
-    }}, 'AI Summary of Errors'),
+    }}, 'AI Summary of Errors', h('small', {class: 'fd-summary-disclosure'}, requested ? 'Open saved summary for this review' : state.aiOn ? 'Click to generate with Claude using finding-group metadata' : 'AI is off; open recorded findings and review actions')),
       fdSummaryPanel(r, binding, owner, current),
       h('p', {class: 'fd-hint'}, `${eligible.length} eligible proposed cell changes available. Accept All opens a before/after preview; remove any change there and confirm Apply to create a new version.`),
       !eligible.length ? h('p', {}, 'No eligible proposed changes are available. Review individual findings and the reasons preventing changes below.') : null,
@@ -1000,7 +1001,12 @@
         h('ul', {class: 'fd-summary-scroll', tabindex: '0', 'aria-label': 'Read-only recorded finding groups'}, groups.map(group => h('li', {},
           h('b', {}, `${group.code}: ${group.count}`), ` · ${group.severity} · ${group.source} · ${group.state}. ${group.ids.filter(id => loadedKeys.has(id)).length} of ${group.count} identities loaded.`)))));
   }
+  function fdSummaryContext(report) {
+    return JSON.stringify({assignment: report.assignment, holds: report.holds, source: report.source_reconciliation,
+      sharepoint: report.review?.sharepoint, coverage: report.review?.coverage, page: report.review?.page});
+  }
   function fdSummaryPanel(report, binding, owner, current) {
+    const context = fdSummaryContext(report), stillCurrent = () => current() && fdSummaryContext(report) === context;
     const issues = [...new Map([...allIssues(report.review), ...(report.review.dismissed || [])].map(i => [i.key, i])).values()];
     const incomplete = report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed;
     const counts = ['high', 'medium', 'low', 'info'].map(severity => `${issues.filter(i => i.severity === severity).length} ${severity === 'high' ? 'high severity' : severity === 'info' ? 'informational' : severity}`).join(' · ');
@@ -1010,12 +1016,12 @@
           h('p', {class: 'fd-coverage'}, answer.coverage.label), h('p', {}, answer.narrative_notice), answer.reply ? h('details', {open: true}, h('summary', {}, 'Read AI explanation'), h('p', {class: 'fd-summary-text fd-summary-scroll', tabindex: '0', 'aria-label': 'AI explanation text'}, answer.reply)) : null, h('p', {class: 'fd-hint'}, answer.notice),
           h('p', {class: 'fd-hint'}, 'AI text is not verification or approval. Use the recorded groups below to request AI proposals, fix manually, or ignore with a reason. Only previewed changes can be applied.'));
     };
-    if (state.fdSummaryCache?.key === JSON.stringify(binding)) {
+    if (state.fdSummaryCache?.report === report && state.fdSummaryCache?.context === context && state.fdSummaryCache?.key === JSON.stringify(binding)) {
       const answer = state.fdSummaryCache.answer;
       renderAnswer(answer, fdSummaryInventory(answer, new Set(issues.map(i => i.key))));
     }
     const button = h('button', {type: 'button', class: 'btn fd-summary-request', disabled: !state.aiOn, onclick: async () => {
-      if (!current() || !state.aiOn || state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending) return;
+      if (!stillCurrent() || !state.aiOn || state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending) return;
       if ([...document.querySelectorAll('#side input:not([type=checkbox]):not([type=radio]), #side textarea, .fd-review-dialog input:not([type=checkbox]), .fd-review-dialog textarea')].some(node => node.value !== node.defaultValue)) {
         toast('Finish or save your typed draft before asking for a summary. Your text is unchanged.', true); return;
       }
@@ -1025,7 +1031,7 @@
         state.aiProposalOperation = null;
         if (!state.busy && !state.rechecking && !state.decisionPending) controls.forEach((disabled, node) => { if (node.isConnected) node.disabled = disabled; });
       }, lock: () => {
-        if (!current()) { operation.cancel(); return; }
+        if (!stillCurrent()) { operation.cancel(); return; }
         document.querySelectorAll('#side button, #side input, #side textarea, #side select, #fd-preview-btn, .fd-mode-selector button, .fd-review-dialog button, .fd-review-dialog input, .fd-review-dialog textarea, dialog .primary').forEach(node => {
           if (node.dataset?.aiCancel === 'true') return;
           if (!controls.has(node)) controls.set(node, node.disabled);
@@ -1034,17 +1040,17 @@
       }};
       state.aiProposalOperation = operation; operation.lock();
       output.replaceChildren(h('p', {role: 'status'}, 'Summarizing the available findings for this exact report version. No changes are being made.'));
-      const active = () => state.aiProposalOperation === operation && current() && owner.isConnected;
+      const active = () => state.aiProposalOperation === operation && stillCurrent() && owner.isConnected;
       try {
         const answer = await api('/api/spreadsheets/review-summary', {scope: 'available_findings', file_hash: binding.file_hash,
           expected_check_hash: binding.expected_check_hash, expected_rev: binding.expected_rev, run: binding.expected_run});
-        if (!active()) { if (owner.isConnected && !current()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); return; }
+        if (!active()) { if (owner.isConnected && !stillCurrent()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); return; }
         if (!answer || answer.read_only !== true || answer.file_hash !== binding.file_hash || answer.check_hash !== binding.expected_check_hash ||
             answer.expected_rev !== binding.expected_rev || JSON.stringify(answer.run) !== JSON.stringify(binding.expected_run) || typeof answer.reply !== 'string' || typeof answer.notice !== 'string' || typeof answer.coverage?.label !== 'string' || typeof answer.narrative_notice !== 'string') throw new Error('The summary did not match the current report review. Reload before trying again.');
         const inventory = fdSummaryInventory(answer, new Set(issues.map(i => i.key)));
-        state.fdSummaryCache = {key: JSON.stringify(binding), answer};
+        state.fdSummaryCache = {key: JSON.stringify(binding), context, report, answer};
         renderAnswer(answer, inventory);
-      } catch (error) { if (active()) output.replaceChildren(h('p', {role: 'alert'}, `Summary unavailable: ${error.message}. The recorded findings and actions below are unchanged.`)); else if (owner.isConnected && !current()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); }
+      } catch (error) { if (active()) output.replaceChildren(h('p', {role: 'alert'}, `Summary unavailable: ${error.message}. The recorded findings and actions below are unchanged.`)); else if (owner.isConnected && !stillCurrent()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); }
       finally { operation.cancel(); }
     }}, state.aiOn ? 'Ask AI to summarize available findings' : 'AI summary unavailable: AI is off');
     return h('section', {class: 'fd-review-summary', 'aria-label': 'Findings summary'}, h('h3', {}, 'Findings summary'),
@@ -1325,10 +1331,18 @@
     return findings || holds ? [findings ? plural(findings, 'blocker') : null, holds ? plural(holds, 'approval hold') : null].filter(Boolean).join(' · ') : st.text;
   }
   function fdSourceVerified(r) {
-    const rec = r.source_reconciliation || {}, sp = r.review?.sharepoint || {}, bound = rec.bound_to || {};
-    return sp.source_verified === true && sp.status === 'match' && rec.verified === true && rec.coverage?.complete === true &&
-      rec.count_reconciliation?.status === 'verified' && !rec.rows_truncated && !rec.coverage?.timezone_unconfirmed && !rec.coverage?.truncated && !rec.unidentified_rows && !rec.unconfirmed_rows && !(r.assignment || {}).needs_person && !rec.stale && bound.file_hash === r.file_hash &&
-      !!bound.checker_version && bound.checker_version === r.checker_version && !(r.holds || []).some(hold => String(hold.code || '').startsWith('source_'));
+    const rec = r.source_reconciliation || {}, sp = r.review?.sharepoint || {};
+    return fdSourceComplete(r) && sp.source_verified === true && sp.status === 'match' && rec.verified === true &&
+      rec.count_reconciliation?.status === 'verified' && !(r.holds || []).some(hold => String(hold.code || '').startsWith('source_'));
+  }
+  function fdSourceComplete(r) {
+    const rec = r.source_reconciliation || {}, bound = rec.bound_to || {}, cov = rec.coverage || {};
+    return !rec.stale && bound.file_hash === r.file_hash && !!bound.checker_version && bound.checker_version === r.checker_version &&
+      cov.complete === true && !rec.rows_truncated && !rec.unidentified_rows && !rec.unconfirmed_rows && !(r.assignment || {}).needs_person &&
+      !!rec.snapshot_id && !!rec.site_id && !!(rec.list_id || rec.list?.id) &&
+      !cov.timezone_unconfirmed && !cov.truncated && !cov.denied && !cov.throttled && !(cov.failed_pages || []).length &&
+      !Object.values(rec.column_mapping || {}).some(mapping => ['needs_confirmation', 'conflict'].includes(mapping.status)) &&
+      !(r.holds || []).some(hold => String(hold.code || '').startsWith('source_') && /mapping|timezone|identity|incomplete|stale|assignment/.test(hold.code));
   }
   function fdSourceSummary(r) {
     const rec = r.source_reconciliation || {}, sp = r.review?.sharepoint || {}, counts = rec.count_reconciliation?.record_counts;
@@ -1482,7 +1496,7 @@
     body.append(h('div', {class: 'fd-groups'}, tierGroups.map(g => {
       const selectable = g.items.filter(x => x.selectable && x.state === 'open' && (x.evidence === 'source' || x.evidence === 'mechanical'));
       return h('section', {class: 'fd-group' + (cur && cur.group === g.key ? ' cur' : '')},
-        h('button', {type: 'button', class: 'fd-grouphead', 'aria-expanded': String(!!cur && cur.group === g.key), onclick: () => fdOpen(g.items.find(x => x.state === 'open') || g.items[0])},
+        h('button', {type: 'button', class: 'fd-grouphead', 'aria-expanded': String(!!cur && cur.group === g.key), onclick: () => fdReviewDialog(g.items, null, g.title)},
           h('span', {class: 'fd-gtitle'}, g.unresolved ? '' : icon('ok', 14), g.unresolved ? '' : ' ', g.title),
           h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'item')} · ${plural(g.records, 'record')}${g.unresolved ? ` · ${g.unresolved} unresolved` : ''}`)),
         fdDirectControls(g.items), fdOccurrenceList(g),
@@ -2144,16 +2158,11 @@
     const sourceHolds = (r.holds || []).filter(hold => String(hold.code || '').startsWith('source_'));
     const verified = fdSourceVerified(r);
     const differences = (rec.rows || []).filter(row => row.status && row.status !== 'matched');
-    const complete = current && rec.coverage?.complete === true && !rec.rows_truncated &&
-      !rec.unidentified_rows && !rec.unconfirmed_rows && !(r.assignment || {}).needs_person &&
-      !!rec.snapshot_id && !!rec.site_id && !!(rec.list_id || rec.list?.id) &&
-      !rec.coverage?.timezone_unconfirmed && !rec.coverage?.truncated && !rec.coverage?.denied && !rec.coverage?.throttled && !(rec.coverage?.failed_pages || []).length &&
-      !Object.values(rec.column_mapping || {}).some(mapping => ['needs_confirmation', 'conflict'].includes(mapping.status)) &&
-      !sourceHolds.some(hold => /mapping|timezone|identity|incomplete|stale|assignment/.test(hold.code || ''));
+    const complete = fdSourceComplete(r);
     const differs = complete && sp.status === 'differences' && differences.length > 0;
     return h('details', {class: 'fd-comparison'},
       h('summary', {}, `Match SharePoint? ${verified ? 'Yes' : differs ? 'No' : 'Not verified'}`),
-      differences.length ? h('section', {}, h('h3', {}, `${differences.length} recorded differences${rec.rows_truncated ? ' shown (incomplete)' : ''}`),
+      differences.length ? h('section', {}, h('h3', {}, `${differs ? 'Current comparison' : 'Earlier comparison, not verified'} · ${differences.length} recorded differences${rec.rows_truncated ? ' shown (incomplete)' : ''}`),
         h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Recorded differences'}, differences.map(row => h('li', {}, `${row.sheet || 'Report'}${row.row ? ' row ' + row.row : ''}${row.item != null ? ' · source item ' + row.item : ''}: ${String(row.status).replaceAll('_', ' ')}${row.field ? ' · ' + row.field + ': report ' + value(row.report) + ', SharePoint ' + value(row.sharepoint) : ''}${row.note ? ' · ' + row.note : ''}`)))) : null,
       !verified ? h('p', {class: 'fd-coverage', role: 'note'}, sp.message || 'Current exact-source verification is unavailable. Stored totals do not establish client readiness.') : null,
       sourceHolds.length ? h('ul', {class: 'fd-coverage'}, sourceHolds.map(hold => h('li', {}, hold.text || hold.code))) : null,
