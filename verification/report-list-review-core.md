@@ -42,3 +42,11 @@ A separate Ask Dex owner confirmed a passive AI_LAYOUT path in report parsing/pr
 The existing sticky chooser implementation was exercised directly in headless Chromium at 1200×850 and 390×850 using 31 fabricated items with two distinct error codes. After scrolling the modal to its last group (173px desktop, 857px phone), the selected count and all seven actions were visible and hit-testable within the viewport. A direct mouse-coordinate click on Select none, without locator auto-scrolling, cleared the selection. Error-type/group/individual and cross-page selection, blocker evidence guarding, exact preview capture, manual scope, stale-binding rejection and Escape/focus also passed. No runtime change was needed for this check.
 
 This remains a standalone production-chooser/synthetic-action test, not an integrated provider or persisted decision test. Final combined own-decision/manual/AI route verification remains pending the final integration and applicable sharing approval.
+
+## Actual-handler keep, defer and manual correction
+
+`tests/browser_review_choices_full_app.py` passed at 1200×900 and 390×900 against the complete app and real HTTP handlers backed only by an isolated fake workspace. The browser selects one finding to keep, records its reason, selects a second to defer to a named synthetic source owner, then separately selects one manual correction in another fabricated report. Preview cancellation saves nothing. Explicit Apply creates revision 2 with exactly one changed cell.
+
+The wrapper verifies both recorded decision IDs/actions, the remaining awaiting-source-owner hold, original workbook byte identity, one corrected copy, every other cell/formula unchanged, and no approval/send. Mutating requests are restricted to those exact fabricated findings and the named synthetic cell. All non-loopback network requests and other provider/write routes are denied. Logs: report-choices-full-app-1200.txt and report-choices-full-app-390.txt beside the worktree.
+
+Local Ask Dex and selected-proposal backend integration subsequently proceeded under explicit approval for relevant selected-report context to Claude/Anthropic. The privacy/context-minimization follow-up, scoped AI UI and final aggregate are still required before publication; this test did not call a provider.
