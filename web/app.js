@@ -1017,6 +1017,10 @@
       ...(report.holds || []).map(hold => h('p', {class: 'fd-coverage'}, hold.text || hold.code)),
       h('p', {class: 'fd-hint'}, 'On request, Claude receives bounded finding-group metadata for this report only, not workbook contents or unrelated reports. AI summarizes; it cannot apply changes or ignore findings.'), button, output);
   }
+  function fdManualCellHeld(items, sheet, row, cell) {
+    return items.some(other => other.sheet === sheet && (other.cell === cell || !other.cell && other.row === row) &&
+      (fdConflict(other) || ['kept', 'deferred', 'rejected', 'kept_earlier'].includes(other.state)));
+  }
   // A review scope is separate from the correction basket. Opening/selecting never writes data.
   function fdReviewDialog(initialScope = null, initialAction = null) {
     if (!state.report || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation) return;
@@ -1127,8 +1131,7 @@
           const row = rows.get(key);
           const candidates = row.sheet === it.sheet && Array.isArray(row.cells) ? row.cells.filter(c => it.cell ? c.cell === it.cell : true) : [];
           const editable = candidates.filter(c => !c.formula && typeof c.before === 'string' && splitCell(c.cell)?.[1] === it.row &&
-            !items.some(other => other.sheet === it.sheet && (other.cell === c.cell || !other.cell && other.row === it.row) &&
-              (fdConflict(other) || !['open', 'selected', 'confirmed'].includes(other.state))));
+            !fdManualCellHeld(items, it.sheet, it.row, c.cell));
           if (editable.length < candidates.length) unavailable.push(`${it.sheet} row ${it.row}: ${candidates.length - editable.length} protected, formula, or previously decided cells are not editable here.`);
           if (!editable.length) throw new Error('Cell is unavailable or is a protected formula');
           for (const cell of editable) cells.set(editId(it.sheet, cell.cell), {it: {...it, cell: cell.cell}, cell, rowContext: !it.cell});
