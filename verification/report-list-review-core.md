@@ -28,3 +28,11 @@ This is not an integrated AI or release acceptance result. Ask Dex and selected-
 No live report, live source, provider request, user browser, remote push or deployment was exercised by these checks. No PostgreSQL aggregate was run at this stage. Two provisional full Python invocations used the wrong macOS temporary-directory/auth fixture environment and hit inherited path/auth guards; they are retained as failed test setup runs, not a product regression result. Run the full aggregate once the integrated candidate is frozen using the established sanitized HOME/TMPDIR/CI_LOCAL_DEV/VERCEL configuration and separately coordinated disposable PostgreSQL fixture.
 
 The independent visual review accepted the synthetic list readability at 1200/390. Final integrated usability review and code review remain required after any later integration.
+
+## Post-snapshot attention-badge alignment
+
+After the immutable 321c996 runtime review snapshot, a narrow follow-up changes only the client-tab/sidebar attention-count predicate to reuse `queueNeedsAttention`, exactly as To do does. Source/client uncertainty, missing reviews and incomplete finding coverage now count consistently; sent items and auto-hidden originals remain excluded. The original snapshot attribution above is unchanged.
+
+A synthetic production-function test exercises both tab and sidebar badges for two clients plus Needs client, including source incomplete/stale, ambiguous/missing client, missing review, missing coverage, sent/clear/hidden records, and badge clearing after resolution. Eight list tests and all 113 Node UI tests passed; JavaScript syntax and diff-whitespace checks passed. No provider or report writes were invoked.
+
+A separate Ask Dex owner confirmed a passive AI_LAYOUT path in report parsing/proposal preparation and is gating it independently with a default-off explicit parser permission. That privacy change is not integrated or verified in this branch. The final combined aggregate must include the passive-open/fixes/record-extraction no-provider regression, with provider configuration present in synthetic fakes, before release. No Ask Dex or selected-AI feature wiring was added by this badge follow-up.

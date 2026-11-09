@@ -87,7 +87,7 @@
     const cl = state.clients || [];
     bar.hidden = !cl.length; if (rail) rail.hidden = !cl.length; if (!cl.length) return;
     const ofKey = (r, key) => key === '' || (key === '_none' ? !clientOfReport(r) : clientOfReport(r) === key);
-    const need = key => visibleList().filter(r => ofKey(r, key) && r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
+    const need = key => visibleList().filter(r => ofKey(r, key) && queueNeedsAttention(r)).length;
     const go = key => { location.hash = key ? 'c=' + encodeURIComponent(key) : ''; };
     const tab = (key, label, title) => { const n = need(key);
       return h('button', {type: 'button', role: 'tab', class: state.client === key ? 'on' : '', 'aria-selected': String(state.client === key), title: title || null, onclick: () => go(key)},

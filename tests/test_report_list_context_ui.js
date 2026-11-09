@@ -10,3 +10,28 @@ test('missing review and incomplete or stale checks cannot be clear or omitted f
 test('version labels reject zero and malformed versions',()=>{for(const value of [null,0,-1,'oops','2',true])assert.equal(ctx.queueVersion(value),'unknown');assert.equal(ctx.queueVersion(2),'2');});
 test('search includes confirmed client, source, date, version and exact identity',()=>{const r={...row,version:2,review:{...row.review,day:'2026-11-06',sharepoint:{source:'Synthetic Source'}},assignment:{client:'Synthetic Client',status:'manual'}};for(const q of ['synthetic client','2026-11-06','synthetic source','v2'])assert.ok(ctx.queueSearch(r).includes(q));});
 test('separate review control and inventory coverage disclosure are present',()=>{assert.ok(source.includes("state.listPartial = data.has_more === true"));assert.ok(source.includes("class: 'queue-entry'"));assert.ok(source.includes("state.openReviewFor = r.file_hash"));assert.ok(source.includes("'aria-pressed'"));assert.ok(!source.includes("dayOf = r => r.review?.day || (r.received_at"));});
+
+test('client tab and rail attention badges use exactly the To do predicate and visible inventory',()=>{
+ const clear={status:'clear',job:'SYNTHETIC-1234',day:'2026-11-06',sharepoint:{status:'match'}};
+ const make=(id,key,review={})=>({file_hash:id,filename:'Synthetic '+id+'.xlsx',assignment:{status:'manual',client_key:key,client:key},review:{...clear,...review}});
+ const list=[make('source-incomplete','alpha',{sharepoint:{status:'incomplete'}}),make('source-stale','beta',{sharepoint:{status:'stale'}}),
+  {...make('client-ambiguous','alpha'),assignment:{status:'ambiguous'}},{...make('review-missing','alpha'),review:null},
+  make('already-sent','beta',{status:'hold',sharepoint:{status:'error'},sent_at:'2026-11-07'}),make('clear','alpha'),
+  make('hidden-original','alpha',{status:'hold'}),make('cleaned-copy','alpha',{auto_hidden:['hidden-original']}),
+  {...make('client-unknown','alpha'),assignment:null},make('coverage-incomplete','beta',{coverage:{truncated:true}})];
+ const bar={replaceChildren(...children){this.children=children;}},rail={replaceChildren(...children){this.children=children;}};
+ const state={list,client:'',clients:[{key:'alpha',client:'Alpha',sites:[],jobs:[]},{key:'beta',client:'Beta',sites:[],jobs:[]}]};
+ const context=vm.createContext({state,location:{hash:''},$:id=>id==='clienttabs'?bar:rail,h:(tag,attrs,...children)=>({tag,attrs,children:children.flat()})});
+ const section=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
+ vm.runInContext(section('  const SETTLED =','  const inClientR')+section('  const visibleList =','  function queueClient(')+section('  function drawClientTabs()','  // ---------------------------------------------------------------- queue')+'\nObject.assign(globalThis,{visibleList,queueNeedsAttention});drawClientTabs();',context);
+ const badge=node=>Number(node.children.find(child=>child?.tag==='i')?.children[0]||0);
+ const tabs=Object.fromEntries(bar.children.map(node=>[node.children[0],badge(node)]));
+ const rails=Object.fromEntries(rail.children.filter(node=>node.tag==='a').map(node=>[node.children.find(child=>child?.tag==='span').children[0],badge(node)]));
+ assert.deepEqual(tabs,{'All clients':6,Alpha:2,Beta:2,'Needs client':2});
+ assert.deepEqual(rails,{Alpha:2,Beta:2,'Needs client':2});
+ assert.equal(tabs['All clients'],context.visibleList().filter(context.queueNeedsAttention).length);
+ // A badge must clear when its only review needs are resolved, without treating sent/hidden rows as work.
+ list[0].review.sharepoint.status='match';list[3].review={...clear};context.drawClientTabs();
+ assert.equal(badge(bar.children.find(node=>node.children[0]==='Alpha')),0);
+ assert.equal(badge(rail.children.find(node=>node.tag==='a'&&node.children[0].children[0]==='Alpha')),0);
+});
