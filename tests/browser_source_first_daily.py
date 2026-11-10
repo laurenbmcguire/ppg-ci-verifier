@@ -52,6 +52,11 @@ with tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{'CI_LOCAL_DEV'
         assert len(calls)==1
         for width,height,label in ((1440,1000,'desktop-1440'),(1200,1000,'desktop-1200'),(390,844,'mobile')):
             page.set_viewport_size({'width':width,'height':height})
+            checkbox=page.get_by_role('checkbox')
+            bounds=checkbox.bounding_box()
+            assert bounds['width']>=20 and bounds['height']>=20,(label,bounds)
+            checkbox.click();assert checkbox.is_checked(),label
+            checkbox.click();assert not checkbox.is_checked(),label
             page.screenshot(path=str(out/('browser-'+label+'.png')),full_page=True)
             assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth + 1'), label
         # Lose a capture response after the server actually committed it.
