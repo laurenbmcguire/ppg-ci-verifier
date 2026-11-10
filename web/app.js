@@ -955,6 +955,18 @@
     }; setTimeout(attempt, 0); }
     owner.append(h('summary', {}, 'Quick summary', h('small', {class: 'fd-summary-disclosure'}, state.aiOn ? 'by Dex' : 'AI is off')),
       fdSummaryPanel(r, binding, owner, current, true),
+      (() => {
+        const all = state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)) : [];
+        if (!all.length) return null;
+        const ai = all.filter(fdCanAI), off = busy || state.fdAIRun?.running;
+        return h('div', {class: 'fd-fixall'},
+          h('p', {class: 'fd-fixall-q'}, `What would you like to do with ${all.length === 1 ? 'this possible error' : `these ${all.length} possible errors`}?`),
+          h('div', {class: 'fd-cardacts'},
+            h('button', {type: 'button', class: 'btn primary', id: 'fd-fix-everything', disabled: off || !ai.length || null, onclick: () => { if (current()) fdAIFixNow(all); }}, 'Fix everything with AI'),
+            h('button', {type: 'button', class: 'btn', id: 'fd-fix-all-manual', disabled: off || null, onclick: () => { if (current()) fdManualStart(all); }}, 'Fix manually'),
+            h('button', {type: 'button', class: 'btn', id: 'fd-ignore-all', disabled: off || null, onclick: () => { if (current()) fdReviewDialog(all, 'ignore'); }}, 'Ignore possible errors')),
+          h('p', {class: 'fd-hint'}, ai.length ? 'Dex fixes every error it can in one go, saves a new version and shows you what changed. The original is kept.' : state.aiOn ? 'Dex has no safe fix for these. Fix them manually or ignore them.' : 'AI is off. Fix these manually or ignore them.'));
+      })(),
       h('div', {class: 'fd-cardacts', hidden: true},
         h('button', {type: 'button', class: 'btn', disabled: busy || !eligible.length, onclick: () => { if (current()) fdPreviewRecommended(binding); }}, `Accept All · ${eligible.length} proposed changes`),
         h('button', {type: 'button', class: 'btn', disabled: busy, onclick: () => { if (current()) fdReviewDialog(open, 'manual'); }}, 'Manually Edit'),
@@ -1611,7 +1623,7 @@
         h('label', {class: 'fd-tickall'}, allBox, ` Select all ${plural(fixable.length, 'error')}`),
         h('p', {class: 'fd-tickcount', role: 'status'}, ticked.length ? `${ticked.length} selected` : 'Tick the errors to fix, or select all.'),
         h('div', {class: 'fd-cardacts'},
-          h('button', {type: 'button', class: 'btn primary', disabled: busyNow || !state.aiOn || !ticked.some(it => it.fp && it.state === 'open') || null, onclick: () => fdAIFixNow(fdPicked(fixable))}, 'AI fix'),
+          h('button', {type: 'button', class: 'btn primary', disabled: busyNow || !ticked.some(fdCanAI) || null, onclick: () => fdAIFixNow(fdPicked(fixable))}, 'AI fix'),
           h('button', {type: 'button', class: 'btn', disabled: busyNow || !ticked.length || null, onclick: () => fdManualStart(fdPicked(fixable))}, 'Fix manually'),
           h('button', {type: 'button', class: 'btn', disabled: busyNow || !ticked.length || null, onclick: () => fdReviewDialog(fdPicked(fixable), 'ignore')}, 'Ignore'))));
     }
@@ -1660,11 +1672,14 @@
   }
   // AI fix: Dex fixes every selected error it can and saves a new version (the earlier one is kept).
   // The report reloads on the new version, so fixed errors drop off and only what is left stays listed.
+  const fdReadyFix = it => it.fix && it.selectable && ['open', 'selected'].includes(it.state) && (it.evidence === 'source' || (!it.fp && ['mechanical', 'ai'].includes(it.evidence))) ? it.fix : null;
+  const fdCanAI = it => !!fdReadyFix(it) || !!(it.fp && it.state === 'open' && state.aiOn);
   async function fdAIFixNow(scope) {
     const report = state.report; if (!report) return;
-    if (!state.aiOn) { toast('AI fix is off.', true); return; }
     const binding = reviewBinding(report), hash = report.file_hash;
-    const todo = scope.filter(it => it.fp && it.state === 'open');
+    // Errors that already have a checked answer (SharePoint's own value, or a clean-up with no open question) are applied as they are;
+    // Dex is only asked about the rest, and never guesses a value it cannot know.
+    const todo = scope.filter(fdCanAI), ready = todo.filter(fdReadyFix), ask = todo.filter(it => !fdReadyFix(it));
     if (!todo.length) { toast('Dex can only fix errors that are still open. Fix these manually or ignore them.', true); return; }
     document.querySelectorAll('dialog.fd-review-dialog[open]').forEach(d => d.close());
     state.fdAIRun = {hash, total: todo.length, running: true}; drawSide();
@@ -1672,21 +1687,24 @@
     const proposals = [], skipped = [];
     try {
       if (state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || state.report !== report) throw new Error('Another step is still running. Try again in a moment.');
-      for (let i = 0; i < todo.length; i += 120) {
-        const chunk = todo.slice(i, i + 120);
+      for (const it of ready) proposals.push({...it.fix, finding_id: it.key, after: it.proposed ?? it.fix.after});
+      for (let i = 0; i < ask.length; i += 120) {
+        const chunk = ask.slice(i, i + 120);
         const answer = await new Promise(resolve => {
           fdPrepareAI(chunk, binding, {owner: document.body, active: () => state.report === report, pending: () => {}, failure: error => resolve({error}), success: a => resolve(a)}).then(() => resolve(null));
         });
-        if (!answer) throw new Error('Dex could not start. Nothing was changed.');
-        if (answer.error) throw answer.error;
+        if (!answer || answer.error) {
+          if (!ready.length) throw answer?.error || new Error('Dex could not start. Nothing was changed.');
+          skipped.push(...ask.slice(i).map(it => ({finding_id: it.key, reason: 'Dex could not be reached for this one. Try AI fix again.'}))); break;   // still apply the checked fixes
+        }
         proposals.push(...answer.proposals); skipped.push(...(answer.skipped || []));
       }
       const cells = new Set(), accepted = proposals.filter(p => { const k = p.sheet + '!' + p.cell; if (cells.has(k)) return false; cells.add(k); return true; });
       const why = new Map(skipped.map(x => [x.finding_id, String(x.reason || '')]));
-      const fixedIds = new Set(accepted.map(p => p.finding_id));
-      const unfixed = todo.filter(it => !fixedIds.has(it.key)).map(it => ({key: it.key, where: [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ') || 'Whole report',
-        text: it.text || it.reason || '', now: it.report, reason: why.get(it.key) || ''}));
-      if (!accepted.length) { state.fdAIRun = {hash, done: true, fixed: 0, confirmed: 0, tried: todo.length, skipped, unfixed, items: []};
+      const fixedIds = new Set(scope.filter(it => it.cell && cells.has(it.sheet + '!' + it.cell)).map(it => it.key).concat(accepted.map(p => p.finding_id)));
+      const unfixed = scope.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state) && !fixedIds.has(it.key)).map(it => ({key: it.key, where: [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ') || 'Whole report',
+        text: it.text || it.reason || '', now: it.report, reason: why.get(it.key) || (todo.includes(it) ? '' : 'This one already has a decision on it.')}));
+      if (!accepted.length) { state.fdAIRun = {hash, done: true, fixed: 0, confirmed: 0, tried: scope.length, skipped, unfixed, items: []};
         document.body.classList.add('fd-panel-open'); fdAIDoneDialog(state.fdAIRun, report); return; }
       const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
       const capture = captureCorrections(accepted, dec, {}, binding, report);
@@ -1701,7 +1719,7 @@
       const saved = state.report?.file_hash === next ? (state.report.fixed_from?.changes || []) : [];
       const has = p => saved.some(c => c.sheet === p.sheet && c.cell === p.cell && String(c.after) === String(p.after));
       const confirmed = accepted.filter(has).length;
-      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed, tried: todo.length, skipped, unfixed, from: revisionOf(report), items: done};
+      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed, tried: scope.length, skipped, unfixed, from: revisionOf(report), items: done};
       document.body.classList.add('fd-panel-open');
       fdAIDoneDialog(state.fdAIRun, state.report?.file_hash === next ? state.report : null);
     } catch (e) { state.fdAIRun = {hash, done: true, error: e?.message || String(e)}; toast('AI fix did not finish: ' + state.fdAIRun.error, true); }
