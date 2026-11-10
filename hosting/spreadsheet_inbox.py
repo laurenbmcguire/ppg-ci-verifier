@@ -1518,7 +1518,7 @@ class SpreadsheetInbox:
             result=dict(result, internal_check_status='outdated_checks_require_recheck',
                         recheck=dict(available=True, checked_with=result.get('checker_version'), current=CHECKER_VERSION))
         return result
-    RECHECK_KEEP = ('approval','sent','fixes_applied','fixed_from','review_request','source_document','accepted_issues','auto_formatting','ai_fixed',
+    RECHECK_KEEP = ('approval','sent','send_pending','send_in_progress','fixes_applied','fixed_from','review_request','source_document','accepted_issues','auto_formatting','ai_fixed',
                     'source_reconciliation','approval_withdrawn','recheck_applied','review_decisions','review_decision_log','revision','root_hash',
                     'finding_decisions','finding_decision_log','finding_decisions_rev','finding_requests')
     def _fresh_checks(self, file_hash):
@@ -1571,6 +1571,10 @@ class SpreadsheetInbox:
             from_check=current.get('check_hash'), changes=(proposal or {}).get('changes'))]
         with self.connect() as db:
             self._begin(db, file_hash)
+            original, _ = self._original(db, file_hash)
+            locked = self.latest(db, file_hash, original)
+            if locked.get('check_hash') != current.get('check_hash'):
+                raise ValueError('This report changed while the new checks were prepared. No checks were applied; reload and review again.')
             saved = self.save_check(db, fresh)
         previous = current.get('sharepoint') or {}
         if previous.get('status') in ('match','differences') and previous.get('source_sha256') and not current.get('source_reconciliation'):
@@ -1604,6 +1608,13 @@ class SpreadsheetInbox:
             if hashlib.sha256(raw).hexdigest()!=file_hash:raise ValueError('Stored original integrity mismatch.')
             result=reconcile_result(inspect_spreadsheet(original['filename'],raw),source)
             latest=self.latest(db,file_hash,original)
+            # Legacy source reconciliation rechecks the immutable workbook, not its
+            # workflow. Never erase approvals, sends or correction ancestry when
+            # appending new evidence to an exact historical version.
+            result.update({k: latest[k] for k in self.RECHECK_KEEP if k in latest})
+            if result.get('source_reconciliation'):
+                result['source_reconciliation'] = dict(result['source_reconciliation'], stale=True,
+                    stale_reason='Separate source evidence was applied; reconcile the exact assigned source again.')
             if latest.get('source_sha256') and latest['source_sha256']!=result['source_sha256']:
                 if not result.get('source_captured_at') or not latest.get('source_captured_at'):
                     raise ValueError('Different source revisions cannot be ordered without established capture times. Current evidence was not replaced.')

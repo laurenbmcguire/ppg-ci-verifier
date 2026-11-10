@@ -140,6 +140,45 @@ class WorkingCopyTests(unittest.TestCase):
             graph.items[self.c] = result
             self.assertEqual(graph.resolve(self.a)['read_only_reason'], reason)
 
+class HistoricalEvidenceSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.box = SpreadsheetInbox(self.temp.name)
+        from test_branded_reports import raw
+        self.a = self.box.ingest('historical.xlsx', raw())['file_hash']
+
+    def test_legacy_reconciliation_preserves_exact_workflow_and_bytes(self):
+        from test_branded_reports import source
+        state = dict(approval={'by': 'Synthetic'}, sent=[{'sent': True}],
+            send_pending={'token': 'synthetic'}, send_in_progress=True,
+            fixed_from={'file_hash': 'a'*64}, fixes_applied=[{'fixed_file_hash': 'b'*64}],
+            revision=3, root_hash='a'*64)
+        self.box._update(self.a, lambda r: r.update(state))
+        before = self.box.download(self.a)[1]
+        result = self.box.reconcile(self.a, source())
+        for key, value in state.items():
+            self.assertEqual(result[key], value, key)
+        self.assertEqual(self.box.download(self.a)[1], before)
+        with self.assertRaisesRegex(ValueError, 'sent'):
+            self.box.apply_fixes(self.a, [dict(sheet='Summary',cell='D13',before='Synthetic-Job',after='Changed',source='Your edit',kind='text')], expected_check_hash=result['check_hash'])
+
+    def test_recheck_rejects_concurrent_workflow_change(self):
+        original = self.box._fresh_checks
+        def race(key):
+            current, fresh = original(key)
+            self.box._update(key, lambda r: r.update(approval={'by':'Concurrent reviewer'}))
+            return current, fresh
+        with patch.object(self.box, '_fresh_checks', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'changed while'):
+                self.box.apply_recheck(self.a, 'Synthetic')
+        self.assertEqual(self.box.get(self.a)['approval']['by'], 'Concurrent reviewer')
+
+    def test_recheck_keeps_sending_state(self):
+        self.box._update(self.a, lambda r: r.update(send_pending={'token':'synthetic'}, send_in_progress=True))
+        result = self.box.apply_recheck(self.a, 'Synthetic')
+        self.assertEqual(result['send_pending'], {'token':'synthetic'})
+        self.assertTrue(result['send_in_progress'])
+
 class WorkingCopyHTTPTests(unittest.TestCase):
     setUp = reuse.VersionReuseHTTPTests.setUp
     tearDown = reuse.VersionReuseHTTPTests.tearDown
