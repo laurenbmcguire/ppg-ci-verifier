@@ -2612,7 +2612,7 @@
   function fdSourceRefreshReason(r) {
     if (!r || versionReadOnly(r)) return 'Open the current working copy to refresh SharePoint.';
     const a = r.assignment || {};
-    if (a.needs_person || !a.site_id || !a.list_id) return 'Choose the client and job with an exact SharePoint site and list before refreshing.';
+    if (a.needs_person || !['manual', 'verified', 'matched', 'source'].includes(a.status) || !(a.site_id || a.site) || !a.list_id) return 'Choose the client and job with an exact SharePoint site and list before refreshing.';
     if (state.health?.sharepoint_configured === false) return 'SharePoint is not connected. Ask an administrator to connect the assigned source, then reopen this report.';
     return '';
   }
@@ -2645,6 +2645,8 @@
     }};
     state.fdReconciling = operation; state.rechecking = operation;
     state.fdAutoSP ||= {}; state.fdAutoSP[key] = true;
+    // This explicit source-only action must not launch a queued or newly rendered workbook re-check.
+    state.fdAutoRecheck ||= {}; state.fdAutoRecheck[hash] = true;
     state.fdAutoSPError = null;
     let posted = false, failure = null;
     try {

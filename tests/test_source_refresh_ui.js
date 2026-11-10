@@ -3,7 +3,7 @@ const assert = require('node:assert/strict'), fs = require('node:fs'), vm = requ
 const source = fs.readFileSync('web/app.js','utf8');
 const part = (a,b) => source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
 const code = part('  function versionReadOnly(', '  function versionLinks(') + part('  function reviewBinding(', '  function findingBinding(') + part('  function fdSourceRefreshReason(', '  // ---------- history and sources');
-const report = () => ({file_hash:'a'.repeat(64), check_hash:'check', assignment:{site_id:'site',list_id:'list'}, version_view:{status:'current'}, review:{sharepoint:{status:'incomplete'},decisions:{rev:0}},source_reconciliation:{snapshot_id:'old'},history:['original'],bytes:'immutable'});
+const report = () => ({file_hash:'a'.repeat(64), check_hash:'check', assignment:{status:'verified',site_id:'site',list_id:'list'}, version_view:{status:'current'}, review:{sharepoint:{status:'incomplete'},decisions:{rev:0}},source_reconciliation:{snapshot_id:'old'},history:['original'],bytes:'immutable'});
 function setup() {
  const r=report(), calls=[], messages=[], controls=[{disabled:false,isConnected:true}], state={report:r,selected:r.file_hash,health:{sharepoint_configured:true}}, c={state,toast:m=>messages.push(m),document:{querySelectorAll:s=>s.includes('input:not')?[]:controls},gridDirty:()=>false,drawSide(){},drawReport(){},loadFixes(){},loadList(){},fillPages:async x=>x,api:async (path,body)=>{calls.push({path,body});if(path.includes('working-copy'))return {requested_hash:r.file_hash,status:'current'};if(body)return {item:r};return {...r,source_reconciliation:{snapshot_id:'new'}};}};
  vm.createContext(c);vm.runInContext(code,c);
@@ -23,6 +23,17 @@ function setup() {
   const t=setup(),api=t.c.api;t.c.api=async(p,b)=>{if(b){t.calls.push({path:p,body:b});if(mode==='transport')throw Error('connection lost');if(mode==='pending')return {pending:true};return {item:t.r};}if(p.startsWith('/api/spreadsheet?')){if(mode==='receipt_failure')throw Error('read failed');if(mode==='unavailable')return {...t.r,review:{sharepoint:{status:'error',message:'source unavailable'}}};}return api(p,b);};
   await t.run();assert.equal(t.calls.filter(x=>x.body).length,1);assert.equal(t.state.rechecking,false);assert.equal(t.state.fdReconciling,null);assert.equal(t.controls[0].disabled,false);if(mode!=='unavailable')assert.match(t.messages.join(' '),/unconfirmed/);assert.doesNotMatch(t.messages.join(' '),/Matches SharePoint|success|verified/i);
  }
+ // Use the production coverage scheduler, including an already queued callback, before and after source receipt rendering.
+ {const t=setup(),timers=[];t.c.h=()=>({});t.c.setTimeout=fn=>timers.push(fn);t.c.fdRecheck=()=>{throw Error('Source refresh must not schedule workbook recheck');};
+  const start=source.indexOf('    const cov = r.review.coverage || {}, dc = r.review.decisions || {};',source.indexOf('  function fdCorrections('));
+  const end=source.indexOf("    body.append(h('p', {class: 'fd-countline'",start);
+  vm.runInContext('function exerciseCoverage(r) { const body={append(){}};'+source.slice(start,end)+'}',t.c);
+  t.r.review.coverage={truncated:true,not_listed:20};t.c.exerciseCoverage(t.r);assert.equal(timers.length,1);
+  t.c.drawSide=()=>t.c.exerciseCoverage(t.state.report);t.c.drawReport=t.c.drawSide;t.c.loadFixes=t.c.drawSide;
+  await t.run();for(const fn of timers)fn();t.c.drawSide();for(const fn of timers)fn();assert.equal(t.state.fdAutoRecheck[t.r.file_hash],true);assert.equal(t.state.fdAutoRecheckWaiting,false);assert.equal(t.calls.filter(x=>x.body).length,1);
+ }
+ for(const status of ['unconfirmed','ambiguous','missing']) {const t=setup();t.r.assignment.status=status;await t.run();assert.equal(t.calls.length,0);}
+ {const t=setup();delete t.r.assignment.site_id;t.r.assignment.site='ExactConfiguredSite';t.r.assignment.list_id='01234567-89ab-cdef-0123-456789abcdef';await t.run();assert.equal(t.calls.filter(x=>x.body).length,1);}
  assert.match(part('  function fdComparison(', '  function fdSources('),/fdSourceRefresh\(r\)/);assert.match(part('  function fdSources(', '  function drawSide('),/fdComparison\(r\)/);
  console.log('PASS source refresh: exact single POST, guards, stale binding, navigation at three awaits, transport/pending/read failure, unavailable source, cleanup, immutable original/history');
 })().catch(e=>{console.error(e);process.exitCode=1;});
