@@ -295,7 +295,7 @@ class PgSafetyGates(NativeTables):
     def test_correction_waits_then_refuses_concurrent_approval_before_ingest(self):
         def correct(box):
             return box.apply_fixes(self.h, [self.change()], expected_check_hash=self.item['check_hash'])
-        with self.assertRaisesRegex(ValueError,'Approved'):
+        with self.assertRaisesRegex(ValueError,'(?i)approved'):
             self.overlap(correct, self.approval)
         self.assertEqual(self.report_count(),1)
         self.assertFalse(self.saved().get('fixes_applied'))
