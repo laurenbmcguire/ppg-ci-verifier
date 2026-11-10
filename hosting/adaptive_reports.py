@@ -106,6 +106,15 @@ def label_for_header(value):
     return None
 
 
+def exact_label_for_header(value):
+    """Identity fields only: descriptions and model names cannot prove a part number."""
+    label = label_for_header(value)
+    if label == 'part' and norm(header_text(value)) not in {
+            'part number', 'part', 'part no', 'part num', 'p n', 'pn', 'item number', 'sku', 'part id'}:
+        return None
+    return label if label in ('part', 'identifier') else None
+
+
 def _header_map(row):
     mapping, labels = {}, {}
     for index, value in enumerate(row):
@@ -373,7 +382,14 @@ def scan(sources, cached=None, layout_specs=None):
                 stats[state] += 1
             record = dict(sheet=title, row=r, table=table['index'], table_kind=table['kind'],
                           values={f: n for f, (n, s) in cells.items()}, states={f: s for f, (n, s) in cells.items()},
-                          labels=labels, day=day, row_label=_row_label(row, mapping, labmap),
+                          labels=labels,
+                          exact_labels={k: row[i] for k, i in labmap.items()
+                                        if k in ('part', 'identifier') and i < len(row) and isinstance(row[i], str)
+                                        and row[i] and len(row[i]) <= 4096 and not row[i].lstrip().startswith('=')
+                                        and i < len(rows[table['header_row'] - 1])
+                                        and exact_label_for_header(rows[table['header_row'] - 1][i]) == k
+                                        and sum(exact_label_for_header(h) == k for h in rows[table['header_row'] - 1]) == 1},
+                          day=day, row_label=_row_label(row, mapping, labmap),
                           is_total=_is_total_row(row, mapping) or (not (labels.get('identifier') or labels.get('part')) and any(
                               isinstance(v, str) and not v.startswith('=') and 'total' in norm(v).split() for v in row)),
                           columns={f: mapping[f] + 1 for f in mapping},
@@ -733,6 +749,6 @@ def _detail_count(records):
 
 def export_record(r):
     part = r['labels'].get('part')
-    return dict(sheet=r['sheet'], row=r['row'], part=part, identifier=r['labels'].get('identifier'), source=r.get('source'),
+    return dict(sheet=r['sheet'], row=r['row'], exact_labels=r.get('exact_labels', {}), label_columns=r.get('label_columns', {}), part=part, identifier=r['labels'].get('identifier'), source=r.get('source'),
                 day=r['day'].isoformat() if r['day'] else None, shift=r['labels'].get('shift'),
                 values={f: (str(v) if v is not None else None) for f, v in r['values'].items()})

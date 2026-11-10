@@ -38,11 +38,11 @@ def snapshot(inbox, file_hash, expected_check_hash):
     item = inbox.get(file_hash)
     if not isinstance(expected_check_hash, str) or not expected_check_hash or item.get('check_hash') != expected_check_hash:
         raise ValueError('This report changed. Reload it before asking Dex again.')
-    review = summarize(item)
+    review = inbox.review_summary(item) if (item.get('source_reconciliation') or {}).get('identifier_pattern_evidence') else summarize(item)
     assignment = inbox.assignment_for(item, review)
     holds = inbox.holds(item)
     # Check rows, human decisions, assignment changes and source holds, not just workbook bytes.
-    fingerprint = hashlib.sha256(json.dumps([item, assignment, holds], sort_keys=True, default=str).encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps([item, review, assignment, holds], sort_keys=True, default=str).encode()).hexdigest()
     return item, review, holds, fingerprint
 
 

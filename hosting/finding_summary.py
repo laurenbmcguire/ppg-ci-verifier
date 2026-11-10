@@ -69,7 +69,7 @@ def snapshot(inbox, payload, authorize):
         if (item.get('check_hash') != payload['expected_check_hash'] or check_run(item) != payload['run'] or
                 int(item.get('finding_decisions_rev') or 0) != payload['expected_rev']):
             raise ValueError('The report or review changed. Reload before requesting a summary.')
-        review = summarize(item)
+        review = inbox.review_summary(item) if (item.get('source_reconciliation') or {}).get('identifier_pattern_evidence') else summarize(item)
         assignment = inbox.assignment_for(item, review)
         holds = inbox.holds(item, review)
         mappings = []

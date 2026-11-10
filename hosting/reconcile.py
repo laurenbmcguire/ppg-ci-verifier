@@ -560,7 +560,9 @@ def compare(day, records, export_records, snap, confirmed=None, report=None):
             if count_reconciliation['quantities'][field]['status'] != 'matched':
                 why.append(f'{field.capitalize()} quantity comparison is {count_reconciliation["quantities"][field]["status"]}; explicit values for every report and source record are required.')
     mapping_binding = dict(site_id=snap.get('site_id'), list_id=snap.get('list_id'), mapping=dict(confirmed or {}), revision=None, legacy_requires_confirmation=False)
-    return dict(mapping_binding=mapping_binding, count_reconciliation=count_reconciliation, status=status, day=day, captured_at=snap.get('captured_at'), list=snap.get('list'), site=snap.get('site'), site_id=snap.get('site_id'), list_id=snap.get('list_id'),
+    from hosting.source_patterns import capture
+    pattern_evidence = capture(records, snap, day, same_list, snap_id, dict(report or {}))
+    return dict(identifier_pattern_evidence=pattern_evidence, mapping_binding=mapping_binding, count_reconciliation=count_reconciliation, status=status, day=day, captured_at=snap.get('captured_at'), list=snap.get('list'), site=snap.get('site'), site_id=snap.get('site_id'), list_id=snap.get('list_id'),
                 snapshot_id=snap_id, date_contract=snap.get('date_contract'), bound_to=dict(report or {}),
                 coverage={k: cov.get(k) for k in ('pages', 'items', 'complete', 'denied', 'throttled', 'failed_pages', 'truncated', 'unknown_schema', 'undated', 'date_fallbacks', 'timezone_unconfirmed', 'notes')},
                 quantity_columns=cols, column_mapping=mapping, fields_checked=[f for f in report_fields if f in cols], fields_not_checked=unsupported,

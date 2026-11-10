@@ -375,7 +375,7 @@ class SpreadsheetInbox:
         from hosting.review_summary import summarize
         item = self.get(file_hash)
         _, raw = self.original_bytes(file_hash)
-        out = summarize(item, use_verdicts=not include_dismissed)
+        out = self.review_summary(item, use_verdicts=not include_dismissed)
         decided = item.get('review_decisions') or {}   # what a person already decided is never re-decided by Claude
         return item, raw, [i for i in out['issues'] if i['severity'] != 'info' and i['key'] not in decided and not i.get('decision') and not i.get('previous_decision')]
     def _begin(self, db, file_hash):
@@ -432,7 +432,7 @@ class SpreadsheetInbox:
                 raise ValueError('This report changed after it was displayed. Reload and review it before approving.')
             if not approver:
                 raise ValueError('Type your name to approve the report.')
-            rv = summarize(r, with_issues=False)
+            rv = self.review_summary(r, with_issues=False)
             must = (rv.get('counts') or {}).get('high', 0)
             holds = self.holds(r, rv)
             hard = [x for x in holds if x['hard']]
@@ -501,7 +501,7 @@ class SpreadsheetInbox:
             later = [f for f in r.get('fixes_applied') or [] if str(f.get('applied_at') or '') > str(appr.get('at') or '')]
             if later:
                 raise ValueError(f'A corrected copy ("{later[-1].get("fixed_filename")}") was made after this version was approved. Send that version instead.')
-            rv = summarize(r, with_issues=False)
+            rv = self.review_summary(r, with_issues=False)
             hard = [x for x in self.holds(r, rv) if x['hard']]
             if hard:
                 raise ValueError('Not sent: ' + hard[0]['text'])
@@ -549,7 +549,7 @@ class SpreadsheetInbox:
                                                     current_run=check_run(r))
         if seen is None:
             return
-        rv = summarize(r)
+        rv = self.review_summary(r)
         current = {x['key']: x for x in rv['issues'] + rv['dismissed']}
         changed = [k for k in keys if k in current and str((seen or {}).get(k)) != str(current[k].get('fp'))]
         if changed:
@@ -579,7 +579,7 @@ class SpreadsheetInbox:
                 raise review_decisions.DecisionConflict('This version is approved, sent, or being sent; its decisions cannot change.')
             if not replay and (not isinstance(expected_run, dict) or expected_run != check_run(r)):
                 raise review_decisions.DecisionConflict('The check run changed. Reload and decide again.')
-            rv = summarize(r)
+            rv = self.review_summary(r)
             current = {x['key']: x for x in rv['issues'] + rv['dismissed']}
             out['entry'] = review_decisions.decide(r, current, ids=ids, action=action, reason=reason, by=by, owner=owner, evidence=evidence,
                                                    request_id=request_id, expected_rev=expected_rev, undo_of=undo_of, expected_fps=expected_fps, expected_run=expected_run)
@@ -711,7 +711,7 @@ class SpreadsheetInbox:
                     found.append(self.latest(db, r['file_hash'], base))
         by_day = {}
         for result in found:
-            rv = summarize(result, with_issues=False)
+            rv = self.review_summary(result, with_issues=False)
             by_day.setdefault(rv['day'], []).append(dict(file_hash=result['file_hash'], filename=result['filename'], version=result.get('version'),
                                                          received_at=result.get('received_at'), review=rv))
         out = {}
@@ -842,6 +842,25 @@ class SpreadsheetInbox:
         with self.connect() as db:
             rows = db.execute('SELECT key, value_json FROM settings WHERE key LIKE ?', (prefix.replace('%', '') + '%',)).fetchall()
         return {r['key'][len(prefix):]: json.loads(r['value_json']) for r in rows}
+    def review_summary(self, item, **kwargs):
+        """Read-only classification using current assignment and source mapping, never saved success flags."""
+        from hosting.review_summary import summarize
+        base = summarize(item, **kwargs)
+        rec = item.get('source_reconciliation') or {}
+        if not rec.get('identifier_pattern_evidence'):
+            return base
+        try:
+            from hosting import registry
+            assigned = self.assignment_for(item, base)
+            valid = (assigned.get('status') in registry.RESOLVED and not assigned.get('needs_person')
+                     and all(assigned.get(k) and assigned.get(k) == rec.get(k) for k in ('site_id', 'list_id'))
+                     and rec.get('mapping_binding') == self.source_mapping(rec.get('site_id'), rec.get('list_id'))
+                     and not any(str(h.get('code', '')).startswith('source_') and any(word in h.get('code', '') for word in ('mapping', 'identity', 'coverage', 'stale', 'assignment')) for h in self.holds(item, base)))
+            context = dict(valid=valid, site_id=assigned.get('site_id'), list_id=assigned.get('list_id'))
+        except Exception:
+            context = None
+        return summarize(item, source_context=context, **kwargs)
+
     def assignment_context(self):
         from hosting import registry
         return dict(registry=registry.entries(self.setting(registry.REGISTRY_KEY, [])), snapshot=self.setting(registry.SNAPSHOT_KEY, []) or [],
@@ -951,7 +970,7 @@ class SpreadsheetInbox:
             item = dict(self.latest(db, file_hash, original))
             self._require_working_parent(db, file_hash)
             self._check_proposal_state(item, expected_check_hash)
-            review = summarize(item)
+            review = self.review_summary(item)
             decided = item.get('review_decisions') or {}
             issues = [i for i in review['issues'] if i['severity'] != 'info' and i['key'] not in decided and not i.get('decision') and not i.get('previous_decision')]
             return item, raw, issues
@@ -1517,7 +1536,7 @@ class SpreadsheetInbox:
         def row(result):
             item = {key: result[key] for key in fields if key in result}
             try:
-                item['review'] = summarize(result, with_issues=False)
+                item['review'] = self.review_summary(result, with_issues=False)
             except Exception:
                 item['review'] = None
             if ctx is not None:
@@ -1558,7 +1577,7 @@ class SpreadsheetInbox:
         from hosting.review_summary import summarize
         current, fresh = self._fresh_checks(file_hash)
         def facts(r):
-            rv = summarize(r, with_issues=False)
+            rv = self.review_summary(r, with_issues=False)
             try:
                 a = self.assignment_for(r, rv)
             except Exception:

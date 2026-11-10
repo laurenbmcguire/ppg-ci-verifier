@@ -1997,7 +1997,7 @@
       coverage && ['findings_total', 'findings_listed', 'all_findings'].every(k => Number.isSafeInteger(coverage[k]) && coverage[k] >= 0) && !coverage.truncated && coverage.not_listed === 0 &&
       coverage.findings_total === coverage.findings_listed && coverage.all_findings === inventory.length &&
       working?.status === 'current' && working.requested_hash === fresh.file_hash && working.working_hash === fresh.file_hash && !working.read_only_reason);
-    const resolved = [], appliedProposals = [], remaining = [];
+    const resolved = [], appliedProposals = [], informational = [], remaining = [];
     for (const it of scope.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state))) {
       const issue = it.issue;
       // Keys/fingerprints may change when values or a record identifier change.
@@ -2010,6 +2010,14 @@
         !(fresh?.holds || []).some(h => h.hard && String(h.code || '').startsWith('source_')) ||
         issue?.source === 'AI review' && rv?.ai?.status === 'done';
       const sameBinding = it.binding && JSON.stringify(it.binding) === JSON.stringify(binding);
+      const support = current?.source_support;
+      const age = Date.now() - Date.parse(support?.captured_at);
+      if (complete && sameBinding && current?.severity === 'info' && current.source === 'Checks' &&
+          ['part_format_differs', 'identifier_format_differs'].includes(current.code) && !current.decision && !current.dismissed_by &&
+          support?.kind === 'source_confirmed_pattern' && support.snapshot_id === fresh.source_reconciliation?.snapshot_id &&
+          Number.isFinite(age) && age >= 0 && age <= 600000) {
+        informational.push(it.key); continue; // Source support, never a saved correction or AI dismissal.
+      }
       let reason;
       if (!changed) reason = 'No exact saved correction was confirmed for this finding.';
       else if (!complete || !sameBinding) reason = 'The change was saved, but finding resolution could not be verified. Reopen the saved copy and check again.';
@@ -2019,7 +2027,7 @@
       else { resolved.push(it.key); continue; }
       remaining.push({item: it, currentKey: current?.key, reason});
     }
-    return {confirmed: confirmed.length, resolved, appliedProposals, remaining, complete};
+    return {confirmed: confirmed.length, resolved, appliedProposals, informational, remaining, complete};
   }
   async function fdReadSavedCheck(savedItem) {
     try {
@@ -2030,7 +2038,7 @@
   }
   function fdResolutionText(run) {
     if (!run.fixed) return 'No selected findings were resolved by a saved correction.';
-    return Number.isInteger(run.resolved) ? `${plural(run.resolved, 'selected finding')} cleared by the saved check. ${run.appliedProposals ? plural(run.appliedProposals, 'selected suggestion') + ' applied. ' : ''}${plural((run.unfixed || []).length, 'selected finding')} still ${(run.unfixed || []).length === 1 ? 'needs' : 'need'} review.`
+    return Number.isInteger(run.resolved) ? `${plural(run.resolved, 'selected finding')} cleared by the saved check. ${run.informational ? plural(run.informational, 'source-confirmed pattern hint') + ' informational; identifiers unchanged. ' : ''}${run.appliedProposals ? plural(run.appliedProposals, 'selected suggestion') + ' applied. ' : ''}${plural((run.unfixed || []).length, 'selected finding')} still ${(run.unfixed || []).length === 1 ? 'needs' : 'need'} review.`
       : 'Saved changes are in History. Findings are removed only when the saved check no longer detects them.';
   }
   async function fdAIFixNow(scope) {
@@ -2081,7 +2089,7 @@
       const {fresh, working} = await fdReadSavedCheck(savedItem);
       const resolution = fdSavedFindingResolution(scope, accepted, binding, savedItem, fresh, working);
       if (state.fdAIOperation !== operation) return;
-      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed: resolution.confirmed, resolved: resolution.resolved.length, appliedProposals: resolution.appliedProposals.length,
+      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed: resolution.confirmed, resolved: resolution.resolved.length, appliedProposals: resolution.appliedProposals.length, informational: resolution.informational.length,
         tried: scope.length, skipped, unfixed: resolution.remaining.map(x => describe(x.item, x.reason, x.currentKey)),
         from: revisionOf(report), version: revisionOf(savedItem), reused, originalHash: hash, items: done};
       // A finished save must not pull the user back from a newer navigation or open a dialog over another report.

@@ -51,7 +51,7 @@ def snapshot(inbox, payload, authorize):
             raise ValueError('The workbook does not match the requested version.')
         if payload['run'] != check_run(item) or payload['expected_rev'] != int(item.get('finding_decisions_rev') or 0):
             raise ValueError('The review changed. Reload before preparing suggestions.')
-        review = summarize(item)
+        review = inbox.review_summary(item) if (item.get('source_reconciliation') or {}).get('identifier_pattern_evidence') else summarize(item)
         issues = review['issues']
         counts = Counter(i['key'] for i in issues)
         available = {i['key']: i for i in issues}

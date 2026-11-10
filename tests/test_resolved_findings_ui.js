@@ -58,3 +58,16 @@ test('malformed committed receipt changes never throw or confirm a correction',(
 
 for(const field of ['file_hash','check_hash','checker_version'])for(const value of [undefined,null,'', '  ',42,{}])test(`missing/malformed ${field} ${JSON.stringify(value)} cannot establish resolution`,()=>{const f=fixture();f.fresh[field]=value;f.savedItem[field]=value;assert.equal(f.run().resolved.length,0);assert.equal(f.run().complete,false);});
 test('only completed scoped editors are synchronously removed before saved-copy navigation',()=>{assert.ok(source.includes('finished = true; d.close(); d.remove(); c.onApplied?.();'));assert.equal((source.match(/onApplied: \(\) => \{ dlg.close\(\); dlg.remove\(\); \}/g)||[]).length,2);assert.match(between('  function navigationDrafts(', '  function versionReadOnly('),/unsavedForm.*window.confirm/);});
+
+test('source-confirmed pattern becomes informational in saved AI outcome, never corrected or Needs a person',()=>{
+ const f=fixture();f.scope[0].issue.code='part_format_differs';
+ const hint={key:'old-key',source:'Checks',code:'part_format_differs',sheet:'Sheet',cell:'G17',row:17,severity:'info',
+  source_support:{kind:'source_confirmed_pattern',snapshot_id:'snap',captured_at:new Date().toISOString()}};
+ f.fresh.source_reconciliation={snapshot_id:'snap'};addIssue(f,hint);
+ const r=f.run();assert.equal(r.remaining.length,0);assert.equal(r.resolved.length,0);assert.equal(r.informational.length,1);
+ assert.match(ctx.fdResolutionText({fixed:1,resolved:0,informational:1,unfixed:[]}),/identifiers unchanged/);
+ for(const mutate of [()=>hint.severity='high',()=>hint.source_support.captured_at='2020-01-01T00:00:00Z',()=>hint.decision={action:'defer'},()=>f.fresh.review.page.complete=false]) {
+  hint.severity='info';hint.source_support.captured_at=new Date().toISOString();delete hint.decision;f.fresh.review.page.complete=true;mutate();
+  assert.equal(f.run().informational.length,0);assert.equal(f.run().remaining.length,1);
+ }
+});

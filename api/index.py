@@ -1,5 +1,6 @@
 """Verifier review app. Local SQLite copy is loopback-only; Vercel runs only in protected preview mode (Postgres, Vercel Authentication required)."""
 import base64
+import hashlib
 from datetime import datetime, timezone
 import json
 import re
@@ -36,7 +37,8 @@ def findings_binding(data, review):
     """One immutable finding inventory across all pages of this review."""
     return dict(file_hash=data['file_hash'], check_hash=data.get('check_hash'),
                 run=review.get('run'), rev=(review.get('decisions') or {}).get('rev', 0),
-                issues_total=len(review.get('issues') or []), dismissed_total=len(review.get('dismissed') or []))
+                issues_total=len(review.get('issues') or []), dismissed_total=len(review.get('dismissed') or []),
+                classification=hashlib.sha256(json.dumps([[x.get('key'), x.get('fp'), x.get('severity'), x.get('source_support')] for x in (review.get('issues') or []) + (review.get('dismissed') or [])], sort_keys=True).encode()).hexdigest())
 
 
 def review_page_size():
@@ -156,7 +158,7 @@ class handler(BaseHTTPRequestHandler):
             repeats = inbox.repeats_elsewhere(file_hash, index_old=False)   # never slow down opening a report
         except Exception:
             debug_log(); repeats = []
-        rv = summarize(data)
+        rv = inbox.review_summary(data) if (data.get('source_reconciliation') or {}).get('identifier_pattern_evidence') else summarize(data)
         try:
             assignment = inbox.assignment_for(data, rv)
             assignment['history'] = registry.history(inbox, file_hash)
@@ -1023,7 +1025,7 @@ class handler(BaseHTTPRequestHandler):
                     inbox = SpreadsheetInbox(directory)
                     item, data, _ = inbox.ai_fix_inputs(file_hash)
                     changes = inbox.fix_proposals(file_hash)['proposals']
-                rv = summarize(item)
+                    rv = inbox.review_summary(item)
                 extra = [c for c in (payload.get('extra') or []) if isinstance(c, dict) and c.get('id')][:200] if isinstance(payload.get('extra'), list) else []
                 skip = set(x for x in (payload.get('skip') or []) if isinstance(x, str)) if isinstance(payload.get('skip'), list) else set()
                 changes = [c for c in changes if c['id'] not in skip] + extra
@@ -1187,8 +1189,9 @@ class handler(BaseHTTPRequestHandler):
                 which = 'dismissed' if payload.get('list') == 'dismissed' else 'issues'
                 offset, limit = max(0, int(payload.get('offset') or 0)), max(1, min(review_page_size(), int(payload.get('limit') or review_page_size())))
                 with self.store().session() as directory:
-                    data = SpreadsheetInbox(directory).get(file_hash)
-                    rv = summarize(data)
+                    inbox = SpreadsheetInbox(directory)
+                    data = inbox.get(file_hash)
+                    rv = inbox.review_summary(data) if (data.get('source_reconciliation') or {}).get('identifier_pattern_evidence') else summarize(data)
                 binding = findings_binding(data, rv)
                 if 'expected_binding' in payload and payload['expected_binding'] != binding:
                     raise Conflict('The findings changed while loading. Reopen the report before selecting or applying changes.')

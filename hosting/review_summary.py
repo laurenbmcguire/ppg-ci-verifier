@@ -213,7 +213,7 @@ def quantity_summary(totals):
     return out
 
 
-def summarize(result, with_issues=True, use_verdicts=True):
+def summarize(result, with_issues=True, use_verdicts=True, source_context=None):
     from hosting.source_compare import identify
     issues = []
     for i, f in enumerate(result.get('findings') or []):
@@ -313,7 +313,14 @@ def summarize(result, with_issues=True, use_verdicts=True):
                 return a
         return None
     kept = []
+    from hosting.source_patterns import supported
     for x in undecided:
+        proof = supported(result, x, source_context) if (not x.get('previous_decision')
+                and x['key'] not in person_hits and x['key'] not in (result.get('review_decisions') or {})) else None
+        if proof:
+            x.update(severity='info', source_support=proof, fix=proof['message'])
+            kept.append(x)
+            continue
         lk = str(x.get('legacy_key') or '')
         p = lk.rsplit(':', 1)[0] if lk.startswith('check:') else None
         v = None
