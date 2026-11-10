@@ -802,7 +802,7 @@ class handler(BaseHTTPRequestHandler):
                             return self.fail(404, 'Report not found.')
                         view = self.report_view(inbox, file_hash)
                         proof = view['checked_copy']
-                        if not proof['ready'] or query.get('check') != [proof['check_hash']]:
+                        if not proof['ready'] or proof.get('file_hash') != file_hash or query.get('check') != [proof['check_hash']]:
                             raise Conflict('This copy is no longer verified by the current checks. Reload the report; ordinary version downloads remain available.')
                     filename, raw = inbox.download(file_hash)
                     if query.get('checked') == ['1']:
@@ -810,11 +810,19 @@ class handler(BaseHTTPRequestHandler):
                         if not self.can_stored_report(inbox, inbox.get(file_hash)):
                             return self.fail(404, 'Report not found.')
                         proof = self.report_view(inbox, file_hash)['checked_copy']
-                        if not proof['ready'] or query.get('check') != [proof['check_hash']]:
+                        if not proof['ready'] or proof.get('file_hash') != file_hash or query.get('check') != [proof['check_hash']]:
                             raise Conflict('This copy changed or its evidence expired while reading the file. Reload before downloading a checked copy.')
                 safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', filename)[:180] or 'report'
                 kind = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if safe.lower().endswith('.xlsx') else 'text/csv; charset=utf-8'
-                return self.send(200, raw, kind, {'Content-Disposition': f'attachment; filename="{safe}"'})
+                headers = {'Content-Disposition': f'attachment; filename="{safe}"'}
+                if query.get('checked') == ['1']:
+                    # Positive, versioned receipt distinguishes this validated response from
+                    # old servers that ignore checked query parameters and send ordinary bytes.
+                    headers['X-PPG-Checked-Copy'] = json.dumps(dict(protocol='ppg-checked-copy-v1',
+                        ready=True, file_hash=file_hash, check_hash=proof['check_hash'],
+                        expires_at=proof['expires_at']), separators=(',', ':'))
+                    headers['Cache-Control'] = 'private, no-store'
+                return self.send(200, raw, kind, headers)
             if route == '/api/spreadsheets/media':   # one embedded picture's original bytes, for the sheet view
                 q = parse_qs(urlsplit(self.path).query)
                 file_hash, media = q.get('id', [''])[0], q.get('media', [''])[0]

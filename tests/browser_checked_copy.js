@@ -54,7 +54,7 @@ const server = http.createServer((req, res) => {
     if (url.searchParams.get('checked') === '1') {
       assert.equal(url.searchParams.get('id'), HASH); assert.equal(url.searchParams.get('check'), CHECK);
       if (rejectDownload) return json(res, {error: 'Synthetic check expired. Re-check this copy before downloading.'}, 409);
-      res.writeHead(200, {'Content-Type': MIME, 'Content-Disposition': `attachment; filename="${NAME}"`}); return res.end(BYTES);
+      res.writeHead(200, {'Content-Type': MIME, 'Content-Disposition': `attachment; filename="${NAME}"`, ...(mode==='old-server'?{}:{'X-PPG-Checked-Copy': mode==='malformed-receipt'?'{bad':JSON.stringify({protocol:'ppg-checked-copy-v1',ready:true,file_hash:HASH,check_hash:mode==='wrong-receipt'?'d'.repeat(64):CHECK,expires_at:report().checked_copy.expires_at})}), 'Cache-Control':'private, no-store'}); return res.end(BYTES);
     }
     res.writeHead(200, {'Content-Type': MIME, 'Content-Disposition': 'attachment; filename="synthetic-original.xlsx"'}); return res.end(ORIGINAL_BYTES);
   }
@@ -95,6 +95,12 @@ const server = http.createServer((req, res) => {
       await page.getByText('Synthetic check expired. Re-check this copy before downloading.', {exact: false}).first().waitFor();
       await page.waitForTimeout(100); assert.equal(downloads.length, beforeFailure, '409 JSON must not download');
       await page.screenshot({path: path.join(EVIDENCE, `checked-copy-rejected-${width}.png`), fullPage: true});
+      for(const receiptMode of ['old-server','malformed-receipt','wrong-receipt']) {
+        await open(receiptMode); await button().waitFor(); const prior=downloads.length, before=requests.length;
+        await button().click(); await page.getByText('The server did not confirm a current checked copy', {exact:false}).first().waitFor();
+        assert.equal(downloads.length,prior,receiptMode+' must not save ordinary or unconfirmed bytes');
+        assert.equal(requests.slice(before).filter(r=>r.path==='/api/spreadsheets/download').length,1,'No automatic retry');
+      }
       await open('not-ready'); assert.equal(await button().count(), 0, 'Fresh unready payload must replace success');
       await open('mismatch'); assert.equal(await button().count(), 0, 'Scope mismatch must not retain success');
       await open('expiry'); await button().waitFor(); const beforeExpiry = requests.length;

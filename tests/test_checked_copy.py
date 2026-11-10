@@ -1,5 +1,6 @@
 """Synthetic, read-only actual completion predicates and actual handler branches."""
 import ast
+import json
 import copy
 import contextlib
 from datetime import datetime, timezone, timedelta
@@ -96,7 +97,7 @@ def test_informational_and_prior_version_fixes_not_current_errors():
 source = ast.parse((Path(__file__).parents[1] / 'api/index.py').read_text())
 route = next(n for n in ast.walk(source) if isinstance(n, ast.If) and ast.unparse(n.test) == "route == '/api/spreadsheets/download'")
 fn = ast.FunctionDef(name='download', args=ast.arguments(posonlyargs=[], args=[ast.arg(arg='self')], kwonlyargs=[], kw_defaults=[], defaults=[]), body=route.body, decorator_list=[])
-ns = dict(parse_qs=parse_qs, urlsplit=urlsplit, re=re, Conflict=ValueError)
+ns = dict(json=json, parse_qs=parse_qs, urlsplit=urlsplit, re=re, Conflict=ValueError)
 exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), 'actual_download_route', 'exec'), ns)
 
 class Inbox:
@@ -128,17 +129,26 @@ def test_actual_guarded_download_exact_filename_type_bytes_and_original():
         out = Handler(suffix).download()
         assert out[:3] == (200, b'PK\x03\x04SYNTHETIC-EXACT-BYTES', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         assert out[3]['Content-Disposition'] == 'attachment; filename="Synthetic checked.xlsx"'
+        if suffix:
+            receipt = json.loads(out[3]['X-PPG-Checked-Copy'])
+            assert receipt['protocol'] == 'ppg-checked-copy-v1' and receipt['ready'] is True
+            assert receipt['file_hash'] == HASH and receipt['check_hash'] == CHECK
+            assert datetime.fromisoformat(receipt['expires_at']) > datetime.now(timezone.utc)
+            assert out[3]['Cache-Control'] == 'private, no-store'
+        else:
+            assert 'X-PPG-Checked-Copy' not in out[3]
 
 
 def test_actual_guarded_download_denied_opaque():
     h = Handler(f'&checked=1&check={CHECK}'); h.allowed = False
     assert h.download() == (404, 'Report not found.')
 
-@pytest.mark.parametrize('change', ['check', 'expired', 'fork', 'superseded'])
+@pytest.mark.parametrize('change', ['check', 'file', 'expired', 'fork', 'superseded'])
 def test_actual_guarded_download_rejects_state_change_without_bytes(change):
     h = Handler(f'&checked=1&check={CHECK}')
     i, r, holds, w = clean()
     if change == 'check': i['check_hash'] = 'd'*64
+    elif change == 'file': i['file_hash'] = 'd'*64
     elif change == 'expired': i['source_reconciliation']['captured_at'] = '2000-01-01T00:00:00+00:00'
     else: w['status'] = 'choice' if change == 'fork' else 'superseded'
     h.proof = completion(i, r, holds, w)

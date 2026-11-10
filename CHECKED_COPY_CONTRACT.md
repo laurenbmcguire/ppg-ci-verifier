@@ -19,3 +19,5 @@ The opt-in `checked=1&check=<saved check hash>` mode on the existing exact downl
 - Full production UI in loopback browser at 1200 and 390 pixels: valid synthetic XLSX bytes, filename/MIME, readable refusal/no file, replaced/mismatched receipt, expiry clearing every success claim without requests, original bytes preserved, no external or unexpected requests. Existing POST fixture reads for clients/sheet/fixes are allowlisted, not writes.
 
 No live reports, source captures, provider, credentials, settings, grants, deployment, approvals or sending are exercised. Full native PostgreSQL aggregate and combined source-refresh integration are separate parent-owned checks.
+
+Checked downloads return a versioned X-PPG-Checked-Copy receipt with the exact file/check identities, ready=true and the current proof expiry, plus private no-store caching. The browser requires that receipt before and after reading the body. Missing, malformed, old-protocol, mismatched or expired receipts refuse the checked download without retry, including ordinary 200/MIME responses from older servers that ignore checked query parameters. Ordinary downloads do not add this receipt.

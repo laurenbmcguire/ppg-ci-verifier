@@ -1713,7 +1713,14 @@
       }
       const expectedType = /\.xlsx$/i.test(r.filename) ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv';
       if (!(response.headers.get('Content-Type') || '').startsWith(expectedType)) throw new Error('The server did not return a workbook. No file was downloaded.');
+      let receipt;
+      try { receipt = JSON.parse(response.headers.get('X-PPG-Checked-Copy') || 'null'); } catch (_) {}
+      const receiptCurrent = () => receipt?.protocol === 'ppg-checked-copy-v1' && receipt.ready === true &&
+        receipt.file_hash === hash && receipt.check_hash === check && typeof receipt.expires_at === 'string' &&
+        Number.isFinite(Date.parse(receipt.expires_at)) && Date.parse(receipt.expires_at) > Date.now();
+      if (!receiptCurrent()) throw new Error('The server did not confirm a current checked copy for this exact version. No file was downloaded. Reload before trying again.');
       const blob = await response.blob();
+      if (!receiptCurrent()) throw new Error('The checked-copy receipt expired while downloading. No file was downloaded.');
       if (!fdCheckedState(r).ready || state.report?.file_hash !== hash || state.report?.check_hash !== check) throw new Error('This version changed or its evidence expired while downloading. Reload it before trying again.');
       const disposition = response.headers.get('Content-Disposition') || '';
       const filename = disposition.match(/filename="([^"]+)"/i)?.[1] || r.filename;
