@@ -4615,7 +4615,7 @@
             h('tbody', {}, rows.map(r => {
               const s = sp[r.job];
               const today = !data.sharepoint_on ? h('span', {class: 'quiet'}, 'SharePoint off') : s === undefined ? h('span', {class: 'quiet'}, h('span', {class: 'spin'}), ' checking…')
-                : s?.error ? h('span', {class: 'quiet', title: s.error}, 'Could not read SharePoint') : !s?.found ? h('span', {class: 'quiet'}, 'No “Data #” list found')
+                : s?.error ? h('details', {class: 'source-read-error'}, h('summary', {}, 'Source check incomplete'), h('p', {class: 'quiet'}, s.error)) : !s?.found ? h('span', {class: 'quiet'}, 'No “Data #” list found')
                 : s.today ? h('span', {}, h('b', {}, fmt(s.today)), ' scans', s.last ? ` · last ${new Date(s.last).toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago'})}` : '',
                     Object.keys(s.shifts || {}).length ? h('span', {class: 'quiet'}, ' · ' + Object.entries(s.shifts).map(([k, v]) => `${k} ${fmt(v)}`).join(' · ')) : null)
                 : h('span', {class: 'quiet'}, 'No scans yet');

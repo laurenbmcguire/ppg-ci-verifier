@@ -48,6 +48,26 @@ def pick_daily(rows):
     return max(rows, key=rank)
 
 
+def _activity_date_context(data):
+    """Use the exact captured source metadata and freshly observed date policy."""
+    from hosting import sharepoint
+    from hosting.source_date_contracts import capture_contract
+    metadata = data[1]
+    capture = metadata.get('_capture') or {}
+    raw_columns = capture.get('columns') or []
+    if not isinstance(raw_columns, list) or any(not isinstance(c, dict) or not c.get('name') for c in raw_columns):
+        raise sharepoint.SharePointError('Source column metadata is incomplete; activity counts are unknown.')
+    columns = {c['name']: c for c in raw_columns}
+    if len(columns) != len(raw_columns):
+        raise sharepoint.SharePointError('Source column identities are repeated; activity counts are unknown.')
+    identity = dict(site_id=capture.get('site_id'), list_id=capture.get('list_id'))
+    if identity['list_id'] and metadata.get('id') != identity['list_id']:
+        raise sharepoint.SharePointError('Captured list identity changed; activity counts are unknown.')
+    identity['date_contract'] = (capture_contract(identity['site_id'], identity['list_id'], columns)
+                                 if identity['site_id'] and identity['list_id'] and columns else None)
+    return columns, identity
+
+
 def sharepoint_days(job, start, end, schedule=None):
     """{day: {scans, inspected, rejected}} from the job's SharePoint list, by report day (shift times aware)."""
     from hosting import sharepoint
@@ -62,11 +82,12 @@ def sharepoint_days(job, start, end, schedule=None):
     if not data:
         return {}, f'No "Data #{job}" list was found on SharePoint.'
     _, lst, names, items = data
-    if any(sharepoint._item_day(it, schedule) is None for it in items):
+    columns, identity = _activity_date_context(data)
+    if any(sharepoint._item_day(it, schedule, columns, **identity) is None for it in items):
         return {}, 'SharePoint activity is incomplete: some business dates are unconfirmed. Totals are unknown; no zero was inferred.'
     by_day = defaultdict(list)
     for it in items:
-        d = sharepoint._item_day(it, schedule)
+        d = sharepoint._item_day(it, schedule, columns, **identity)
         if d and start.isoformat() <= d <= end.isoformat():
             by_day[d].append(it)
     out = {}
@@ -237,7 +258,8 @@ def day_scans(job, day, schedule=None):
     data = sharepoint._list_items(job)
     if not data:
         return dict(found=False)
-    if any(sharepoint._item_day(it, schedule) is None for it in data[3]):
+    columns, identity = _activity_date_context(data)
+    if any(sharepoint._item_day(it, schedule, columns, **identity) is None for it in data[3]):
         return dict(found=True, complete=False, today=None, yesterday=None, last=None, shifts=None,
                     error='SharePoint activity is incomplete: business dates could not be confirmed. Counts are unknown, not zero.')
     d0 = date.fromisoformat(day)
@@ -245,7 +267,7 @@ def day_scans(job, day, schedule=None):
     out = dict(found=True, list=data[1].get('displayName'), site=data[0], today=0, yesterday=0, last=None, shifts={})
     last = None
     for it in data[3]:
-        d = sharepoint._item_day(it, schedule)
+        d = sharepoint._item_day(it, schedule, columns, **identity)
         if d == day:
             out['today'] += 1
             local = local_time(sharepoint._stamp(it))
