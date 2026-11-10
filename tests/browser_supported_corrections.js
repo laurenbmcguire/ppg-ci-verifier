@@ -38,7 +38,7 @@ const path=require('node:path');
     if(c.name==='mixed')assert.equal(payload.proposals.filter(p=>p.source==='AI fix (asked)').length,1);
     const receipt=await saved;assert.equal(receipt.status(),200);const body=await receipt.json();assert.equal(body.item.fixed_from.changes.length,2);
     await page.locator('#fd-aidone').waitFor();assert.match(await page.locator('#fd-aidone').innerText(),/All 2 changes are applied and saved as version 2/);
-    if(c.name!=='refresh_failure'){await page.locator('.fd-airun.good').waitFor();assert.match(await page.locator('.fd-airun.good').innerText(),/Dex fixed 2 cells/);}else{
+    if(c.name!=='refresh_failure'){await page.locator('.fd-airun.good').waitFor();assert.match(await page.locator('.fd-airun.good').innerText(),/Dex saved 2 cell changes/);}else{
      await refreshFailed;
      assert.match(await page.locator('#fd-aidone').innerText(),/Version 1 is kept/);
     }

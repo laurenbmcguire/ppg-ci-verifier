@@ -1374,7 +1374,7 @@
           if (!guard() || state.aiProposalOperation) return;
           const accepted = proposals.filter((p, i) => include.has(i)); if (!accepted.length) return;
           const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
-          const capture = captureCorrections(accepted, dec, {}, binding, report); fdPreview({...capture, independentScope: true, onApplied: () => dlg.close(), onRemove: row => {
+          const capture = captureCorrections(accepted, dec, {}, binding, report); fdPreview({...capture, independentScope: true, onApplied: () => { dlg.close(); dlg.remove(); }, onRemove: row => {
             proposals.forEach((p, i) => { if (p.sheet === row.sheet && p.cell === row.cell) { include.delete(i); const box = decision.querySelectorAll('input[type=checkbox]')[i]; if (box) box.checked = false; } });
             preview.disabled = !include.size; preview.textContent = `Preview ${include.size} selected AI proposals`;
           }});
@@ -1463,7 +1463,7 @@
           {sheet: e.it.sheet, cell: e.it.cell, before: e.cell.before, after: e.input.value, header: e.cell.header || '', kind: 'auto', source: 'Your edit', reason: 'Typed by the reviewer in scoped review'}]));
         if (!Object.keys(included).length) return;
         // Keep this modal and its typed draft behind the preview, including on Back.
-        fdPreview({...captureCorrections([], {}, included, binding, report), independentScope: true, onApplied: () => dlg.close(), onRemove: row => {
+        fdPreview({...captureCorrections([], {}, included, binding, report), independentScope: true, onApplied: () => { dlg.close(); dlg.remove(); }, onRemove: row => {
           for (const e of edits.values()) if (e.it.sheet === row.sheet && e.it.cell === row.cell) { e.include.checked = false; e.include.dispatchEvent(new Event('change')); }
           update();
         }});
@@ -1848,7 +1848,7 @@
       }; globalThis.setTimeout?.(attempt, 0); }
       body.append(h('p', {class: 'fd-hint', role: 'status'}, state.fdAutoRecheck[r.file_hash] && !state.rechecking ? 'Some errors were not listed by the last check. Recheck this report to list them all.' : 'Checking the whole report again so every error is listed…'));
     }
-    body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length, 'error')} to fix · ${c.applied} fixed in this version · ${c.kept} ignored`));
+    body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length, 'error')} to fix · ${plural(c.applied, 'saved cell change')} in this version · ${c.kept} ignored`));
     body.append(fdCheckedCopy(r));
     const statuses = [['To fix', ['open', 'selected']], ['Waiting on the SharePoint owner', ['deferred']],
       ['Confirmed, to fix', ['confirmed']], ['Ignored', ['kept', 'rejected']],
@@ -1949,9 +1949,67 @@
     }
     return [...cells.values()];
   }
+  // A recorded cell change is not proof that every finding on that cell was fixed.
+  // Only a complete, exact saved check can clear a selected finding in the result summary.
+  // The open list itself always comes from fdItems() on the newly loaded report.
+  function fdSavedFindingResolution(scope, accepted, binding, savedItem, fresh, working) {
+    const outcome = savedItem.save_outcome, reused = outcome?.type === 'existing_version';
+    const recorded = reused ? (outcome.requested_from === binding.file_hash && outcome.expected_check_hash === binding.expected_check_hash ? outcome.changes || [] : [])
+      : savedItem.fixed_from?.file_hash === binding.file_hash ? savedItem.fixed_from.changes || [] : [];
+    const saved = Array.isArray(recorded) ? recorded : [];
+    const cell = x => String(x?.cell || '').toUpperCase();
+    const exact = p => saved.some(c => c && c.sheet === p.sheet && cell(c) === cell(p) && c.before === p.before && c.after === p.after);
+    const confirmed = accepted.filter(exact), rv = fresh?.review, coverage = rv?.coverage, proof = fresh?.checked_copy;
+    const hasInventory = Array.isArray(rv?.issues) && Array.isArray(rv?.dismissed);
+    const inventory = hasInventory ? [...rv.issues, ...rv.dismissed].filter(x => x && typeof x === 'object') : [];
+    const identity = x => typeof x === 'string' && x.trim().length > 0;
+    const complete = !!(identity(fresh?.file_hash) && fresh.file_hash === savedItem.file_hash && identity(fresh.check_hash) && fresh.check_hash === savedItem.check_hash &&
+      identity(fresh.checker_version) && fresh.checker_version === savedItem.checker_version && ['findings', 'no_findings_in_checks_performed'].includes(fresh.internal_check_status) &&
+      proof?.file_hash === fresh.file_hash && proof.check_hash === fresh.check_hash && proof.coverage_complete === true &&
+      hasInventory && rv?.page?.complete === true && rv.page.issues_total === rv.issues.length && rv.page.dismissed_total === rv.dismissed.length &&
+      coverage && ['findings_total', 'findings_listed', 'all_findings'].every(k => Number.isSafeInteger(coverage[k]) && coverage[k] >= 0) && !coverage.truncated && coverage.not_listed === 0 &&
+      coverage.findings_total === coverage.findings_listed && coverage.all_findings === inventory.length &&
+      working?.status === 'current' && working.requested_hash === fresh.file_hash && working.working_hash === fresh.file_hash && !working.read_only_reason);
+    const resolved = [], appliedProposals = [], remaining = [];
+    for (const it of scope.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state))) {
+      const issue = it.issue;
+      // Keys/fingerprints may change when values or a record identifier change.
+      // A same-rule finding at the same place is still open, even if it was set aside.
+      const current = inventory.find(x => x.key === it.key || issue && x.code === issue.code && x.source === issue.source &&
+        (issue.item != null && x.item === issue.item && x.field === issue.field || x.sheet === it.sheet &&
+          (it.cell ? cell(x) === cell(it) : it.row ? Number(x.row) === Number(it.row) : true)));
+      const changed = it.cell && confirmed.some(p => p.sheet === it.sheet && cell(p) === cell(it));
+      const checked = issue?.source === 'Checks' || issue?.source === 'SharePoint' && rv?.sharepoint?.source_verified === true && Date.parse(proof?.expires_at) > Date.now() &&
+        !(fresh?.holds || []).some(h => h.hard && String(h.code || '').startsWith('source_')) ||
+        issue?.source === 'AI review' && rv?.ai?.status === 'done';
+      const sameBinding = it.binding && JSON.stringify(it.binding) === JSON.stringify(binding);
+      let reason;
+      if (!changed) reason = 'No exact saved correction was confirmed for this finding.';
+      else if (!complete || !sameBinding) reason = 'The change was saved, but finding resolution could not be verified. Reopen the saved copy and check again.';
+      else if (!issue) { appliedProposals.push(it.key); continue; } // Applied suggestion, not a detected-finding resolution.
+      else if (current) reason = 'This finding is still detected in the saved check. The saved cell change did not resolve it.';
+      else if (!checked) reason = 'The change was saved, but this finding needs a current check from its original source before it can be considered resolved.';
+      else { resolved.push(it.key); continue; }
+      remaining.push({item: it, currentKey: current?.key, reason});
+    }
+    return {confirmed: confirmed.length, resolved, appliedProposals, remaining, complete};
+  }
+  async function fdReadSavedCheck(savedItem) {
+    try {
+      const fresh = await fillPages(await api('/api/spreadsheet?id=' + savedItem.file_hash));
+      const working = await api('/api/spreadsheets/working-copy?id=' + savedItem.file_hash);
+      return {fresh, working};
+    } catch (_) { return {}; } // The save is still committed. Never retry a mutation to recover a read.
+  }
+  function fdResolutionText(run) {
+    if (!run.fixed) return 'No selected findings were resolved by a saved correction.';
+    return Number.isInteger(run.resolved) ? `${plural(run.resolved, 'selected finding')} cleared by the saved check. ${run.appliedProposals ? plural(run.appliedProposals, 'selected suggestion') + ' applied. ' : ''}${plural((run.unfixed || []).length, 'selected finding')} still ${(run.unfixed || []).length === 1 ? 'needs' : 'need'} review.`
+      : 'Saved changes are in History. Findings are removed only when the saved check no longer detects them.';
+  }
   async function fdAIFixNow(scope) {
     const report = state.report; if (!report) return;
-    const binding = reviewBinding(report), hash = report.file_hash;
+    const binding = reviewBinding(report), hash = report.file_hash, operation = {};
+    state.fdAIOperation = operation;
     // Errors that already have a checked answer (SharePoint's own value, or a clean-up with no open question) are applied as they are;
     // Dex is only asked about the rest, and never guesses a value it cannot know.
     const todo = scope.filter(fdCanAI), ready = todo.filter(fdReadyFix), ask = todo.filter(it => !fdReadyFix(it));
@@ -1976,11 +2034,11 @@
         proposals.push(...answer.proposals); skipped.push(...(answer.skipped || []));
       }
       if (state.report !== report || JSON.stringify(reviewBinding(report)) !== JSON.stringify(binding)) throw new Error('The report changed while suggestions were prepared. Reopen it before applying. No save was started.');
-      const accepted = fdUniqueAIProposals(proposals), cells = new Set(accepted.map(p => p.sheet + '!' + p.cell));
+      const accepted = fdUniqueAIProposals(proposals);
       const why = new Map(skipped.map(x => [x.finding_id, String(x.reason || '')]));
-      const fixedIds = new Set(scope.filter(it => it.cell && cells.has(it.sheet + '!' + it.cell)).map(it => it.key).concat(accepted.map(p => p.finding_id)));
-      const unfixed = scope.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state) && !fixedIds.has(it.key)).map(it => ({key: it.key, where: [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ') || 'Whole report',
-        text: it.text || it.reason || '', now: it.report, reason: why.get(it.key) || (fdSourceGap(it) ? 'The source evidence must be verified first. AI cannot establish the source date or authority.' : todo.includes(it) ? '' : 'This one already has a decision on it.')}));
+      const describe = (it, reason, currentKey) => ({key: currentKey || it.key, where: [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ') || 'Whole report',
+        text: it.text || it.reason || '', now: it.report, reason: why.get(it.key) || reason || (fdSourceGap(it) ? 'The source evidence must be verified first. AI cannot establish the source date or authority.' : '')});
+      const unfixed = scope.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).map(it => describe(it));
       if (!accepted.length) { state.fdAIRun = {hash, done: true, fixed: 0, confirmed: 0, tried: scope.length, skipped, unfixed, items: []};
         document.body.classList.add('fd-panel-open'); fdAIDoneDialog(state.fdAIRun, report); return; }
       const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
@@ -1988,18 +2046,21 @@
       state.fdAIRun = {hash, total: todo.length, running: true, saving: accepted.length}; drawSide();
       const savedItem = await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true, returnReceipt: true, throwOnError: true});
       const next = savedItem.file_hash;
-      state.fdReviewSelection = null;
+      if (state.fdReviewSelection?.binding === JSON.stringify(binding)) state.fdReviewSelection = null;
       const done = accepted.map(p => { const it = todo.find(x => x.key === p.finding_id); return {where: `${p.sheet} cell ${p.cell}`, text: p.selected_finding_id ? 'Checked mechanical correction: ' + p.reason : it?.text || it?.reason || '', before: p.before, after: p.after}; });
       // The successful save receipt is authoritative even if refreshing the list or report fails.
       // Never turn a committed version into a failed save, or repeat the mutation to recover a read.
-      const outcome = savedItem.save_outcome, reused = outcome?.type === 'existing_version';
-      const saved = reused ? (outcome.requested_from === hash && outcome.expected_check_hash === binding.expected_check_hash ? outcome.changes || [] : [])
-        : savedItem.fixed_from?.file_hash === hash ? (savedItem.fixed_from.changes || []) : [];
-      const has = p => saved.some(c => c.sheet === p.sheet && c.cell === p.cell && String(c.before) === String(p.before) && String(c.after) === String(p.after));
-      const confirmed = accepted.filter(has).length;
-      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed, tried: scope.length, skipped, unfixed, from: revisionOf(report), version: revisionOf(savedItem), reused, originalHash: hash, items: done};
-      document.body.classList.add('fd-panel-open');
-      fdAIDoneDialog(state.fdAIRun, savedItem);
+      const reused = savedItem.save_outcome?.type === 'existing_version';
+      const {fresh, working} = await fdReadSavedCheck(savedItem);
+      const resolution = fdSavedFindingResolution(scope, accepted, binding, savedItem, fresh, working);
+      if (state.fdAIOperation !== operation) return;
+      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed: resolution.confirmed, resolved: resolution.resolved.length, appliedProposals: resolution.appliedProposals.length,
+        tried: scope.length, skipped, unfixed: resolution.remaining.map(x => describe(x.item, x.reason, x.currentKey)),
+        from: revisionOf(report), version: revisionOf(savedItem), reused, originalHash: hash, items: done};
+      // A finished save must not pull the user back from a newer navigation or open a dialog over another report.
+      if (location.hash === '#r=' + next || location.hash === '#r=' + hash) {
+        document.body.classList.add('fd-panel-open'); fdAIDoneDialog(state.fdAIRun, savedItem);
+      }
     } catch (e) { state.fdAIRun = {hash, done: true, saveCommitted: e?.saveCommitted === true, http_status: e?.httpStatus || null, category: e?.aiCategory || null, error: e?.message || String(e)}; toast((state.fdAIRun.saveCommitted ? '' : 'AI fix did not finish: ') + state.fdAIRun.error, true); }
     finally { if (state.report?.file_hash === state.fdAIRun?.hash) drawSide(); }
   }
@@ -2092,16 +2153,16 @@
   // The message box after every AI fix: what was fixed, that it is saved, what still needs an answer, and downloads.
   function fdAISummaryText(run, report) {
     const lines = ['Verification App - AI fix summary', report ? `Report: ${report.filename}` : '', `Date: ${new Date().toLocaleString()}`, '',
-      `${run.reused ? 'Requested changes in existing copy' : 'Fixed by Dex'}: ${run.fixed}`, run.fixed ? `${run.reused ? 'Opened existing version' : 'Saved as version'} ${run.version || (run.from || 1) + 1} (version ${run.from || 1} is kept). ${run.reused ? 'No new version was created. ' : ''}Confirmed in the saved copy: ${run.confirmed} of ${run.fixed}.` : 'Nothing was changed.', ''];
-    for (const x of run.items || []) lines.push(`${run.reused ? 'REQUESTED' : 'FIXED'}  ${x.where}: ${x.before === '' ? 'blank' : '"' + x.before + '"'} -> "${x.after}"${x.text ? '   (' + x.text + ')' : ''}`);
-    if ((run.unfixed || []).length) { lines.push('', `Not fixed: ${run.unfixed.length}`);
-      for (const x of run.unfixed) lines.push(`NOT FIXED  ${x.where}: ${x.text}${x.reason ? '   Reason: ' + x.reason : ''}`); }
+      `${run.reused ? 'Requested changes in existing copy' : 'Saved cell changes'}: ${run.fixed}`, run.fixed ? `${run.reused ? 'Opened existing version' : 'Saved as version'} ${run.version || (run.from || 1) + 1} (version ${run.from || 1} is kept). ${run.reused ? 'No new version was created. ' : ''}Confirmed in the saved copy: ${run.confirmed} of ${run.fixed}.` : 'Nothing was changed.', fdResolutionText(run), ''];
+    for (const x of run.items || []) lines.push(`${run.reused ? 'REQUESTED' : 'SAVED'}  ${x.where}: ${x.before === '' ? 'blank' : '"' + x.before + '"'} -> "${x.after}"${x.text ? '   (' + x.text + ')' : ''}`);
+    if ((run.unfixed || []).length) { lines.push('', `Still needs review: ${run.unfixed.length}`);
+      for (const x of run.unfixed) lines.push(`NEEDS REVIEW  ${x.where}: ${x.text}${x.reason ? '   Reason: ' + x.reason : ''}`); }
     return lines.join('\r\n');
   }
   function fdAIDoneDialog(run, report) {
     document.getElementById('fd-aidone')?.remove();
     const allSaved = run.confirmed === run.fixed, unfixed = run.unfixed || [];
-    const live = keys => { const all = state.fdItems || fdItems(); return keys.map(k => all.find(it => it.key === k)).filter(Boolean); };
+    const live = keys => { if (state.report?.file_hash !== run.hash) return []; const all = state.fdItems || fdItems(); return keys.map(k => all.find(it => it.key === k)).filter(Boolean); };
     const unknown = unfixed.filter(x => !x.reason || /No supported cell suggestion|could not return a safe|source authority|source correction/i.test(x.reason));
     const other = unfixed.filter(x => !unknown.includes(x));
     const d = h('dialog', {id: 'fd-aidone', class: 'fd-modal fd-aidone', 'aria-labelledby': 'fd-aidone-title'});
@@ -2109,14 +2170,15 @@
     const saveText = () => { const a = h('a', {href: URL.createObjectURL(new Blob([fdAISummaryText(run, report)], {type: 'text/plain'})), download: `AI fix summary - ${(report?.filename || 'report').replace(/\.[^.]+$/, '')}.txt`}); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); };
     const line = x => h('li', {}, h('b', {}, x.where), `: ${/^Missing cell\.?$/i.test(String(x.text).trim()) ? 'this cell is blank' : x.text}${x.now != null && x.now !== '' ? ` (now “${String(x.now).slice(0, 40)}”)` : ''}`);
     d.append(h('button', {type: 'button', class: 'fd-dialog-x', 'aria-label': 'Close', title: 'Close', onclick: close}, icon('x', 18)),
-      h('h2', {id: 'fd-aidone-title', tabindex: '-1'}, run.reused ? 'Opened the existing matching version' : !run.fixed ? 'Dex could not fix these' : !unfixed.length ? 'Dex fixed everything you selected' : `Dex fixed ${run.fixed} of ${run.tried}`),
+      h('h2', {id: 'fd-aidone-title', tabindex: '-1'}, run.reused ? 'Opened the existing matching version' : !run.fixed ? 'Dex could not fix these' : `Saved ${plural(run.fixed, 'cell change')}`),
       run.fixed ? h('p', {class: allSaved ? 'fd-aidone-ok' : 'fd-aidone-warn', role: 'status'}, allSaved
         ? run.reused ? `All ${plural(run.fixed, 'requested change')} match existing version ${run.version}. No new version was created. Version ${run.from || 1} is kept.`
         : `All ${plural(run.fixed, 'change')} ${run.fixed === 1 ? 'is' : 'are'} applied and saved as version ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept.`
         : `${run.confirmed} of ${run.fixed} changes could be confirmed in the saved version. Open the report again and check the rest.`)
         : h('p', {class: 'fd-aidone-warn', role: 'status'}, 'Nothing was changed.'),
-      (run.items || []).length ? h('section', {}, h('h3', {}, `${run.reused ? 'Requested changes matched' : 'What was fixed'} (${run.items.length})`), h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
-        h('s', {}, x.where), ` ${x.before === '' ? 'blank' : '“' + x.before + '”'} → “${x.after}”`)))) : null,
+      run.fixed ? h('p', {class: 'fd-resolution', role: 'status'}, fdResolutionText(run)) : null,
+      (run.items || []).length ? h('details', {class: 'fd-saved-changes'}, h('summary', {}, `${run.reused ? 'Requested changes matched' : 'Saved changes'} (${run.items.length})`), h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
+        h('b', {}, x.where), ` ${x.before === '' ? 'blank' : '“' + x.before + '”'} → “${x.after}”`)))) : null,
       unknown.length ? h('section', {class: 'fd-aidone-ask'}, h('h3', {}, `Dex does not know the right value for ${unknown.length === 1 ? 'this one' : 'these ' + unknown.length}`),
         h('ul', {class: 'fd-fixed-list'}, unknown.slice(0, 100).map(line)),
         h('p', {}, 'Would you like to add a value, or leave it as it is?'),
@@ -2124,7 +2186,7 @@
           h('button', {type: 'button', class: 'btn primary', onclick: () => { const list = live(unknown.map(x => x.key)); close(); if (list.length) fdManualStart(list); }}, unknown.length === 1 ? 'Add a value' : 'Add values'),
           h('button', {type: 'button', class: 'btn', onclick: () => { const list = live(unknown.map(x => x.key)); close(); if (list.length) fdReviewDialog(list, 'ignore'); }}, unknown.length === 1 ? 'Leave it blank' : 'Leave them blank'))) : null,
       other.length ? h('section', {}, h('h3', {}, `Needs a person (${other.length})`), h('ul', {class: 'fd-fixed-list'}, other.slice(0, 100).map(x => h('li', {}, h('b', {}, x.where), `: ${x.text}`, x.reason ? h('p', {class: 'fd-hint'}, x.reason) : null))),
-        h('p', {class: 'fd-hint'}, 'No change was confirmed for these findings. Review the reason for each before deciding what to do next.'),
+        h('p', {class: 'fd-hint'}, 'These findings have not been confirmed resolved. Review the reason for each before deciding what to do next.'),
         h('div', {class: 'fd-cardacts'}, h('button', {type: 'button', class: 'btn', onclick: () => { const list = live(other.map(x => x.key)); close(); if (list.length) fdManualStart(list); }}, 'Fix manually'))) : null,
       h('div', {class: 'fd-modalacts'},
         report && run.reused ? h('a', {class: 'btn', href: '#r=' + report.file_hash, onclick: close}, 'Open working copy') : null,
@@ -2147,9 +2209,9 @@
     const why = reasons.size ? h('ul', {class: 'fd-airun-why'}, [...reasons].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([t, n]) => h('li', {}, `${n} not fixed: ${t}`))) : null;
     if (!run.fixed) return h('div', {class: 'fd-airun', role: 'status'}, h('p', {}, `Dex could not fix ${run.tried === 1 ? 'this error' : `these ${run.tried} errors`}. Nothing was changed. Fix ${run.tried === 1 ? 'it' : 'them'} manually or ignore ${run.tried === 1 ? 'it' : 'them'}.`), why, dismiss);
     return h('div', {class: 'fd-airun good', role: 'status'},
-      h('p', {}, h('b', {}, `${run.reused ? 'Requested changes match' : run.manual ? 'You changed' : 'Dex fixed'} ${plural(run.fixed, 'cell')}.`), ` ${run.reused ? 'Opened existing version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}; version ${run.from || 1} is kept. ${run.reused ? 'No new version was created.' : ''}`),
-      (run.items || []).length ? h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
-        h('s', {}, `${x.where}${x.text ? ': ' + String(x.text).slice(0, 120) : ''}`), ` ${x.before === '' ? 'blank' : '“' + x.before + '”'} → “${x.after}”`))) : null,
+      h('p', {}, h('b', {}, `${run.reused ? 'Requested changes match' : run.manual ? 'You saved' : 'Dex saved'} ${plural(run.fixed, 'cell change')}.`), ` ${run.reused ? 'Opened existing version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}; version ${run.from || 1} is kept. ${run.reused ? 'No new version was created.' : ''}`),
+      h('p', {}, fdResolutionText(run)),
+      h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'history'; drawReport(); }}, 'View saved changes in History'),
       h('p', {}, left ? `${plural(left, 'error')} left to fix. ${left === 1 ? 'It is' : 'They are'} listed below.` : 'No open items in this list. Ignored and AI-set-aside findings may still be unresolved; check the verification status above.'), why, dismiss);
   }
   // ---------- the app fixes what it can by itself (new version, original kept), then shows only what needs a person
@@ -2668,12 +2730,12 @@
           if (saving || state.busy) return;
           const applyButton = e.currentTarget; // DOM Event.currentTarget is null after awaiting.
           setSaving(true); errorMessage.textContent = ''; applyButton.textContent = `Saving v${next} and re-checking…`;
-          let hash = null;
-          try { hash = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding, recommendedOnly: c.recommendedOnly, independentScope: c.independentScope, gridDraft: c.gridDraft}); }
+          let hash = null, finished = false;
+          const finishApplied = () => { if (!finished) { finished = true; d.close(); d.remove(); c.onApplied?.(); } };
+          try { hash = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding, recommendedOnly: c.recommendedOnly, independentScope: c.independentScope, gridDraft: c.gridDraft, beforeOpen: finishApplied}); }
           catch (error) { toast('The save could not be confirmed. Reload the report before retrying.', true); }
           finally { setSaving(false); }
-          if (hash) d.close();
-          if (hash) c.onApplied?.();
+          if (hash) finishApplied();
           else { applyButton.textContent = `Apply ${plural(rows.length, 'change')} and re-check`; errorMessage.textContent = 'Not confirmed saved. Review the error and reload the report before trying again; this preview remains available.'; errorMessage.focus(); }
         }}, `Apply ${plural(rows.length, 'change')} and re-check`)));
     const setSaving = pending => { saving = pending; for (const button of d.querySelectorAll('button')) button.disabled = pending; };
@@ -2829,6 +2891,9 @@
     if (inconsistent) add('Saved history could not be verified', fdReadOnlyReason(r) + ' The links below are recorded references, not verified correction ancestry.');
     if (r.fixed_from) add(`v${r.fixed_from.revision || 1} · ${r.fixed_from.filename}`, inconsistent ? 'Unverified recorded parent reference.' : 'The version these changes were made on. Kept unchanged.', h('a', {href: '#r=' + r.fixed_from.file_hash + '&history=1'}, `Open v${r.fixed_from.revision || 1}`));
     add(`v${revisionOf(r)} · this version`, r.fixed_from ? `${plural((r.fixed_from.changes || []).length, 'change')} ${inconsistent ? 'recorded in unverified history' : 'applied'}${r.fixed_from.applied_at ? ' ' + when2(r.fixed_from.applied_at) : ''}: ` + (r.fixed_from.changes || []).slice(0, 8).map(c => `${c.sheet}!${c.cell} ${c.before || '(blank)'} → ${c.after || '(blank)'}`).join('; ') + ((r.fixed_from.changes || []).length > 8 ? '…' : '') : `Uploaded ${when2(r.received_at) || ''}. Stored unchanged (SHA-256 ${r.file_hash.slice(0, 12)}…).`);
+    if ((r.fixed_from?.changes || []).length) rows.push(h('details', {class: 'fd-saved-history'},
+      h('summary', {}, `All ${plural(r.fixed_from.changes.length, 'saved cell change')}`),
+      ...fdHistoryGroups({changed: r.fixed_from.changes}).map(g => fdHistoryGroup(g, inconsistent ? {unverified: true, notice: 'Recorded changes only; correction ancestry is unverified.'} : {}))));
     for (const f of r.fixes_applied || []) add(`v${f.revision || '?'} · ${f.fixed_filename}`, `${plural((f.changes || []).length, 'change')} ${inconsistent ? 'recorded in unverified history' : 'applied'} ${when2(f.applied_at) || ''}.`, h('a', {href: '#r=' + f.fixed_file_hash + '&history=1'}, 'Open it'));
     for (const x of r.recheck_applied || []) add('Re-checked', `${x.by || 'Someone'} re-ran the checks ${when2(x.at) || ''} (from ${x.from_version || '?'} to ${x.to_version || '?'}).`);
     for (const x of (r.review_decision_log || []).slice(-30)) add({keep: 'Kept as recorded', reject: 'Suggestion rejected', note: 'Note', reopen: 'Decision undone'}[x.action] || x.action, `${x.by || 'A reviewer'} ${when2(x.at) || ''}${x.note ? ': “' + x.note + '”' : ''}`);
@@ -3691,7 +3756,7 @@
     const captured = correctionSnapshots.get(accepted);
     if (!captured?.binding?.expected_check_hash) { const error = new Error('Reopen the correction preview before applying. No save was started.'); if (opts.throwOnError) throw error; toast(error.message, true); return null; }
     ({accepted, dec, edits} = captured);
-    const binding = captured.binding;
+    const binding = captured.binding, reportAtSave = state.report, openAtSave = state.openRequest, selectedAtSave = state.selected, routeAtSave = globalThis.location?.hash;
     if (state.busy || state.decisionPending || state.rechecking || state.aiProposalOperation) { const error = new Error('Another step is still running. No save was started. Wait for it to finish.'); if (opts.throwOnError) throw error; toast(error.message, true); return null; }
     state.busy = true; drawFixes(); updateDownloads();
     toast('Building the fixed copy with your changes…');
@@ -3729,7 +3794,10 @@
       if (opts.thenOpen !== false) {
         // These reads cannot undo the successful, committed save above.
         try { await loadList(); } catch (error) { toast('The corrected version is saved, but the report list could not refresh. Open the saved copy or reload the list.', true); }
-        select(savedItem.file_hash, true);
+        if (state.report === reportAtSave && state.openRequest === openAtSave && state.selected === selectedAtSave && globalThis.location?.hash === routeAtSave) {
+          opts.beforeOpen?.(); // A confirmed preview's saved inputs are no longer unsaved drafts.
+          select(savedItem.file_hash, true);
+        }
       }
       return opts.returnReceipt ? savedItem : savedItem.file_hash;
     } catch (e) {

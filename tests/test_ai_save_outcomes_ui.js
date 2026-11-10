@@ -8,7 +8,7 @@ function harness(mode='ok'){
  const state={report};const ctx=vm.createContext({state,revisionOf:r=>r.revision||1,drawFixes(){},updateDownloads(){},$(){return null;},plural:(n,s)=>`${n} ${s}s`,
  toast:(...a)=>events.push(a),store:{get:()=>({}),set(){}},select:h=>{if(mode==='select-fail')throw Error('Synthetic screen failure');selections.push(h);},
  loadList:async()=>{if(mode==='refresh-fail')throw Error('Synthetic list failure');},
- api:async(path,body)=>{writes.push({path,body});if(mode==='committed-denied')throw Object.assign(Error('The corrected version was saved, but access changed before it could be opened. Ask an admin to review access before trying again.'),{httpStatus:403,saveCommitted:true});if(mode==='rejected')throw Object.assign(Error('Exact source changed. Nothing was applied.'),{httpStatus:409});if(mode==='lost')throw Error('Network response lost');if(mode==='server')throw Object.assign(Error('Unavailable'),{httpStatus:503});if(mode==='malformed')return {};return {item};}});
+ api:async(path,body)=>{writes.push({path,body});if(mode==='committed-denied')throw Object.assign(Error('The corrected version was saved, but access changed before it could be opened. Ask an admin to review access before trying again.'),{httpStatus:403,saveCommitted:true});if(mode==='rejected')throw Object.assign(Error('Exact source changed. Nothing was applied.'),{httpStatus:409});if(mode==='lost')throw Error('Network response lost');if(mode==='server')throw Object.assign(Error('Unavailable'),{httpStatus:503});if(mode==='malformed')return {};if(mode==='navigation')state.report={file_hash:'other'};return {item};}});
  vm.runInContext(source.slice(source.indexOf('  function versionReadOnly('),source.indexOf('  function versionLinks(')) + between('  const correctionSnapshots =','  function readyChanges()')+between('  async function applyFixes(','  // Take out extra copies'),ctx);
  const binding={file_hash:'original',expected_check_hash:'checked',expected_run:{id:1},expected_rev:2};
  const p={id:'p',sheet:'Sheet',cell:'A1',before:'2',after:'3',kind:'number',source:'SharePoint',snapshot_id:'snap',item:'item',field:'quantity',change_set:'whole',change_set_size:1};
@@ -31,3 +31,9 @@ test('identical repeated cell proposals deduplicate but conflicting values or pr
 });
 
 test('committed access loss stays explicit and never retries or claims no write',async()=>{const h=harness('committed-denied');await assert.rejects(h.run(),e=>e.saveCommitted===true&&/was saved/.test(e.message));assert.equal(h.writes.length,1);assert.ok(h.events.every(e=>!e[0].includes('Nothing was changed')));});
+
+test('navigation during a committed save does not reopen the saved report over the newer view',async()=>{const h=harness('navigation');assert.equal(await h.run(),'saved');assert.equal(h.state.report.file_hash,'other');assert.deepEqual(h.selections,[]);assert.equal(h.writes.length,1);});
+
+test('confirmed preview cleanup runs once before navigating to the saved child',async()=>{const h=harness(),events=[];h.ctx.select=hash=>events.push(['open',hash]);await h.run({beforeOpen:()=>events.push(['close-preview'])});assert.deepEqual(events,[['close-preview'],['open','saved']]);});
+
+test('failed save never closes the manual draft as if it were saved',async()=>{const h=harness('rejected');let closed=0;await assert.rejects(h.run({beforeOpen:()=>closed++}));assert.equal(closed,0);});
