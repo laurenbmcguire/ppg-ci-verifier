@@ -1115,7 +1115,7 @@
       const answer = result.ai_proposals;
       if (!answer || answer.status !== 'done' || answer.file_hash !== binding.file_hash || answer.check_hash !== binding.expected_check_hash ||
           JSON.stringify([...(answer.ids || [])].sort()) !== JSON.stringify(scope.map(it => it.key).sort()) || !Array.isArray(answer.proposals) ||
-          answer.proposals.some(p => !scope.some(it => it.key === p.finding_id) || p.source !== 'AI fix (asked)' || p.sure !== false || p.recommendation_eligible !== false)) throw Object.assign(new Error('The AI response did not match the selected scope and safety labels. No proposals were used.'), {aiCategory: 'response'});
+          answer.proposals.some(p => !scope.some(it => it.key === p.finding_id) || p.recommendation_eligible !== false || !(p.source === 'AI fix (asked)' && p.sure === false || ['Clean-up', 'Number as text', 'Spelling'].includes(p.source) && p.sure === true && p.selected_finding_id === p.finding_id && scope.some(it => it.key === p.finding_id && it.fp === p.selected_finding_fp)))) throw Object.assign(new Error('The AI response did not match the selected scope and safety labels. No proposals were used.'), {aiCategory: 'response'});
       view.success(answer);
     } catch (error) { if (current()) view.failure(error); }
     finally { operation.cancel(); }
@@ -1854,7 +1854,7 @@
   const fdCanAI = it => !!fdReadyFix(it) || !!(it.fp && it.state === 'open' && state.aiOn && !fdSourceGap(it));
   function fdUniqueAIProposals(proposals) {
     const cells = new Map();
-    const fields = ['before', 'after', 'kind', 'source', 'snapshot_id', 'item', 'field', 'change_set', 'change_set_size'];
+    const fields = ['before', 'after', 'kind', 'source', 'snapshot_id', 'item', 'field', 'change_set', 'change_set_size', 'selected_finding_id', 'selected_finding_fp'];
     for (const p of proposals) {
       const key = JSON.stringify([p.sheet, String(p.cell).toUpperCase()]), prior = cells.get(key);
       if (prior && fields.some(field => JSON.stringify(prior[field] ?? null) !== JSON.stringify(p[field] ?? null))) {
@@ -1904,7 +1904,7 @@
       const savedItem = await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true, returnReceipt: true, throwOnError: true});
       const next = savedItem.file_hash;
       state.fdReviewSelection = null;
-      const done = accepted.map(p => { const it = todo.find(x => x.key === p.finding_id); return {where: `${p.sheet} cell ${p.cell}`, text: it?.text || it?.reason || '', before: p.before, after: p.after}; });
+      const done = accepted.map(p => { const it = todo.find(x => x.key === p.finding_id); return {where: `${p.sheet} cell ${p.cell}`, text: p.selected_finding_id ? 'Checked mechanical correction: ' + p.reason : it?.text || it?.reason || '', before: p.before, after: p.after}; });
       // The successful save receipt is authoritative even if refreshing the list or report fails.
       // Never turn a committed version into a failed save, or repeat the mutation to recover a read.
       const outcome = savedItem.save_outcome, reused = outcome?.type === 'existing_version';
@@ -3608,6 +3608,7 @@
         const after = dec[f.id]?.after ?? f.after;
         return {id: f.id, sheet: f.sheet, cell: f.cell, before: f.before, after, reason: f.reason, source: f.source, snapshot_id: f.snapshot_id, item: f.item, field: f.field,
           change_set: f.change_set, change_set_size: f.change_set_size,
+          selected_finding_id: f.selected_finding_id, selected_finding_fp: f.selected_finding_fp,
           kind: f.kind === 'auto' ? 'auto' : after === f.after ? f.kind : (f.kind === 'number' && after.trim() !== '' && !isNaN(Number(after)) ? 'number' : 'text')};
       });
       for (const e of Object.values(edits || {})) {

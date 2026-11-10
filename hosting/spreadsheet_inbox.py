@@ -1160,6 +1160,8 @@ class SpreadsheetInbox:
         # Copy first so the immutable displayed request and caller-owned objects stay unchanged.
         approved = [dict(c) for c in approved]
         for c in approved:
+            if ('selected_finding_id' in c or 'selected_finding_fp' in c) and any(c.get(k) is not None for k in ('snapshot_id', 'item', 'field', 'change_set', 'change_set_size')):
+                raise FixError('A selected mechanical correction cannot assert source or coordinated-change authority. Nothing was applied.')
             label = str(c.get('source') or '').strip()
             if label.casefold().startswith('reverted'):
                 raise ValueError('Revert workbook changes are disabled pending safety review.')
@@ -1269,6 +1271,13 @@ class SpreadsheetInbox:
             fixed_result['revision'] = revision
             fixed_result['root_hash'] = result.get('root_hash') or file_hash
             if result.get('source_document'): fixed_result['source_document'] = result['source_document']   # still came from that PDF / Word file
+            # Changed workbook bytes cannot inherit source verification, but must not
+            # silently lose an outstanding source requirement either. Keep the prior
+            # receipt explicitly historical, bound to the old bytes, until refreshed.
+            if result.get('source_reconciliation'):
+                fixed_result['source_reconciliation'] = dict(result['source_reconciliation'],
+                    stale=True, verified=False, carried_from=file_hash,
+                    stale_reason='Workbook corrections changed this version. Compare the assigned source again before verification.')
             # Unbound historical acceptances never follow changed workbook bytes.
             for k in ('auto_formatting', 'ai_fixed', 'review_decisions'):   # what was already fixed or decided stays on the report as it moves on
                 if result.get(k) and k not in fixed_result: fixed_result[k] = result[k]
@@ -1407,6 +1416,8 @@ class SpreadsheetInbox:
                 why = {'reject': 'a person decided to keep it as recorded', 'defer': 'it is waiting for the source owner'}.get(
                     why, 'an earlier decision on it no longer matches and needs a person')
                 raise FixError(f'{c.get("sheet")}!{c.get("cell")} was not changed: {why}. Reopen it first. Nothing was applied.')
+        from hosting.selected_corrections import validate as validate_selected_corrections
+        validate_selected_corrections(result, raw, approved)
         source_proposals = None
         for c in approved:
             where = (c.get('sheet'), str(c.get('cell') or '').upper())

@@ -39,7 +39,8 @@ from eos_fixture import build,ROWS
 from hosting.spreadsheet_inbox import SpreadsheetInbox
 from openpyxl import load_workbook
 store=PostgresWorkspace('postgresql://test.invalid/synthetic',FakeDatabase().connect)
-rows=[list(row) for row in ROWS];rows[1][4]='Holes /  Glue ';rows[2][4]='Holes /  Glue '
+rows=[list(row) for row in ROWS]
+if MODE!='provider-failure': rows[1][4]='Holes /  Glue ';rows[2][4]='Holes /  Glue '
 raw=build([tuple(row) for row in rows])
 if MODE=='reuse':
     from hosting.fixes import apply_fixes
@@ -65,7 +66,11 @@ with store.session() as directory:
     before=box.get(original_hash)
     assert box.holds(before)==[], 'Stop: safe fixture must genuinely satisfy existing eligibility, never patch holds.'
     eligible=[p for p in box.fix_proposals(original_hash)['proposals'] if p['recommendation_eligible']]
-    assert len(eligible)==2 and all(p['source']=='Clean-up' for p in eligible),eligible
+    if MODE=='provider-failure':
+        assert not eligible
+        eligible=[dict(sheet='1st Shift',cell='L'+str(i+16),before=ROWS[i][5]) for i in (1,2)]
+    else:
+        assert len(eligible)==2 and all(p['source']=='Clean-up' for p in eligible),eligible
     # Fabricated findings on the real fixture cells; no safety/hold function is patched.
     findings=[dict(code='synthetic_spacing', sheet=p['sheet'], cell=p['cell'], row=int(''.join(c for c in p['cell'] if c.isdigit())), message='Synthetic whitespace review', observed=[{'type':'str','value':p['before']}]) for p in eligible]
     box._update(original_hash,lambda r:r.update(findings=findings,finding_counts={'synthetic_spacing':2},finding_count=2,findings_truncated=False))
@@ -84,7 +89,7 @@ class LocalHandler(handler):
             data=self.rfile.read(int(self.headers.get('Content-Length','0')));payload=json.loads(data);self.rfile=io.BytesIO(data)
             if payload.get('file_hash')!=original_hash or (payload.get('recommended_only') is True and MODE!='preview'):
                 return self.fail(409,'Only the fabricated reviewed recommendation scope is allowed.')
-            if not payload.get('changes') or any(not any(c.get('sheet')==p['sheet'] and c.get('cell')==p['cell'] and c.get('after')==p['after'] and c.get('source')==('Clean-up' if MODE=='preview' else 'AI fix (asked)') for p in eligible) for c in payload['changes']):
+            if not payload.get('changes') or any(not any(c.get('sheet')==p['sheet'] and c.get('cell')==p['cell'] and c.get('after')==p['after'] and c.get('source')=='Clean-up' for p in eligible) for c in payload['changes']):
                 return self.fail(409,'Only generated synthetic recommendations are allowed.')
             apply_requests.append(payload)
         return super().do_POST()
@@ -105,7 +110,7 @@ try:
         if MODE=='reuse':
             assert box.list()['count']==4 and len(apply_requests)==1
             assert {h:box.get(h) for h in reuse_before}==reuse_before, 'Reusing a copy must not change any saved metadata'
-            assert len(provider_calls)==1 and not external
+            assert len(provider_calls)==0 and not external
             print(json.dumps(dict(passed=True,width=WIDTH,actual_handler=True,existing_version_opened=True,no_new_version=True,all_metadata_unchanged=True,original_byte_identical=True,no_provider_traffic=True)))
             sys.exit(0)
         assert len(parent.get('fixes_applied') or [])==1;record=parent['fixes_applied'][0];assert len(record['changes'])==2
@@ -118,7 +123,7 @@ try:
                 for cell in row:
                     if cell.value!=new_wb[ws.title][cell.coordinate].value:diffs.append((ws.title,cell.coordinate,cell.value,new_wb[ws.title][cell.coordinate].value))
         assert sorted(diffs)==sorted((c['sheet'],c['cell'],c['before'],c['after']) for c in apply_requests[0]['changes']),diffs
-        assert not new.get('approval') and not new.get('sent');assert len(apply_requests)==1; assert len(provider_calls)==(0 if MODE=='preview' else 1); assert all(len(rows)==2 for rows in provider_calls)
+        assert not new.get('approval') and not new.get('sent');assert len(apply_requests)==1; assert len(provider_calls)==0; assert all(len(rows)==2 for rows in provider_calls)
         assert not external,external
         print(json.dumps(dict(passed=True,width=WIDTH,actual_handler=True,original_byte_identical=True,one_corrected_version=True,revision=2,recorded_changes=2,exact_cell_differences=diffs,no_provider_traffic=True,synthetic_only=True)))
 finally:

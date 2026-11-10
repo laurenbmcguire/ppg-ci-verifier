@@ -66,7 +66,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
   }
   assert.equal(writes.length,1);assert.equal(proposals.length,1);
   assert.equal(writes[0].expected_check_hash,proposals[0].expected_check_hash);
-  assert.equal(writes[0].changes.length,2);assert.ok(writes[0].changes.every(c=>c.source==='AI fix (asked)'));
+  assert.equal(writes[0].changes.length,2);assert.ok(writes[0].changes.every(c=>c.source==='Clean-up'&&c.selected_finding_id&&c.selected_finding_fp));
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   console.log(JSON.stringify({passed:true,mode,width,one_apply_request:true,exact_binding:true,provider_calls_are_synthetic:true}));
  }catch(e){console.error('Diagnostic:',JSON.stringify({mode,writes:writes.length,saved,receipt_hash:receipt?.item?.file_hash,visible_toast:await page.locator('#toast').textContent(),ai_status:await page.locator('.fd-airun').allTextContents(),errors}));throw e;}
