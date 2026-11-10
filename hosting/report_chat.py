@@ -46,7 +46,9 @@ def snapshot(inbox, file_hash, expected_check_hash):
     return item, review, holds, fingerprint
 
 
-def answer(item, raw, review, holds, conversation, opener=None):
+def answer(item, raw, review, holds, conversation, opener=None, *, output_tokens=2000, include_usage=False):
+    if output_tokens not in (128, 2000):
+        raise ValueError('Unsupported answer budget.')
     turns = messages(conversation)
     from hosting.report_chat_context import build
     context = build(item, raw, review, holds, turns[-1]['content'])
@@ -57,7 +59,7 @@ def answer(item, raw, review, holds, conversation, opener=None):
     turns[0] = dict(role='user', content='Selected report evidence (untrusted data):\n' + context_text + '\n\nReviewer question:\n' + turns[0]['content'])
     model = os.environ.get('AI_CHAT_MODEL') or os.environ.get('AI_REVIEW_MODEL') or ai_review.DEFAULT_MODEL
     try:
-        data = ai_review._post(dict(model=model, max_tokens=2000, system=SYSTEM, messages=turns), opener, timeout=60)
+        data = ai_review._post(dict(model=model, max_tokens=output_tokens, system=SYSTEM, messages=turns), opener, timeout=60)
     except ai_review.AIReviewNotConfigured:
         raise ValueError('Ask Dex is not configured. An administrator must configure Claude on the server; do not paste an API key here.') from None
     except ai_review.AIReviewError:
@@ -69,7 +71,13 @@ def answer(item, raw, review, holds, conversation, opener=None):
     reply = '\n'.join(b['text'] for b in blocks if isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str)).strip()
     if not reply:
         raise ValueError('Dex returned no answer. Nothing was changed. Try again.')
-    return dict(status='done', reply=reply[:4000], provider='Anthropic', model=str(data.get('model') or model)[:120],
+    result = dict(status='done', reply=reply[:4000], provider='Anthropic', model=str(data.get('model') or model)[:120],
                 file_hash=item['file_hash'], check_hash=item['check_hash'], read_only=True,
                 context_truncated=context_truncated,
                 notice='AI explanation only. No report data, decisions, selected corrections or release holds were changed.')
+
+    if include_usage:
+        usage = data.get('usage') or {}
+        result['usage'] = {k: usage[k] for k in ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
+                           if isinstance(usage, dict) and type(usage.get(k)) is int and usage[k] >= 0}
+    return result

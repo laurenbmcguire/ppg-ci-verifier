@@ -240,6 +240,21 @@ class handler(BaseHTTPRequestHandler):
         if token:
             self._user_cache = (header, access.session_user(inbox, token))
 
+    # TEMPORARY: re-read existing session without granting virtual-owner fallback.
+    def probe_admin_principal(self):
+        from hosting import access
+        header = self.headers.get('Cookie') or ''
+        token = access.read_cookie(header, access.COOKIE)
+        if token:
+            with self.store().session() as directory:
+                self.refresh_session_principal(SpreadsheetInbox(directory))
+        else:
+            self._user_cache = None
+        user = self.current_user()
+        if not user or user.get('virtual') or user.get('role') != 'admin':
+            return None
+        return user.get('id') or None
+
     def is_admin(self):
         u = self.current_user()
         return bool(u and u.get('role') == 'admin')
@@ -658,6 +673,17 @@ class handler(BaseHTTPRequestHandler):
                 refused = self.gate('GET', route)
                 if refused:
                     return refused
+            # TEMPORARY fixed-synthetic test UI; every asset requires an admin session.
+            probe_assets = {
+                '/api/admin/ask-dex-connection-test/page': ('ask-dex-probe.html', 'text/html; charset=utf-8'),
+                '/api/admin/ask-dex-connection-test/script.js': ('ask-dex-probe.js', 'text/javascript; charset=utf-8'),
+                '/api/admin/ask-dex-connection-test/style.css': ('ask-dex-probe.css', 'text/css; charset=utf-8'),
+            }
+            if route in probe_assets:
+                if not self.probe_admin_principal():
+                    return self.fail(403, 'Only an admin can view this connection test.')
+                name, content_type = probe_assets[route]
+                return self.send(200, (ROOT / 'web' / name).read_bytes(), content_type)
             if route == '/api/me':
                 from hosting import access, mailer
                 user = self.current_user()
@@ -880,7 +906,7 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-proposals','/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine', '/api/spreadsheets/decision', '/api/spreadsheets/decide', '/api/spreadsheets/decision-status', '/api/spreadsheets/findings', '/api/spreadsheets/auto-fix', '/api/spreadsheets/revert-fix', '/api/spreadsheets/assign', '/api/spreadsheets/source-reconcile', '/api/spreadsheets/recheck', '/api/sharepoint/confirm-columns', '/api/change-summary', '/api/change-summaries', '/api/settings/sharepoint-jobs', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/review-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if route not in ('/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-proposals','/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine', '/api/spreadsheets/decision', '/api/spreadsheets/decide', '/api/spreadsheets/decision-status', '/api/spreadsheets/findings', '/api/spreadsheets/auto-fix', '/api/spreadsheets/revert-fix', '/api/spreadsheets/assign', '/api/spreadsheets/source-reconcile', '/api/spreadsheets/recheck', '/api/sharepoint/confirm-columns', '/api/change-summary', '/api/change-summaries', '/api/settings/sharepoint-jobs', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/review-summary', '/api/spreadsheets/chat', '/api/admin/ask-dex-connection-test', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload', '/api/periods/check-file', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/remove-rows') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
@@ -1014,6 +1040,19 @@ class handler(BaseHTTPRequestHandler):
                     SpreadsheetInbox(directory).record_ai_verify(file_hash, record)
                 return self.send(200, encode_json({'verified': len(record.get('verdicts') or {}),
                                                    'dismissed': sum(1 for v in (record.get('verdicts') or {}).values() if v.get('verdict') == 'not_an_issue')}))
+            # TEMPORARY fixed-synthetic connectivity probe. Remove after one approved test.
+            if route == '/api/admin/ask-dex-connection-test':
+                principal = self.probe_admin_principal()
+                if not principal:
+                    return self.fail(403, 'Only an admin can run this connection test.')
+                payload = json.loads(raw)
+                if payload != {'test': 'fixed-synthetic-ask-dex-v2'}:
+                    return self.fail(400, 'Only the fixed synthetic connection test is accepted. No report IDs or message text are allowed.')
+                from hosting.report_chat_probe import run_fixed_synthetic
+                out = run_fixed_synthetic()
+                if self.probe_admin_principal() != principal:
+                    return self.fail(403, 'Admin access is required to view the connection result.')
+                return self.send(200, encode_json(out))
             if route == '/api/spreadsheets/chat':
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None
