@@ -29,7 +29,7 @@
       method: 'POST', headers: {'Content-Type': 'application/json', 'X-Review-Token': 'same-origin'}, body: JSON.stringify(body)});
     let data = {};
     try { data = await response.json(); } catch (e) { /* non-JSON error page */ }
-    if (response.status === 401 && data.signin) { showSignIn(); throw new Error('Sign in to continue.'); }
+    if (response.status === 401 && data.signin) { showSignIn(); const error = new Error('Sign in to continue.'); error.httpStatus = 401; throw error; }
     if (!response.ok) { const error = new Error(data.error || `The server answered ${response.status}. Try again in a moment.`); error.httpStatus = response.status; error.saveCommitted = data.save_committed === true; throw error; }
     return data;
   }
@@ -1074,13 +1074,29 @@
         h('button', {type: 'button', class: 'btn', disabled: busy || !ignorable.length, onclick: () => { if (current()) fdReviewDialog(ignorable, null, 'Choose open items to ignore'); }}, `Ignore · ${ignorable.length} open items`)));
     return owner;
   }
+  // A rejected application request is not evidence of a provider outage.
+  function fdAIRequestFailure(error) {
+    const status = Number.isInteger(error?.httpStatus) ? error.httpStatus : null;
+    const message = String(error?.message || '');
+    const safe = /^(Report access changed\.|The workbook does not match|The review changed\.|Unknown, ambiguous, or changed finding selection\.|Report state changed|Report access, source, assignment, or review changed\.|The report |This report |This version is approved, sent, or superseded\.|Re-check this report before preparing suggestions\.|The source |Source |SharePoint |Sign in to continue\.|Report not found\.|The AI response did not match)/.test(message) && message.length <= 500 && !/[\r\n<>]/.test(message) ? message : '';
+    let category = error?.aiCategory || 'unconfirmed', reason;
+    if (status === 401) { category = 'signin'; reason = 'Sign in before requesting suggestions.'; }
+    else if (status === 403 || status === 404) { category = 'access'; reason = 'The application refused access to this report. Check access and reopen the report.'; }
+    else if (status === 409) { category = /source|SharePoint/i.test(safe) ? 'source' : 'stale'; reason = 'The application rejected this report or finding selection. Reload and review its current state before requesting suggestions.'; }
+    else if (status) { category = 'server'; reason = 'The application could not complete the suggestion request (HTTP ' + status + '). Provider availability is unconfirmed.'; }
+    else if (category === 'response') reason = 'The suggestion response could not be verified. No suggestions from this request were used.';
+    else if (category === 'not_started') reason = 'The suggestion request did not start. Finish pending edits or operations and check the selected report and AI setting.';
+    else reason = 'No confirmed suggestion response was received. Check the connection and report state; provider availability is unconfirmed.';
+    return {category, http_status: status, reason: reason + (safe ? ' ' + safe : '')};
+  }
   // Own the read-only proposal request without taking ownership of another save/recheck.
   async function fdPrepareAI(scope, binding, view) {
-    if (state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending || !state.aiOn) return;
+    const notStarted = () => view.failure(Object.assign(new Error('Suggestion request did not start.'), {aiCategory: 'not_started'}));
+    if (state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending || !state.aiOn) { notStarted(); return; }
     const report = state.report, selectedReport = state.selected;
-    if (!report || selectedReport != null && selectedReport !== report.file_hash || JSON.stringify(reviewBinding(report)) !== JSON.stringify(binding) || !scope.length || scope.length > 120 || scope.some(it => !it.fp || it.state !== 'open')) return;
+    if (!report || selectedReport != null && selectedReport !== report.file_hash || JSON.stringify(reviewBinding(report)) !== JSON.stringify(binding) || !scope.length || scope.length > 120 || scope.some(it => !it.fp || it.state !== 'open')) { notStarted(); return; }
     if ([...document.querySelectorAll('#side input:not([type="checkbox"]):not([type="radio"]), #side textarea, .fd-review-dialog textarea')].some(node => node.value !== node.defaultValue)) {
-      toast('Finish or save your typed draft before requesting AI proposals. Your text is unchanged.', true); return;
+      toast('Finish or save your typed draft before requesting AI proposals. Your text is unchanged.', true); notStarted(); return;
     }
     const controls = new Map();
     const operation = {owner: view.owner, cancel: () => {
@@ -1104,7 +1120,7 @@
       const answer = result.ai_proposals;
       if (!answer || answer.status !== 'done' || answer.file_hash !== binding.file_hash || answer.check_hash !== binding.expected_check_hash ||
           JSON.stringify([...(answer.ids || [])].sort()) !== JSON.stringify(scope.map(it => it.key).sort()) || !Array.isArray(answer.proposals) ||
-          answer.proposals.some(p => !scope.some(it => it.key === p.finding_id) || p.source !== 'AI fix (asked)' || p.sure !== false || p.recommendation_eligible !== false)) throw new Error('The AI response did not match the selected scope and safety labels. No proposals were used.');
+          answer.proposals.some(p => !scope.some(it => it.key === p.finding_id) || p.source !== 'AI fix (asked)' || p.sure !== false || p.recommendation_eligible !== false)) throw Object.assign(new Error('The AI response did not match the selected scope and safety labels. No proposals were used.'), {aiCategory: 'response'});
       view.success(answer);
     } catch (error) { if (current()) view.failure(error); }
     finally { operation.cancel(); }
@@ -1782,7 +1798,8 @@
   // AI fix: Dex fixes every selected error it can and saves a new version (the earlier one is kept).
   // The report reloads on the new version, so fixed errors drop off and only what is left stays listed.
   const fdReadyFix = it => it.fix && it.selectable && ['open', 'selected'].includes(it.state) && (it.evidence === 'source' || (!it.fp && ['mechanical', 'ai'].includes(it.evidence))) ? it.fix : null;
-  const fdCanAI = it => !!fdReadyFix(it) || !!(it.fp && it.state === 'open' && state.aiOn);
+  const fdSourceGap = it => !fdReadyFix(it) && (String(it.issue?.source || '').startsWith('SharePoint') || it.issue?.source_value != null || /^(source_|sharepoint_)/i.test(it.issue?.code || '') || /timezone.*unconfirmed|date.*unconfirmed/i.test(it.issue?.code || ''));
+  const fdCanAI = it => !!fdReadyFix(it) || !!(it.fp && it.state === 'open' && state.aiOn && !fdSourceGap(it));
   function fdUniqueAIProposals(proposals) {
     const cells = new Map();
     const fields = ['before', 'after', 'kind', 'source', 'snapshot_id', 'item', 'field', 'change_set', 'change_set_size'];
@@ -1812,11 +1829,12 @@
       for (let i = 0; i < ask.length; i += 120) {
         const chunk = ask.slice(i, i + 120);
         const answer = await new Promise(resolve => {
-          fdPrepareAI(chunk, binding, {owner: document.body, active: () => state.report === report, pending: () => {}, failure: error => resolve({error}), success: a => resolve(a)}).then(() => resolve(null));
+          fdPrepareAI(chunk, binding, {owner: document.body, active: () => state.report === report, pending: () => {}, failure: error => resolve({error}), success: a => resolve(a)}).then(() => resolve(null), error => resolve({error}));
         });
         if (!answer || answer.error) {
-          if (!ready.length) throw answer?.error || new Error('Dex could not start. Nothing was changed.');
-          skipped.push(...ask.slice(i).map(it => ({finding_id: it.key, reason: 'Dex could not be reached for this one. Try AI fix again.'}))); break;   // still apply the checked fixes
+          const failure = fdAIRequestFailure(answer?.error);
+          if (!proposals.length) throw Object.assign(new Error(failure.reason), {httpStatus: failure.http_status, aiCategory: failure.category});
+          skipped.push(...ask.slice(i).map(it => ({finding_id: it.key, ...failure}))); break; // guarded save still validates any already prepared fixes
         }
         proposals.push(...answer.proposals); skipped.push(...(answer.skipped || []));
       }
@@ -1825,7 +1843,7 @@
       const why = new Map(skipped.map(x => [x.finding_id, String(x.reason || '')]));
       const fixedIds = new Set(scope.filter(it => it.cell && cells.has(it.sheet + '!' + it.cell)).map(it => it.key).concat(accepted.map(p => p.finding_id)));
       const unfixed = scope.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state) && !fixedIds.has(it.key)).map(it => ({key: it.key, where: [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ') || 'Whole report',
-        text: it.text || it.reason || '', now: it.report, reason: why.get(it.key) || (todo.includes(it) ? '' : 'This one already has a decision on it.')}));
+        text: it.text || it.reason || '', now: it.report, reason: why.get(it.key) || (fdSourceGap(it) ? 'The source evidence must be verified first. AI cannot establish the source date or authority.' : todo.includes(it) ? '' : 'This one already has a decision on it.')}));
       if (!accepted.length) { state.fdAIRun = {hash, done: true, fixed: 0, confirmed: 0, tried: scope.length, skipped, unfixed, items: []};
         document.body.classList.add('fd-panel-open'); fdAIDoneDialog(state.fdAIRun, report); return; }
       const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
@@ -1845,7 +1863,7 @@
       state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed, tried: scope.length, skipped, unfixed, from: revisionOf(report), version: revisionOf(savedItem), reused, originalHash: hash, items: done};
       document.body.classList.add('fd-panel-open');
       fdAIDoneDialog(state.fdAIRun, savedItem);
-    } catch (e) { state.fdAIRun = {hash, done: true, saveCommitted: e?.saveCommitted === true, error: e?.message || String(e)}; toast((state.fdAIRun.saveCommitted ? '' : 'AI fix did not finish: ') + state.fdAIRun.error, true); }
+    } catch (e) { state.fdAIRun = {hash, done: true, saveCommitted: e?.saveCommitted === true, http_status: e?.httpStatus || null, category: e?.aiCategory || null, error: e?.message || String(e)}; toast((state.fdAIRun.saveCommitted ? '' : 'AI fix did not finish: ') + state.fdAIRun.error, true); }
     finally { if (state.report?.file_hash === state.fdAIRun?.hash) drawSide(); }
   }
   // Fix manually: one error at a time, with its cell highlighted in the spreadsheet. Typed values are kept until

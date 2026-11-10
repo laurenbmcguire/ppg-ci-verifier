@@ -92,18 +92,36 @@ def ask(issues, opener=None):
     return calls[0]['input']
 
 
+def failure_metadata(exc):
+    """Only fixed diagnostics cross the boundary, never provider response text."""
+    category = 'provider_timeout' if isinstance(exc, TimeoutError) else getattr(exc, 'category', 'response')
+    status = getattr(exc, 'http_status', None)
+    if isinstance(exc, ai_review.AIReviewNotConfigured):
+        category, reason = 'configuration', 'AI suggestions are not configured. Ask an admin to check the existing AI setup.'
+    elif category == 'provider_http':
+        reason = 'The AI provider rejected the request' + (f' (HTTP {status})' if type(status) is int else '') + '. Ask an admin to check provider access, limits, and service status.'
+    elif category == 'provider_timeout':
+        reason = 'The AI provider request timed out. No suggestion was confirmed.'
+    elif category == 'provider_transport':
+        reason = 'No response was received from the AI provider. Availability is unconfirmed.'
+    else:
+        category, reason = 'response', 'The AI response could not be verified as a safe suggestion. Review the finding manually.'
+    return dict(category=category, http_status=status if type(status) is int else None, reason=reason)
+
+
 def prepare(inbox, payload, authorize, provider=None):
     item, raw, selected, holds, binding = snapshot(inbox, payload, authorize)
     sources, _ = _sources(item['filename'], raw)
-    candidates, skipped = {}, {}
+    candidates, skipped, failures = {}, {}, {}
     cells = Counter((i.get('sheet'), i.get('cell')) for i in selected)
     for issue in selected:
         key = issue['key']; cell = issue.get('cell'); sheet = issue.get('sheet')
         reason = None
         # Holds keep blocking approval and sending; they no longer stop a reviewer from asking for a cell suggestion
         # (the change is saved as a new version and the original is kept).
-        if issue.get('source_value') is not None or str(issue.get('source') or '').startswith('SharePoint'):
-            reason = 'Review the verified source correction separately; AI cannot establish source authority.'
+        if (issue.get('source_value') is not None or str(issue.get('source') or '').startswith('SharePoint')
+                or re.search(r'^(source_|sharepoint_)|timezone.*unconfirmed|date.*unconfirmed', str(issue.get('code') or ''), re.I)):
+            reason = 'Verify the source evidence separately; AI cannot establish a source date or authority.'
         elif issue.get('decision') or issue.get('previous_decision') or key in (item.get('review_decisions') or {}):
             reason = 'This finding has a review decision. Reopen it before requesting a change.'
         elif not isinstance(cell, str) or not re.fullmatch('[A-Z]{1,3}[1-9][0-9]{0,6}', cell) or cells[(sheet, cell)] != 1:
@@ -162,9 +180,11 @@ def prepare(inbox, payload, authorize, provider=None):
                     skipped[key] = 'The suggestion did not pass the guarded cell checks. Review it manually.'
                     continue
                 proposals.append(proposal)
-        except (ai_review.AIReviewError, ai_review.AIReviewNotConfigured, ValueError, TypeError, TimeoutError):
+        except (ai_review.AIReviewError, ai_review.AIReviewNotConfigured, ValueError, TypeError, TimeoutError) as exc:
             proposals = []
-            skipped.update({k: 'AI could not return a safe suggestion. No changes were made; retry or review manually.' for k in candidates})
+            failure = failure_metadata(exc)
+            skipped.update({k: failure['reason'] for k in candidates})
+            failures.update({k: failure for k in candidates})
     # Repeat authorization, scope, source, assignment, holds and exact state after the provider call.
     final = snapshot(inbox, payload, authorize)
     if final[4] != binding:
@@ -174,7 +194,7 @@ def prepare(inbox, payload, authorize, provider=None):
         if key not in proposed and key not in skipped:
             skipped[key] = 'No supported cell suggestion was returned. Review this finding manually.'
     return dict(status='done', file_hash=payload['file_hash'], check_hash=payload['expected_check_hash'], ids=payload['ids'],
-                proposals=proposals, skipped=[dict(finding_id=k, reason=v) for k, v in skipped.items()])
+                proposals=proposals, skipped=[dict(finding_id=k, **(failures.get(k) or dict(reason=v))) for k, v in skipped.items()])
 
 
 def run(handler, payload):

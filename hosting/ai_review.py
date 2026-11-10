@@ -28,7 +28,10 @@ class AIReviewNotConfigured(RuntimeError):
 
 
 class AIReviewError(RuntimeError):
-    pass
+    def __init__(self, message, *, category='response', http_status=None):
+        super().__init__(message)
+        self.category = category
+        self.http_status = http_status
 
 
 def configured():
@@ -195,9 +198,13 @@ def _send(body, opener=None, timeout=None):
             detail = str((json.loads(exc.read() or b'{}').get('error') or {}).get('message') or '')[:300]
         except Exception:
             pass
-        raise AIReviewError(f'AI review failed (HTTP {exc.code}).{hint}' + (f' The AI service said: {detail}' if detail else '')) from None
-    except (urllib.error.URLError, TimeoutError, ValueError):
-        raise AIReviewError('Could not reach Dex for the AI review. Try again.') from None
+        raise AIReviewError(f'AI review failed (HTTP {exc.code}).{hint}' + (f' The AI service said: {detail}' if detail else ''), category='provider_http', http_status=exc.code) from None
+    except TimeoutError:
+        raise AIReviewError('The provider request timed out.', category='provider_timeout') from None
+    except urllib.error.URLError:
+        raise AIReviewError('No provider response was received.', category='provider_transport') from None
+    except ValueError:
+        raise AIReviewError('The provider response could not be read.', category='response') from None
 
 
 def _rules_text(rules):

@@ -160,3 +160,24 @@ def test_complete_serialized_request_budget_checked_before_transport(monkeypatch
     monkeypatch.setattr(ap,'MAX_REQUEST_BYTES',100)
     monkeypatch.setattr(ap.ai_review,'_post',lambda *a,**k:pytest.fail('Oversized transport body sent'))
     with pytest.raises(ValueError,match='serialized'):ap.ask([{'before':'safe'}])
+
+
+@pytest.mark.parametrize('category,status', [('provider_http',401), ('provider_http',403), ('provider_http',429), ('provider_http',529), ('provider_timeout',None), ('provider_transport',None), ('response',None)])
+def test_provider_failure_metadata_is_sanitized(setup,category,status):
+    box,item,issues,p,pv=setup
+    def provider(rows):
+        raise ap.ai_review.AIReviewError('secret provider body must never leave',category=category,http_status=status)
+    before=box.get(item['file_hash'])
+    out=ap.prepare(box,p,lambda:True,provider)
+    assert out['proposals']==[]
+    for skip in out['skipped']:
+        assert skip['category']==category and skip['http_status']==status
+        assert 'secret' not in skip['reason'] and 'retry' not in skip['reason'].lower()
+    assert box.get(item['file_hash'])==before
+
+@pytest.mark.parametrize('code', ['source_timezone_unconfirmed','sharepoint_date_unconfirmed','date_unconfirmed'])
+def test_unknown_source_date_never_reaches_provider(setup,code):
+    box,item,issues,p,pv=setup
+    for issue in issues:issue['code']=code
+    out=ap.prepare(box,p,lambda:True,lambda rows:pytest.fail('Source gap sent to provider'))
+    assert not out['proposals'] and len(out['skipped'])==2
