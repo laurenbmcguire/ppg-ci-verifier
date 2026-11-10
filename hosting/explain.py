@@ -425,3 +425,7 @@ _add('source_mapping_changed',
 _add('export_source_unconfirmed',
      'The captured export cannot be tied to the exact source site, list and item.',
      'Capture the exact assigned source again with complete source links or stable IDs.', True)
+
+_add('verification_unavailable',
+     'Current verification evidence could not be loaded; this does not establish a data error.',
+     'Reopen the report to load its current check. Do not edit report values to clear this state.', True)
