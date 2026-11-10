@@ -87,6 +87,22 @@ def _summary_date_below(sheet, rows, r, c):
             and any(w == 'day' and rx.search(header[1]) for rx, w in DETAIL_LABELS))
 
 
+def _legacy_eos_date_right(sheet, rows, r, c):
+    """Only hosting.builder's exact branded metadata block establishes Summary D4."""
+    if sheet != 'Summary' or (r, c) != (3, 1):
+        return False
+    if _cell(rows, 0, 1) != 'PPG QUALITY   /   END OF SHIFT DATA AND BILLING REPORT':
+        return False
+    labels = ('Project', 'Report date', 'Customer', 'Worksite', 'Part / program', 'Prepared by')
+    for i, label in enumerate(labels, 2):
+        if _cell(rows, i, 1) != label:
+            return False
+        if any(not _empty(v) for j, v in enumerate(rows[i]) if j not in (1, 3)):
+            return False
+    project = _cell(rows, 2, 3)
+    return isinstance(project, str) and _is_value(project, 'job')
+
+
 def blank_details(sources, ctx, add, col_letter):
     """Propose values for blank horizontal details or the supported vertical summary date.
 
@@ -113,6 +129,12 @@ def blank_details(sources, ctx, add, col_letter):
                     if _summary_date_below(sheet, rows, r, c):
                         value = _cell(rows, r + 1, c)
                         spots.append(dict(sheet=sheet, row=r + 2, col=c + 1, c=c,
+                                          label=val.strip(), what=what,
+                                          filled=not empty(value), value=value))
+                        continue
+                    if _legacy_eos_date_right(sheet, rows, r, c):
+                        value = _cell(rows, r, c + 2)
+                        spots.append(dict(sheet=sheet, row=r + 1, col=c + 3, c=c,
                                           label=val.strip(), what=what,
                                           filled=not empty(value), value=value))
                         continue

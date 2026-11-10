@@ -39,13 +39,17 @@ def suggestions(rows, sheet=SHEET):
     return out
 
 
-def workbook(value=None, merged=False):
-    wb = load_workbook(io.BytesIO(sl_daily()))
+def workbook(value=None, merged=False, client=None, job=None):
+    wb = load_workbook(io.BytesIO(sl_daily(job=job or '2214')))
     ws = wb[SHEET]
     ws['A4'] = None
     for row in (4, 5, 7):
         for col, cell in enumerate(summary_rows(value)[row - 1], 1):
             ws.cell(row, col).value = cell
+    if client:
+        ws['A3'] = f'Synthetic {client} summary'
+    if job:
+        ws['C7'] = job
     if merged:
         for row in (4, 5):
             for left, right in (('B', 'G'), ('H', 'L'), ('M', 'P')):
@@ -92,7 +96,7 @@ class SummaryDateSuggestions(unittest.TestCase):
             self.assertEqual(suggestions([row, [None] * len(row)]), [])
 
     def test_unknown_vertical_date_does_not_become_a_horizontal_blank(self):
-        for value in (DAY, '=TODAY()', 'Unknown'):
+        for value in (DAY, '=TODAY()', '=Customer', ' =Project', 'Customer unknown', 'Unknown'):
             self.assertEqual(suggestions([[None, 'Date'], [None, value]]), [])
 
     def test_horizontal_date_proposals_keep_their_existing_value_cell(self):
@@ -100,6 +104,12 @@ class SummaryDateSuggestions(unittest.TestCase):
         rows = [['Client', None, 'Synthetic'], ['Report date', None, None]]
         self.assertEqual([p['cell'] for p in suggestions(rows)], ['C2'])
         self.assertEqual(suggestions([['Date', DAY]]), [])
+
+    def test_metadata_label_below_does_not_prove_an_unknown_layout_is_horizontal(self):
+        for rows in ([['Date', None], ['Customer', None]],
+                     [['Project', None, '9004-SYNTHETIC'],
+                      ['Report date', None, None], ['Customer', None, 'Synthetic Other']]):
+            self.assertEqual(suggestions(rows), [])
 
     def test_nonempty_horizontal_value_is_not_reported_as_blank(self):
         for value in ('Unknown', '=TODAY()', 'Shift', 0, False):
@@ -132,6 +142,56 @@ class WorkbookDateSuggestions(unittest.TestCase):
                 item = self.ingest(raw)
                 self.assertEqual(self.dates(item), [])
                 self.assertEqual(self.box.download(item['file_hash'])[1], raw)
+
+    def test_shared_template_is_independent_of_client_and_job(self):
+        # Representative labels and synthetic jobs, not production report evidence.
+        clients = [('HMMA', '9001-HMMA-SYNTHETIC'), ('Lear', '9002-LEAR-SYNTHETIC'),
+                   ('SL Alabama', '9003-SLAL-SYNTHETIC')]
+        for client, job in clients:
+            for merged in (False, True):
+                for value in (None, datetime.datetime(2026, 11, 6)):
+                    with self.subTest(client=client, merged=merged, populated=value is not None):
+                        raw = workbook(value, merged, client=client, job=job)
+                        item = self.box.ingest(f'Synthetic {client} - {job} - {DAY}.xlsx', raw)
+                        got = [(p['cell'], p['after']) for p in self.dates(item)]
+                        self.assertEqual(got, [('B5', DAY)] if value is None else [])
+                        self.assertEqual(self.box.download(item['file_hash'])[1], raw)
+                        self.assertFalse(summarize(self.box.get(item['file_hash']))['sharepoint']['source_verified'])
+
+    def test_existing_legacy_eos_builder_keeps_its_horizontal_date_mapping(self):
+        # This repository explicitly says the legacy EOS builder is NOT the selected
+        # Briggs template. Cover its actual generated layout without claiming Briggs QA.
+        from hosting import builder, shifts
+        rows = [dict(shift='1', area='Synthetic area', part='P-1', identifier='LOT-1',
+                     inspected_for='Synthetic check', inspected=1, condition='OK',
+                     defect='', rejected=0, certified=1, comment='')]
+        job = '9004-OTHER-SYNTHETIC'
+        original = builder.build_xlsx(job, DAY, rows, shifts.DEFAULT, {'customer': 'Synthetic Other'})
+        for blank in (False, True):
+            with self.subTest(blank=blank):
+                wb = load_workbook(io.BytesIO(original))
+                if blank:
+                    wb['Summary']['D4'] = None
+                buf = io.BytesIO(); wb.save(buf); raw = buf.getvalue()
+                item = self.box.ingest(builder.file_name(job, DAY), raw)
+                props = self.box.fix_proposals(item['file_hash'])['proposals']
+                dates = [(p['sheet'], p['cell'], p['after']) for p in props
+                         if '"Report date" is blank' in p['reason']]
+                self.assertEqual(dates, [('Summary', 'D4', DAY)] if blank else [])
+                self.assertEqual(self.box.download(item['file_hash'])[1], raw)
+        for changed in ('brand', 'sheet', 'label', 'project', 'project_formula', 'project_number'):
+            with self.subTest(changed_signature=changed):
+                wb = load_workbook(io.BytesIO(original)); ws = wb['Summary']; ws['D4'] = None
+                if changed == 'brand': ws['B1'] = 'Unknown report template'
+                elif changed == 'sheet': ws.title = 'Different Summary'
+                elif changed == 'label': ws['B6'] = 'Location'
+                elif changed == 'project_formula': ws['D3'] = '=Customer'
+                elif changed == 'project_number': ws['D3'] = 42
+                else: ws['D3'] = None
+                buf = io.BytesIO(); wb.save(buf)
+                item = self.box.ingest(builder.file_name(job, DAY), buf.getvalue())
+                props = self.box.fix_proposals(item['file_hash'])['proposals']
+                self.assertFalse([p for p in props if '"Report date" is blank' in p['reason']])
 
     def test_blank_vertical_date_proposal_is_read_only_and_preserves_source_holds(self):
         for merged in (False, True):
