@@ -56,7 +56,7 @@ class LocalHandler(handler):
             data=self.rfile.read(int(self.headers.get('Content-Length','0')));payload=json.loads(data);self.rfile=io.BytesIO(data)
             if payload.get('file_hash')!=original_hash or payload.get('recommended_only') is True:
                 return self.fail(409,'Only the fabricated reviewed recommendation scope is allowed.')
-            if not payload.get('changes') or any(not any(c.get('sheet')==p['sheet'] and c.get('cell')==p['cell'] and c.get('after')==p['after'] and c.get('source')=='AI fix (asked)' for p in eligible) for c in payload['changes']):
+            if not payload.get('changes') or any(not any(c.get('sheet')==p['sheet'] and c.get('cell')==p['cell'] and c.get('after')==p['after'] and c.get('source')=='Clean-up' and c.get('selected_finding_id') and c.get('selected_finding_fp') for p in eligible) for c in payload['changes']):
                 return self.fail(409,'Only generated synthetic recommendations are allowed.')
             apply_requests.append(payload)
         return super().do_POST()
@@ -78,7 +78,7 @@ try:
                 for cell in row:
                     if cell.value!=new_wb[ws.title][cell.coordinate].value:diffs.append((ws.title,cell.coordinate,cell.value,new_wb[ws.title][cell.coordinate].value))
         assert sorted(diffs)==sorted((c['sheet'],c['cell'],c['before'],c['after']) for c in apply_requests[0]['changes']),diffs
-        assert not new.get('approval') and not new.get('sent');assert len(apply_requests)==1; assert len(provider_calls)==1; assert all(len(rows)==2 for rows in provider_calls)
+        assert not new.get('approval') and not new.get('sent');assert len(apply_requests)==1; assert len(provider_calls)==0
         assert not external,external
         print(json.dumps(dict(passed=True,width=WIDTH,actual_handler=True,original_byte_identical=True,one_corrected_version=True,revision=2,recorded_changes=2,exact_cell_differences=diffs,cancel_created_no_version=True,no_provider_traffic=True,synthetic_only=True)))
 finally:

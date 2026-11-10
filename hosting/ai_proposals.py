@@ -113,6 +113,9 @@ def failure_metadata(exc):
 def prepare(inbox, payload, authorize, provider=None):
     item, raw, selected, holds, binding = snapshot(inbox, payload, authorize)
     sources, _ = _sources(item['filename'], raw)
+    from hosting.selected_corrections import candidates as mechanical_candidates
+    mechanical = mechanical_candidates(item, raw)
+    deterministic = []
     candidates, skipped, failures = {}, {}, {}
     cells = Counter((i.get('sheet'), i.get('cell')) for i in selected)
     for issue in selected:
@@ -126,7 +129,7 @@ def prepare(inbox, payload, authorize, provider=None):
         elif issue.get('decision') or issue.get('previous_decision') or key in (item.get('review_decisions') or {}):
             reason = 'This finding has a review decision. Reopen it before requesting a change.'
         elif not isinstance(cell, str) or not re.fullmatch('[A-Z]{1,3}[1-9][0-9]{0,6}', cell) or cells[(sheet, cell)] != 1:
-            reason = 'This finding does not identify one unambiguous editable cell. Review it manually.'
+            reason = 'This finding identifies a row or report, not one editable cell. Identify the exact field and verify its replacement against the assigned source before correcting it.'
         try:
             current = _cell_value(sources, sheet, cell) if not reason else None
         except (FixError, TypeError, ValueError):
@@ -137,9 +140,19 @@ def prepare(inbox, payload, authorize, provider=None):
             reason = 'This cell is too large for safe AI review. Review it manually; its value was not shortened.'
         if reason:
             skipped[key] = reason
+        elif key in mechanical:
+            deterministic.append(mechanical[key])
         else:
             candidates[key] = dict(finding_id=key, sheet=sheet, cell=cell, before=_show(current),
                                    finding=str(issue.get('text') or '')[:1000], source_value=issue.get('source_value'))
+    if deterministic:
+        try:
+            from hosting.fixes import apply_fixes
+            inbox._check_changes(item, deterministic, False, raw=raw)
+            apply_fixes(item['filename'], raw, deterministic)  # one in-memory batch, no storage
+        except (ValueError, FixError):
+            skipped.update({p['finding_id']: 'The existing mechanical correction no longer passes the current cell or decision checks. Reopen this finding.' for p in deterministic})
+            deterministic = []
     for key, candidate in list(candidates.items()):
         if len(_canonical(candidate).encode('utf-8')) > MAX_CANDIDATE_BYTES:
             skipped[key] = 'This finding contains too much context for safe AI review. Review it manually.'
@@ -190,10 +203,14 @@ def prepare(inbox, payload, authorize, provider=None):
     final = snapshot(inbox, payload, authorize)
     if final[4] != binding:
         raise ValueError('Report access, source, assignment, or review changed. Discard these suggestions and reload.')
+    # A provider failure cannot erase independently proved mechanical corrections.
+    if deterministic:
+        inbox._check_changes(final[0], deterministic, False, raw=final[1])
+    proposals = deterministic + proposals
     proposed = {p['finding_id'] for p in proposals}
     for key in payload['ids']:
         if key not in proposed and key not in skipped:
-            skipped[key] = 'No supported cell suggestion was returned. Review this finding manually.'
+            skipped[key] = 'No supported cell suggestion was returned. Verify the exact replacement using the assigned source or recorded evidence; a blank or neighboring value alone is not proof.'
     return dict(status='done', file_hash=payload['file_hash'], check_hash=payload['expected_check_hash'], ids=payload['ids'],
                 proposals=proposals, skipped=[dict(finding_id=k, **(failures.get(k) or dict(reason=v))) for k, v in skipped.items()])
 
