@@ -1575,8 +1575,11 @@ class handler(BaseHTTPRequestHandler):
                     job = ' '.join(str(payload.get('job') or '').split()).upper()
                     if not job:
                         raise Conflict('Which job?')
+                    from hosting import photo_embed
                     with self.store().session() as directory:
-                        schedule = SpreadsheetInbox(directory).shift_schedule(job)
+                        inbox = SpreadsheetInbox(directory)
+                        schedule = inbox.shift_schedule(job)
+                        photo_embed.use_stored_certificate(inbox.setting(photo_embed.CERT_KEY, None))
                     try:
                         sp = periods.day_scans(job, d0.isoformat(), schedule)  # network call outside any DB transaction
                     except Exception as exc:
@@ -1790,7 +1793,7 @@ class handler(BaseHTTPRequestHandler):
                     found['results'] = [x for x in found['results'] if self.can_job(x.get('job'))]
                 return self.send(200, encode_json(found))
             if route.startswith('/api/periods'):
-                from hosting import periods
+                from hosting import periods, photo_embed
                 from urllib.parse import quote
                 payload = json.loads(raw)
                 if not isinstance(payload, dict):
@@ -1809,6 +1812,7 @@ class handler(BaseHTTPRequestHandler):
                     reports = inbox.reports_for(job, start, end)
                     schedule = inbox.shift_schedule(job)
                     file_check = inbox.setting(f'filecheck|{job}|{kind}|{start.isoformat()}', None)
+                    photo_embed.use_stored_certificate(inbox.setting(photo_embed.CERT_KEY, None))
                 sp_days, sp_note = periods.sharepoint_days(job, start, end, schedule)  # network call outside any DB transaction
                 period = periods.assemble(job, kind, start, end, label, reports, sp_days, sp_note)
                 if len(reports) > 1:
