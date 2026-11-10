@@ -12,7 +12,7 @@ const ctx = vm.createContext({state: {report: {}}, crypto: {randomUUID: () => 'f
   toast() {}, drawSide() {}, myName: () => 'Synthetic Reviewer',
   fetch: async (_, init) => { sent.push(JSON.parse(init.body)); if (!response) throw Error('lost response'); return response; },
   api: async () => ({saved: false})});
-vm.runInContext(bindingCode + sendCode, ctx);
+vm.runInContext(section('  function versionReadOnly(', '  function versionLinks(') + bindingCode + sendCode, ctx);
 (async () => {
   vm.runInContext(`
     var report = {file_hash: 'old-file', check_hash: 'old-check', review: {run: {checker: 'old'}, decisions: {rev: 4}}};
