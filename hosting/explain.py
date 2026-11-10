@@ -181,6 +181,9 @@ _add('photo_missing',
 _add('sharepoint_value_differs sharepoint_export_value_differs',
      'The report shows a different number than SharePoint for this record, so the client could be billed or told the wrong count.',
      'Accept the SharePoint value (SharePoint is the record of what was scanned), or correct SharePoint if the report is right.', True)
+_add('source_date_metadata_stale',
+     'The timezone and Date-field evidence is expired or changed, so the source result is not current. This is a verification gap, not a report error.',
+     'Recheck SharePoint to refresh its timezone and Date-field evidence. Keep report rows unchanged.', False)
 _add('sharepoint_source_item_unconfirmed',
      'The source read was incomplete, so the item could not be confirmed. This is not proof of a missing record.',
      'Retry the SharePoint check when source access is available. Keep the report row unchanged.', False)

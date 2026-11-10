@@ -6,12 +6,16 @@ from hosting import builder, sharepoint, shifts, public_api
 
 class SafeBuilder(unittest.TestCase):
     def capture(self):
-        return ('SL',{'id':'lid','displayName':'Data','_capture':{'columns':[]}}, {'Shift':'Shift'},[
+        return ('SL',{'id':'lid','displayName':'Data','_capture':{'site_id':'sid','list_id':'lid','columns':[]}}, {'Shift':'Shift'},[
             {'id':'1','fields':{'Date':'2026-11-07','Date0':'2026-11-07T21:00:00Z','Shift':'1','Identifier':'A','Qty':10,'NOK':None}},
             {'id':'2','fields':{'Date':'2026-11-07','Date0':'2026-11-07T21:00:00Z','Shift':'1','Identifier':'','Qty':None,'NOK':None}}])
     def rows(self,data=None):
         with patch.object(sharepoint,'configured',return_value=True),patch.object(sharepoint,'_list_items',return_value=data or self.capture()),patch.object(builder,'column_roles',return_value={'Identifier':'identifier','Qty':'inspected','NOK':'rejected'}):
             return builder.day_rows('2207','2026-11-07',shifts.DEFAULT,site_id='sid',list_id='lid')
+    def test_capture_identity_must_match_selected_source(self):
+        captured=self.capture();captured[1]['_capture']['list_id']='other-list'
+        with self.assertRaisesRegex(builder.BuildError,'capture identity'):
+            self.rows(captured)
     def test_missing_counts_never_invented(self):
         r=builder._row({'VIN':'A','Condition':'NOK'},{'VIN':'identifier','Condition':'condition'})
         self.assertIsNone(r['inspected']);self.assertIsNone(r['rejected']);self.assertIsNone(r['certified'])
