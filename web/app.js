@@ -1182,7 +1182,7 @@
   function fdAIRequestFailure(error) {
     const status = Number.isInteger(error?.httpStatus) ? error.httpStatus : null;
     const message = String(error?.message || '');
-    const safe = /^(Report access changed\.|The workbook does not match|The review changed\.|Unknown, ambiguous, or changed finding selection\.|Report state changed|Report access, source, assignment, or review changed\.|The report |This report |This version is approved, sent, or superseded\.|Re-check this report before preparing suggestions\.|The source |Source |SharePoint |Sign in to continue\.|Report not found\.|The AI response did not match)/.test(message) && message.length <= 500 && !/[\r\n<>]/.test(message) ? message : '';
+    const safe = /^(Report access changed\.|The workbook does not match|The review changed\.|Unknown, ambiguous, or changed finding selection\.|A selected finding is now informational\.|Report state changed|Report access, source, assignment, or review changed\.|The report |This report |This version is approved, sent, or superseded\.|Re-check this report before preparing suggestions\.|The source |Source |SharePoint |Sign in to continue\.|Report not found\.|The AI response did not match)/.test(message) && message.length <= 500 && !/[\r\n<>]/.test(message) ? message : '';
     let category = error?.aiCategory || 'unconfirmed', reason;
     if (status === 401) { category = 'signin'; reason = 'Sign in before requesting suggestions.'; }
     else if (status === 403 || status === 404) { category = 'access'; reason = 'The application refused access to this report. Check access and reopen the report.'; }
@@ -2037,7 +2037,7 @@
     } catch (_) { return {}; } // The save is still committed. Never retry a mutation to recover a read.
   }
   function fdResolutionText(run) {
-    if (!run.fixed) return 'No selected findings were resolved by a saved correction.';
+    if (!run.fixed) return 'No selected findings were resolved by a saved correction.' + (run.informational ? ` ${plural(run.informational, 'source-confirmed pattern hint')} informational; identifiers unchanged.` : '');
     return Number.isInteger(run.resolved) ? `${plural(run.resolved, 'selected finding')} cleared by the saved check. ${run.informational ? plural(run.informational, 'source-confirmed pattern hint') + ' informational; identifiers unchanged. ' : ''}${run.appliedProposals ? plural(run.appliedProposals, 'selected suggestion') + ' applied. ' : ''}${plural((run.unfixed || []).length, 'selected finding')} still ${(run.unfixed || []).length === 1 ? 'needs' : 'need'} review.`
       : 'Saved changes are in History. Findings are removed only when the saved check no longer detects them.';
   }
@@ -2074,8 +2074,24 @@
       const describe = (it, reason, currentKey) => ({key: currentKey || it.key, where: [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ') || 'Whole report',
         text: it.text || it.reason || '', now: it.report, reason: why.get(it.key) || reason || (fdSourceGap(it) ? 'The source evidence must be verified first. AI cannot establish the source date or authority.' : '')});
       const unfixed = scope.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).map(it => describe(it));
-      if (!accepted.length) { state.fdAIRun = {hash, done: true, fixed: 0, confirmed: 0, tried: scope.length, skipped, unfixed, items: []};
-        document.body.classList.add('fd-panel-open'); fdAIDoneDialog(state.fdAIRun, report); return; }
+      if (!accepted.length) {
+        // Even a no-save run must re-read current evidence before repeating a stale warning.
+        const {fresh, working} = await fdReadSavedCheck(report);
+        const resolution = fresh?.file_hash === hash ? fdSavedFindingResolution(scope, [], binding, fresh, fresh, working) : null;
+        if (state.fdAIOperation !== operation) return;
+        const informative = new Set(resolution?.informational || []);
+        state.fdAIRun = {hash, done: true, fixed: 0, confirmed: 0, resolved: 0, informational: informative.size,
+          tried: scope.length, skipped: skipped.filter(x => !informative.has(x.finding_id)), unfixed: unfixed.filter(x => !informative.has(x.key)), items: []};
+        if (state.report === report && location.hash === '#r=' + hash) {
+          if (informative.size) {
+            fresh.version_view = {...working, historical: false};
+            state.report = fresh; state.fixes = null; state.fdItems = [];
+            drawReport(); loadFixes(hash);
+          }
+          document.body.classList.add('fd-panel-open'); fdAIDoneDialog(state.fdAIRun, fresh?.file_hash === hash ? fresh : report);
+        }
+        return;
+      }
       const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
       const capture = captureCorrections(accepted, dec, {}, binding, report);
       state.fdAIRun = {hash, total: todo.length, running: true, saving: accepted.length}; drawSide();
@@ -2090,7 +2106,7 @@
       const resolution = fdSavedFindingResolution(scope, accepted, binding, savedItem, fresh, working);
       if (state.fdAIOperation !== operation) return;
       state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed: resolution.confirmed, resolved: resolution.resolved.length, appliedProposals: resolution.appliedProposals.length, informational: resolution.informational.length,
-        tried: scope.length, skipped, unfixed: resolution.remaining.map(x => describe(x.item, x.reason, x.currentKey)),
+        tried: scope.length, skipped: skipped.filter(x => !resolution.informational.includes(x.finding_id)), unfixed: resolution.remaining.map(x => describe(x.item, x.reason, x.currentKey)),
         from: revisionOf(report), version: revisionOf(savedItem), reused, originalHash: hash, items: done};
       // A finished save must not pull the user back from a newer navigation or open a dialog over another report.
       if (location.hash === '#r=' + next || location.hash === '#r=' + hash) {
@@ -2205,13 +2221,13 @@
     const saveText = () => { const a = h('a', {href: URL.createObjectURL(new Blob([fdAISummaryText(run, report)], {type: 'text/plain'})), download: `AI fix summary - ${(report?.filename || 'report').replace(/\.[^.]+$/, '')}.txt`}); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); };
     const line = x => h('li', {}, h('b', {}, x.where), `: ${/^Missing cell\.?$/i.test(String(x.text).trim()) ? 'this cell is blank' : x.text}${x.now != null && x.now !== '' ? ` (now “${String(x.now).slice(0, 40)}”)` : ''}`);
     d.append(h('button', {type: 'button', class: 'fd-dialog-x', 'aria-label': 'Close', title: 'Close', onclick: close}, icon('x', 18)),
-      h('h2', {id: 'fd-aidone-title', tabindex: '-1'}, run.reused ? 'Opened the existing matching version' : !run.fixed ? 'Dex could not fix these' : `Saved ${plural(run.fixed, 'cell change')}`),
+      h('h2', {id: 'fd-aidone-title', tabindex: '-1'}, run.reused ? 'Opened the existing matching version' : !run.fixed ? run.informational ? 'Checked the selected findings' : 'Dex could not fix these' : `Saved ${plural(run.fixed, 'cell change')}`),
       run.fixed ? h('p', {class: allSaved ? 'fd-aidone-ok' : 'fd-aidone-warn', role: 'status'}, allSaved
         ? run.reused ? `All ${plural(run.fixed, 'requested change')} match existing version ${run.version}. No new version was created. Version ${run.from || 1} is kept.`
         : `All ${plural(run.fixed, 'change')} ${run.fixed === 1 ? 'is' : 'are'} applied and saved as version ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept.`
         : `${run.confirmed} of ${run.fixed} changes could be confirmed in the saved version. Open the report again and check the rest.`)
         : h('p', {class: 'fd-aidone-warn', role: 'status'}, 'Nothing was changed.'),
-      run.fixed ? h('p', {class: 'fd-resolution', role: 'status'}, fdResolutionText(run)) : null,
+      run.fixed || run.informational ? h('p', {class: 'fd-resolution', role: 'status'}, fdResolutionText(run)) : null,
       (run.items || []).length ? h('details', {class: 'fd-saved-changes'}, h('summary', {}, `${run.reused ? 'Requested changes matched' : 'Saved changes'} (${run.items.length})`), h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
         h('b', {}, x.where), ` ${x.before === '' ? 'blank' : '“' + x.before + '”'} → “${x.after}”`)))) : null,
       unknown.length ? h('section', {class: 'fd-aidone-ask'}, h('h3', {}, `Dex does not know the right value for ${unknown.length === 1 ? 'this one' : 'these ' + unknown.length}`),
@@ -2242,6 +2258,7 @@
       : /No supported cell suggestion|could not return a safe/i.test(t) ? 'Dex does not know the right value (it never guesses missing numbers).' : t;
     const reasons = new Map(); for (const x of run.skipped || []) { const t = plain(String(x.reason || '')); reasons.set(t, (reasons.get(t) || 0) + 1); }
     const why = reasons.size ? h('ul', {class: 'fd-airun-why'}, [...reasons].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([t, n]) => h('li', {}, `${n} not fixed: ${t}`))) : null;
+    if (!run.fixed && run.informational) return h('div', {class: 'fd-airun', role: 'status'}, h('p', {}, 'Nothing was changed.'), h('p', {}, fdResolutionText(run)), h('p', {}, `Selected findings still needing review: ${(run.unfixed || []).length}.`), why, dismiss);
     if (!run.fixed) return h('div', {class: 'fd-airun', role: 'status'}, h('p', {}, `Dex could not fix ${run.tried === 1 ? 'this error' : `these ${run.tried} errors`}. Nothing was changed. Fix ${run.tried === 1 ? 'it' : 'them'} manually or ignore ${run.tried === 1 ? 'it' : 'them'}.`), why, dismiss);
     return h('div', {class: 'fd-airun good', role: 'status'},
       h('p', {}, h('b', {}, `${run.reused ? 'Requested changes match' : run.manual ? 'You saved' : 'Dex saved'} ${plural(run.fixed, 'cell change')}.`), ` ${run.reused ? 'Opened existing version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}; version ${run.from || 1} is kept. ${run.reused ? 'No new version was created.' : ''}`),

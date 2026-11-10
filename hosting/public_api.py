@@ -14,7 +14,7 @@ from hosting.spreadsheet_inbox import SpreadsheetInbox
 
 ID = r'([0-9a-f]{64})'
 MAX_UPLOAD = 4 * 1024 * 1024 + 16384
-ISSUE_FIELDS = ('key', 'severity', 'source', 'text', 'where', 'sheet', 'cell', 'row', 'why', 'check', 'verdict', 'verdict_reason')
+ISSUE_FIELDS = ('key', 'code', 'fix', 'source_support', 'severity', 'source', 'text', 'where', 'sheet', 'cell', 'row', 'why', 'check', 'verdict', 'verdict_reason')
 STATUS_LABEL = {'hold': 'Hold: must be fixed', 'check': 'Check: items to look at', 'clear': 'Clear: nothing flagged'}
 
 ENDPOINTS = [
@@ -59,8 +59,8 @@ def report_row(row):
                 approved_by=rv.get('approved'), sent_at=rv.get('sent_at'), corrected_from=rv.get('fixed_from'))
 
 
-def report(item):
-    rv = summarize(item)
+def report(item, *, inbox=None):
+    rv = inbox.review_summary(item) if inbox is not None else summarize(item)
     applied = (item.get('fixes_applied') or [])[-1:] or [None]
     return dict(
         id=item['file_hash'], check_hash=item.get('check_hash'), run=rv['run'], filename=item['filename'], version=item.get('version'), uploaded_at=item.get('received_at'),
@@ -76,6 +76,12 @@ def report(item):
                                                        changes=item['fixed_from'].get('changes')),
         auto_formatting=item.get('auto_formatting') and {k: item['auto_formatting'][k] for k in ('count', 'kinds', 'examples')},
         download=f'/api/v1/reports/{item["file_hash"]}/download')
+
+
+def _report(h, item):
+    """Public/connector results use current assignment and mapping just like the app."""
+    with h.store().session() as directory:
+        return report(item, inbox=SpreadsheetInbox(directory))
 
 
 def _key(h):
@@ -186,7 +192,7 @@ def _checked(h, item):
             if cleaned:
                 item = cleaned
         # Importing is not an AI-sharing choice. AI review requires an explicit request.
-    return bool(item.get('idempotent')), dict(report(_get(h, item['file_hash'])), already_uploaded=bool(item.get('idempotent')))
+    return bool(item.get('idempotent')), dict(_report(h, _get(h, item['file_hash'])), already_uploaded=bool(item.get('idempotent')))
 
 
 def op_upload_start():
@@ -220,7 +226,7 @@ def op_upload_finish(h, upload_id, name, part_count, sha256):
 
 
 def op_get(h, file_hash):
-    return report(_get(h, _id(file_hash)))
+    return _report(h, _get(h, _id(file_hash)))
 
 
 def op_fixes(h, file_hash):
@@ -263,7 +269,7 @@ def op_apply(h, file_hash, accept=None, ids=None, changes=None, expected_check_h
         _after_change(h, fixed['file_hash'])
     # Service-key access remains the workspace-wide model checked by the API/MCP
     # entrypoint. A reused target is only read, never checked or relabelled anew.
-    return dict(report(_get(h, fixed['file_hash'])), applied=0 if reused else len(todo),
+    return dict(_report(h, _get(h, fixed['file_hash'])), applied=0 if reused else len(todo),
                 already_applied=reused, **({'requested_changes': len(todo), 'save_outcome': fixed['save_outcome']} if reused else {}))
 
 
@@ -285,13 +291,13 @@ def op_recheck(h, file_hash, checks=None):
     file_hash = _id(file_hash); _get(h, file_hash)
     checks = [c for c in checks or ['sharepoint', 'baseline'] if c in ('sharepoint', 'baseline', 'ai')]
     ran = _after_change(h, file_hash, checks)
-    return dict(report(_get(h, file_hash)), ran=ran)
+    return dict(_report(h, _get(h, file_hash)), ran=ran)
 
 
 def op_approve(h, file_hash, approver=None, note=None, override=False, withdraw=False, expected_check_hash=None, expected_run=None):
     from hosting import delivery
     file_hash = _id(file_hash); _get(h, file_hash)
-    return report(delivery.approve(h.store(), file_hash, approver, note, override, withdraw, expected_check_hash=expected_check_hash, expected_run=expected_run))
+    return _report(h, delivery.approve(h.store(), file_hash, approver, note, override, withdraw, expected_check_hash=expected_check_hash, expected_run=expected_run))
 
 
 def op_send_preview(h, file_hash):
@@ -383,7 +389,7 @@ def op_build(h, job, day=None, force=False, header=None, source=None):
         item = inbox.ingest(builder.file_name(job, day), raw)
         inbox.set_setting(f'built|{item["file_hash"]}', built)
     _after_change(h, item['file_hash'])
-    return dict(report=report(_get(h, item['file_hash'])), built={k: v for k, v in built.items() if k != 'columns'})
+    return dict(report=_report(h, _get(h, item['file_hash'])), built={k: v for k, v in built.items() if k != 'columns'})
 
 
 def op_nexus(h, job, day=None, source=None):
@@ -449,7 +455,7 @@ def remove_rows(h, file_hash, rows):
 def op_shift_fix(h, file_hash):
     file_hash = _id(file_hash); _get(h, file_hash)
     fixed, moved, removed = shift_fix(h, file_hash)
-    return dict(report(fixed), moved=moved, removed=removed)
+    return dict(_report(h, fixed), moved=moved, removed=removed)
 
 
 def op_send(h, key, file_hash, data):
@@ -460,7 +466,7 @@ def op_send(h, key, file_hash, data):
     file_hash = _id(file_hash); _get(h, file_hash)
     data = dict(data, via=('connector:' if key.get('via') == 'mcp' else 'api:') + key['name'])
     updated, record = delivery.send(h.store(), file_hash, data, defaults=delivery.info(h.store(), file_hash))
-    return dict(record=record, report=report(updated))
+    return dict(record=record, report=_report(h, updated))
 
 
 def handle(h, method, route, send):

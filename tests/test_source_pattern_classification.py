@@ -117,22 +117,53 @@ class SourcePatterns(unittest.TestCase):
 
 if __name__=='__main__':unittest.main()
 
+class BoundedSourcePatterns(unittest.TestCase):
+    def test_large_outlier_set_has_bounded_receipts_and_one_hash_per_summary(self):
+        import time
+        from hosting.source_patterns import MAX_RECEIPT_BYTES
+        for huge in (False, True):
+            rows=[['Identifier','Part number','Inspected','OK','NOK']]
+            rows += [[f'LOT-{n:05}', ('X'*4000 if huge else '00356870-V-LH') if n>=1500 else '12345678 AA',1,1,0] for n in range(2000)]
+            item=inspect_adaptive([('Inspection Detail',rows)],{'limitations':[]})
+            item.update(file_hash='a'*64,checker_version=CHECKER_VERSION)
+            for group in (item['records'],item['_detail_records']):
+                for r in group:r['source']=dict(site_id='site-1',list_id='list-1',item=str(r['row']))
+            snap=dict(site_id='site-1',list_id='list-1',captured_at=datetime.now(timezone.utc).isoformat(),columns={'Part':dict(displayName='Part number')},coverage=dict(complete=True),items=[dict(item=r['source']['item'],day='2026-11-10',raw={'Part':r['exact_labels']['part']}) for r in item['records']])
+            rec=reconcile.compare('2026-11-10',item['_detail_records'],[],snap,report=dict(file_hash=item['file_hash'],checker_version=CHECKER_VERSION))
+            item['source_reconciliation']=rec
+            receipt=rec['identifier_pattern_evidence']
+            self.assertLessEqual(len(json.dumps(receipt).encode()),MAX_RECEIPT_BYTES)
+            started=time.monotonic()
+            with patch('hosting.source_patterns.fingerprint',wraps=fingerprint) as hashes:
+                review=summarize(item,source_context=CONTEXT)
+                self.assertLessEqual(hashes.call_count,1)
+            self.assertLess(time.monotonic()-started,5)
+            patterns=[i for i in review['issues'] if i['code']=='part_format_differs']
+            self.assertEqual(len(patterns),500)
+            self.assertTrue(all(i['severity']==('high' if huge else 'info') for i in patterns))
+            if huge:self.assertFalse(receipt['complete']);self.assertEqual(receipt['proofs'],[])
+
+
+def persisted_fixture_inputs():
+    from tests.sl_daily_fixture import sl_daily, records
+    from tests.test_reconcile import snap, sp_item, COLS, SITE, LIST
+    data=records(27,inspected=1)
+    for r in data:r['part']='12345678 AA'
+    data[11]['part']='00356870-V-LH'  # physical row 15
+    source=[sp_item(432+i,inspected=1) for i in range(27)]
+    for it,r in zip(source,data):it['fields']['PartNumber']=r['part']
+    snapshot=snap([source],columns=COLS+[dict(name='PartNumber',displayName='Part number')])
+    assigned=dict(status='manual',site=SITE,site_id='site-1',list_id=LIST,needs_person=False)
+    return sl_daily(recs=data,nok_blank=True), snapshot, assigned
+
 class PersistedSourcePatterns(unittest.TestCase):
     def test_saved_recheck_and_current_assignment_mapping_are_required(self):
         import tempfile
         from hosting.spreadsheet_inbox import SpreadsheetInbox
-        from tests.sl_daily_fixture import sl_daily, records
-        from tests.test_reconcile import snap, sp_item, COLS, SITE, LIST
-        data=records(27,inspected=1)
-        for r in data:r['part']='12345678 AA'
-        data[11]['part']='00356870-V-LH'  # physical row 15
-        source=[sp_item(432+i,inspected=1) for i in range(27)]
-        for it,r in zip(source,data):it['fields']['PartNumber']=r['part']
-        snapshot=snap([source],columns=COLS+[dict(name='PartNumber',displayName='Part number')])
-        assigned=dict(status='manual',site=SITE,site_id='site-1',list_id=LIST,needs_person=False)
+        raw, snapshot, assigned = persisted_fixture_inputs()
+        SITE, LIST = assigned['site'], assigned['list_id']
         with tempfile.TemporaryDirectory() as root, patch.object(SpreadsheetInbox,'assignment_for',return_value=assigned):
             box=SpreadsheetInbox(root)
-            raw=sl_daily(recs=data,nok_blank=True)
             original=box.ingest('Synthetic 2214.xlsx',raw);h=original['file_hash']
             box.source_reconcile(h,snapshot,'2026-11-06',expected_check_hash=box.get(h)['check_hash'],expected_assignment=assigned)
             def finding():return next(x for x in box.review_summary(box.get(h))['issues'] if x['code']=='part_format_differs')
@@ -142,6 +173,18 @@ class PersistedSourcePatterns(unittest.TestCase):
             view=handler.report_view(SimpleNamespace(can_stored_report=lambda *a:True),box,h)
             self.assertEqual(next(x for x in view['review']['issues'] if x['code']=='part_format_differs')['severity'],'info')
             self.assertFalse(view['checked_copy']['ready'])
+            import contextlib
+            from hosting import public_api, delivery, ai_proposals
+            store=SimpleNamespace(session=lambda:contextlib.nullcontext(root))
+            api_handler=SimpleNamespace(store=lambda:store)
+            public=public_api.op_get(api_handler,h)
+            self.assertEqual(public['counts'],view['review']['counts'])
+            self.assertEqual(next(x for x in public['issues'] if x['code']=='part_format_differs')['severity'],'info')
+            self.assertEqual(delivery._load(store,h)[2]['counts'],view['review']['counts'])
+            current=box.get(h); finding_now=finding()
+            payload=dict(file_hash=h,expected_check_hash=current['check_hash'],run=check_run(current),expected_rev=0,ids=[finding_now['key']],seen={finding_now['key']:finding_now['fp']})
+            with self.assertRaisesRegex(ValueError,'now informational'):
+                ai_proposals.prepare(box,payload,lambda:True,lambda *a:self.fail('Provider must not run'))
             self.assertFalse(any(x['code']=='part_format_differs' for x in box.ai_fix_inputs(h)[2]))
             self.assertTrue(any(x['code']=='source_evidence_incomplete' for x in box.holds(box.get(h))))
             box.propose_recheck(h);box.apply_recheck(h,'Synthetic reviewer')

@@ -14,7 +14,7 @@ def _load(store, file_hash):
         inbox = SpreadsheetInbox(directory)
         item = inbox.get(file_hash)
         _, data = inbox.original_bytes(file_hash)
-        rv = summarize(item, with_issues=False)
+        rv = inbox.review_summary(item, with_issues=False)
         saved = inbox.contacts_for(rv.get('job'))
     return item, data, rv, saved
 

@@ -58,6 +58,8 @@ def snapshot(inbox, payload, authorize):
         if any(counts[i] != 1 or payload['seen'][i] != available[i].get('fp') for i in payload['ids']):
             raise ValueError('Unknown, ambiguous, or changed finding selection.')
         selected = [available[i] for i in payload['ids']]
+        if any(i.get('severity') == 'info' for i in selected):
+            raise ValueError('A selected finding is now informational. Reload the report to see its current source evidence; no identifier was changed.')
         assignment = inbox.assignment_for(item, review)
         holds = inbox.holds(item, review)
         binding = _canonical([item, assignment, holds, inbox.assignment_context()])

@@ -313,9 +313,10 @@ def summarize(result, with_issues=True, use_verdicts=True, source_context=None):
                 return a
         return None
     kept = []
-    from hosting.source_patterns import supported
+    from hosting.source_patterns import supported, support_index
+    pattern_support = support_index(result, source_context)
     for x in undecided:
-        proof = supported(result, x, source_context) if (not x.get('previous_decision')
+        proof = supported(x, pattern_support) if (not x.get('previous_decision')
                 and x['key'] not in person_hits and x['key'] not in (result.get('review_decisions') or {})) else None
         if proof:
             x.update(severity='info', source_support=proof, fix=proof['message'])
