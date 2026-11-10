@@ -25,3 +25,21 @@ test('successful response is exact requested hash, never proof-provided alternat
 test('wrong content type, scope change and local expiry after response never download',async()=>{
  for(const mode of ['type','scope','expiry']){const {ctx,report,log}=setup();ctx.fetch=async()=>({ok:true,headers:{get:()=>mode==='type'?'application/json':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},blob:async()=>{if(mode==='scope')ctx.state.report={};if(mode==='expiry')report.checked_copy.expires_at='2000-01-01';return {};}});await ctx.fdDownloadChecked(report);assert.ok(!log.includes('blob'),mode);}
 });
+
+test('saved-version, empty-list and AI-result surfaces never promise finality for ignored or expired evidence',()=>{
+ const part=(a,b)=>src.slice(src.indexOf(a),src.indexOf(b,src.indexOf(a)));
+ const text=n=>n==null?'':typeof n==='object'?(n.children||[]).map(text).join(' '):String(n);
+ const h=(tag,props,...children)=>({tag,props,children:children.flat(Infinity),append(...nodes){this.children.push(...nodes);}});
+ for(const mode of ['ignored','ai-set-aside','expired','incomplete','source-hold']){
+  const report={file_hash:'a',check_hash:'b',filename:'Synthetic.xlsx',review:{status:'clear',coverage:{},decisions:{}},checked_copy:{ready:mode==='expired',file_hash:'a',check_hash:'b',expires_at:'2000-01-01',coverage_complete:mode!=='incomplete',remaining_detected_errors:mode==='ignored'||mode==='ai-set-aside'?1:0,set_aside_unresolved:1,reasons:[mode==='source-hold'?'Source verification holds remain.':'Verification is not complete.']}};
+  const items=[{state:mode==='ai-set-aside'?'claude':'kept',key:'synthetic'}];
+  const ctx=vm.createContext({Date,Number,state:{report,fixes:[],fdAIRun:{hash:'a',fixed:1,from:1,version:2}},h,readyChanges:()=>({total:0}),revisionOf:()=>2,plural:(n,s)=>`${n} ${s}`,icon:()=>null,clearTimeout:()=>{},setTimeout:()=>1,fdStatus:()=>({}),fdCounts:()=>({applied:1,kept:1}),fdItems:()=>items,fdGroups:()=>[],fdNextStep:()=>null,fdAutoSummary:()=>null,fdManualList:()=>null});
+  vm.runInContext(part('  function fdSheetBar(', '  function drawReport(')+part('  function fdCheckedState(', '  async function fdDownloadChecked(')+part('  function fdCheckedCopy(', '  // ---------- right-hand panel')+part('  function fdCorrections(', '  // One selection, shared')+part('  function fdAIRunBanner(', '  // ---------- the app fixes'),ctx);
+  const bar=text(ctx.fdSheetBar(report));assert.match(bar,/Saved working copy: version 2/);assert.doesNotMatch(bar,/FINAL/);
+  const panel=h('div',{});ctx.fdCorrections(panel);const rendered=text(panel);
+  assert.match(rendered,/Verification not complete/);assert.match(rendered,/No open items in this list/);assert.match(rendered,/Ignored and AI-set-aside findings may still be unresolved/);assert.doesNotMatch(rendered,/No errors left to fix|0 remaining detected errors|Download checked copy/);
+  if(mode==='expired')assert.match(rendered,/Source evidence expired/);
+  if(mode==='ignored'||mode==='ai-set-aside')assert.match(rendered,/1 unresolved detected findings/);
+  if(mode==='source-hold')assert.match(rendered,/Source verification holds remain/);
+ }
+});

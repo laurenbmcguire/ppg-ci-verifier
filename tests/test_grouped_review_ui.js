@@ -155,7 +155,7 @@ test('header reports receipt matches, never parsed report rows as matched source
  assert.equal(ctx.fdSourceSummary(r),'Source comparison incomplete · 0 unique source items matched / 13 report rows in the recorded capture');
  assert.ok(!ctx.fdSourceSummary(r).includes('13 of 13'));assert.ok(!ctx.fdSourceSummary(r).includes('Source verified'));
  Object.assign(r.source_reconciliation,{snapshot_id:'snapshot',site_id:'site',list_id:'list'});r.source_reconciliation.coverage.complete=true;r.source_reconciliation.verified=true;r.source_reconciliation.count_reconciliation={status:'verified',record_counts:{report_rows:13,source_rows:13,matched_unique_items:13}};r.review.sharepoint={status:'match',source_verified:true};
- assert.equal(ctx.fdSourceSummary(r),'Source verified · 13 unique source items matched / 13 report rows');
+ assert.equal(ctx.fdSourceSummary(r),'Recorded source comparison verified · 13 unique source items matched / 13 report rows in the recorded capture');
  r.holds=[{code:'source_assignment_changed'}];assert.match(ctx.fdSourceSummary(r),/^Source not verified/);
  delete r.source_reconciliation.count_reconciliation;assert.match(ctx.fdSourceSummary(r),/matched count unavailable/);
 });

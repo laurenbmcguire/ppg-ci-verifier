@@ -102,6 +102,12 @@ const server = http.createServer((req, res) => {
       assert.equal(await button().count(), 0, 'Expired claim must disappear without network');
       assert.doesNotMatch(await page.locator('body').innerText(), /0 remaining detected errors/, 'All visible checked claims must expire, including the header');
       assert.equal(requests.length, beforeExpiry, 'Expiry must not issue any network request');
+      assert.doesNotMatch(await page.locator('body').innerText(), /FINAL version|No errors left to fix/);
+      assert.match(await page.locator('.fd-sheetbar-what').innerText(), /Saved working copy/);
+      const recorded = page.locator('.fd-comparison').first();
+      await recorded.evaluate(node => node.open = true);
+      assert.match(await recorded.innerText(), /Recorded comparison: Matches SharePoint/);
+      assert.match(await recorded.innerText(), /not current checked-copy eligibility/);
       await page.screenshot({path: path.join(EVIDENCE, `checked-copy-expired-${width}.png`), fullPage: true});
       assert.deepEqual(errors, []); assert.deepEqual(external, []); assert.deepEqual(unexpected, []);
       console.log(JSON.stringify({passed: true, width, full_app: true, synthetic_only: true, exact_download_bytes: true, filename: NAME, content_type: MIME, failed_json_not_downloaded: true, expiry_no_network: true, stale_scope_rejected: true, post_apply_current_payload: true, ordinary_links_preserved: ordinary, non_get_requests: requests.filter(r => r.method !== 'GET'), unexpected_requests: unexpected}));

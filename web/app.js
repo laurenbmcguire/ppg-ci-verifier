@@ -1564,9 +1564,9 @@
   function fdSourceSummary(r) {
     const rec = r.source_reconciliation || {}, sp = r.review?.sharepoint || {}, counts = rec.count_reconciliation?.record_counts;
     const verified = fdSourceVerified(r);
-    const status = verified ? 'Source verified' : rec.coverage?.complete === false || sp.status === 'incomplete' ? 'Source comparison incomplete' : 'Source not verified';
+    const status = verified ? 'Recorded source comparison verified' : rec.coverage?.complete === false || sp.status === 'incomplete' ? 'Source comparison incomplete' : 'Source not verified';
     if (!counts || counts.matched_unique_items == null || counts.report_rows == null) return `${status} · matched count unavailable`;
-    return `${status} · ${counts.matched_unique_items} unique source items matched / ${counts.report_rows} report rows${verified ? '' : ' in the recorded capture'}`;
+    return `${status} · ${counts.matched_unique_items} unique source items matched / ${counts.report_rows} report rows in the recorded capture`;
   }
   // Download the copy being worked on (it already has Dex's and your saved changes), or email it to the client.
   function fdSheetBar(r) {
@@ -1584,7 +1584,7 @@
     };
     const pending = readyChanges().total;
     return h('div', {class: 'fd-sheetbar'},
-      h('span', {class: 'fd-sheetbar-what'}, `${r.review?.status === 'clear' && !(r.fixes_applied || []).length ? 'FINAL version' : 'Working copy'}: version ${revisionOf(r)}${r.fixed_from ? ` · ${plural((r.fixed_from.changes || []).length, 'change')} saved` : ' · original'}${pending ? ` · ${pending} typed, not saved yet` : ''}`),
+      h('span', {class: 'fd-sheetbar-what'}, `Saved working copy: version ${revisionOf(r)}${r.fixed_from ? ` · ${plural((r.fixed_from.changes || []).length, 'change')} saved` : ' · original'}${pending ? ` · ${pending} typed, not saved yet` : ''}`),
       h('button', {type: 'button', class: 'btn', onclick: download}, 'Download'),
       h('button', {type: 'button', class: 'btn primary', onclick: email}, 'Email to client'));
   }
@@ -1804,7 +1804,7 @@
           h('button', {type: 'button', class: 'btn', disabled: busyNow || !ticked.length || null, onclick: () => fdManualStart(fdPicked(fixable))}, 'Fix manually'),
           h('button', {type: 'button', class: 'btn', disabled: busyNow || !ticked.length || null, onclick: () => fdReviewDialog(fdPicked(fixable), 'ignore')}, 'Ignore'))));
     }
-    if (!tierGroups.length) body.append(h('p', {class: 'fd-hint'}, 'No errors left to fix. Decided ones are under Possible errors above.'));
+    if (!tierGroups.length) body.append(h('p', {class: 'fd-hint'}, 'No open items in this list. Ignored and AI-set-aside findings may still be unresolved; see Possible errors by status and verification above.'));
     const manual = fdManualList(items);
     if (manual) body.append(fdManualCard(manual));
     else if (cur) body.append(h('p', {id: 'fd-correction-context', class: 'fd-grid-context', role: 'status'}, `Current correction: ${cur.sheet || 'Report'} · ${cur.cell || (cur.row ? 'row ' + cur.row : 'report-level')}. Filtering the sheet does not change this correction.`), fdCard(cur, groups));
@@ -2065,7 +2065,7 @@
       h('p', {}, h('b', {}, `${run.reused ? 'Requested changes match' : run.manual ? 'You changed' : 'Dex fixed'} ${plural(run.fixed, 'cell')}.`), ` ${run.reused ? 'Opened existing version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}; version ${run.from || 1} is kept. ${run.reused ? 'No new version was created.' : ''}`),
       (run.items || []).length ? h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
         h('s', {}, `${x.where}${x.text ? ': ' + String(x.text).slice(0, 120) : ''}`), ` ${x.before === '' ? 'blank' : '“' + x.before + '”'} → “${x.after}”`))) : null,
-      h('p', {}, left ? `${plural(left, 'error')} left to fix. ${left === 1 ? 'It is' : 'They are'} listed below.` : 'No errors left to fix.'), why, dismiss);
+      h('p', {}, left ? `${plural(left, 'error')} left to fix. ${left === 1 ? 'It is' : 'They are'} listed below.` : 'No open items in this list. Ignored and AI-set-aside findings may still be unresolved; check the verification status above.'), why, dismiss);
   }
   // ---------- the app fixes what it can by itself (new version, original kept), then shows only what needs a person
   function fdAutoEligible(r) {
@@ -2878,14 +2878,14 @@
       source_item_unconfirmed: 'not yet confirmed because source capture is incomplete', source_day_unconfirmed: 'on SharePoint with an unconfirmed business day', missing_from_report: 'on SharePoint but missing from the report', not_on_sharepoint_for_day: 'not on SharePoint for this day', not_on_sharepoint: 'not on SharePoint at all',
       item_listed_twice: 'duplicate rows', report_row_without_item_id: 'rows with no SharePoint item number', wrong_list: 'from a different SharePoint list'};
     const quick = [...kinds].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${kindText[k] || String(k).replace(/_/g, ' ')}`);
-    const answer = verified ? 'Matches SharePoint' : differs ? `Does not match SharePoint · ${differences.length}${rec.rows_truncated ? '+' : ''} ${differences.length === 1 ? 'difference' : 'differences'}`
+    const answer = verified ? 'Recorded comparison: Matches SharePoint' : differs ? `Does not match SharePoint · ${differences.length}${rec.rows_truncated ? '+' : ''} ${differences.length === 1 ? 'difference' : 'differences'}`
       : checking ? 'Checking SharePoint…' : gaps.length ? `SharePoint verification incomplete · ${gaps.length} ${gaps.length === 1 ? 'gap' : 'gaps'}` : possible ? `SharePoint verification incomplete · ${differences.length} ${differences.length === 1 ? 'item' : 'items'} to check` : spIssues.length ? `${spIssues.length} ${spIssues.length === 1 ? 'difference' : 'differences'} from SharePoint` : failed ? 'SharePoint could not be checked' : 'SharePoint check is not complete';
     return h('details', {class: 'fd-comparison ' + (verified ? 'ok' : differs || (!possible && spIssues.length) ? 'bad' : 'unknown'), open: differs || possible || (!verified && spIssues.length > 0) || null},
       h('summary', {}, verified ? icon('ok', 15) : differs ? icon('x', 15) : checking ? h('span', {class: 'spin'}) : icon('warn', 15), ' ', answer),
       (differs || possible) && quick.length ? h('p', {class: 'fd-sp-quick'}, quick.join(' · ') + '.') : null,
       failed && !checking ? h('p', {class: 'fd-hint', role: 'status'}, failed) : null,
       fdSourceRefresh(r),
-      verified ? h('p', {}, 'Every record and quantity in this report matches SharePoint.') : null,
+      verified ? h('p', {}, 'The saved source comparison matched every record and quantity. This records that comparison, not current checked-copy eligibility; see the verification status above.') : null,
       differs ? h('section', {}, h('h3', {}, `What is different (${differences.length}${rec.rows_truncated ? '+' : ''})`),
         totals.length ? h('ul', {class: 'fd-difference-totals'}, totals.map(t => h('li', {}, t))) : null,
         h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Differences from SharePoint'}, differences.map(row => h('li', {}, fdDifferenceText(row),
