@@ -1,0 +1,316 @@
+{
+  "version": "daily-selected-template-contract-v1",
+  "status": "layout_and_cleanup_contract_not_generation_approval",
+  "selected_library_file_id": "libfile_fde3_f-78a17c72e2608191b9fde25b2179baa6_30f716c0c5048191a1ca903407e662da",
+  "selected_sha256": "9d43392f7a6869b38afee62a56bf502be963ca26bb7d46543415c08555be69bf",
+  "report_type": "daily",
+  "sheets": [
+    {
+      "name": "Summary",
+      "source_part": "xl/worksheets/sheet2.xml",
+      "state": "visible"
+    },
+    {
+      "name": "1st Shift",
+      "source_part": "xl/worksheets/sheet3.xml",
+      "state": "visible"
+    },
+    {
+      "name": "2nd Shift",
+      "source_part": "xl/worksheets/sheet4.xml",
+      "state": "visible"
+    },
+    {
+      "name": "3rd Shift",
+      "source_part": "xl/worksheets/sheet5.xml",
+      "state": "visible"
+    },
+    {
+      "name": "Rejects & Photos",
+      "source_part": "xl/worksheets/sheet6.xml",
+      "state": "visible"
+    },
+    {
+      "name": "_Calc",
+      "source_part": "xl/worksheets/sheet7.xml",
+      "state": "hidden"
+    }
+  ],
+  "summary": {
+    "job": "D13",
+    "business_date": "D14",
+    "area": "D15",
+    "service_type": "D16",
+    "description": "D17",
+    "paying_client": "M13",
+    "client_contact": "M14",
+    "worksite": "M15",
+    "prepared_by": "M16",
+    "part_number": "B29",
+    "part_name": "E29",
+    "inspected_for": "H29",
+    "total_row": 24,
+    "capacity_parts": 1,
+    "shift_status": {
+      "1": "D21",
+      "2": "D22",
+      "3": "D23"
+    }
+  },
+  "shift_details": {
+    "1": {
+      "sheet": "1st Shift",
+      "first_row": 16,
+      "last_row": 28,
+      "capacity": 13,
+      "columns": {
+        "date": "A",
+        "shift": "B",
+        "location": "C",
+        "part": "D",
+        "identifier": "E",
+        "inspected_for": "F",
+        "inspected": "G",
+        "condition": "H",
+        "reject_reason": "I",
+        "rejected": "J",
+        "certified": "K",
+        "comments": "L",
+        "photo": "M",
+        "holes": "N",
+        "glue": "O"
+      },
+      "clear_input_columns": [
+        "D",
+        "E",
+        "F",
+        "G",
+        "H",
+        "I",
+        "J",
+        "L",
+        "M"
+      ],
+      "total_row": 32,
+      "billing_name": "A36",
+      "billing_hours": "D36",
+      "billing_total": "D37",
+      "daily_notes": "C11",
+      "source_status_is_not_completion": true
+    },
+    "2": {
+      "sheet": "2nd Shift",
+      "first_row": 16,
+      "last_row": 20,
+      "capacity": 5,
+      "columns": {
+        "date": "A",
+        "shift": "B",
+        "location": "C",
+        "part": "D",
+        "identifier": "E",
+        "inspected_for": "F",
+        "inspected": "G",
+        "condition": "H",
+        "reject_reason": "I",
+        "rejected": "J",
+        "certified": "K",
+        "comments": "L",
+        "photo": "M",
+        "holes": "N",
+        "glue": "O"
+      },
+      "clear_input_columns": [
+        "D",
+        "E",
+        "F",
+        "G",
+        "H",
+        "I",
+        "J",
+        "L",
+        "M"
+      ],
+      "total_row": 24,
+      "billing_name": "A28",
+      "billing_hours": "D28",
+      "billing_total": "D29",
+      "daily_notes": "C11",
+      "source_status_is_not_completion": true
+    },
+    "3": {
+      "sheet": "3rd Shift",
+      "first_row": 16,
+      "last_row": 20,
+      "capacity": 5,
+      "columns": {
+        "date": "A",
+        "shift": "B",
+        "location": "C",
+        "part": "D",
+        "identifier": "E",
+        "inspected_for": "F",
+        "inspected": "G",
+        "condition": "H",
+        "reject_reason": "I",
+        "rejected": "J",
+        "certified": "K",
+        "comments": "L",
+        "photo": "M",
+        "holes": "N",
+        "glue": "O"
+      },
+      "clear_input_columns": [
+        "D",
+        "E",
+        "F",
+        "G",
+        "H",
+        "I",
+        "J",
+        "L",
+        "M"
+      ],
+      "total_row": 24,
+      "billing_name": "A28",
+      "billing_hours": "D28",
+      "billing_total": "D29",
+      "daily_notes": "C11",
+      "source_status_is_not_completion": true
+    }
+  },
+  "cleanup": {
+    "summary_inputs": [
+      "D13",
+      "D14",
+      "D15",
+      "D16",
+      "D17",
+      "M13",
+      "M14",
+      "M15",
+      "M16",
+      "B29",
+      "E29",
+      "H29",
+      "D21",
+      "D22",
+      "D23"
+    ],
+    "summary_sample_instructions": [
+      "B74",
+      "B82"
+    ],
+    "photo_sheet_clear_content_ranges": [
+      "A8:K20",
+      "A24:K90"
+    ],
+    "clear_all_external_sample_hyperlinks": true,
+    "clear_all_formula_cached_values": true,
+    "headers_footers": "Remove hardcoded old job/client/date on every visible sheet; set only generic branding or values from the exact reviewed dataset.",
+    "sample_tokens": [
+      "2230-OWENS-BASCO",
+      "Briggs & Stratton",
+      "Briggs Stratton",
+      "80139189",
+      "8010808539",
+      "8010808540",
+      "8010808537",
+      "8010808541",
+      "8010852061",
+      "8010672070",
+      "8010672071",
+      "8010726199",
+      "8010726202",
+      "8010796870",
+      "8010726174",
+      "8010799672",
+      "8010799675",
+      "October 7, 2026",
+      "2026-10-07"
+    ]
+  },
+  "branding_images": [
+    {
+      "part": "xl/media/image2.png",
+      "sha256": "f7bca7cc2c47830ce0c99dd0353b42531dbb7e09a109d783ae38595d619346ef"
+    },
+    {
+      "part": "xl/media/image1.jpeg",
+      "sha256": "52368bf79467facffd89c8758ae355a67f53317e805741aa5059ef1f61a80dab"
+    }
+  ],
+  "preserve_media_sha256": [
+    "52368bf79467facffd89c8758ae355a67f53317e805741aa5059ef1f61a80dab",
+    "f7bca7cc2c47830ce0c99dd0353b42531dbb7e09a109d783ae38595d619346ef"
+  ],
+  "remove_sample_media_sha256": [
+    "7015731f4829b68005236b9106be25f78a8f3829be075f0dca2bd16981b5c72e",
+    "cb58608aa87433d0bf0d6eb64f0f44bb04cefea2fb279a07602c8cff1bfcf950",
+    "f65c862d5f45e923659ff521707647fa6a473a44ddd4b92b83b355694a8a2e60",
+    "67a21855e04dc912f216cc064cad1538dd109c877442d6424f32899c3c7d93f3",
+    "41e7a175d3a4623cb785d0282a0d9815c0afd09b310aab655f434ba6e956e226",
+    "48dfa622c223540dc7d238473d388d75a6f052750ef06f40a222ec9c24edadb3",
+    "36ba5fa8c439284631ed167e68ca51c27fe5d1980b361b132c03af0baa1be6ae",
+    "bfa94009381225bf804fe9ab9eb312f6861cac19dad845e64acfcc7e1b930878",
+    "3c0367308d24d8dc4c64f15c9c883939e77f60af16521cb226c207d52e76cbb6",
+    "2ec904713bcf84e2b619a58bdc87ebf5213c8a87155ff10d070a681a94658ef4",
+    "2f9179eb6682d0eabce28f5638f0e8e3c03fbc3a791847ea88198d9bedb046ee"
+  ],
+  "photo_layout": {
+    "source_sheet": "Rejects & Photos",
+    "record_rows": [
+      8,
+      20
+    ],
+    "source_capacity": 13,
+    "actual_photo_capacity": 11,
+    "card_header_rows": [
+      24,
+      41,
+      58,
+      75
+    ],
+    "card_columns": [
+      "A",
+      "D",
+      "G"
+    ],
+    "image_anchor_row_offsets": [
+      26,
+      43,
+      60,
+      77
+    ],
+    "last_card_columns": [
+      "A",
+      "D"
+    ],
+    "comments_header_offset": 13,
+    "source_link_header_offset": 15,
+    "binding": "Exact source item ID + source image hash + source version, never identifier first-match alone"
+  },
+  "generation_holds": [
+    "Any unresolved required raw/source uncertainty",
+    "More than one part number unless summary/detail and all dependent formulas have verified expansion",
+    "More than13 first-shift,5 second-shift,5 third-shift rows unless verified expansion",
+    "More than13 photo-traceability rows or11 chosen photos unless verified expansion",
+    "Any missing required source pagination/date/shift contract",
+    "Any unsupported defect taxonomy or metadata needed for truthful figures"
+  ],
+  "required_generator_rewrites": [
+    "Count verified record presence independently from shift completion. Do not set Complete/In progress just to include rows. Unknown expected shifts remain unknown.",
+    "K certified must use independently verified source value, or an explicitly approved arithmetic relationship whose two inputs are present. Never G-N(J) when J is missing.",
+    "All sums/rates must distinguish missing from numeric zero. Missing labor yields unavailable labor/productivity, not actual zero.",
+    "N/O holes/glue parser only applies when exact mapping verified; do not reuse generic blank-to-zero for other defect categories.",
+    "All _Calc aggregate and mismatch/coverage formulas must use current mapping and presence states, not sample source assumptions.",
+    "LARGE+MATCH ranking must become stable distinct source-row ranking under ties. Do not first-match by rejected quantity.",
+    "Photo traceability must include actual selected shifts with exact source row ID binding. Original first-shift-only links and fixed captions are sample data.",
+    "Final workbook must be reopened, recalculated and independently checked for exact rows/keys/date/shift/parts/presence/quantities/photos and formula errors. Original sample bytes must not remain in cached cells, shared strings, draw objects, metadata, links, or chart caches."
+  ],
+  "clean_sha256": "f156d383280f4e89ac3e35a21abffec17d3245f94a24ec6f1f1c33a1ebb85800",
+  "clean_status": "native_cleaner_independently_audited",
+  "rejected_artifact_candidate": "57d4791709b1d75775661ee3a866cc9920156d04f2ee2172b166af21619a25c0",
+  "clean_filename": "daily-clean.xlsx",
+  "clean_audit_scope": "Sample data/media/cache removal and native layout preservation; generated reports require their own exact-snapshot verification."
+}

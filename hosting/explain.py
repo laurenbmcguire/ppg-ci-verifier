@@ -23,6 +23,18 @@ def _add(codes, why, fix, sure):
 
 
 # ---------------------------------------------------------------- numbers on a row that cannot be right
+_add('mapping_required',
+     'The source fields have not yet been matched to this report.',
+     'Review and save the exact source field mapping before approving the snapshot.', False)
+_add('labor_not_mapped',
+     'Labor and inspector fields are not mapped in this inspection-only pilot.',
+     'Keep the report held; a full report requires separately verified labor and inspector mapping.', False)
+_add('identity_capacity',
+     'A source record ID or version exceeds the verified printable limits of this report layout.',
+     'Keep the exact source value unchanged and use a report layout that can include it completely.', True)
+_add('text_capacity',
+     'Complete source text exceeds the verified cell or continuation-page limits of this report layout.',
+     'Keep all source text unchanged and use a report layout that can include it completely.', True)
 _add('rejected_exceeds_inspected certified_exceeds_inspected',
      'More parts are shown as rejected or OK than were inspected, so the counts are wrong and the totals and the bill will be off.',
      'Check this row against the scan and correct whichever of Inspected, OK or Rejected was keyed wrong.', True)

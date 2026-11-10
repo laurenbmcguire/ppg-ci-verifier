@@ -22,7 +22,7 @@ from hosting.source_adapter import convert_private_envelope
 from hosting.storage import StorageUnavailable
 from hosting.sqlite_storage import local_environment, SQLiteWorkspace
 
-FILES = {'/development-examples.js': 'development-examples.js', '/': 'index.html', '/ui.js': 'ui.js', '/report-ui.js': 'report-ui.js',
+FILES = {'/source-review': 'source-review.html', '/source-review.js': 'source-review.js', '/source-review.css': 'source-review.css', '/development-examples.js': 'development-examples.js', '/': 'index.html', '/ui.js': 'ui.js', '/report-ui.js': 'report-ui.js',
          '/style.css': 'style.css', '/spreadsheet-ui.js': 'spreadsheet-ui.js', '/workflow-ui.js':'workflow-ui.js', '/assets/ppg-client-intelligence.png': 'assets/ppg-client-intelligence.png',
          '/app.js': 'app.js', '/app.css': 'app.css',
          **{f'/assets/fonts/{n}': f'assets/fonts/{n}' for n in ('dm-sans-latin-400-normal.woff2', 'dm-sans-latin-500-normal.woff2', 'dm-sans-latin-600-normal.woff2',
@@ -362,7 +362,7 @@ class handler(BaseHTTPRequestHandler):
             return self.send(401, encode_json({'error': 'Sign in to continue.', 'signin': True}))
         if user.get('role') == 'admin':
             return None
-        admin_only = (route.startswith(('/api/keys', '/api/users', '/api/access', '/api/workflow', '/api/spreadsheets/demo'))
+        admin_only = (route.startswith(('/api/keys', '/api/users', '/api/access', '/api/workflow', '/api/spreadsheets/demo', '/api/source-review'))
                       or route in ('/api/spreadsheets/history-recovery', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/state', '/api/reports', '/api/reports/import')
                       or route.startswith('/api/overview/artifact'))
         if admin_only:
@@ -664,6 +664,9 @@ class handler(BaseHTTPRequestHandler):
                 refused = self.gate('GET', route)
                 if refused:
                     return refused
+            if route.startswith('/api/source-review'):
+                from hosting.source_first_http import handle
+                return handle(self, 'GET', route)
             if route == '/api/me':
                 from hosting import access, mailer
                 user = self.current_user()
@@ -911,11 +914,13 @@ class handler(BaseHTTPRequestHandler):
             return self.fail(403, 'Same-origin browser request required.')
         if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
             return self.fail(415, 'JSON content type required.')
-        if route not in ('/api/spreadsheets/history-recovery', '/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-proposals','/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine', '/api/spreadsheets/decision', '/api/spreadsheets/decide', '/api/spreadsheets/decision-status', '/api/spreadsheets/findings', '/api/spreadsheets/auto-fix', '/api/spreadsheets/revert-fix', '/api/spreadsheets/assign', '/api/spreadsheets/source-reconcile', '/api/spreadsheets/recheck', '/api/sharepoint/confirm-columns', '/api/change-summary', '/api/change-summaries', '/api/settings/sharepoint-jobs', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/review-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
+        if not route.startswith('/api/source-review/') and route not in ('/api/spreadsheets/history-recovery', '/api/spreadsheets/demo/decisions', '/api/spreadsheets/demo/apply', '/api/reports/import', '/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/upload/finish', '/api/spreadsheets/sharepoint', '/api/spreadsheets/ai-review', '/api/spreadsheets/ai-proposals','/api/spreadsheets/ai-fixes', '/api/spreadsheets/ai-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine', '/api/spreadsheets/decision', '/api/spreadsheets/decide', '/api/spreadsheets/decision-status', '/api/spreadsheets/findings', '/api/spreadsheets/auto-fix', '/api/spreadsheets/revert-fix', '/api/spreadsheets/assign', '/api/spreadsheets/source-reconcile', '/api/spreadsheets/recheck', '/api/sharepoint/confirm-columns', '/api/change-summary', '/api/change-summaries', '/api/settings/sharepoint-jobs', '/api/spreadsheets/ai-verify', '/api/spreadsheets/ai-summary', '/api/spreadsheets/review-summary', '/api/spreadsheets/chat', '/api/keys', '/api/keys/create', '/api/keys/revoke', '/api/settings', '/api/settings/shifts', '/api/settings/rules', '/api/spreadsheets/shift-fix', '/api/spreadsheets/remove-rows', '/api/spreadsheets/dashboard', '/api/spreadsheets/dashboard/chat', '/api/spreadsheets/dashboard/undo', '/api/vins/search', '/api/spreadsheets/review', '/api/recommendations', '/api/build', '/api/nexus', '/api/settings/report-header', '/api/clients', '/api/auth/email', '/api/auth/signout', '/api/users', '/api/users/save', '/api/users/remove', '/api/users/link', '/api/users/email', '/api/access/required', '/api/overview', '/api/kpis', '/api/overview/artifact', '/api/overview/artifact/chat', '/api/overview/artifact/undo', '/api/today', '/api/today/job', '/api/autopilot', '/api/periods', '/api/periods/check-file', '/api/periods/artifact', '/api/periods/artifact/chat', '/api/periods/artifact/undo', '/api/spreadsheets/approve', '/api/spreadsheets/send', '/api/spreadsheets/send-info', '/api/spreadsheets/baseline', '/api/spreadsheets/fixes', '/api/spreadsheets/cells', '/api/spreadsheets/sheet', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/source-upload', '/api/spreadsheets/reconcile', '/api/workflow/import', '/api/workflow/batch', '/api/workflow/apply', '/api/workflow/approve', '/api/workflow/demo/decision', '/api/workflow/demo/decisions', '/api/workflow/demo/apply') and route.removeprefix('/api/') not in ACTIONS:
             return self.fail(404, 'Not found.')
         try:
             limit = 4 * 1024 * 1024 + 16384 if route in ('/api/spreadsheets/import', '/api/spreadsheets/upload/part', '/api/spreadsheets/source-upload', '/api/periods/check-file', '/api/spreadsheets/apply-fixes', '/api/spreadsheets/remove-rows') else (2 * 1024 * 1024 if route in ('/api/workflow/import','/api/workflow/batch','/api/spreadsheets/reconcile') else (1024 * 1024 if route == '/api/reports/import' else 100000))
             if not route.startswith('/api/workflow/') and route not in ('/api/periods/check-file', '/api/settings/sharepoint-jobs', '/api/spreadsheets/import','/api/spreadsheets/upload/part','/api/spreadsheets/upload/finish','/api/spreadsheets/sharepoint','/api/spreadsheets/ai-review','/api/spreadsheets/ai-proposals','/api/spreadsheets/ai-fixes','/api/spreadsheets/ai-fix','/api/spreadsheets/auto-fix','/api/spreadsheets/revert-fix','/api/spreadsheets/auto-clean','/api/spreadsheets/mark-fine','/api/spreadsheets/decide','/api/spreadsheets/decision-status','/api/spreadsheets/findings','/api/spreadsheets/ai-verify','/api/spreadsheets/ai-summary','/api/spreadsheets/chat','/api/spreadsheets/baseline','/api/spreadsheets/fixes','/api/spreadsheets/cells','/api/spreadsheets/sheet','/api/spreadsheets/apply-fixes','/api/spreadsheets/source-upload','/api/spreadsheets/reconcile','/api/spreadsheets/demo/decisions','/api/spreadsheets/demo/apply','/api/reports/import'): limit=10000
+            if route.startswith('/api/source-review/'):
+                limit = 32768
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= limit:
                 return self.fail(413, 'Request size is invalid.')
@@ -929,6 +934,9 @@ class handler(BaseHTTPRequestHandler):
             refused = self.gate('POST', route, gate_payload)
             if refused:   # a refusal has been sent: nothing below may run (send() returns True)
                 return refused
+            if route.startswith('/api/source-review/'):
+                from hosting.source_first_http import handle
+                return handle(self, 'POST', route, gate_payload)
             if route.startswith(('/api/auth/', '/api/users', '/api/access/')):
                 return self.account_post(route, gate_payload)
             content_type, headers = 'application/json; charset=utf-8', {}
