@@ -72,6 +72,7 @@ with tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{'CI_LOCAL_DEV'
         # controls for a partial table. Restoring capacity recovers all content.
         with patch.object(sf,'MAX_RESPONSE_BYTES',2000):
             page.goto(base+'/source-review#'+saved_hash)
+            page.reload()  # The same hash may not issue a new document/request.
             page.get_by_text('The saved review exceeds the private pilot display limit.',exact=False).wait_for()
             assert page.get_by_role('button',name='Create held daily workbook',exact=True).count()==0
             assert page.get_by_role('button',name='Approve reviewed content',exact=True).count()==0
