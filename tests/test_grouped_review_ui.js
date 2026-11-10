@@ -29,13 +29,13 @@ test('correction grouping includes sheet, risk, evidence, and decision state wit
  const items=ctx.fdItems();assert.equal(new Set(items.map(x=>x.group)).size,5);
  for(let i=0;i<items.length;i++){assert.equal(items[i].key,issues[i].key);assert.equal(items[i].fp,issues[i].fp);assert.equal(items[i].binding.expected_check_hash,'check');assert.equal(items[i].binding.expected_rev,9);}
 });
-test('paged findings all contribute and incomplete pages remain explicitly incomplete',async()=>{
- const calls=[],ctx=vm.createContext({api:async(path,p)=>{calls.push(p);return {items:Array.from({length:Math.min(50,301-p.offset)},(_,i)=>({key:`k${p.offset+i}`}))}}});
+test('paged findings all contribute with exact snapshot binding',async()=>{
+ const calls=[],binding={file_hash:'synthetic',check_hash:'check',run:{version:1},rev:0,issues_total:301,dismissed_total:0};
+ const ctx=vm.createContext({api:async(path,p)=>{calls.push(p);return {list:p.list,offset:p.offset,total:301,rev:0,binding,items:Array.from({length:Math.min(50,301-p.offset)},(_,i)=>({key:`k${p.offset+i}`}))}}});
  vm.runInContext(between('  async function fillPages(', '  function showEmpty('),ctx);
- const data={file_hash:'synthetic',review:{issues:[{key:'k0'}],dismissed:[],page:{issues_total:301,dismissed_total:0,size:50}}};
+ const data={file_hash:'synthetic',check_hash:'check',review:{run:{version:1},decisions:{rev:0},issues:Array.from({length:50},(_,i)=>({key:`k${i}`})),dismissed:[],page:{issues_total:301,dismissed_total:0,issues_returned:50,dismissed_returned:0,size:50,binding}}};
  await ctx.fillPages(data);assert.equal(data.review.issues.length,301);assert.equal(new Set(data.review.issues.map(x=>x.key)).size,301);assert.equal(data.review.page.complete,true);assert.equal(calls.length,6);
- ctx.api=async()=>({items:[]});const partial={file_hash:'synthetic',review:{issues:[],dismissed:[],page:{issues_total:301,dismissed_total:0,size:50}}};
- await ctx.fillPages(partial);assert.equal(partial.review.page.complete,false);
+ assert.ok(calls.every(p=>p.expected_binding===binding));
  assert.ok(source.includes('Counts below cover loaded occurrences only'));
 });
 test('Facts tab removed; source evidence and underlying audit records remain accessible',()=>{

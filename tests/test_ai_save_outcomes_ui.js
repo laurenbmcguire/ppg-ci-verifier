@@ -8,7 +8,7 @@ function harness(mode='ok'){
  const state={report};const ctx=vm.createContext({state,revisionOf:r=>r.revision||1,drawFixes(){},updateDownloads(){},$(){return null;},plural:(n,s)=>`${n} ${s}s`,
  toast:(...a)=>events.push(a),store:{get:()=>({}),set(){}},select:h=>{if(mode==='select-fail')throw Error('Synthetic screen failure');selections.push(h);},
  loadList:async()=>{if(mode==='refresh-fail')throw Error('Synthetic list failure');},
- api:async(path,body)=>{writes.push({path,body});if(mode==='rejected')throw Object.assign(Error('Exact source changed. Nothing was applied.'),{httpStatus:409});if(mode==='lost')throw Error('Network response lost');if(mode==='server')throw Object.assign(Error('Unavailable'),{httpStatus:503});if(mode==='malformed')return {};return {item};}});
+ api:async(path,body)=>{writes.push({path,body});if(mode==='committed-denied')throw Object.assign(Error('The corrected version was saved, but access changed before it could be opened. Ask an admin to review access before trying again.'),{httpStatus:403,saveCommitted:true});if(mode==='rejected')throw Object.assign(Error('Exact source changed. Nothing was applied.'),{httpStatus:409});if(mode==='lost')throw Error('Network response lost');if(mode==='server')throw Object.assign(Error('Unavailable'),{httpStatus:503});if(mode==='malformed')return {};return {item};}});
  vm.runInContext(between('  const correctionSnapshots =','  function readyChanges()')+between('  async function applyFixes(','  // Take out extra copies'),ctx);
  const binding={file_hash:'original',expected_check_hash:'checked',expected_run:{id:1},expected_rev:2};
  const p={id:'p',sheet:'Sheet',cell:'A1',before:'2',after:'3',kind:'number',source:'SharePoint',snapshot_id:'snap',item:'item',field:'quantity',change_set:'whole',change_set_size:1};
@@ -29,3 +29,5 @@ test('identical repeated cell proposals deduplicate but conflicting values or pr
  for(const field of ['before','after','kind','source','snapshot_id','item','field','change_set','change_set_size'])assert.throws(()=>ctx.fdUniqueAIProposals([p,{...p,[field]:'different'}]),/Conflicting suggestions.*No save was started/);
  const second={...p,cell:'A2'};assert.equal(ctx.fdUniqueAIProposals([p,second]).length,2);
 });
+
+test('committed access loss stays explicit and never retries or claims no write',async()=>{const h=harness('committed-denied');await assert.rejects(h.run(),e=>e.saveCommitted===true&&/was saved/.test(e.message));assert.equal(h.writes.length,1);assert.ok(h.events.every(e=>!e[0].includes('Nothing was changed')));});

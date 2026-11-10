@@ -39,6 +39,10 @@ def _known_details(filename, raw):
         return {}
 
 
+class CorrectionAccessDenied(ValueError):
+    """A correction destination is not accessible; no identifying metadata may escape."""
+
+
 class _NoChange(Exception):
     pass
 
@@ -1131,7 +1135,7 @@ class SpreadsheetInbox:
             if any(size != len(sizes) for size in sizes):
                 raise ValueError(f'Change set {name} is incomplete ({len(sizes)} of its cells were sent). Nothing was applied.')
 
-    def apply_fixes(self, file_hash, approved, *, auto=False, automatic=False, expected_check_hash=None, recommended_only=False):
+    def apply_fixes(self, file_hash, approved, *, auto=False, automatic=False, expected_check_hash=None, recommended_only=False, authorize_destination=None):
         """Write a corrected copy with the approved changes as a new upload; the original is untouched.
         Source freshness, change sets and (for the automatic pass, ``auto=True``) a person's decisions are checked under
         the report's lock, and the new version is created in the same transaction: a SharePoint read or decision that
@@ -1212,14 +1216,24 @@ class SpreadsheetInbox:
                     raise ValueError('Recommendations changed or are now held. Reopen the current preview. Nothing was applied.')
 
             self._check_changes(result, approved, auto, raw=raw)  # against the state being saved
+            if authorize_destination is not None:
+                stored = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (new_hash,)).fetchone()
+                candidate = self.latest(db, new_hash, json.loads(stored['result_json'])) if stored else dict(new_check, file_hash=new_hash, filename=new_name)
+                if not authorize_destination(candidate):
+                    # Check before storing bytes, updating either version, or committing.
+                    # The API uses the current destination's own assignment semantics.
+                    raise CorrectionAccessDenied('Report not found.')
             new_item = self._store_new(db, new_name, fixed, new_check, new_hash)
             if new_item.get('duplicate'):
                 # the same changes give byte-identical output: that version already exists, so it is opened, never
                 # recorded a second time (this is how one report once showed many "fixed" entries for a single file)
-                if any(x.get('fixed_file_hash') == new_hash for x in result.get('fixes_applied') or []) or \
-                        (new_item.get('fixed_from') or {}).get('file_hash') == file_hash:
-                    return dict(new_item, already_applied=True)
-                raise ValueError('The corrected content already exists as another version; open it instead.')
+                if self._shared_correction_ancestry(db, file_hash, new_hash):
+                    # This is a read-only outcome, not a new historical correction. The
+                    # requested transformation is proved by its exact output hash above.
+                    return dict(new_item, already_applied=True, save_outcome=dict(
+                        type='existing_version', requested_from=file_hash,
+                        expected_check_hash=expected_check_hash, changes=record['changes']))
+                raise ValueError('The corrected content matches an unrelated upload. No version was changed; review the requested changes manually.')
             revision = int(result.get('revision') or 1) + 1
             record = dict(record, fixed_filename=new_item['filename'], revision=revision)
             result.pop('check_hash', None); result.pop('checked_at', None)
@@ -1248,6 +1262,51 @@ class SpreadsheetInbox:
         except Exception:
             pass  # search falls back to indexing later
         return new_item
+    def _shared_correction_ancestry(self, db, left, right):
+        """Prove membership from append-only stored parent links, never filename/root hints.
+
+        A correction initially has a check without a parent, followed in the same
+        transaction by its permanent fixed_from record. All later parent records
+        must agree with that first record. Missing, cyclic or conflicting chains
+        fail closed; no metadata or history is rewritten when a copy is reused.
+        """
+        cache = {}
+        def chain(start):
+            seen = set()
+            current = start
+            for _ in range(1000):
+                if current in seen:
+                    return None
+                seen.add(current)
+                if current not in cache:
+                    row = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (current,)).fetchone()
+                    if not row:
+                        return None
+                    records = db.execute('SELECT result_json FROM spreadsheet_checks WHERE file_hash=? ORDER BY seq ASC', (current,)).fetchall()
+                    if not records:
+                        return None
+                    saved_parent = None
+                    for record in records:
+                        link = json.loads(record['result_json']).get('fixed_from')
+                        if saved_parent is not None and link != saved_parent:
+                            return None
+                        if link:
+                            if not isinstance(link, dict):
+                                return None
+                            saved_parent = link
+                    parent = saved_parent.get('file_hash') if saved_parent else None
+                    if saved_parent and not parent:
+                        return None
+                    if parent is not None and (not isinstance(parent, str) or not re.fullmatch(r'[0-9a-f]{64}', parent)):
+                        return None
+                    cache[current] = parent
+                current = cache[current]
+                if current is None:
+                    return seen
+            return None
+        a, b = chain(left), chain(right)
+        return bool(a and b and a.intersection(b))
+
     @staticmethod
     def held_cells(item, auto=True):
         """(sheet, CELL) a person decided on (kept as recorded or deferred), plus, for automatic work, those whose

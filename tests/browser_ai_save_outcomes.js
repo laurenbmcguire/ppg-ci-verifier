@@ -41,7 +41,18 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
    else{assert.match(text,/could not be confirmed|not confirmed/i);assert.doesNotMatch(text,/Nothing was changed/i);}
   }else{
    await page.locator('#fd-aidone').waitFor({timeout:20000});
-   assert.match(await page.locator('#fd-aidone').innerText(),/All 2 changes are applied and saved/);
+   const text=await page.locator('#fd-aidone').innerText();
+   if(mode==='reuse'){
+    assert.match(text,/Opened the existing matching version/);assert.match(text,/All 2 requested changes match existing version 3/);assert.match(text,/No new version was created/);assert.doesNotMatch(text,/saved as version 2|What was fixed/);
+    assert.equal(receipt.item.fixed_from.changes.length,3);assert.equal(receipt.item.save_outcome.changes.length,2);
+    await page.waitForURL(url=>url.hash==='#r='+receipt.item.file_hash);
+    if(process.env.QA_SCREENSHOT_DIR)await page.screenshot({path:process.env.QA_SCREENSHOT_DIR+'/reuse-'+width+'.png',fullPage:true});
+    await page.locator('#fd-aidone').getByRole('link',{name:'Open starting version 2',exact:true}).click();
+    await page.waitForURL(url=>url.hash==='#r='+hash);await page.waitForLoadState('networkidle');
+    assert.equal(writes.length,1);assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
+    console.log(JSON.stringify({passed:true,mode,width,existing_version_three_opened:true,starting_version_reopened:true,no_new_write:true,requested_changes_separate_from_history:true}));return;
+   }
+   assert.match(text,/All 2 changes are applied and saved/);
    assert.equal(await page.locator('#fd-aidone a[download]').getAttribute('href'),'/api/spreadsheets/download?id='+receipt.item.file_hash);
   }
   assert.equal(writes.length,1);assert.equal(proposals.length,1);

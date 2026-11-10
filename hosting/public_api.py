@@ -258,8 +258,13 @@ def op_apply(h, file_hash, accept=None, ids=None, changes=None, expected_check_h
             fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, todo, expected_check_hash=expected_check_hash, auto=everything)
     except FixError as exc:
         raise ApiError(409, str(exc)) from None
-    _after_change(h, fixed['file_hash'])
-    return dict(report(_get(h, fixed['file_hash'])), applied=len(todo))
+    reused = fixed.get('already_applied') is True
+    if not reused:
+        _after_change(h, fixed['file_hash'])
+    # Service-key access remains the workspace-wide model checked by the API/MCP
+    # entrypoint. A reused target is only read, never checked or relabelled anew.
+    return dict(report(_get(h, fixed['file_hash'])), applied=0 if reused else len(todo),
+                already_applied=reused, **({'requested_changes': len(todo), 'save_outcome': fixed['save_outcome']} if reused else {}))
 
 
 def op_ai_fixes(h, file_hash, expected_check_hash=None):

@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / 'app'))
 sys.path.insert(0, str(ROOT))
 from model import Review, Conflict
 from report_intake import ReportInbox, IntakeError
-from hosting.spreadsheet_inbox import SpreadsheetInbox
+from hosting.spreadsheet_inbox import SpreadsheetInbox, CorrectionAccessDenied
 from hosting.spreadsheet_demo import SpreadsheetDemo
 from hosting.report_workflow import ReportWorkflow, parse as parse_workflow
 from hosting.source_adapter import convert_private_envelope
@@ -30,6 +30,13 @@ FILES = {'/development-examples.js': 'development-examples.js', '/': 'index.html
 TYPES = {'html': 'text/html; charset=utf-8', 'js': 'text/javascript; charset=utf-8',
          'css': 'text/css; charset=utf-8', 'png': 'image/png', 'woff2': 'font/woff2'}
 MAX_RESPONSE_BYTES = 3 * 1024 * 1024
+
+
+def findings_binding(data, review):
+    """One immutable finding inventory across all pages of this review."""
+    return dict(file_hash=data['file_hash'], check_hash=data.get('check_hash'),
+                run=review.get('run'), rev=(review.get('decisions') or {}).get('rev', 0),
+                issues_total=len(review.get('issues') or []), dismissed_total=len(review.get('dismissed') or []))
 
 
 def review_page_size():
@@ -169,7 +176,7 @@ class handler(BaseHTTPRequestHandler):
         rv['sharepoint'] = source
         # counts, holds and approval use every finding; the list itself is sent in pages so a very large report still opens
         page = review_page_size()
-        rv['page'] = dict(size=page, issues_total=len(rv.get('issues') or []), dismissed_total=len(rv.get('dismissed') or []))
+        rv['page'] = dict(size=page, issues_total=len(rv.get('issues') or []), dismissed_total=len(rv.get('dismissed') or []), binding=findings_binding(data, rv))
         rv['issues'], rv['dismissed'] = (rv.get('issues') or [])[:page], (rv.get('dismissed') or [])[:page]
         rv['page'].update(issues_returned=len(rv['issues']), dismissed_returned=len(rv['dismissed']))
         return dict(data, review=rv, other_days=repeats, built=inbox.setting(f'built|{file_hash}', None), assignment=assignment, holds=holds,
@@ -214,6 +221,18 @@ class handler(BaseHTTPRequestHandler):
         self._signin_required = hosted_preview() or needed
         self._user_cache = (cookie_header, user)
         return user
+
+    def refresh_session_principal(self, inbox):
+        """Refresh only an existing session at correction authorization boundaries.
+
+        Read through the caller's inbox/transaction rather than opening a nested
+        workspace session. A revoked cookie never gains local virtual-owner access.
+        """
+        from hosting import access
+        header = self.headers.get('Cookie') or ''
+        token = access.read_cookie(header, access.COOKIE)
+        if token:
+            self._user_cache = (header, access.session_user(inbox, token))
 
     def is_admin(self):
         u = self.current_user()
@@ -879,16 +898,47 @@ class handler(BaseHTTPRequestHandler):
                     if isinstance(changes, list):
                         changes = [dict(c, kind='auto') if isinstance(c, dict) and c.get('kind') not in ('number', 'text', 'auto') else c for c in changes]
                     with self.store().session() as directory:
-                        fixed = SpreadsheetInbox(directory).apply_fixes(file_hash, changes, expected_check_hash=payload.get('expected_check_hash'), recommended_only=payload.get('recommended_only') is True)
+                        inbox = SpreadsheetInbox(directory)
+                        def authorize_destination(candidate):
+                            self.refresh_session_principal(inbox)
+                            if self.is_admin():
+                                return True
+                            from hosting.review_summary import summarize
+                            parent = inbox.get(file_hash)
+                            parent_review = summarize(parent, with_issues=False)
+                            if not self.can_report(inbox.assignment_for(parent, parent_review), parent_review.get('job')):
+                                return False
+                            review = summarize(candidate, with_issues=False)
+                            return self.can_report(inbox.assignment_for(candidate, review), review.get('job'))
+                        fixed = inbox.apply_fixes(file_hash, changes, expected_check_hash=payload.get('expected_check_hash'),
+                                                  recommended_only=payload.get('recommended_only') is True, authorize_destination=authorize_destination)
+                except CorrectionAccessDenied:
+                    return self.fail(404, 'Report not found.')
                 except FixError as exc:
                     raise Conflict(str(exc))
                 already_applied = fixed.get('already_applied') is True
-                for step in (self.sharepoint_check if sharepoint_configured() else None, self.baseline_check):
+                # Parent access does not authorize the destination. Refresh the
+                # stored principal after commit, and again just before disclosure.
+                def destination_denial():
+                    with self.store().session() as directory:
+                        self.refresh_session_principal(SpreadsheetInbox(directory))
+                    if self.can_hash(fixed['file_hash']):
+                        return None
+                    if already_applied:
+                        return self.fail(404, 'Report not found.')
+                    return self.send(403, encode_json({'error': 'The corrected version was saved, but access changed before it could be opened. Ask an admin to review access before trying again.', 'save_committed': True}))
+                denied = destination_denial()
+                if denied:
+                    return denied
+                for step in (() if already_applied else (self.sharepoint_check if sharepoint_configured() else None, self.baseline_check)):
                     if step:
                         try:
                             fixed = step(fixed['file_hash'])
                         except Exception:
                             debug_log()
+                denied = destination_denial()
+                if denied:
+                    return denied
                 return self.send(200, encode_json({'item': fixed, 'already_applied': already_applied}))
             if route == '/api/spreadsheets/review-summary':
                 payload = json.loads(raw)
@@ -1073,10 +1123,14 @@ class handler(BaseHTTPRequestHandler):
                 which = 'dismissed' if payload.get('list') == 'dismissed' else 'issues'
                 offset, limit = max(0, int(payload.get('offset') or 0)), max(1, min(review_page_size(), int(payload.get('limit') or review_page_size())))
                 with self.store().session() as directory:
-                    rv = summarize(SpreadsheetInbox(directory).get(file_hash))
+                    data = SpreadsheetInbox(directory).get(file_hash)
+                    rv = summarize(data)
+                binding = findings_binding(data, rv)
+                if 'expected_binding' in payload and payload['expected_binding'] != binding:
+                    raise Conflict('The findings changed while loading. Reopen the report before selecting or applying changes.')
                 items = rv.get(which) or []
                 return self.send(200, encode_json({'list': which, 'offset': offset, 'total': len(items), 'items': items[offset:offset + limit],
-                                                   'rev': (rv.get('decisions') or {}).get('rev', 0)}))
+                                                   'rev': binding['rev'], 'binding': binding}))
             if route == '/api/spreadsheets/decision-status':   # after a lost response: was this request saved?
                 payload = json.loads(raw)
                 file_hash = payload.get('file_hash') if isinstance(payload, dict) else None

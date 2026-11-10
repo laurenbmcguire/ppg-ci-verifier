@@ -30,7 +30,7 @@
     let data = {};
     try { data = await response.json(); } catch (e) { /* non-JSON error page */ }
     if (response.status === 401 && data.signin) { showSignIn(); throw new Error('Sign in to continue.'); }
-    if (!response.ok) { const error = new Error(data.error || `The server answered ${response.status}. Try again in a moment.`); error.httpStatus = response.status; throw error; }
+    if (!response.ok) { const error = new Error(data.error || `The server answered ${response.status}. Try again in a moment.`); error.httpStatus = response.status; error.saveCommitted = data.save_committed === true; throw error; }
     return data;
   }
   let toastTimer;
@@ -444,14 +444,36 @@
   // the counts include is missing from the lists (the counts themselves always come from the server, over all findings)
   async function fillPages(data) {
     const rv = data?.review, pg = rv?.page; if (!pg) return data;
+    pg.complete = false;
+    const binding = pg.binding, same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const fail = () => { throw new Error('The findings changed or a page is missing. Reopen the report before selecting or applying changes.'); };
+    if (!binding || binding.file_hash !== data.file_hash || binding.check_hash !== data.check_hash ||
+        !same(binding.run, rv.run) || binding.rev !== (rv.decisions?.rev || 0) ||
+        binding.issues_total !== pg.issues_total || binding.dismissed_total !== pg.dismissed_total ||
+        !Number.isSafeInteger(pg.size) || pg.size < 1) fail();
+    // Stage the entire inventory separately. Never expose a mix of old and new
+    // pages, or let a repeated/missing stable key silently shrink Select all.
+    const loaded = {}, keys = new Set();
+    const add = items => {
+      if (!Array.isArray(items)) fail();
+      for (const it of items) {
+        if (!it || typeof it.key !== 'string' || !it.key || keys.has(it.key)) fail();
+        keys.add(it.key);
+      }
+    };
     for (const [list, total] of [['issues', pg.issues_total], ['dismissed', pg.dismissed_total]]) {
-      while ((rv[list] || []).length < total) {
-        const out = await api('/api/spreadsheets/findings', {file_hash: data.file_hash, list, offset: rv[list].length, limit: pg.size});
-        if (!out.items.length) break;
-        rv[list] = [...rv[list], ...out.items];
+      if (!Number.isSafeInteger(total) || total < 0 || !Array.isArray(rv[list]) ||
+          rv[list].length !== Math.min(pg.size, total) || pg[list + '_returned'] !== rv[list].length) fail();
+      loaded[list] = [...rv[list]]; add(loaded[list]);
+      while (loaded[list].length < total) {
+        const offset = loaded[list].length;
+        const out = await api('/api/spreadsheets/findings', {file_hash: data.file_hash, list, offset, limit: pg.size, expected_binding: binding});
+        if (!out || out.list !== list || out.offset !== offset || out.total !== total || out.rev !== binding.rev ||
+            !same(out.binding, binding) || !Array.isArray(out.items) || out.items.length !== Math.min(pg.size, total - offset)) fail();
+        add(out.items); loaded[list].push(...out.items);
       }
     }
-    pg.complete = rv.issues.length >= pg.issues_total && rv.dismissed.length >= pg.dismissed_total;
+    rv.issues = loaded.issues; rv.dismissed = loaded.dismissed; pg.complete = true;
     return data;
   }
   function showEmpty() { $('report').replaceChildren(emptyState); }
@@ -1357,7 +1379,11 @@
   function fdProblemList(scope, max = 4) {
     const ticked = new Set(state.report ? fdPicked(scope).map(it => it.key) : []);
     state.fdShowAll ||= {};
-    const showKey = scope[0]?.key, all = !!state.fdShowAll[showKey], shown = all ? scope.slice(0, 300) : scope.slice(0, max);
+    const showKey = JSON.stringify([state.report?.file_hash, state.report?.check_hash, scope.map(it => it.key)]);
+    const all = !!state.fdShowAll[showKey], pageSize = 25;
+    state.fdProblemPages ||= {};
+    const page = Math.max(0, Math.min(state.fdProblemPages[showKey] || 0, Math.ceil(scope.length / pageSize) - 1));
+    const shown = all ? scope.slice(page * pageSize, (page + 1) * pageSize) : scope.slice(0, max);
     const line = it => {
       const where = [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ');
       const blank = /^Missing cell\.?$/i.test(String(it.text || '').trim());
@@ -1367,7 +1393,10 @@
         'aria-label': `Select ${where || 'report error'}`, onchange: e => fdTick([it], e.target.checked)}), h('span', {}, ...text)) : text);
     };
     return h('div', {class: 'fd-problems'},
+      all ? h('p', {class: 'fd-problem-range', role: 'status', tabindex: '-1'}, `Errors ${page * pageSize + 1}–${Math.min((page + 1) * pageSize, scope.length)} of ${scope.length}. Selection covers all pages.`) : null,
       h('ul', {}, shown.map(line)),
+      all && scope.length > pageSize ? h('div', {class: 'fd-cardacts'}, ...[['Previous errors', -1], ['Next errors', 1]].map(([label, step]) => h('button', {type: 'button', class: 'btn small', disabled: step < 0 ? page === 0 : (page + 1) * pageSize >= scope.length,
+        onclick: e => { const parent = e.currentTarget.closest('.fd-problems'), groups = [...document.querySelectorAll('#side .fd-problems')], at = groups.indexOf(parent); state.fdProblemPages[showKey] = page + step; drawSide(); document.querySelectorAll('#side .fd-problems')[at]?.querySelector('.fd-problem-range')?.focus(); }}, label))) : null,
       scope.length > max ? h('button', {type: 'button', class: 'fd-linkbtn', onclick: () => { state.fdShowAll[showKey] = !all; drawSide(); }},
         all ? 'Show fewer' : `Show all ${scope.length}`) : null);
   }
@@ -1728,13 +1757,15 @@
       const done = accepted.map(p => { const it = todo.find(x => x.key === p.finding_id); return {where: `${p.sheet} cell ${p.cell}`, text: it?.text || it?.reason || '', before: p.before, after: p.after}; });
       // The successful save receipt is authoritative even if refreshing the list or report fails.
       // Never turn a committed version into a failed save, or repeat the mutation to recover a read.
-      const saved = savedItem.fixed_from?.file_hash === hash ? (savedItem.fixed_from.changes || []) : [];
+      const outcome = savedItem.save_outcome, reused = outcome?.type === 'existing_version';
+      const saved = reused ? (outcome.requested_from === hash && outcome.expected_check_hash === binding.expected_check_hash ? outcome.changes || [] : [])
+        : savedItem.fixed_from?.file_hash === hash ? (savedItem.fixed_from.changes || []) : [];
       const has = p => saved.some(c => c.sheet === p.sheet && c.cell === p.cell && String(c.before) === String(p.before) && String(c.after) === String(p.after));
       const confirmed = accepted.filter(has).length;
-      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed, tried: scope.length, skipped, unfixed, from: revisionOf(report), items: done};
+      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed, tried: scope.length, skipped, unfixed, from: revisionOf(report), version: revisionOf(savedItem), reused, originalHash: hash, items: done};
       document.body.classList.add('fd-panel-open');
       fdAIDoneDialog(state.fdAIRun, savedItem);
-    } catch (e) { state.fdAIRun = {hash, done: true, error: e?.message || String(e)}; toast('AI fix did not finish: ' + state.fdAIRun.error, true); }
+    } catch (e) { state.fdAIRun = {hash, done: true, saveCommitted: e?.saveCommitted === true, error: e?.message || String(e)}; toast((state.fdAIRun.saveCommitted ? '' : 'AI fix did not finish: ') + state.fdAIRun.error, true); }
     finally { if (state.report?.file_hash === state.fdAIRun?.hash) drawSide(); }
   }
   // Fix manually: one error at a time, with its cell highlighted in the spreadsheet. Typed values are kept until
@@ -1776,29 +1807,32 @@
       else if (got.error) rowNote = `This row could not be opened: ${got.error}`;
       else rowCells = (got.cells || []).filter(c => !c.formula && typeof c.before === 'string');
     }
-    const field = (cell, before, value, label) => h('input', {class: 'fd-manual-input', 'data-cell': cell, 'data-before': before, 'aria-label': `New value for ${label}`, value, placeholder: 'Type the correct value'});
+    const field = (cell, before, value, label) => h('input', {class: 'fd-manual-input', 'data-cell': cell, 'data-before': before, 'data-initial-value': value, 'aria-label': `New value for ${label}`, value, placeholder: 'Type the correct value'});
     const one = it.cell && rowCells ? rowCells.find(c => c.cell === it.cell) : null;
     const input = one ? field(it.cell, one.before, mine ? mine.after : it.source != null ? String(it.source) : it.proposed != null ? String(it.proposed) : one.before, where) : null;
     if (it.cell && rowCells && !one) rowNote = 'This cell holds a formula or is protected, so it cannot be typed over here.';
     const rowFields = rowCells && !it.cell ? rowCells.map(c => h('label', {class: 'fd-manual-rowfield'}, h('span', {}, `${c.header || 'Column'} (${c.cell})`),
       field(c.cell, c.before, edits[editId(it.sheet, c.cell)]?.after ?? c.before, `${c.header || c.cell}`))) : null;
-    const keep = () => {
-      if (!state.report) return;
+    const manualBinding = JSON.stringify(reviewBinding(state.report));
+    const keep = (dirtyOnly = false) => {
+      if (!state.report || state.fdManual?.binding !== manualBinding || JSON.stringify(reviewBinding(state.report)) !== manualBinding) return;
       const all = store.get(editsKey(), {});
       for (const el of document.querySelectorAll('.fd-manual input[data-cell]')) {
+        if (dirtyOnly && el.value === el.getAttribute('data-initial-value')) continue;
         const cell = el.getAttribute('data-cell'), before = el.getAttribute('data-before') ?? '', id = editId(it.sheet, cell);
         if (el.value === String(before)) delete all[id];
         else all[id] = {sheet: it.sheet, cell, before, after: el.value, header: '', source: 'Your edit', reason: 'Typed by the reviewer'};
       }
       store.set(editsKey(), all);
     };
+    if (state.fdManual) state.fdManual.keepDraft = () => keep(true);
     const save = async () => {
       keep(); const c = readyChanges();
       if (!c.total) { toast('Nothing typed yet. Nothing was changed.'); return; }
       const report = state.report, from = revisionOf(report);
       state.fdManual = null;
-      const next = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding: c.binding});
-      if (next) state.fdAIRun = {hash: next, done: true, fixed: c.total, tried: c.total, from, manual: true,
+      const receipt = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding: c.binding, returnReceipt: true}), next = receipt?.file_hash;
+      if (next) state.fdAIRun = {hash: next, done: true, fixed: c.total, tried: c.total, from, version: revisionOf(receipt), reused: receipt.save_outcome?.type === 'existing_version', originalHash: report.file_hash, manual: true,
         items: Object.values(c.edits).map(e => ({where: `${e.sheet} cell ${e.cell}`, text: '', before: e.before, after: e.after}))};
       if (state.report?.file_hash === next) drawSide();
     };
@@ -1823,8 +1857,8 @@
   // The message box after every AI fix: what was fixed, that it is saved, what still needs an answer, and downloads.
   function fdAISummaryText(run, report) {
     const lines = ['Verification App - AI fix summary', report ? `Report: ${report.filename}` : '', `Date: ${new Date().toLocaleString()}`, '',
-      `Fixed by Dex: ${run.fixed}`, run.fixed ? `Saved as version ${(run.from || 1) + 1} (version ${run.from || 1} is kept). Confirmed in the saved copy: ${run.confirmed} of ${run.fixed}.` : 'Nothing was changed.', ''];
-    for (const x of run.items || []) lines.push(`FIXED  ${x.where}: ${x.before === '' ? 'blank' : '"' + x.before + '"'} -> "${x.after}"${x.text ? '   (' + x.text + ')' : ''}`);
+      `${run.reused ? 'Requested changes in existing copy' : 'Fixed by Dex'}: ${run.fixed}`, run.fixed ? `${run.reused ? 'Opened existing version' : 'Saved as version'} ${run.version || (run.from || 1) + 1} (version ${run.from || 1} is kept). ${run.reused ? 'No new version was created. ' : ''}Confirmed in the saved copy: ${run.confirmed} of ${run.fixed}.` : 'Nothing was changed.', ''];
+    for (const x of run.items || []) lines.push(`${run.reused ? 'REQUESTED' : 'FIXED'}  ${x.where}: ${x.before === '' ? 'blank' : '"' + x.before + '"'} -> "${x.after}"${x.text ? '   (' + x.text + ')' : ''}`);
     if ((run.unfixed || []).length) { lines.push('', `Not fixed: ${run.unfixed.length}`);
       for (const x of run.unfixed) lines.push(`NOT FIXED  ${x.where}: ${x.text}${x.reason ? '   Reason: ' + x.reason : ''}`); }
     return lines.join('\r\n');
@@ -1840,12 +1874,13 @@
     const saveText = () => { const a = h('a', {href: URL.createObjectURL(new Blob([fdAISummaryText(run, report)], {type: 'text/plain'})), download: `AI fix summary - ${(report?.filename || 'report').replace(/\.[^.]+$/, '')}.txt`}); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); };
     const line = x => h('li', {}, h('b', {}, x.where), `: ${/^Missing cell\.?$/i.test(String(x.text).trim()) ? 'this cell is blank' : x.text}${x.now != null && x.now !== '' ? ` (now “${String(x.now).slice(0, 40)}”)` : ''}`);
     d.append(h('button', {type: 'button', class: 'fd-dialog-x', 'aria-label': 'Close', title: 'Close', onclick: close}, icon('x', 18)),
-      h('h2', {id: 'fd-aidone-title', tabindex: '-1'}, !run.fixed ? 'Dex could not fix these' : !unfixed.length ? 'Dex fixed everything you selected' : `Dex fixed ${run.fixed} of ${run.tried}`),
+      h('h2', {id: 'fd-aidone-title', tabindex: '-1'}, run.reused ? 'Opened the existing matching version' : !run.fixed ? 'Dex could not fix these' : !unfixed.length ? 'Dex fixed everything you selected' : `Dex fixed ${run.fixed} of ${run.tried}`),
       run.fixed ? h('p', {class: allSaved ? 'fd-aidone-ok' : 'fd-aidone-warn', role: 'status'}, allSaved
-        ? `All ${plural(run.fixed, 'change')} ${run.fixed === 1 ? 'is' : 'are'} applied and saved as version ${(run.from || 1) + 1}. Version ${run.from || 1} is kept.`
+        ? run.reused ? `All ${plural(run.fixed, 'requested change')} match existing version ${run.version}. No new version was created. Version ${run.from || 1} is kept.`
+        : `All ${plural(run.fixed, 'change')} ${run.fixed === 1 ? 'is' : 'are'} applied and saved as version ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept.`
         : `${run.confirmed} of ${run.fixed} changes could be confirmed in the saved version. Open the report again and check the rest.`)
         : h('p', {class: 'fd-aidone-warn', role: 'status'}, 'Nothing was changed.'),
-      (run.items || []).length ? h('section', {}, h('h3', {}, `What was fixed (${run.items.length})`), h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
+      (run.items || []).length ? h('section', {}, h('h3', {}, `${run.reused ? 'Requested changes matched' : 'What was fixed'} (${run.items.length})`), h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
         h('s', {}, x.where), ` ${x.before === '' ? 'blank' : '“' + x.before + '”'} → “${x.after}”`)))) : null,
       unknown.length ? h('section', {class: 'fd-aidone-ask'}, h('h3', {}, `Dex does not know the right value for ${unknown.length === 1 ? 'this one' : 'these ' + unknown.length}`),
         h('ul', {class: 'fd-fixed-list'}, unknown.slice(0, 100).map(line)),
@@ -1857,6 +1892,7 @@
         h('p', {class: 'fd-hint'}, 'These are about a whole row or an earlier decision, so Dex cannot change one cell to fix them. Use Fix manually or Ignore.'),
         h('div', {class: 'fd-cardacts'}, h('button', {type: 'button', class: 'btn', onclick: () => { const list = live(other.map(x => x.key)); close(); if (list.length) fdManualStart(list); }}, 'Fix manually'))) : null,
       h('div', {class: 'fd-modalacts'},
+        run.originalHash ? h('a', {class: 'btn', href: '#r=' + run.originalHash, onclick: close}, `Open starting version ${run.from || 1}`) : null,
         report && run.fixed ? h('a', {class: 'btn primary', href: '/api/spreadsheets/download?id=' + report.file_hash, download: report.filename}, 'Download updated report') : null,
         h('button', {type: 'button', class: 'btn', onclick: saveText}, 'Download summary'),
         h('button', {type: 'button', class: 'btn', onclick: close}, 'Close')));
@@ -1866,7 +1902,7 @@
   function fdAIRunBanner(run, left) {
     const dismiss = h('button', {type: 'button', class: 'btn small subtle', onclick: () => { state.fdAIRun = null; drawSide(); }}, 'OK');
     if (run.running) return h('div', {class: 'fd-airun', role: 'status'}, h('span', {class: 'spin'}), run.saving ? ` Saving ${plural(run.saving, 'fix', 'fixes')}…` : ` Dex is fixing ${plural(run.total, 'error')}…`);
-    if (run.error) return h('div', {class: 'fd-airun bad', role: 'alert'}, h('p', {}, `AI fix did not finish: ${run.error}`), dismiss);
+    if (run.error) return h('div', {class: 'fd-airun bad', role: 'alert'}, h('p', {}, run.saveCommitted ? run.error : `AI fix did not finish: ${run.error}`), dismiss);
     const plain = t => /report holds/i.test(t) ? 'This report is on hold (for example the client or SharePoint is not confirmed yet), so Dex is not allowed to change it.'
       : /source authority|source correction/i.test(t) ? 'This one depends on SharePoint, so Dex cannot decide the right value.'
       : /unambiguous editable cell|does not identify an editable cell/i.test(t) ? 'This error is about a whole row, not one cell, so it needs a person.'
@@ -1875,7 +1911,7 @@
     const why = reasons.size ? h('ul', {class: 'fd-airun-why'}, [...reasons].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([t, n]) => h('li', {}, `${n} not fixed: ${t}`))) : null;
     if (!run.fixed) return h('div', {class: 'fd-airun', role: 'status'}, h('p', {}, `Dex could not fix ${run.tried === 1 ? 'this error' : `these ${run.tried} errors`}. Nothing was changed. Fix ${run.tried === 1 ? 'it' : 'them'} manually or ignore ${run.tried === 1 ? 'it' : 'them'}.`), why, dismiss);
     return h('div', {class: 'fd-airun good', role: 'status'},
-      h('p', {}, h('b', {}, `${run.manual ? 'You changed' : 'Dex fixed'} ${plural(run.fixed, 'cell')}.`), ` Saved as version ${(run.from || 1) + 1}; version ${run.from || 1} is kept.`),
+      h('p', {}, h('b', {}, `${run.reused ? 'Requested changes match' : run.manual ? 'You changed' : 'Dex fixed'} ${plural(run.fixed, 'cell')}.`), ` ${run.reused ? 'Opened existing version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}; version ${run.from || 1} is kept. ${run.reused ? 'No new version was created.' : ''}`),
       (run.items || []).length ? h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
         h('s', {}, `${x.where}${x.text ? ': ' + String(x.text).slice(0, 120) : ''}`), ` ${x.before === '' ? 'blank' : '“' + x.before + '”'} → “${x.after}”`))) : null,
       h('p', {}, left ? `${plural(left, 'error')} left to fix. ${left === 1 ? 'It is' : 'They are'} listed below.` : 'No errors left to fix.'), why, dismiss);
@@ -2696,6 +2732,8 @@
     void open;
   }
   function drawSide() {
+    // Paging, selection and async refreshes must not discard typed manual text.
+    state.fdManual?.keepDraft?.();
     const side = $('side'), r = state.report; if (!side || !r) return;
     if (state.sideTab === 'facts') state.sideTab = 'fixes';
     const rv = r.review, tab = state.sideTab || 'fixes';
@@ -3349,8 +3387,8 @@
         document.body.append(link); link.click(); link.remove();
       }
       const existingVersion = answer.already_applied === true || answer.item.already_applied === true;
-      const recordedChanges = answer.item.fixed_from?.changes;
-      toast(`${existingVersion ? 'Opened the existing corrected version' : 'Saved the corrected version'} "${answer.item.filename}"${Array.isArray(recordedChanges) ? ` with ${plural(recordedChanges.length, 'recorded change')}` : ''}. ${existingVersion ? 'No new version was created. ' : ''}The original is unchanged.`);
+      const recordedChanges = existingVersion ? null : answer.item.fixed_from?.changes;
+      toast(`${existingVersion ? 'Opened the existing matching version' : 'Saved the corrected version'} "${answer.item.filename}"${Array.isArray(recordedChanges) ? ` with ${plural(recordedChanges.length, 'recorded change')}` : ''}. ${existingVersion ? 'No new version was created. ' : ''}The original is unchanged.`);
       if (opts.thenOpen !== false) {
         // These reads cannot undo the successful, committed save above.
         try { await loadList(); } catch (error) { toast('The corrected version is saved, but the report list could not refresh. Open the saved copy or reload the list.', true); }
@@ -3364,7 +3402,7 @@
         return opts.returnReceipt ? savedItem : savedItem.file_hash;
       }
       // A lost response or server error does not prove the transaction failed. Never retry it here.
-      const error = requestStarted && (!e.httpStatus || e.httpStatus >= 500)
+      const error = !e.saveCommitted && requestStarted && (!e.httpStatus || e.httpStatus >= 500)
         ? new Error('The save could not be confirmed. Reload this report and check its saved versions before trying again. ' + (e.message || '')) : e;
       toast(error.message, true);
       if (opts.throwOnError) throw error;
