@@ -202,8 +202,8 @@ _add('possible_identifier_typo possible_part_number_typo possible_defect_typo po
      'This value looks almost the same as a more common one, so it may be a typing mistake that splits or hides a count.',
      'Compare it with the similar value and correct it if it was mistyped.', False)
 _add('identifier_format_differs part_format_differs',
-     'This value is shaped differently from the others in the report, which often means it was mistyped or pasted wrongly.',
-     'Check it against the scan or label.', False)
+     'This value has a different pattern from most rows. A pattern difference alone does not establish an error.',
+     'Keep the value unchanged unless the exact assigned source confirms a different identifier.', False)
 _add('identifier_unusual_length',
      'This identifier is shorter or longer than the rest, so a character may be missing or extra.',
      'Check it against the scan and fix the missing or extra character.', False)
@@ -386,8 +386,6 @@ WRITTEN = {
     'possible_condition_typo': 'Looks like the same condition written a little differently. If that is all, nothing else is wrong.',
     'possible_auditor_typo': 'Looks like the same name written a little differently. If that is all, nothing else is wrong.',
     'identifier_typo_vs_sharepoint': 'Looks like the same ID as on SharePoint, written a little differently. If that is all, nothing else is wrong.',
-    'identifier_format_differs': 'Often the same ID typed a little differently (like the letter O for a zero). Check it; if that is all, nothing else is wrong.',
-    'part_format_differs': 'Often the same part number typed a little differently (like the letter O for a zero). Check it; if that is all, nothing else is wrong.',
     'vin_has_i_o_q': 'Most likely the letter I, O or Q typed for a 1 or a 0. If that is all, the rest of the VIN is right.',
 }
 
