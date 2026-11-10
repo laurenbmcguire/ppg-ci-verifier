@@ -1782,3 +1782,7 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-decision-list{max-height:30vh;overflow:auto;border:1px solid var(--line,#ccd5d2);border-radius:8px;padding:6px 6px 6px 26px}
 .fd-aidone{max-width:520px}.fd-aidone h2{margin:0 0 8px}.fd-aidone-ok{background:#e9f6ee;border:1px solid #9fd1b3;border-radius:8px;padding:8px 10px;font-weight:600}
 .fd-aidone-warn{background:#fff6e5;border:1px solid #f0d49a;border-radius:8px;padding:8px 10px;font-weight:600}
+.fd-aidone{max-width:640px;max-height:86vh;overflow:auto}.fd-aidone h3{margin:12px 0 4px;font-size:15px}
+.fd-aidone-ask{border:1px solid #f0d49a;background:#fff6e5;border-radius:10px;padding:8px 12px;margin-top:10px}
+.fd-bottom-download{display:block;text-align:center;margin:12px 0}
+.fd-rowvalues{display:block;font-size:12px;color:#40524c;background:#fff;border:1px solid #dfe6e3;border-radius:6px;padding:3px 6px;margin:3px 0 6px}

@@ -46,7 +46,7 @@
   const statusNote = r => { const c = r.counts || {}; if (r.coverage?.truncated || r.coverage?.not_listed || r.page?.complete === false) return 'Recheck needed'; if (r.status === 'hold') return `${c.high || 0} high-severity finding${c.high === 1 ? '' : 's'}`; if (r.status === 'check') return `${(c.medium || 0) + (c.low || 0)} medium/low finding${(c.medium || 0) + (c.low || 0) === 1 ? '' : 's'}`; return 'Nothing flagged'; };
 
   // ---------------------------------------------------------------- state
-  const state = {list: [], filter: store.get('rd-filter', 'attention'), search: '', selected: null, report: null, fixes: null, issueSource: 'All', showAll: false, busy: false};
+  const state = {list: [], filter: store.get('rd-filter-v2', 'all'), search: '', selected: null, report: null, fixes: null, issueSource: 'All', showAll: false, busy: false};
 
   // ---------------------------------------------------------------- connections
   api('/api/health').then(hh => { state.health = hh;
@@ -87,8 +87,12 @@
   }
   function drawClientTabs() {
     const bar = $('clienttabs'), rail = $('railclients'); if (!bar) return;
-    const cl = state.clients || [];
-    bar.hidden = !cl.length; if (rail) rail.hidden = !cl.length; if (!cl.length) return;
+    // Clients come from SharePoint; until that list arrives, the clients already on saved reports are used.
+    let cl = state.clients || [];
+    if (!cl.length) { const seen = new Map(); for (const r of state.list) { const k = clientOfReport(r); if (k && !seen.has(k)) seen.set(k, {key: k, client: r.assignment.client || k, sites: [], jobs: []}); }
+      cl = [...seen.values()].sort((a, b) => a.client.localeCompare(b.client)); }
+    const any = cl.length || state.list.length;
+    bar.hidden = !any; if (rail) rail.hidden = !any; if (!any) return;
     const ofKey = (r, key) => key === '' || (key === '_none' ? !clientOfReport(r) : clientOfReport(r) === key);
     const need = key => visibleList().filter(r => ofKey(r, key) && queueNeedsAttention(r)).length;
     const go = key => { location.hash = key ? 'c=' + encodeURIComponent(key) : ''; };
@@ -100,6 +104,7 @@
       const item = (key, label, title) => { const n = need(key), href = '#c=' + encodeURIComponent(key);
         return h('a', {class: 'nav client' + (onList && state.client === key ? ' active' : ''), href, title: title || null}, h('span', {}, label), n ? h('i', {title: `${n} saved version${n === 1 ? '' : 's'} need attention`}, String(n)) : null); };
       rail.replaceChildren(h('div', {class: 'rail-head'}, 'Clients'),
+        h('a', {class: 'nav client' + (onList && !state.client ? ' active' : ''), href: '#', title: 'Every job for every client'}, h('span', {}, 'All clients'), need('') ? h('i', {title: `${need('')} saved versions need attention`}, String(need(''))) : null),
         ...[...cl.map(c => item(c.key, c.client, `${c.sites.map(x => x.location || x.site).join(', ')}: ${c.jobs.length} job${c.jobs.length === 1 ? '' : 's'} on SharePoint`)),
           state.list.some(r => !clientOfReport(r)) ? item('_none', 'Needs client', 'Reports whose client or job is not settled yet') : null].filter(Boolean));
     }
@@ -216,7 +221,7 @@
     }
     if (!rows.length) {
       list.append(h('p', {class: 'queue-empty'}, state.list.length
-        ? (state.client && !q && !state.list.some(r => inClientR(r)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'No reports have a review request. Use To do to find reports with findings.' : state.filter === 'final' && !q ? 'No final reports yet. A report lands here once it has no errors left to fix.' : state.filter === 'attention' && !q ? h('span', {}, 'No matching to-do reports in this loaded list. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
+        ? (state.client && !q && !state.list.some(r => inClientR(r)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'No reports have a review request. Use To do to find reports with findings.' : state.filter === 'final' && !q ? 'No final reports yet. A report lands here once it has no errors left to fix.' : state.filter === 'attention' && !q ? h('span', {}, 'No matching to-do reports in this loaded list. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter-v2', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
         : 'No reports yet. Upload an end-of-shift report to start.'));
       return;
     }
@@ -311,7 +316,7 @@
       try { const out = await api('/api/vins/search', {q: state.search}); if (state.search === out.query) { state.vinHits = out; drawQueue(); } } catch (err) { /* plain list filtering still works */ }
     }, 350);
   });
-  document.querySelectorAll('.segmented button').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.filter; store.set('rd-filter', state.filter); drawQueue(); }));
+  document.querySelectorAll('.segmented button').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.filter; store.set('rd-filter-v2', state.filter); drawQueue(); }));
 
   // ---------------------------------------------------------------- sign-in and who is using the app
   function showSignIn(message) {
@@ -1588,7 +1593,7 @@
       body.append(h('div', {class: 'fd-final', role: 'status'}, icon('ok', 22),
         h('div', {}, h('b', {}, `Final version (version ${revisionOf(r)})`), h('p', {}, 'No errors left. This copy is saved in the library under Final reports.'),
           h('div', {class: 'fd-cardacts'}, h('a', {class: 'btn small', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download final copy'),
-            h('button', {type: 'button', class: 'btn small', onclick: () => { state.filter = 'final'; store.set('rd-filter', 'final'); location.hash = ''; }}, 'Open Final reports')))));
+            h('button', {type: 'button', class: 'btn small', onclick: () => { state.filter = 'final'; store.set('rd-filter-v2', 'final'); location.hash = ''; }}, 'Open Final reports')))));
       state.fdFinalTold ||= {};
       if (!state.fdFinalTold[r.file_hash] && r.fixed_from) { state.fdFinalTold[r.file_hash] = true; toast(`This is the final version (version ${revisionOf(r)}). A copy is saved in Final reports.`); }
     }
@@ -1634,6 +1639,7 @@
         state.fdBatch && state.fdBatch.group === g.key ? fdBatchForm(g) : null);
     })));
     body.append(recon);
+    body.append(h('a', {class: 'btn fd-bottom-download', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report'));
     appendHistory();
   }
   // One selection, shared by the errors panel and the review window.
@@ -1676,7 +1682,12 @@
         proposals.push(...answer.proposals); skipped.push(...(answer.skipped || []));
       }
       const cells = new Set(), accepted = proposals.filter(p => { const k = p.sheet + '!' + p.cell; if (cells.has(k)) return false; cells.add(k); return true; });
-      if (!accepted.length) { state.fdAIRun = {hash, done: true, fixed: 0, tried: todo.length, skipped}; return; }
+      const why = new Map(skipped.map(x => [x.finding_id, String(x.reason || '')]));
+      const fixedIds = new Set(accepted.map(p => p.finding_id));
+      const unfixed = todo.filter(it => !fixedIds.has(it.key)).map(it => ({key: it.key, where: [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ') || 'Whole report',
+        text: it.text || it.reason || '', now: it.report, reason: why.get(it.key) || ''}));
+      if (!accepted.length) { state.fdAIRun = {hash, done: true, fixed: 0, confirmed: 0, tried: todo.length, skipped, unfixed, items: []};
+        document.body.classList.add('fd-panel-open'); fdAIDoneDialog(state.fdAIRun, report); return; }
       const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
       const capture = captureCorrections(accepted, dec, {}, binding, report);
       state.fdAIRun = {hash, total: todo.length, running: true, saving: accepted.length}; drawSide();
@@ -1690,10 +1701,10 @@
       const saved = state.report?.file_hash === next ? (state.report.fixed_from?.changes || []) : [];
       const has = p => saved.some(c => c.sheet === p.sheet && c.cell === p.cell && String(c.after) === String(p.after));
       const confirmed = accepted.filter(has).length;
-      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed, tried: todo.length, skipped, from: revisionOf(report), items: done};
+      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed, tried: todo.length, skipped, unfixed, from: revisionOf(report), items: done};
       document.body.classList.add('fd-panel-open');
       fdAIDoneDialog(state.fdAIRun, state.report?.file_hash === next ? state.report : null);
-    } catch (e) { state.fdAIRun = {hash, done: true, error: e?.message || String(e)}; }
+    } catch (e) { state.fdAIRun = {hash, done: true, error: e?.message || String(e)}; toast('AI fix did not finish: ' + state.fdAIRun.error, true); }
     finally { if (state.report?.file_hash === state.fdAIRun?.hash) drawSide(); }
   }
   // Fix manually: one error at a time, with its cell highlighted in the spreadsheet. Typed values are kept until
@@ -1779,24 +1790,45 @@
         at < list.length - 1 ? h('button', {type: 'button', class: 'btn small', onclick: () => { keep(); go(at + 1); }}, 'Skip') : null,
         h('button', {type: 'button', class: 'btn small' + (at < list.length - 1 ? '' : ' subtle'), onclick: save}, `Save my changes${pending ? ` (${pending})` : ''}`)));
   }
-  // The message box after AI fix: what was fixed, that it is saved, and the new report to download.
+  // The message box after every AI fix: what was fixed, that it is saved, what still needs an answer, and downloads.
+  function fdAISummaryText(run, report) {
+    const lines = ['Verification App - AI fix summary', report ? `Report: ${report.filename}` : '', `Date: ${new Date().toLocaleString()}`, '',
+      `Fixed by Dex: ${run.fixed}`, run.fixed ? `Saved as version ${(run.from || 1) + 1} (version ${run.from || 1} is kept). Confirmed in the saved copy: ${run.confirmed} of ${run.fixed}.` : 'Nothing was changed.', ''];
+    for (const x of run.items || []) lines.push(`FIXED  ${x.where}: ${x.before === '' ? 'blank' : '"' + x.before + '"'} -> "${x.after}"${x.text ? '   (' + x.text + ')' : ''}`);
+    if ((run.unfixed || []).length) { lines.push('', `Not fixed: ${run.unfixed.length}`);
+      for (const x of run.unfixed) lines.push(`NOT FIXED  ${x.where}: ${x.text}${x.reason ? '   Reason: ' + x.reason : ''}`); }
+    return lines.join('\r\n');
+  }
   function fdAIDoneDialog(run, report) {
     document.getElementById('fd-aidone')?.remove();
-    const left = report && state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
-    const allSaved = run.confirmed === run.fixed, notFixed = run.tried - run.fixed;
+    const allSaved = run.confirmed === run.fixed, unfixed = run.unfixed || [];
+    const live = keys => { const all = state.fdItems || fdItems(); return keys.map(k => all.find(it => it.key === k)).filter(Boolean); };
+    const unknown = unfixed.filter(x => !x.reason || /No supported cell suggestion|could not return a safe|source authority|source correction/i.test(x.reason));
+    const other = unfixed.filter(x => !unknown.includes(x));
     const d = h('dialog', {id: 'fd-aidone', class: 'fd-modal fd-aidone', 'aria-labelledby': 'fd-aidone-title'});
     const close = () => { d.close(); d.remove(); };
+    const saveText = () => { const a = h('a', {href: URL.createObjectURL(new Blob([fdAISummaryText(run, report)], {type: 'text/plain'})), download: `AI fix summary - ${(report?.filename || 'report').replace(/\.[^.]+$/, '')}.txt`}); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); };
+    const line = x => h('li', {}, h('b', {}, x.where), `: ${/^Missing cell\.?$/i.test(String(x.text).trim()) ? 'this cell is blank' : x.text}${x.now != null && x.now !== '' ? ` (now “${String(x.now).slice(0, 40)}”)` : ''}`);
     d.append(h('button', {type: 'button', class: 'fd-dialog-x', 'aria-label': 'Close', title: 'Close', onclick: close}, icon('x', 18)),
-      h('h2', {id: 'fd-aidone-title', tabindex: '-1'}, left === 0 && !notFixed ? 'Dex fixed everything' : `Dex fixed ${plural(run.fixed, 'error')}`),
-      h('p', {class: allSaved ? 'fd-aidone-ok' : 'fd-aidone-warn', role: 'status'}, allSaved
+      h('h2', {id: 'fd-aidone-title', tabindex: '-1'}, !run.fixed ? 'Dex could not fix these' : !unfixed.length ? 'Dex fixed everything you selected' : `Dex fixed ${run.fixed} of ${run.tried}`),
+      run.fixed ? h('p', {class: allSaved ? 'fd-aidone-ok' : 'fd-aidone-warn', role: 'status'}, allSaved
         ? `All ${plural(run.fixed, 'change')} ${run.fixed === 1 ? 'is' : 'are'} applied and saved as version ${(run.from || 1) + 1}. Version ${run.from || 1} is kept.`
-        : `${run.confirmed} of ${run.fixed} changes could be confirmed in the saved version. Open the report again and check the rest.`),
-      left == null ? null : h('p', {}, left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you: fix manually or ignore.` : 'No errors left. This is the final version.'),
-      notFixed > 0 ? h('p', {class: 'fd-hint'}, `${plural(notFixed, 'error')} could not be fixed by Dex; the reasons are in the panel.`) : null,
-      (run.items || []).length ? h('details', {}, h('summary', {}, 'See what changed'), h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
+        : `${run.confirmed} of ${run.fixed} changes could be confirmed in the saved version. Open the report again and check the rest.`)
+        : h('p', {class: 'fd-aidone-warn', role: 'status'}, 'Nothing was changed.'),
+      (run.items || []).length ? h('section', {}, h('h3', {}, `What was fixed (${run.items.length})`), h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
         h('s', {}, x.where), ` ${x.before === '' ? 'blank' : '“' + x.before + '”'} → “${x.after}”`)))) : null,
+      unknown.length ? h('section', {class: 'fd-aidone-ask'}, h('h3', {}, `Dex does not know the right value for ${unknown.length === 1 ? 'this one' : 'these ' + unknown.length}`),
+        h('ul', {class: 'fd-fixed-list'}, unknown.slice(0, 100).map(line)),
+        h('p', {}, 'Would you like to add a value, or leave it as it is?'),
+        h('div', {class: 'fd-cardacts'},
+          h('button', {type: 'button', class: 'btn primary', onclick: () => { const list = live(unknown.map(x => x.key)); close(); if (list.length) fdManualStart(list); }}, unknown.length === 1 ? 'Add a value' : 'Add values'),
+          h('button', {type: 'button', class: 'btn', onclick: () => { const list = live(unknown.map(x => x.key)); close(); if (list.length) fdReviewDialog(list, 'ignore'); }}, unknown.length === 1 ? 'Leave it blank' : 'Leave them blank'))) : null,
+      other.length ? h('section', {}, h('h3', {}, `Needs a person (${other.length})`), h('ul', {class: 'fd-fixed-list'}, other.slice(0, 100).map(x => h('li', {}, h('b', {}, x.where), `: ${x.text}`))),
+        h('p', {class: 'fd-hint'}, 'These are about a whole row or an earlier decision, so Dex cannot change one cell to fix them. Use Fix manually or Ignore.'),
+        h('div', {class: 'fd-cardacts'}, h('button', {type: 'button', class: 'btn', onclick: () => { const list = live(other.map(x => x.key)); close(); if (list.length) fdManualStart(list); }}, 'Fix manually'))) : null,
       h('div', {class: 'fd-modalacts'},
-        report ? h('a', {class: 'btn primary', href: '/api/spreadsheets/download?id=' + report.file_hash, download: report.filename}, 'Download the new report') : null,
+        report && run.fixed ? h('a', {class: 'btn primary', href: '/api/spreadsheets/download?id=' + report.file_hash, download: report.filename}, 'Download updated report') : null,
+        h('button', {type: 'button', class: 'btn', onclick: saveText}, 'Download summary'),
         h('button', {type: 'button', class: 'btn', onclick: close}, 'Close')));
     d.addEventListener('cancel', e => { e.preventDefault(); close(); });
     document.body.append(d); d.showModal(); d.querySelector('h2').focus();
@@ -2501,6 +2533,18 @@
     }[row.status];
     return said || `${at}: ${String(row.status || 'difference').replaceAll('_', ' ')}${row.note ? '. ' + String(row.note).replace(/\.$/, '') : ''}.`;
   }
+  // What a report row actually holds, as "Column: value" pairs, so a difference shows the row it is about.
+  function fdRowValues(sheet, rowNo) {
+    const g = state.grid; if (!g || g.sheet !== sheet || !rowNo || !Array.isArray(g.rows)) return '';
+    const row = g.rows[rowNo - 1]; if (!row) return '';
+    let head = null;
+    for (let i = Math.min(rowNo - 2, 9); i >= 0; i--) { const cand = g.rows[i] || []; if (cand.filter(x => typeof x === 'string' && x.trim() && isNaN(Number(x))).length >= 3) { head = cand; break; } }
+    const parts = [];
+    row.forEach((value, i) => { if (value == null || String(value).trim() === '' || parts.length >= 7) return; const text = String(value); if (/^https?:/i.test(text)) return;
+      parts.push(`${head && head[i] ? String(head[i]).trim() : 'Column ' + (i + 1)}: ${text.slice(0, 40)}`); });
+    return parts.join(' · ');
+  }
+  function fdRowLine(sheet, rowNo) { const text = fdRowValues(sheet, rowNo); return text ? h('span', {class: 'fd-rowvalues'}, 'This row: ' + text) : null; }
   function fdComparison(r) {
     const rec = r.source_reconciliation || {}, counts = rec.count_reconciliation, sp = r.review?.sharepoint || {};
     const value = v => v == null ? 'Unknown' : v === '' ? 'Blank' : String(v);
@@ -2548,11 +2592,11 @@
       !verified && !differs && !checking ? h('p', {class: 'fd-hint'}, current && rec.rows ? `SharePoint was read, but part of the comparison could not be confirmed${sp.message ? ': ' + String(sp.message).split('. ')[0] + '.' : '.'}`
         : (r.assignment || {}).needs_person ? 'Choose the client and job first; then SharePoint is checked automatically.' : 'SharePoint has not answered for this report yet.') : null,
       possible ? h('section', {}, h('h3', {}, 'What is different'),
-        h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Differences from SharePoint'}, differences.map(row => h('li', {}, fdDifferenceText(row),
-          row.url ? [' ', h('a', {href: row.url, target: '_blank', rel: 'noopener'}, 'Open in SharePoint')] : null))),
+        h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Differences from SharePoint'}, differences.map(row => h('li', {}, fdDifferenceText(row), row.note && /dated/.test(row.note) ? ' ' + row.note : '',
+          row.url ? [' ', h('a', {href: row.url, target: '_blank', rel: 'noopener'}, 'Open in SharePoint')] : null, fdRowLine(row.sheet, row.row)))),
         h('p', {class: 'fd-hint'}, 'Earlier comparison, not verified: SharePoint could not be fully confirmed, so some of these may not be real differences.')) : null,
       !verified && !differs && !possible && spIssues.length ? h('section', {}, h('h3', {}, 'What is different'),
-        h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Differences from SharePoint'}, spIssues.map(i => h('li', {}, [i.sheet, i.cell ? 'cell ' + i.cell : i.row ? 'row ' + i.row : null].filter(Boolean).join(' ') + ': ' + (i.text || i.message || ''))))) : null,
+        h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Differences from SharePoint'}, spIssues.map(i => h('li', {}, [i.sheet, i.cell ? 'cell ' + i.cell : i.row ? 'row ' + i.row : null].filter(Boolean).join(' ') + ': ' + (i.text || i.message || ''), fdRowLine(i.sheet, i.row))))) : null,
       fdSourceRecovery(r),
       sp.web_url ? h('a', {href: sp.web_url, target: '_blank', rel: 'noopener'}, 'Open the SharePoint list (read only)') : null,
       h('details', {class: 'fd-comparison-tech'}, h('summary', {}, 'Technical details'),
@@ -3366,7 +3410,7 @@
     try {
       const g = await api('/api/spreadsheets/sheet', {file_hash: hash, sheet});
       if (state.selected !== hash || state.gridRequest !== request) return;
-      state.grid = {...g, hash}; state.gridSheet = g.sheet; if (!quiet) drawGrid(!(state.sheetScroll || {})[g.sheet]);
+      state.grid = {...g, hash}; state.gridSheet = g.sheet; { const box = document.querySelector('#side .fd-comparison'); if (box && state.report?.file_hash === hash) box.replaceWith(fdComparison(state.report)); } if (!quiet) drawGrid(!(state.sheetScroll || {})[g.sheet]);
     } catch (e) {   // a failed sheet keeps the one on screen and says what went wrong
       if (state.selected !== hash || state.gridRequest !== request) return;
       if (state.grid) { drawGrid(); toast(`Could not open "${sheet}": ${e.message}`, true); } else block.replaceChildren(h('p', {class: 'note', role: 'alert'}, `Could not open "${sheet}": ${e.message}`)); }
