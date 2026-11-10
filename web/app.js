@@ -137,9 +137,21 @@
   // Queue metadata never invents a business date or groups unrelated files by a similar name.
   const queueDay = r => r.review?.day || '';
   const queueFamily = r => JSON.stringify([r.assignment?.client_key || '', r.root_hash || r.file_hash]);
+  // Finding counts, current verification, approval and delivery are separate facts.
+  // Old or incomplete summaries must not acquire a successful label by omission.
+  function reportVerification(r) {
+    const v = r.verification, rv = r.review || r, sp = rv.sharepoint || {};
+    const holds = v ? v.holds : r.holds;
+    const knownHolds = Array.isArray(holds), held = knownHolds && holds.length > 0;
+    const sourceVerified = v ? v.source_verified === true : sp.source_verified === true;
+    const sourceStatus = v ? v.source_status : sp.status;
+    const checksCurrent = v ? v.checks_current === true : ['findings', 'no_findings_in_checks_performed'].includes(r.internal_check_status);
+    return {held, sourceVerified, sourceStatus, complete: knownHolds && !held && sourceVerified && sourceStatus === 'match' && checksCurrent};
+  }
+
   const queueNeedsAttention = r => !r.review?.sent_at && (!r.review || r.review.status !== 'clear' || r.review.coverage?.truncated || r.review.coverage?.not_listed || r.review.page?.complete === false ||
     !r.review.day || !r.review.job || !r.assignment || !SETTLED.includes(r.assignment.status) || r.assignment.needs_person || r.review.sharepoint?.status !== 'match' ||
-    r.internal_check_status === 'outdated_checks_require_recheck' || r.internal_check_status === 'could_not_load_latest_check');
+    r.internal_check_status === 'outdated_checks_require_recheck' || r.internal_check_status === 'could_not_load_latest_check' || !reportVerification(r).complete);
   function queueNewerCopies(r, inventory) {
     if (state.workingCopies) return []; // Parallel graph leaves are independent, never timestamp winners.
     const saved = Date.parse(r.received_at || '');
@@ -147,10 +159,10 @@
     return inventory.filter(other => other.file_hash !== r.file_hash && queueFamily(other) === queueFamily(r) && Date.parse(other.received_at || '') > saved)
       .sort((a, b) => Date.parse(b.received_at) - Date.parse(a.received_at));
   }
-  // Final = the newest saved copy of a report with no errors left to fix. It is kept in "Final reports".
+  // Final also requires current complete source verification and no holds; zero open findings alone is insufficient.
   function queueFinal(r, inventory) {
     const rv = r.review;
-    return !!rv && rv.status === 'clear' && !rv.coverage?.truncated && !rv.coverage?.not_listed && rv.page?.complete !== false &&
+    return !!rv && rv.status === 'clear' && reportVerification(r).complete && !!rv.day && !!rv.job && SETTLED.includes(r.assignment?.status) && !r.assignment?.needs_person && !rv.coverage?.truncated && !rv.coverage?.not_listed && rv.page?.complete !== false &&
       !['could_not_load_latest_check', 'outdated_checks_require_recheck'].includes(r.internal_check_status) && queueNewerCopies(r, inventory).length === 0;
   }
   function queueClient(r) {
@@ -165,7 +177,8 @@
     return `${n}${q.unit ? ' ' + q.unit : ' (unit unknown)'}${q.partial ? ' (partial)' : ''}`;
   }
   function queueSource(r) {
-    const sp = r.review?.sharepoint || {};
+    const sp = r.review?.sharepoint || {}, verification = reportVerification(r);
+    if (sp.status === 'match' && !verification.sourceVerified) return 'Source not verified';
     return ({match: 'Source comparison matched', differences: 'Source differences', incomplete: 'Source coverage incomplete', stale: 'Source check out of date',
       day_level: 'Source compared by day totals only', unverified: 'Source not verified', not_found: 'Source not found', not_configured: 'Source not connected', error: 'Source check failed'})[sp.status] || 'Source not checked';
   }
@@ -174,7 +187,12 @@
     if (!rv || r.internal_check_status === 'could_not_load_latest_check') return ['Check unavailable', 'check'];
     if (r.internal_check_status === 'outdated_checks_require_recheck') return ['Checks out of date', 'check'];
     if (rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false) return ['Recheck needed', 'check'];
-    if (rv.status === 'clear') return ['No open findings', 'clear'];
+    const verification = reportVerification(r);
+    if (verification.held) return ['Verification held', 'hold'];
+    if (rv.status === 'clear') {
+      if (verification.complete) return ['No open findings', 'clear'];
+      return [verification.sourceStatus === 'error' ? 'Source check failed' : 'Verification incomplete', 'check'];
+    }
     const high = c.high, other = Number.isFinite(c.medium) && Number.isFinite(c.low) ? c.medium + c.low : null;
     if (rv.status === 'hold') return [high == null ? 'High-severity findings' : `${high} high-severity finding${high === 1 ? '' : 's'}`, 'hold'];
     return [other == null ? 'Findings need review' : `${other} medium/low finding${other === 1 ? '' : 's'}`, 'check'];
@@ -224,7 +242,7 @@
     }
     if (!rows.length) {
       list.append(h('p', {class: 'queue-empty'}, state.list.length
-        ? (state.client && !q && !state.list.some(r => inClientR(r)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'No reports have a review request. Use To do to find reports with findings.' : state.filter === 'final' && !q ? 'No final reports yet. A report lands here once it has no errors left to fix.' : state.filter === 'attention' && !q ? h('span', {}, 'No matching to-do reports in this loaded list. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter-v2', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
+        ? (state.client && !q && !state.list.some(r => inClientR(r)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'No reports have a review request. Use To do to find reports with findings.' : state.filter === 'final' && !q ? 'No final reports yet. A report lands here once it has no open findings, current source verification, and no holds.' : state.filter === 'attention' && !q ? h('span', {}, 'No matching to-do reports in this loaded list. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter-v2', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
         : 'No reports yet. Upload an end-of-shift report to start.'));
       return;
     }
@@ -984,14 +1002,16 @@
 
   // one truthful status for the whole report, and the one next step when it is not ready
   function fdStatus(r) {
-    const rv = r.review, sp = rv.sharepoint || {}, a = r.assignment || {}, c = fdCounts();
+    const rv = r.review || {}, sp = rv.sharepoint || {}, a = r.assignment || {}, c = fdCounts();
+    if (!r.review || r.internal_check_status === 'could_not_load_latest_check') return {tone: 'amber', icon: 'warn', text: 'Check unavailable', next: 'review', why: 'Reopen the report to load its current check.'};
     if (outdated(r)) return {tone: 'amber', icon: 'warn', text: 'Checks out of date', next: 'recheck', why: `Checked with an older version of the checks (${r.recheck?.checked_with || 'earlier'}). Nothing is trusted until it is checked again.`};
     if ((r.sent || []).some(x => x.sent)) return {tone: 'green', icon: 'ok', text: 'Sent to client', next: null};
     if (a.needs_person) return {tone: 'red', icon: 'x', text: 'Client not settled', next: 'client', why: a.reason || 'Choose the client and job before anything else; job numbers repeat between clients.'};
     if (c.blockers) return {tone: 'red', icon: 'x', text: plural(c.blockers, 'blocker'), next: 'blockers'};
     if (sp.status === 'stale') return {tone: 'amber', icon: 'warn', text: 'SharePoint check out of date', next: 'reconcile', why: sp.message};
-    if (sp.status !== 'match') return {tone: 'amber', icon: 'warn', text: 'Not verified against SharePoint', next: 'reconcile',
+    if (sp.status !== 'match' || sp.source_verified !== true || (r.holds || []).some(h => String(h.code || '').startsWith('source_'))) return {tone: 'amber', icon: 'warn', text: 'Not verified against SharePoint', next: 'reconcile',
       why: sp.status === 'day_level' ? sp.message : sp.status === 'incomplete' ? 'SharePoint could not be read completely, so the report is not verified. ' + (sp.message || '') : sp.status === 'unverified' ? sp.message || 'Some fields could not be compared.' : sp.status === 'differences' ? 'Differences from SharePoint are listed as blockers.' : 'The report has not been compared with SharePoint item by item yet.'};
+    if ((r.holds || []).length) return {tone: 'amber', icon: 'warn', text: 'Verification held', next: 'review', why: r.holds.map(h => h.text).filter(Boolean).join(' ')};
     if (r.checked_copy && !fdCheckedState(r).ready) return {tone: 'amber', icon: 'warn', text: 'Verification not complete', next: 'review', why: fdCheckedState(r).message};
     if (r.checked_copy && fdCheckedState(r).ready) return {tone: 'green', icon: 'ok', text: '0 remaining detected errors', next: null};
     if (c.review) return {tone: 'amber', icon: 'warn', text: `${c.review} to review`, next: 'review'};
@@ -4574,7 +4594,7 @@
       for (const r of rows) {
         const y = r.yesterday, s = sp[r.job];
         if (y && !y.sent_at) counts.send++;
-        if (y && y.status === 'hold') counts.hold++;
+        if (y && (y.status === 'hold' || reportVerification({review: y, verification: y.verification}).held)) counts.hold++;
         if (!y && s?.yesterday) counts.missing++;
       }
       const shift = d => { const x = new Date(day + 'T12:00:00'); x.setDate(x.getDate() + d); state.todayDay = x.toISOString().slice(0, 10); showToday(); };
@@ -4582,8 +4602,11 @@
       const clock = iso => new Date(iso).toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit'});
       const buildBtn = (job, d, label, force, primary) => h('button', {type: 'button', class: 'btn small' + (primary ? ' primary' : ''), onclick: e => buildReport(job, d, force, e.target)}, label);
       const repCell = (rep, scans, when, job) => {
-        if (rep) return h('td', {}, h('a', {href: '#r=' + rep.file_hash}, h('span', {class: 'tag tag-' + rep.status}, STATUS[rep.status])), ' ',
-          h('span', {class: rep.sent_at ? 'ok' : 'warn'}, rep.sent_at ? 'Sent' : rep.approved ? 'Approved, not sent' : 'Not sent'));
+        if (rep) {
+          const [label, tone] = queueCheck({review: rep, verification: rep.verification});
+          return h('td', {}, h('a', {href: '#r=' + rep.file_hash}, h('span', {class: 'tag tag-' + tone}, label)), ' ',
+            h('span', {class: rep.sent_at ? 'ok' : 'warn'}, rep.sent_at ? 'Sent' : rep.approved ? (rep.approval_current ? 'Internally approved, not sent' : 'Approval out of date, not sent') : 'Not sent'));
+        }
         const s = sp[job];
         if (when === 'today' && s?.today) {
           const rd = s.readiness || {};
@@ -4606,8 +4629,8 @@
         h('div', {class: 'numbers five'},
           h('div', {}, h('b', {}, fmt(rows.length)), h('span', {}, 'Jobs in this view')),
           h('div', {}, h('b', {class: counts.missing ? 'bad' : ''}, fmt(counts.missing)), h('span', {}, 'Yesterday’s reports missing')),
-          h('div', {}, h('b', {class: counts.hold ? 'bad' : ''}, fmt(counts.hold)), h('span', {}, 'On Hold')),
-          h('div', {}, h('b', {}, fmt(counts.send)), h('span', {}, 'Still to send')),
+          h('div', {}, h('b', {class: counts.hold ? 'bad' : ''}, fmt(counts.hold)), h('span', {}, 'Yesterday on hold')),
+          h('div', {}, h('b', {}, fmt(counts.send)), h('span', {}, 'Yesterday not sent')),
           h('div', {}, h('b', {}, rows.some(r => !sp[r.job] || sp[r.job].error || sp[r.job].today == null) ? 'Unknown' : fmt(rows.reduce((n, r) => n + sp[r.job].today, 0))), h('span', {}, 'Scans in this view'))),
         h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Jobs')),
           rows.length ? h('div', {class: 'tablewrap'}, h('table', {class: 'keys pdays'},
@@ -5501,11 +5524,12 @@
     const local = iso => iso ? new Date(iso).toLocaleDateString('en-CA', {timeZone: 'America/Chicago'}) : '';
     const cleaned = state.list.filter(r => r.review?.fixed_from && local(r.received_at) === today).length;
     const sent = state.list.filter(r => local(r.review?.sent_at) === today).length;
-    const waiting = visibleList().filter(r => r.review && r.review.status !== 'clear' && !r.review.sent_at).length;
+    const waiting = visibleList().filter(queueNeedsAttention).length;
+    const uncertain = state.listError || state.listPartial;
     return h('div', {class: 'wins-bar'},
       h('span', {}, h('b', {}, String(cleaned)), ` report${cleaned === 1 ? '' : 's'} cleaned today`),
       h('span', {}, h('b', {}, String(sent)), ` sent today`),
-      h('span', {class: waiting ? '' : 'allgood'}, waiting ? [h('b', {}, String(waiting)), ` waiting for you`] : 'Nothing waiting. Nice work!'));
+      h('span', {class: waiting || uncertain ? '' : 'allgood'}, waiting ? [h('b', {}, String(waiting)), ` saved report${waiting === 1 ? '' : 's'} need${waiting === 1 ? 's' : ''} attention`] : uncertain ? 'Report list incomplete. Waiting count unavailable.' : 'No saved reports waiting in this list.'));
   }
   async function autopilotTick() {
     let out;

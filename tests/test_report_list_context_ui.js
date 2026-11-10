@@ -12,8 +12,8 @@ test('search includes confirmed client, source, date, version and exact identity
 test('separate review control and inventory coverage disclosure are present',()=>{assert.ok(source.includes("state.listPartial = data.has_more === true"));assert.ok(source.includes("class: 'queue-entry'"));assert.ok(source.includes("state.openReviewFor = r.file_hash"));assert.ok(source.includes("'aria-pressed'"));assert.ok(!source.includes("dayOf = r => r.review?.day || (r.received_at"));});
 
 test('client tab and rail attention badges use exactly the To do predicate and visible inventory',()=>{
- const clear={status:'clear',job:'SYNTHETIC-1234',day:'2026-11-06',sharepoint:{status:'match'}};
- const make=(id,key,review={})=>({file_hash:id,filename:'Synthetic '+id+'.xlsx',assignment:{status:'manual',client_key:key,client:key},review:{...clear,...review}});
+ const clear={status:'clear',job:'SYNTHETIC-1234',day:'2026-11-06',sharepoint:{status:'match',source_verified:true}};
+ const make=(id,key,review={})=>({holds:[],internal_check_status:'no_findings_in_checks_performed',file_hash:id,filename:'Synthetic '+id+'.xlsx',assignment:{status:'manual',client_key:key,client:key},review:{...clear,...review}});
  const list=[make('source-incomplete','alpha',{sharepoint:{status:'incomplete'}}),make('source-stale','beta',{sharepoint:{status:'stale'}}),
   {...make('client-ambiguous','alpha'),assignment:{status:'ambiguous'}},{...make('review-missing','alpha'),review:null},
   make('already-sent','beta',{status:'hold',sharepoint:{status:'error'},sent_at:'2026-11-07'}),make('clear','alpha'),
@@ -31,14 +31,14 @@ test('client tab and rail attention badges use exactly the To do predicate and v
  assert.deepEqual(rails,{'All clients':6,Alpha:2,Beta:2,'Needs client':2});
  assert.equal(tabs['All clients'],context.visibleList().filter(context.queueNeedsAttention).length);
  // A badge must clear when its only review needs are resolved, without treating sent/hidden rows as work.
- list[0].review.sharepoint.status='match';list[3].review={...clear};context.drawClientTabs();
+ list[0].review.sharepoint={status:'match',source_verified:true};list[3].review={...clear};context.drawClientTabs();
  assert.equal(badge(bar.children.find(node=>node.children[0]==='Alpha')),0);
  assert.equal(badge(rail.children.find(node=>node.tag==='a'&&node.children[0].children[0]==='Alpha')),0);
 });
 
 test('filtered historical attention retains newer same-family context without declaring a current branch',()=>{
- const original={file_hash:'original',filename:'Same.xlsx',received_at:'2026-11-09T01:00:00Z',assignment:{status:'manual',client_key:'alpha'},review:{status:'clear',job:'1234',day:'2026-11-06',sharepoint:{status:'differences'}}};
- const corrected={...original,file_hash:'corrected',root_hash:'original',revision:2,received_at:'2026-11-09T02:00:00Z',review:{...original.review,sharepoint:{status:'match'}}};
+ const original={holds:[],internal_check_status:'no_findings_in_checks_performed',file_hash:'original',filename:'Same.xlsx',received_at:'2026-11-09T01:00:00Z',assignment:{status:'manual',client_key:'alpha'},review:{status:'clear',job:'1234',day:'2026-11-06',sharepoint:{status:'differences'}}};
+ const corrected={...original,file_hash:'corrected',root_hash:'original',revision:2,received_at:'2026-11-09T02:00:00Z',review:{...original.review,sharepoint:{status:'match',source_verified:true}}};
  const parallel={...corrected,file_hash:'parallel',received_at:'2026-11-09T03:00:00Z'};
  const unrelated={...corrected,file_hash:'unrelated',root_hash:null};
  const inventory=[original,corrected,parallel,unrelated];

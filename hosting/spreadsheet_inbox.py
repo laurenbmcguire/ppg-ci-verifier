@@ -696,6 +696,29 @@ class SpreadsheetInbox:
             db.execute('UPDATE dashboards SET versions_json=?, messages_json=?, updated_at=? WHERE file_hash=?',
                        (json.dumps(versions), json.dumps(talk[-40:]), datetime.now(timezone.utc).isoformat(), file_hash))
         return self.dashboard(file_hash)
+    def verification_presentation(self, item, review):
+        """Current read-only context for summary labels, never a saved status or approval."""
+        from hosting import registry
+        try:
+            assigned = self.assignment_for(item, review)
+            holds = self.holds(item, review)
+        except Exception:
+            assigned = {}
+            holds = [dict(code='verification_unavailable', hard=True,
+                          text='Current verification could not be loaded. Reopen the report before proceeding.')]
+        source = (review or {}).get('sharepoint') or {}
+        rec = item.get('source_reconciliation') or {}
+        source_verified = bool(source.get('source_evidence_complete') and
+                               assigned.get('status') in registry.RESOLVED and not assigned.get('needs_person') and
+                               all(assigned.get(k) and assigned.get(k) == rec.get(k) for k in ('site_id', 'list_id')) and
+                               not any(str(h.get('code', '')).startswith('source_') for h in holds) and
+                               not any(h.get('code') == 'verification_unavailable' for h in holds))
+        return dict(source_verified=source_verified,
+                    source_status='unverified' if source.get('status') == 'match' and not source_verified else source.get('status'),
+                    holds=holds,
+                    checks_current=bool(review and item.get('checker_version') == CHECKER_VERSION and
+                                        item.get('internal_check_status') in ('findings', 'no_findings_in_checks_performed')))
+
     def reports_for(self, job, start, end):
         """{day: summary} for the job's daily reports between start and end (the upload that counts for each day)."""
         from hosting.review_summary import summarize
@@ -713,14 +736,16 @@ class SpreadsheetInbox:
         for result in found:
             rv = self.review_summary(result, with_issues=False)
             by_day.setdefault(rv['day'], []).append(dict(file_hash=result['file_hash'], filename=result['filename'], version=result.get('version'),
-                                                         received_at=result.get('received_at'), review=rv))
+                                                         received_at=result.get('received_at'), review=rv,
+                                                         verification=self.verification_presentation(result, rv)))
         out = {}
         for d, cands in by_day.items():
             c = pick_daily(cands)
             rv = c['review']
             out[d] = dict(file_hash=c['file_hash'], filename=c['filename'], version=c['version'], status=rv['status'], counts=rv['counts'],
                           scans=float(rv['scans']) if rv.get('scans') is not None else None, inspected=rv.get('inspected'), rejected=rv.get('rejected'),
-                          approved=rv.get('approved'), sent_at=rv.get('sent_at'), uploads=len(cands),
+                          approved=rv.get('approved'), approval_current=rv.get('approval_current'), sent_at=rv.get('sent_at'), uploads=len(cands),
+                          coverage=rv.get('coverage'), verification=c['verification'],
                           fixed_from=rv.get('fixed_from'), fixes_applied=rv.get('fixes_applied') or 0)
         return out
     def all_results(self):
@@ -1544,6 +1569,7 @@ class SpreadsheetInbox:
                     item['assignment'] = self.assignment_for(result, item['review'], ctx)
                 except Exception:
                     item['assignment'] = None
+            item['verification'] = self.verification_presentation(result, item['review'])
             return item
         return {'spreadsheets': [row(result) for result in results],
                 'count': count, 'limit':100, 'has_more': count > 100, 'working_copies': working,
