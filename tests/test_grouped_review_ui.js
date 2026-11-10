@@ -104,7 +104,7 @@ test('column confirmation captures exact source site/list and mapping at render 
 test('Today capture state renders explicit provisional build action and never treats missing capture as zero',()=>{
  const ctx=vm.createContext({document:{createElement:t=>new Element(t)},sp:{},day:'2026-01-01',prevDay:'2025-12-31',data:{sharepoint_on:true},STATUS:{},fmt:String,
  buildBtn:(job,day,label)=>{const e=new Element('button');e.append(label);return e;}});
- vm.runInContext(between('  const h = (','  const store =')+between('      const repCell = (','      const addBox =')+'\nglobalThis.rep=repCell;',ctx);
+ vm.runInContext(between('  const h = (','  const store =')+between('      const repCell = (','      // This legacy dashboard')+'\nglobalThis.rep=repCell;',ctx);
  assert.match(textOf(ctx.rep(null,null,'today','job')),/Source capture not loaded/);
  ctx.sp.job={today:0,readiness:{state:'no_scans'}};assert.match(textOf(ctx.rep(null,null,'today','job')),/No scans in this capture/);
  ctx.sp.job={today:3,readiness:{state:'provisional',ready_at:null,shift_end_confirmed:false,note:'Through capture only; shift end not confirmed'}};

@@ -212,11 +212,7 @@
     const client = (state.clients || []).find(c => c.key === state.client);
     if (client) {
       list.append(h('div', {class: 'clienthead'}, h('b', {}, client.client),
-        h('span', {}, `${client.sites.map(x => x.location || x.site).join(' · ')} · ${client.jobs.length} job${client.jobs.length === 1 ? '' : 's'} on SharePoint`),
-        client.jobs.length ? h('button', {type: 'button', class: 'linkish', onclick: async e => {
-          e.target.disabled = true; e.target.textContent = 'Adding to Today…';
-          try { for (const j of client.jobs) await api('/api/today', {add: j.job}); toast(`${client.client}'s ${client.jobs.length} job${client.jobs.length === 1 ? ' is' : 's are'} on Today.`); location.hash = 'today'; }
-          catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Watch these jobs on Today'; } }}, 'Watch these jobs on Today') : null));
+        h('span', {}, `${client.sites.map(x => x.location || x.site).join(' · ')} · ${client.jobs.length} job${client.jobs.length === 1 ? '' : 's'} on SharePoint`)));
     }
     const vh = state.vinHits;
     if (vh && vh.query === state.search) {
@@ -4558,21 +4554,21 @@
     } catch (e) { toast(`${job}: ${e.message}`, true); if (btn) { btn.disabled = false; btn.textContent = was; } return null; }
   }
 
-  // ---------------- Today: every job's day at a glance
+  // ---------------- Today: loaded daily reports and source captures
   async function showToday() {
     const wrap = h('div', {class: 'sheetwrap apiwrap'});
     $('report').replaceChildren(wrap);
     state.todayDay ||= null;
     let data;
-    const load = async extra => {
-      try { data = await api('/api/today', {day: state.todayDay, ...(extra || {})}); } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return false; }
+    const load = async () => {
+      try { data = await api('/api/today', {day: state.todayDay}); } catch (e) { wrap.replaceChildren(h('p', {class: 'note'}, e.message)); return false; }
       return location.hash === '#today';
     };
-    wrap.replaceChildren(h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Looking at every job…'));
+    wrap.replaceChildren(h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Loading this dashboard…'));
     if (!await load()) return;
     const sp = {};
     const draw = () => {
-      const day = data.day, rows = data.jobs, unwatched = [];
+      const day = data.day, rows = data.jobs;
       const label = new Date(day + 'T12:00:00').toLocaleDateString('en-US', {weekday: 'long', month: 'long', day: 'numeric'});
       const counts = {send: 0, missing: 0, hold: 0};
       for (const r of rows) {
@@ -4597,23 +4593,22 @@
         if (scans) return h('td', {}, h('span', {class: 'buildcell'}, h('span', {class: 'differs'}, `Missing (${fmt(scans)} scans on SharePoint)`), data.sharepoint_on ? buildBtn(job, prevDay, 'Build it', true, true) : null));
         return h('td', {}, h('span', {class: 'quiet'}, when === 'today' ? (s?.readiness?.state === 'no_scans' || s?.today === 0 ? 'No scans in this capture' : 'Source capture not loaded') : '—'));
       };
-      const addBox = h('input', {type: 'text', placeholder: 'Add a job to watch, e.g. HANDS-HMMA-2219', 'aria-label': 'Job number'});
+      // This legacy dashboard is not the background check ledger. Keep its limited scope explicit.
       wrap.replaceChildren(
-        h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Today'), h('div', {class: 'meta'}, 'Every job’s day at a glance: scans on SharePoint so far, and where each daily report stands.'))),
+        h('div', {class: 'head'}, h('div', {}, h('h1', {}, 'Today'), h('div', {class: 'meta'}, 'Daily report status and captured SharePoint scans for the jobs in this view.'))),
         todaysWins(),
+        h('p', {class: 'note today-scope'}, 'This dashboard shows jobs from recent reports and previously saved monitoring settings. It does not establish complete client or source coverage, or confirm that background checks have run.'),
+        data.coverage?.capped ? h('p', {class: 'note', role: 'status'}, 'Only part of the saved report history was loaded. Jobs and report counts in this view may be incomplete.') : null,
+        data.coverage?.discovery?.search_failed || data.coverage?.discovery?.unreadable_sites?.length ? h('p', {class: 'note', role: 'status'}, 'SharePoint discovery was incomplete. Unreadable or undiscovered sources are not zero activity.') : null,
         h('div', {class: 'periodbar'}, h('div', {class: 'pnav'}, h('button', {type: 'button', class: 'btn small', 'aria-label': 'Previous day', onclick: () => shift(-1)}, '‹'),
           h('b', {}, label), h('button', {type: 'button', class: 'btn small', 'aria-label': 'Next day', onclick: () => shift(1)}, '›'))),
         h('p', {class: 'note'}, 'Build a provisional report from the records captured so far. A gap in scans does not confirm shift completion. Review source coverage and quantities before internal approval; external sending remains paused.'),
-        unwatched.length ? h('div', {class: 'clientwatch'}, h('span', {}, `${client.client} has ${unwatched.length} job${unwatched.length === 1 ? '' : 's'} on SharePoint you are not watching: ${unwatched.slice(0, 6).map(j => j.job).join(', ')}${unwatched.length > 6 ? '…' : ''}`),
-          h('button', {type: 'button', class: 'btn small', onclick: async e => { e.target.disabled = true; e.target.textContent = 'Adding…';
-            for (const j of unwatched) if (!await load({add: j.job})) return;
-            draw(); fetchScans(); }}, `Watch ${unwatched.length === 1 ? 'it' : `all ${unwatched.length}`}`)) : null,
         h('div', {class: 'numbers five'},
-          h('div', {}, h('b', {}, fmt(rows.length)), h('span', {}, 'Jobs')),
+          h('div', {}, h('b', {}, fmt(rows.length)), h('span', {}, 'Jobs in this view')),
           h('div', {}, h('b', {class: counts.missing ? 'bad' : ''}, fmt(counts.missing)), h('span', {}, 'Yesterday’s reports missing')),
           h('div', {}, h('b', {class: counts.hold ? 'bad' : ''}, fmt(counts.hold)), h('span', {}, 'On Hold')),
           h('div', {}, h('b', {}, fmt(counts.send)), h('span', {}, 'Still to send')),
-          h('div', {}, h('b', {}, rows.some(r => !sp[r.job] || sp[r.job].error || sp[r.job].today == null) ? 'Unknown' : fmt(rows.reduce((n, r) => n + sp[r.job].today, 0))), h('span', {}, 'Scans today so far'))),
+          h('div', {}, h('b', {}, rows.some(r => !sp[r.job] || sp[r.job].error || sp[r.job].today == null) ? 'Unknown' : fmt(rows.reduce((n, r) => n + sp[r.job].today, 0))), h('span', {}, 'Scans in this view'))),
         h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Jobs')),
           rows.length ? h('div', {class: 'tablewrap'}, h('table', {class: 'keys pdays'},
             h('thead', {}, h('tr', {}, ['Job', 'Yesterday’s report', 'Today so far', 'Today’s report', ''].map(x => h('th', {}, x)))),
@@ -4629,10 +4624,8 @@
                 repCell(r.yesterday, s?.yesterday, 'yesterday', r.job),
                 h('td', {}, today),
                 repCell(r.today, 0, 'today', r.job),
-                h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => { state.periodQuery = {kind: 'week', day, job: r.job}; location.hash = 'periods'; }}, 'Week'),
-                  r.watched ? h('button', {type: 'button', class: 'btn ghost small', onclick: async () => { if (await load({remove: r.job})) draw(); }}, 'Stop watching') : null));
-            })))) : h('p', {class: 'note'}, 'No jobs yet. Upload a daily report, or add a job to watch below.'),
-          h('div', {class: 'keyform addjob'}, addBox, h('button', {type: 'button', class: 'btn', onclick: async () => { if (!addBox.value.trim()) { addBox.focus(); return toast('Type a job number to watch, for example HANDS-HMMA-2219.', true); } if (await load({add: addBox.value})) { draw(); fetchScans(); } }}, 'Watch job'))));
+                h('td', {}, h('button', {type: 'button', class: 'btn small', onclick: () => { state.periodQuery = {kind: 'week', day, job: r.job}; location.hash = 'periods'; }}, 'Week')));
+            })))) : h('p', {class: 'note'}, 'No jobs are loaded in this dashboard. This does not mean there are no clients, jobs, or source records.')));
     };
     const fetchScans = async () => {
       if (!data.sharepoint_on) return;
