@@ -32,3 +32,7 @@ Receipts are capped at 256 KiB in addition to 2,000 proofs. Overflow produces an
 Reusable real-XLSX fixture: tests.test_source_pattern_classification.persisted_fixture_inputs() returns (raw_bytes, snapshot, assigned_source). It includes exact 00356870-V-LH at Inspection Detail row 15 among 26 other shapes, with NOK unknown. The persisted test uses temporary SQLite only and demonstrates the real report handler, public get_report and delivery summary consistency.
 
 Follow-up combined validation: 328 Python tests passed, 1 PostgreSQL-specific skip, 34 subtests passed. Node aggregate rerun includes zero-proposal refresh, stale/partial/expired/current-working checks, navigation protection, stale-ID wording, and informational-banner wording. Parent owns the independent combined browser/integration gate.
+
+## Combined actual-handler browser gate
+
+`tests/browser_source_patterns.py` runs a synthetic local HTTP app at 1200px and 390px. It verifies exact-source shape hints are excluded from open review, AI/manual/Ignore remain available for other findings, unknown NOK remains held, original workbook bytes stay identical, and no approval/send exists. External connections are rejected. Set SOURCE_FIRST_CHROMIUM and EVIDENCE_DIR with the existing Python Playwright environment. The classifier is also integrated with the separate source-first/recovery browser regressions. No live-source verification is implied.
