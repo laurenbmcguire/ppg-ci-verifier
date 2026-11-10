@@ -134,7 +134,7 @@ test('history pages preserve every stable ID, scope and collapse focus without m
 test('reachable source confirmation freezes exact scope, rejects stale clicks and separates fresh compare',async()=>{
  const requests=[],opened=[],report={file_hash:'synthetic',check_hash:'shown',review:{run:{version:1}},source_reconciliation:{snapshot_id:'snapshot',site_id:'exact-site',list_id:'exact-list',column_mapping:{inspected:{status:'needs_confirmation',column:'InspectedCount'}}}};
  const ctx=vm.createContext({state:{report,me:{user:{role:'admin'}}},document:{createElement:t=>new Element(t)},api:async(path,payload)=>requests.push({path,payload}),openReport:async(...args)=>opened.push(args)});
- vm.runInContext(between('  const h = (','  const store =')+between('  function reviewBinding(', '  function findingBinding(')+between('  function fdSourceRecovery(', '  function fdComparison('),ctx);
+ vm.runInContext(between('  const h = (','  const store =')+between('  function versionReadOnly(', '  function versionLinks(')+between('  function reviewBinding(', '  function findingBinding(')+between('  function fdSourceRecovery(', '  function fdComparison('),ctx);
  const walk=node=>node.children.flatMap(x=>typeof x==='object'?[x,...walk(x)]:[]);
  const ui=ctx.fdSourceRecovery(report),nodes=walk(ui),confirm=nodes.find(x=>x.tag==='button'&&x.children.includes('Confirm source columns')),compare=nodes.find(x=>x.tag==='button'&&x.children.includes('Compare again'));
  assert.match(textOf(ui),/inspected → InspectedCount/);assert.match(textOf(ui),/exact-site/);

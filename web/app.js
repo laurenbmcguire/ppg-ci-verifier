@@ -512,31 +512,113 @@
         h('a', {href: '#r=' + x.file_hash + '&history=1'}, x.filename || 'Saved version'), ' · ',
         h('a', {href: '/api/spreadsheets/download?id=' + x.file_hash, download: x.filename || ''}, 'Download original bytes')))));
   }
+  function fdReadOnlyReason(r) {
+    const v = r.version_view || {};
+    if (v.unavailable_reason === 'history_inconsistent') return v.message || 'Saved correction history is inconsistent. The working copy cannot be verified.';
+    const reason = v.read_only_reason || (r.sent || []).some(x => x.sent) && 'sent' || r.sending && 'sending' || r.approval && 'approved';
+    return reason ? `This version is ${reason} and is read-only.` : 'Historical version. Findings and evidence belong only to this saved copy.';
+  }
+  // Only saved evidence is grouped here. Browser drafts, suggestions and AI recommendations
+  // never become corrections or human decisions just because a historical view was opened.
+  function fdRecordedFindingGroups(r) {
+    const groups = new Map();
+    for (const [list, entries] of [['issues', r.review?.issues || []], ['dismissed', r.review?.dismissed || []]]) entries.forEach((entry, index) => {
+      const decision = entry.decision || r.review_decisions?.[entry.key];
+      const status = ({reject: 'Kept as recorded', keep: 'Kept as recorded', defer: 'Waiting on source', confirm: 'Confirmed, correction needed', reopen: 'Needs review'})[decision?.action]
+        || ({claude_verify: 'AI recommendation, not a human decision', claude_fix: 'AI recommendation, not a human decision', person_legacy: 'Set aside earlier', corrected: 'Fixed in a later version'})[entry.dismissed_by]
+        || (entry.severity === 'info' ? 'Informational' : list === 'dismissed' ? 'Set aside, not a correction' : 'Needs review');
+      const column = String(entry.cell || '').match(/^[A-Z]+/i)?.[0]?.toUpperCase() || '';
+      const rule = entry.code || entry.text || entry.message || 'Recorded finding';
+      const key = JSON.stringify([rule, column, entry.sheet || null, entry.severity || null, entry.source || null, status, decision?.action || null]);
+      const statusLabel = entry.dismissed_by === 'corrected' && !decision && r.version_view?.unavailable_reason === 'history_inconsistent' ? 'Recorded correction claim, history unverified' : status;
+      if (!groups.has(key)) groups.set(key, {key, rule, sheet: entry.sheet, status, statusLabel, severity: entry.severity, entries: []});
+      groups.get(key).entries.push({id: entry.key || `${list}:${index}`, entry: {...entry, decision}});
+    });
+    const rank = {high: 0, medium: 1, low: 2, info: 3};
+    return [...groups.values()].map(g => {
+      const names = kindNames(g.entries[0].entry), title = (g.entries.length === 1 ? names[0] : names[1] || names[0]) || String(g.rule).replaceAll('_', ' ');
+      return {...g, action: `${g.severity || 'Unspecified severity'} · ${title} · ${g.statusLabel}`,
+        cells: new Set(g.entries.filter(x => x.entry.cell).map(x => String(x.entry.cell).toUpperCase())).size,
+        rows: new Set(g.entries.map(x => x.entry.row || String(x.entry.cell || '').match(/[0-9]+$/)?.[0]).filter(Boolean).map(String)).size};
+    }).sort((a, b) => (rank[a.severity] ?? 4) - (rank[b.severity] ?? 4) || b.entries.length - a.entries.length);
+  }
+  function fdReportRail() {
+    return h('nav', {class: 'fd-rail', 'aria-label': 'Report'},
+      h('button', {type: 'button', class: 'fd-railbtn', onclick: () => { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }, 'aria-label': 'Back to all reports', title: 'All reports'}, icon('back', 22), h('span', {}, 'Reports')),
+      ...[['review', 'Review'], ['history', 'History'], ['sources', 'Sources']].map(([id, label]) =>
+        h('button', {type: 'button', class: 'fd-railbtn' + (state.fdView === id ? ' on' : ''), 'aria-pressed': String(state.fdView === id), onclick: () => { state.fdView = id; drawReport(); }}, icon(id, 22), h('span', {}, label))),
+      h('button', {type: 'button', class: 'fd-railbtn fd-menu', onclick: () => document.body.classList.toggle('navopen'), 'aria-label': 'All pages'}, icon('menu', 22), h('span', {}, 'Menu')));
+  }
   function drawReadOnlyReport(r) {
     document.querySelectorAll('#fd-aidone .fd-cardacts').forEach(node => node.remove());
-    const v = r.version_view || {}, reason = v.unavailable_reason === 'history_inconsistent' ? v.message :
-      v.read_only_reason ? `This version is ${v.read_only_reason} and is read-only.` : 'Historical version. Read-only; findings below belong only to this saved copy.';
-    const sheet = h('section', {class: 'readonly-sheet'});
-    const showSheet = async name => {
-      const request = state.readonlySheetRequest = (state.readonlySheetRequest || 0) + 1;
-      sheet.replaceChildren(h('p', {}, 'Loading saved spreadsheet…'));
-      try {
-        const g = await api('/api/spreadsheets/sheet', {file_hash: r.file_hash, sheet: name});
-        if (state.report !== r || request !== state.readonlySheetRequest) return;
-        const {table} = buildGrid(g, {cells: {}, rows: {}, perSheet: {}});
-        sheet.replaceChildren(h('div', {class: 'gridwrap', tabindex: '0', 'aria-label': 'Saved spreadsheet (read-only)'}, table));
-      } catch (e) { if (state.report === r && request === state.readonlySheetRequest) sheet.replaceChildren(h('p', {role: 'alert'}, e.message)); }
-    };
-    const names = (r.sheets || []).map(x => x.name);
-    $('report').replaceChildren(h('div', {class: 'sheetwrap version-readonly'},
-      h('a', {class: 'btn', href: '#'}, 'All reports'), h('h1', {}, r.filename),
-      h('p', {class: 'note', role: 'status'}, reason),
-      h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download this original version'),
-      v.status !== 'unavailable' && (v.historical || v.status !== 'current') ? h('a', {class: 'btn primary', href: '#r=' + r.file_hash}, 'Return to working copy') : null,
-      versionLinks(r), h('h2', {}, 'Recorded findings for this version'),
-      h('ul', {}, (r.review?.issues || []).map(x => h('li', {}, [x.sheet, x.cell, x.text || x.message || x.code].filter(Boolean).join(' · ')))),
-      names.length ? h('select', {'aria-label': 'Saved sheet', onchange: e => showSheet(e.target.value)}, names.map(n => h('option', {value: n}, n))) : null, sheet));
-    if (names.length) showSheet(names[0]);
+    document.body.classList.add('reportmode');
+    state.fdItems = []; state.fdView ||= 'review';
+    // Invalidate sheets even when switching to History/Sources or redrawing the same report.
+    state.readonlySheetRequest = (state.readonlySheetRequest || 0) + 1;
+    if (state.grid?.hash !== r.file_hash) state.grid = null;
+    const v = r.version_view || {}, rv = r.review || {}, a = r.assignment || {};
+    const reason = fdReadOnlyReason(r), locked = 'Editing, saving, AI, rechecking, approval and sending are disabled in this view. Existing findings and holds remain.';
+    const head = h('header', {class: 'fd-head'},
+      h('div', {class: 'fd-title'}, h('p', {class: 'fd-eyebrow'}, 'Review workspace'),
+        h('h1', {}, [a.client || 'Client not settled', rv.job || r.filename, rv.day ? shortDay(rv.day) : 'No business date'].join(' / ')),
+        h('p', {class: 'fd-meta'}, `${r.filename} · saved revision ${r.revision || 'unknown'} · ${fdSourceSummary(r)}`),
+        h('details', {class: 'fd-exact-version'}, h('summary', {}, 'Exact saved version and check'),
+          h('p', {}, `SHA-256: ${r.file_hash}`), h('p', {}, `Check: ${r.check_hash || 'Unavailable'} · Checker: ${r.checker_version || 'Unknown'}`))),
+      h('div', {class: 'fd-actions'}, h('span', {class: 'fd-status amber'}, icon('lock', 16), 'Read-only'),
+        h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download this original version')));
+    const notice = h('section', {class: 'fd-readonly-notice', role: 'status'}, h('b', {}, reason), h('p', {}, locked),
+      h('p', {}, 'Saved checks are shown for inspection. Opening this view does not complete verification or authorize release.'),
+      v.status !== 'unavailable' && (v.historical || v.status !== 'current') ? h('a', {class: 'btn', href: '#r=' + r.file_hash}, 'Return to working copy') : null);
+    const holds = h('details', {class: 'fd-readonly-holds', open: !!(r.holds || []).length},
+      h('summary', {}, `Recorded holds · ${(r.holds || []).length}`),
+      (r.holds || []).length ? h('ul', {}, r.holds.map(hold => h('li', {}, h('b', {}, hold.hard ? 'Blocking hold: ' : 'Review hold: '), hold.text || hold.code)))
+        : h('p', {}, 'No holds listed in this response. That does not establish verification or release readiness.'));
+    let main, showSheet;
+    if (state.fdView === 'history') main = h('div', {}, fdHistory(r), fdAutoSummary(r));
+    else if (state.fdView === 'sources') main = fdSources(r);
+    else {
+      const names = (r.sheets || []).map(x => x.name), sheet = h('div', {class: 'readonly-sheet'});
+      const selector = h('select', {'aria-label': 'Saved sheet', onchange: e => showSheet(e.target.value)}, names.map(n => h('option', {value: n}, n)));
+      showSheet = async (name, focus = null) => {
+        if (state.report !== r || state.fdView !== 'review' || !names.includes(name)) return;
+        const request = ++state.readonlySheetRequest;
+        selector.value = name; state.readonlySheet = {hash: r.file_hash, name};
+        sheet.replaceChildren(h('p', {role: 'status'}, 'Loading saved spreadsheet…'));
+        try {
+          const g = await api('/api/spreadsheets/sheet', {file_hash: r.file_hash, sheet: name});
+          if (state.report !== r || request !== state.readonlySheetRequest || state.fdView !== 'review') return;
+          if (g.sheet !== name) throw new Error('The saved sheet did not match the request. Reopen it to try again.');
+          state.grid = {...g, hash: r.file_hash};
+          const {table, focusEl} = buildGrid(g, {cells: {}, rows: {}, perSheet: {}}, {focus});
+          const wrap = h('div', {class: 'gridwrap', tabindex: '0', 'aria-label': `Saved spreadsheet: ${name} (read-only)`}, table);
+          sheet.replaceChildren(wrap);
+          if (focus) { wrap.focus(); reveal(wrap, focusEl, true); }
+        } catch (e) { if (state.report === r && request === state.readonlySheetRequest) sheet.replaceChildren(h('p', {role: 'alert'}, e.message),
+          h('button', {type: 'button', class: 'btn', onclick: () => showSheet(name, focus)}, 'Retry saved sheet')); }
+      };
+      const groups = fdRecordedFindingGroups(r), count = groups.reduce((n, g) => n + g.entries.length, 0);
+      const coverage = rv.coverage || {};
+      const findings = h('aside', {class: 'fd-aside fd-readonly-findings', 'aria-label': 'Recorded findings'},
+        h('header', {class: 'fd-apphead'}, h('h2', {}, 'Verification App'), h('p', {class: 'fd-errcount'}, `${count} recorded findings`)),
+        h('div', {class: 'sidebody'}, h('p', {class: 'fd-hint'}, 'Grouped by rule, sheet, severity and saved status. Set-aside findings and AI recommendations are not corrections.'),
+          coverage.truncated || coverage.not_listed || rv.page?.complete === false || outdated(r) ? h('p', {class: 'fd-coverage', role: 'note'}, 'Saved check coverage is incomplete or out of date. This list cannot establish complete verification.') : null,
+          !count ? h('p', {}, 'No findings listed in this saved check. Review source evidence and holds before relying on this report.') : null,
+          ...groups.map(g => fdHistoryGroup(g, {finding: true, notice: 'Saved finding status only. No decisions or changes can be made in this view.', renderEntry: x => [
+            h('b', {}, [x.sheet || 'Report-level', x.cell || (x.row ? 'row ' + x.row : null)].filter(Boolean).join(' · ')),
+            h('p', {}, x.text || x.message || x.code),
+            x.decision ? h('p', {}, [x.decision.by, x.decision.reason || x.decision.note].filter(Boolean).join(' · ')) : null,
+            x.source_value != null ? h('p', {}, `Recorded source value: ${x.source_value}`) : null,
+            names.includes(x.sheet) ? h('button', {type: 'button', class: 'btn small', onclick: () => showSheet(x.sheet, {cell: x.cell, row: x.row})}, 'View saved location') : null]}))));
+      main = h('div', {class: 'fd-work fd-readonly-work'}, h('section', {class: 'fd-sheet', 'aria-label': 'Spreadsheet'},
+        h('div', {class: 'fd-sheetbar'}, h('span', {class: 'fd-sheetbar-what'}, 'Exact saved workbook · read-only'), names.length ? selector : null),
+        names.length ? sheet : h('p', {class: 'note'}, 'No saved spreadsheet sheets are available.')), findings);
+    }
+    $('report').replaceChildren(h('div', {class: 'fd version-readonly'}, fdReportRail(), h('div', {class: 'fd-main'}, head, notice, versionLinks(r), fdMetrics(r), holds, main)));
+    if (showSheet) {
+      const names = (r.sheets || []).map(x => x.name), prior = state.readonlySheet;
+      const name = prior?.hash === r.file_hash && names.includes(prior.name) ? prior.name : (r.dataset_selection?.authoritative || []).find(n => names.includes(n)) || names[0];
+      if (name) showSheet(name);
+    }
   }
   async function openReport(hash, keepScroll, historical = false) {
     if (state.gridDraft && !gridDiscard()) return;
@@ -1621,11 +1703,7 @@
         h('div', {class: `fd-status fd-global-status ${st.tone}`, role: 'status'}, icon(st.icon, 16), h('span', {}, fdGlobalStatus(st))),
         more, h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download this version')));
     const metrics = fdMetrics(r);
-    const rail = h('nav', {class: 'fd-rail', 'aria-label': 'Report'},
-      h('button', {type: 'button', class: 'fd-railbtn', onclick: () => { location.hash = state.client ? 'c=' + encodeURIComponent(state.client) : ''; }, 'aria-label': 'Back to all reports', title: 'All reports'}, icon('back', 22), h('span', {}, 'Reports')),
-      ...[['review', 'Review'], ['history', 'History'], ['sources', 'Sources']].map(([id, label]) =>
-        h('button', {type: 'button', class: 'fd-railbtn' + (state.fdView === id ? ' on' : ''), 'aria-pressed': String(state.fdView === id), onclick: () => { state.fdView = id; drawReport(); }}, icon(id, 22), h('span', {}, label))),
-      h('button', {type: 'button', class: 'fd-railbtn fd-menu', onclick: () => document.body.classList.toggle('navopen'), 'aria-label': 'All pages'}, icon('menu', 22), h('span', {}, 'Menu')));
+    const rail = fdReportRail();
     let main;
     if (state.fdView === 'history') main = fdHistory(r);
     else if (state.fdView === 'sources') main = fdSources(r);
@@ -2108,28 +2186,28 @@
       rows: new Set(group.entries.filter(x => x.entry.sheet && (x.entry.row || /[0-9]+$/.test(x.entry.cell || '')))
         .map(x => JSON.stringify([x.entry.sheet, Number(x.entry.row || String(x.entry.cell).match(/[0-9]+$/)[0])]))).size}));
   }
-  function fdHistoryGroup(g) {
+  function fdHistoryGroup(g, options = {}) {
     const pageSize = 25, total = g.entries.length;
     let page = 0;
-    const summary = h('summary', {}, h('b', {}, `${g.action} · ${plural(total, 'occurrence')}`),
+    const summary = h('summary', {}, h('b', {}, `${options.unverified ? 'Unverified record: ' : ''}${g.action} · ${plural(total, 'occurrence')}`),
       h('span', {}, `${g.sheet || 'Report-level'} · ${plural(g.cells, 'distinct cell')} · ${plural(g.rows, 'distinct row')}`),
       h('small', {}, String(g.rule)));
     const range = h('p', {class: 'fd-history-range', tabindex: '-1', 'aria-live': 'polite'});
-    const list = h('ul', {class: 'fd-history-page', tabindex: '0', 'aria-label': 'Recorded occurrences on this page'});
+    const list = h('ul', {class: 'fd-history-page', tabindex: '0', 'aria-label': options.finding ? 'Recorded findings on this page' : 'Recorded occurrences on this page'});
     const previous = h('button', {type: 'button', class: 'btn small', onclick: () => { if (page > 0) { page--; render(true); } }}, 'Previous');
     const next = h('button', {type: 'button', class: 'btn small', onclick: () => { if ((page + 1) * pageSize < total) { page++; render(true); } }}, 'Next');
-    const group = h('details', {class: 'fd-history-group', 'data-history-key': g.key}, summary,
-      h('p', {class: 'fd-hint fd-history-notice'}, g.status === 'reverted' ? 'Already reverted in the recorded history.' : g.category === 'recommendation'
+    const group = h('details', {class: 'fd-history-group' + (options.finding ? ' fd-finding-group' : ''), 'data-history-key': g.key, 'data-finding-status': options.finding ? g.status : null}, summary,
+      h('p', {class: 'fd-hint fd-history-notice'}, options.notice || (g.status === 'reverted' ? 'Already reverted in the recorded history.' : g.category === 'recommendation'
         ? 'This recommendation does not resolve a source hold. Use the individual finding controls below to review it.'
-        : 'Automatic reversal is paused. Review a new manual correction against the current cells, or open the earlier version.'),
+        : 'Automatic reversal is paused. Review a new manual correction against the current cells, or open the earlier version.')),
       range, h('nav', {class: 'fd-history-pages', 'aria-label': 'Occurrence pages'}, previous, next,
         h('button', {type: 'button', class: 'btn small', onclick: () => { group.open = false; summary.focus(); }}, 'Collapse')), list);
     function render(focus) {
       const start = page * pageSize;
       range.textContent = `Occurrences ${start + 1}–${Math.min(start + pageSize, total)} of ${total} · ${pageSize} per page`;
       previous.disabled = page === 0; next.disabled = start + pageSize >= total;
-      list.replaceChildren(...g.entries.slice(start, start + pageSize).map(({id, entry: x}) => h('li', {'data-history-id': id},
-        h('div', {}, h('b', {}, x.sheet ? `${x.sheet}${x.cell ? ' · ' + x.cell : x.row ? ' · row ' + x.row : ''}` : 'Report-level occurrence'),
+      list.replaceChildren(...g.entries.slice(start, start + pageSize).map(({id, entry: x}) => h('li', {[options.finding ? 'data-finding-id' : 'data-history-id']: id},
+        options.renderEntry ? options.renderEntry(x) : h('div', {}, h('b', {}, x.sheet ? `${x.sheet}${x.cell ? ' · ' + x.cell : x.row ? ' · row ' + x.row : ''}` : 'Report-level occurrence'),
           g.category === 'applied' ? h('p', {}, `${showWs(x.before)} → ${showWs(x.after)}`) : h('p', {}, x.text || (x.to_sheet ? `Moved to ${x.to_sheet}` : g.action)),
           h('small', {}, [x.source, x.by, x.reason !== g.rule ? x.reason : null].filter(Boolean).join(' · '))))));
       list.scrollTop = 0;
@@ -2140,22 +2218,24 @@
   }
   function fdAutoSummary(r) {
     const s = r.auto_fixed; if (!s) return null;
-    const groups = fdHistoryGroups(s);
+    const groups = fdHistoryGroups(s), inconsistent = r.version_view?.unavailable_reason === 'history_inconsistent';
     const applied = groups.filter(g => g.status === 'applied' || g.status === 'removed' || g.status === 'moved').reduce((n, g) => n + g.entries.length, 0);
     const recommendations = groups.filter(g => g.status === 'recommendation').reduce((n, g) => n + g.entries.length, 0);
+    const appliedLabel = inconsistent ? `${plural(applied, 'recorded change claim')} (history unverified)` : plural(applied, 'recorded applied change');
     const categories = [['applied', 'Applied cell changes'], ['recommendation', 'AI recommendations, not human decisions'], ['removed', 'Applied row removals'], ['moved', 'Applied row moves'], ['reverted', 'Previously reverted records']];
-    return h('section', {class: 'fd-auto', 'aria-label': 'Recorded changes and recommendations'},
-      h('div', {class: 'fd-autohead'}, icon('ok', 18), h('div', {},
-        h('b', {}, `${plural(applied, 'recorded applied change')} · ${plural(recommendations, 'AI recommendation')}`),
-        h('p', {}, 'History only. Suggested changes and unresolved findings are reviewed separately below. Existing holds still apply.'))),
+    return h('section', {class: 'fd-auto' + (inconsistent ? ' fd-history-unverified' : ''), 'aria-label': 'Recorded changes and recommendations'},
+      h('div', {class: 'fd-autohead'}, icon(inconsistent ? 'warn' : 'ok', 18), h('div', {},
+        h('b', {}, `${appliedLabel} · ${plural(recommendations, 'AI recommendation')}`),
+        h('p', {}, inconsistent ? 'History could not be verified. These entries are recorded claims, not proof of applied corrections. Existing holds still apply.' : 'History only. Suggested changes and unresolved findings are reviewed separately below. Existing holds still apply.'))),
       s.status === 'running' ? h('p', {class: 'fd-coverage', role: 'note'}, 'This earlier automatic pass stopped part way. Only recorded occurrences are shown; automatic continuation is paused.') : null,
       ...categories.map(([status, title]) => {
         const selected = groups.filter(g => g.status === status); if (!selected.length) return null;
         const count = selected.reduce((n, g) => n + g.entries.length, 0);
-        return h('section', {class: 'fd-history-category', 'data-history-status': status}, h('h3', {}, `${title} · ${plural(count, 'occurrence')}`),
-          ...selected.map(fdHistoryGroup));
+        const label = inconsistent ? ({applied: 'Recorded cell changes (history unverified)', removed: 'Recorded row removals (history unverified)', moved: 'Recorded row moves (history unverified)', reverted: 'Recorded reversals (history unverified)'}[status] || title) : title;
+        return h('section', {class: 'fd-history-category', 'data-history-status': status}, h('h3', {}, `${label} · ${plural(count, 'occurrence')}`),
+          ...selected.map(g => fdHistoryGroup(g, inconsistent ? {unverified: true, notice: 'Recorded entry only. Saved correction history could not be verified. No changes or holds are resolved by this view.'} : {})));
       }),
-      s.from_hash ? h('a', {href: '#r=' + s.from_hash + '&history=1'}, 'Open the version before these changes') : null,
+      s.from_hash ? h('a', {href: '#r=' + s.from_hash + '&history=1'}, inconsistent ? 'Open recorded source version (history unverified)' : 'Open the version before these changes') : null,
       (s.notes || []).length ? h('details', {}, h('summary', {}, 'Recorded notes'), h('p', {}, s.notes.join(' '))) : null);
   }
   function fdHoldAction(r, st) {
@@ -2645,6 +2725,7 @@
   }
   // Every report is compared with SharePoint when it is opened: once per version, without a click. Reading only.
   function fdAutoReconcile(r) {
+    if (!r || versionReadOnly(r)) return false;
     const rec = r.source_reconciliation || {}, bound = rec.bound_to || {}, sp = r.review?.sharepoint || {};
     const fresh = !rec.stale && bound.file_hash === r.file_hash && !!bound.checker_version && bound.checker_version === r.checker_version && !!rec.snapshot_id && sp.status && sp.status !== 'stale';
     state.fdAutoSP ||= {};
@@ -2653,7 +2734,7 @@
     if (state.fdAutoSPWaiting) return true;
     state.fdAutoSPWaiting = true; let tries = 0;
     const attempt = async () => {
-      if (state.report !== r || state.fdAutoSP[key]) { state.fdAutoSPWaiting = false; return; }
+      if (state.report !== r || versionReadOnly(r) || state.fdAutoSP[key]) { state.fdAutoSPWaiting = false; return; }
       if (state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || state.fdAutoRecheckWaiting || state.fdReconciling || !state.fixes) { if (++tries < 120) setTimeout(attempt, 500); else state.fdAutoSPWaiting = false; return; }
       state.fdAutoSP[key] = true; state.fdReconciling = true; drawSide();
       try { await api('/api/spreadsheets/sharepoint', {file_hash: r.file_hash}); state.fdReconciling = false; state.fdAutoSPWaiting = false;
@@ -2671,10 +2752,10 @@
   }
   function fdSourceRefresh(r) {
     const binding = JSON.stringify(reviewBinding(r)), assignment = JSON.stringify(r.assignment), reason = fdSourceRefreshReason(r);
-    const pending = !!state.fdReconciling || !!state.fdAutoSPWaiting;
+    const pending = !versionReadOnly(r) && (!!state.fdReconciling || !!state.fdAutoSPWaiting);
     return h('div', {class: 'fd-source-refresh'},
       h('button', {type: 'button', class: 'btn fd-source-refresh-button', disabled: !!reason || pending || !!state.rechecking || !!state.busy || !!state.decisionPending || !!state.aiProposalOperation,
-        onclick: () => fdReconcile(r, binding, assignment)}, state.fdAutoSPWaiting && !state.fdReconciling ? 'Waiting for SharePoint…' : pending ? 'Refreshing SharePoint…' : 'Refresh SharePoint only'),
+        onclick: () => fdReconcile(r, binding, assignment)}, pending && state.fdAutoSPWaiting && !state.fdReconciling ? 'Waiting for SharePoint…' : pending ? 'Refreshing SharePoint…' : 'Refresh SharePoint only'),
       h('p', {class: 'fd-hint'}, reason || 'Read the assigned SharePoint source again for this exact report. Report rows, original files and saved versions stay unchanged. No workbook re-check, AI, approval or sending.'));
   }
   async function fdReconcile(report, binding, assignment) {
@@ -2744,9 +2825,11 @@
     const binding = reviewBinding(r);
     const rv = r.review, rows = [];
     const add = (title, text, link) => rows.push(h('article', {class: 'fd-hist'}, h('b', {}, title), h('span', {}, text), link || null));
-    if (r.fixed_from) add(`v${r.fixed_from.revision || 1} · ${r.fixed_from.filename}`, 'The version these changes were made on. Kept unchanged.', h('a', {href: '#r=' + r.fixed_from.file_hash + '&history=1'}, `Open v${r.fixed_from.revision || 1}`));
-    add(`v${revisionOf(r)} · this version`, r.fixed_from ? `${plural(r.fixed_from.changes.length, 'change')} applied${r.fixed_from.applied_at ? ' ' + when2(r.fixed_from.applied_at) : ''}: ` + r.fixed_from.changes.slice(0, 8).map(c => `${c.sheet}!${c.cell} ${c.before || '(blank)'} → ${c.after || '(blank)'}`).join('; ') + (r.fixed_from.changes.length > 8 ? '…' : '') : `Uploaded ${when2(r.received_at) || ''}. Stored unchanged (SHA-256 ${r.file_hash.slice(0, 12)}…).`);
-    for (const f of r.fixes_applied || []) add(`v${f.revision || '?'} · ${f.fixed_filename}`, `${plural(f.changes.length, 'change')} applied ${when2(f.applied_at) || ''}.`, h('a', {href: '#r=' + f.fixed_file_hash + '&history=1'}, 'Open it'));
+    const inconsistent = r.version_view?.unavailable_reason === 'history_inconsistent';
+    if (inconsistent) add('Saved history could not be verified', fdReadOnlyReason(r) + ' The links below are recorded references, not verified correction ancestry.');
+    if (r.fixed_from) add(`v${r.fixed_from.revision || 1} · ${r.fixed_from.filename}`, inconsistent ? 'Unverified recorded parent reference.' : 'The version these changes were made on. Kept unchanged.', h('a', {href: '#r=' + r.fixed_from.file_hash + '&history=1'}, `Open v${r.fixed_from.revision || 1}`));
+    add(`v${revisionOf(r)} · this version`, r.fixed_from ? `${plural((r.fixed_from.changes || []).length, 'change')} ${inconsistent ? 'recorded in unverified history' : 'applied'}${r.fixed_from.applied_at ? ' ' + when2(r.fixed_from.applied_at) : ''}: ` + (r.fixed_from.changes || []).slice(0, 8).map(c => `${c.sheet}!${c.cell} ${c.before || '(blank)'} → ${c.after || '(blank)'}`).join('; ') + ((r.fixed_from.changes || []).length > 8 ? '…' : '') : `Uploaded ${when2(r.received_at) || ''}. Stored unchanged (SHA-256 ${r.file_hash.slice(0, 12)}…).`);
+    for (const f of r.fixes_applied || []) add(`v${f.revision || '?'} · ${f.fixed_filename}`, `${plural((f.changes || []).length, 'change')} ${inconsistent ? 'recorded in unverified history' : 'applied'} ${when2(f.applied_at) || ''}.`, h('a', {href: '#r=' + f.fixed_file_hash + '&history=1'}, 'Open it'));
     for (const x of r.recheck_applied || []) add('Re-checked', `${x.by || 'Someone'} re-ran the checks ${when2(x.at) || ''} (from ${x.from_version || '?'} to ${x.to_version || '?'}).`);
     for (const x of (r.review_decision_log || []).slice(-30)) add({keep: 'Kept as recorded', reject: 'Suggestion rejected', note: 'Note', reopen: 'Decision undone'}[x.action] || x.action, `${x.by || 'A reviewer'} ${when2(x.at) || ''}${x.note ? ': “' + x.note + '”' : ''}`);
     // every decision on findings, with its exact scope; any one can be undone (the undo is logged too)
@@ -2757,10 +2840,10 @@
       add(`${word} · ${plural((x.ids || []).length, 'finding')}`,
         `${x.by || 'A reviewer'} ${when2(x.at) || ''}${x.owner ? ' · asked ' + x.owner : ''}${x.reason ? ' · “' + x.reason + '”' : ''}${(x.evidence || []).length ? ' · evidence: ' + x.evidence.join('; ') : ''}`
           + ` · ${cells.slice(0, 30).join(', ')}${cells.length > 30 ? ` and ${cells.length - 30} more` : ''}${x.undo_of ? ' (undid an earlier decision)' : ''}`,
-        x.action !== 'undo' && !undone.has(x.decision_id) && !r.approval ? h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null,
+        x.action !== 'undo' && !undone.has(x.decision_id) && !versionReadOnly(r) ? h('button', {type: 'button', class: 'btn small subtle', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null,
           onclick: () => fdSendDecision({...binding, action: 'undo', undo_of: x.decision_id, reason: 'Undone from the history'})}, 'Undo') : undone.has(x.decision_id) ? h('span', {class: 'muted'}, 'undone') : null);
     }
-    if (r.approval) add(rv.approval_current ? 'Internally approved' : 'Approved on an earlier check run', `${r.approval.by} ${when2(r.approval.at) || ''}${r.approval.note ? ': ' + r.approval.note : ''}. Not sent.`);
+    if (r.approval) add(rv.approval_current ? 'Internally approved' : 'Approved on an earlier check run', `${r.approval.by} ${when2(r.approval.at) || ''}${r.approval.note ? ': ' + r.approval.note : ''}.${(r.sent || []).some(x => x.sent) ? ' Delivery recorded below.' : r.sending ? ' Sending is recorded as in progress.' : ' Not sent.'}`);
     for (const s of (r.sent || []).filter(x => x.sent)) add('Sent to client', `${when2(s.at) || ''} to ${(s.to || []).join(', ')}`);
     return h('section', {class: 'fd-utility'}, h('h2', {}, 'Version history'), h('p', {}, 'Every version has its own file, its own checks and its own provenance. Originals are never changed.'), rows);
   }
@@ -2769,11 +2852,14 @@
     const candidates = Object.entries(rec.column_mapping || {}).filter(([, m]) => ['needs_confirmation', 'conflict'].includes(m.status));
     const changed = (r.holds || []).some(hold => hold.code === 'source_mapping_changed');
     if (!candidates.length && !changed) return null;
+    if (versionReadOnly(r)) return h('section', {class: 'fd-source-recovery'}, h('h3', {}, 'Source column review'),
+      h('p', {}, 'Source mapping is read-only for this saved version. Existing holds remain.'),
+      h('ul', {}, candidates.map(([field, m]) => h('li', {}, `${field} → ${m.column || 'No column selected'} (${m.status.replaceAll('_', ' ')})`))));
     const binding = reviewBinding(r), snapshot = rec.snapshot_id, isAdmin = state.me?.user?.role === 'admin';
     const request = Object.freeze({file_hash: binding.file_hash, expected_check_hash: binding.expected_check_hash, expected_snapshot_id: snapshot, expected_mapping_revision: rec.mapping_binding?.revision ?? null, site_id: rec.site_id, list_id: rec.list_id || rec.list?.id,
       mapping: Object.freeze(Object.fromEntries(candidates.filter(([, m]) => typeof m.column === 'string' && m.column.trim()).map(([field, m]) => [field, m.column])))});
     const complete = !!snapshot && !!binding.expected_check_hash && !!request.site_id && !!request.list_id && candidates.length > 0 && Object.keys(request.mapping).length === candidates.length;
-    const current = () => state.report?.file_hash === binding.file_hash && state.report?.check_hash === binding.expected_check_hash &&
+    const current = () => state.report === r && !versionReadOnly(r) && state.report?.file_hash === binding.file_hash && state.report?.check_hash === binding.expected_check_hash &&
       state.report?.source_reconciliation?.snapshot_id === snapshot && state.report?.source_reconciliation?.site_id === request.site_id &&
       (state.report?.source_reconciliation?.list_id || state.report?.source_reconciliation?.list?.id) === request.list_id &&
       (state.report?.source_reconciliation?.mapping_binding?.revision ?? null) === request.expected_mapping_revision;
@@ -2876,7 +2962,7 @@
     if (rows.report_rows != null && rows.matched_unique_items != null && rows.report_rows !== rows.matched_unique_items && differs)
       totals.push(`Records: ${value(rows.report_rows)} rows in the report, ${value(rows.matched_unique_items)} matched in SharePoint.`);
     if (rows.duplicate_report_rows) totals.push(`${rows.duplicate_report_rows} duplicate row${rows.duplicate_report_rows === 1 ? '' : 's'} in the report.`);
-    const checking = !verified && !differs && (state.fdReconciling || (typeof fdAutoReconcile === 'function' && state.report === r && fdAutoReconcile(r)));
+    const checking = !versionReadOnly(r) && !verified && !differs && (state.fdReconciling || (typeof fdAutoReconcile === 'function' && state.report === r && fdAutoReconcile(r)));
     const possible = !verified && !differs && differences.length > 0;
     const spIssues = typeof allIssues === 'function' && r.review ? allIssues(r.review).filter(i => !i.verification_gap).filter(i => String(i.source || '').startsWith('SharePoint') || String(i.code || '').startsWith('sharepoint_')) : [];
     const failed = state.fdAutoSPError?.key === r.file_hash + ':' + r.check_hash ? state.fdAutoSPError.message : null;
