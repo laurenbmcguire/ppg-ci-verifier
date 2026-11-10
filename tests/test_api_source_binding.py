@@ -11,6 +11,7 @@ class FakeInbox:
     def __init__(self,d):pass
     def get(self,h):return self.item
     def shift_schedule(self,j):return []
+    def setting(self,key,default=None):return default
     def assignment_for(self,*a):return self.assignment
     def source_reconcile(self,*a,**kw):self.calls.append(('reconcile',a));return 'reconciled'
     def record_lookup(self,*a):self.calls.append(('lookup',a));return 'held'

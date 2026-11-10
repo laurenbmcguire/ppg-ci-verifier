@@ -124,6 +124,11 @@ def _source_status(result, sp):
     from hosting.spreadsheets import CHECKER_VERSION
     if result.get('source_reconciliation'):
         rec = reconcile.current(result)
+        contract = (result.get('source_reconciliation') or {}).get('date_contract')
+        if contract is not None:
+            from hosting.source_date_contracts import receipt_contract_current
+            if not receipt_contract_current(contract):
+                return dict(source_verified=False, status='stale', message='The reviewed source-date settings expired or changed. Revalidate the exact site timezone and Date field before checking again.')
         if not rec or result.get('checker_version') != CHECKER_VERSION:
             return dict(source_verified=False, status='stale', message='The SharePoint check was made for an earlier version of this report. Reconcile again.')
         word = {'verified': 'match', 'discrepancies': 'differences', 'incomplete': 'incomplete', 'unverified': 'unverified'}.get(rec['status'], rec['status'])
@@ -133,7 +138,8 @@ def _source_status(result, sp):
         return dict(source_verified=False, source_evidence_complete=complete, status=word, message=' '.join(rec.get('not_verified_because') or (rec.get('coverage') or {}).get('notes') or []) or None,
                     matched=rec.get('report_rows'), rows=rec.get('sharepoint_items_for_day'), web_url=(rec.get('list') or {}).get('url'),
                     source=(rec.get('list') or {}).get('name'), captured_at=rec.get('captured_at'), snapshot_id=rec.get('snapshot_id'),
-                    fields_checked=rec.get('fields_checked'), fields_not_checked=rec.get('fields_not_checked'), differences=len(rec.get('rows') or []))
+                    fields_checked=rec.get('fields_checked'), fields_not_checked=rec.get('fields_not_checked'), differences=sum(reconcile.presentation_row(r).get('status') not in reconcile.VERIFICATION_GAPS for r in rec.get('rows') or []),
+                    verification_gaps=sum(reconcile.presentation_row(r).get('status') in reconcile.VERIFICATION_GAPS for r in rec.get('rows') or []))
     legacy = sp.get('status') or 'not_checked'
     if legacy in ('match', 'differences'):
         # the older daily-export comparison matches by identifier and clock-time shift windows, not by SharePoint item:
@@ -228,16 +234,19 @@ def summarize(result, with_issues=True, use_verdicts=True):
     if rec:   # each difference from the live SharePoint list is its own issue, with the cell when there is one
         cells = {(c.get('item'), c.get('field')): f'{_col_letter(int(c["column"]))}{c["row"]}' for c in rec.get('proposed_corrections') or [] if c.get('column') and c.get('row')}
         words = {'value_differs': 'differs from SharePoint', 'missing_from_report': 'is on SharePoint but not in the report',
+                 'source_item_unconfirmed': 'could not be confirmed because the SharePoint capture is incomplete',
+                 'source_day_unconfirmed': 'is on SharePoint, but its business day is unconfirmed',
                  'not_on_sharepoint': 'is not on SharePoint', 'not_on_sharepoint_for_day': 'is on SharePoint for another day',
                  'item_listed_twice': 'is listed twice', 'report_row_without_item_id': 'has no SharePoint item ID',
                  'changed_since_export': 'was edited on SharePoint after the export', 'export_value_differs': 'differs between the export tab and SharePoint',
                  'export_item_not_on_sharepoint': 'is on the export tab but no longer on SharePoint',
                  'wrong_list': 'comes from a different SharePoint site or list', 'field_not_in_source': 'has a value SharePoint has no column for, so it was not checked',
                  'undated': 'has no business date on SharePoint, so its day could not be confirmed'}
-        for i, d in enumerate(rec.get('rows') or []):
+        for i, original_row in enumerate(rec.get('rows') or []):
+            d = _rec.presentation_row(original_row)
             what = f'SharePoint item {d["item"]}' if d.get('item') else 'This row'
             detail = f': {d["field"]} is {d.get("report")} in the report, {d.get("sharepoint")} on SharePoint' if d.get('field') and d['status'] in ('value_differs', 'export_value_differs') else ''
-            issues.append(dict(key=f'rec:{d["status"]}:{d.get("item")}:{d.get("field")}:{i}', source='SharePoint', severity='high' if d['status'] in ('value_differs', 'missing_from_report', 'not_on_sharepoint', 'item_listed_twice', 'wrong_list') else 'medium',
+            issues.append(dict(key=f'rec:{d["status"]}:{d.get("item")}:{d.get("field")}:{i}', source='SharePoint', verification_gap=d['status'] in _rec.VERIFICATION_GAPS, severity='info' if d['status'] in _rec.VERIFICATION_GAPS else 'high' if d['status'] in ('value_differs', 'missing_from_report', 'not_on_sharepoint', 'item_listed_twice', 'wrong_list') else 'medium',
                                code='sharepoint_' + d['status'], where=f'{d["sheet"]} row {d["row"]}' if d.get('sheet') else 'SharePoint',
                                sheet=d.get('sheet'), row=d.get('row'), cell=cells.get((d.get('item'), d.get('field'))),
                                text=(f'{what}: {d["field"]} is {d.get("report")} in the report, {d.get("sharepoint")} on SharePoint.' if detail and d['status'] == 'value_differs'

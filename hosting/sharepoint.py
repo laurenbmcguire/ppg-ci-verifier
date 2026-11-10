@@ -348,10 +348,10 @@ def _stamp(item):
     return fields.get('Date0') or fields.get('Date') or item.get('createdDateTime')
 
 
-def _item_day(item, schedule=None, columns=None):
+def _item_day(item, schedule=None, columns=None, *, site_id=None, list_id=None, date_contract=None):
     """Business Date wins, even if typed dateTime; never silently use submission."""
     from hosting.reconcile import item_day
-    day, basis = item_day(item.get('fields') or {}, columns or {}, schedule)
+    day, basis = item_day(item.get('fields') or {}, columns or {}, schedule, site_id=site_id, list_id=list_id, date_contract=date_contract)
     return day if basis in ('business_date', 'business_date_with_time') else None
 
 
@@ -482,15 +482,19 @@ def list_day(job, day, opener=None, schedule=None, *, site_id=None, list_id=None
     if not data:
         return None
     site, lst, names, items = data
-    columns = {c['name']: c for c in lst.get('_capture', {}).get('columns', [])}
-    if any(_item_day(it, schedule, columns) is None for it in items):
+    capture = lst.get('_capture') or {}
+    columns = {c['name']: c for c in capture.get('columns', [])}
+    identity = dict(site_id=capture.get('site_id'), list_id=capture.get('list_id'))
+    from hosting.source_date_contracts import capture_contract
+    identity['date_contract'] = capture_contract(identity['site_id'], identity['list_id'], columns, opener)
+    if any(_item_day(it, schedule, columns, **identity) is None for it in items):
         raise SharePointError('Source includes missing business dates or timestamps without a verified site/list timezone contract. Confirm source date settings before comparison; plain calendar dates remain usable.')
-    rows = [it for it in items if _item_day(it, schedule, columns) == day]
+    rows = [it for it in items if _item_day(it, schedule, columns, **identity) == day]
     if not rows:
         return None
     modified = max((it.get('lastModifiedDateTime') or '') for it in rows) or None
     meta = dict(site=site, path=f'list: {lst.get("displayName")}', web_url=lst.get('webUrl'), modified=modified,
-                job=job, day=day, source_kind='list', rows=len(rows), capture=lst.get('_capture'))
+                job=job, day=day, source_kind='list', rows=len(rows), capture=dict(capture,date_contract=identity['date_contract']))
     if schedule:
         names, rows, scans = _by_time(names, rows, schedule)
         meta.update(scan_shifts=scans, shift_times=schedule, timeline=timeline(rows, schedule))
@@ -503,12 +507,16 @@ def list_history(job, before_day, limit=10, opener=None, schedule=None, *, site_
     if not data:
         return []
     _, lst, names, items = data
-    columns = {c['name']: c for c in lst.get('_capture', {}).get('columns', [])}
-    if any(_item_day(it, schedule, columns) is None for it in items):
+    capture = lst.get('_capture') or {}
+    columns = {c['name']: c for c in capture.get('columns', [])}
+    identity = dict(site_id=capture.get('site_id'), list_id=capture.get('list_id'))
+    from hosting.source_date_contracts import capture_contract
+    identity['date_contract'] = capture_contract(identity['site_id'], identity['list_id'], columns, opener)
+    if any(_item_day(it, schedule, columns, **identity) is None for it in items):
         raise SharePointError('History includes records without a confirmed business date or verified site/list timezone contract. Confirm source date settings before selecting history.')
     by_day = {}
     for it in items:
-        d = _item_day(it, schedule, columns)
+        d = _item_day(it, schedule, columns, **identity)
         if d and d < before_day:
             by_day.setdefault(d, []).append(it)
     return [(d, f'{job} {d} (SharePoint list).csv', _items_csv(names, by_day[d])) for d in sorted(by_day, reverse=True)[:limit]]

@@ -353,11 +353,12 @@ def _build_binding(inbox, job, source=None):
 def op_build(h, job, day=None, force=False, header=None, source=None):
     """Build the job's report for the day from SharePoint, save it, and run the checks. Returns the report and how it was built."""
     from datetime import datetime as _dt, timezone as _tz
-    from hosting import builder
+    from hosting import builder, photo_embed
     job, day = _job_day(job, day)
     with h.store().session() as directory:
         inbox = SpreadsheetInbox(directory)
         binding = _build_binding(inbox, job, source)
+        photo_embed.use_stored_certificate(inbox.setting(photo_embed.CERT_KEY, None))
         schedule = inbox.shift_schedule(job)
         saved = inbox.setting(f'report_header|{binding["site_id"]}|{binding["list_id"]}', {}) or {}
         if isinstance(header, dict):
@@ -386,11 +387,12 @@ def op_build(h, job, day=None, force=False, header=None, source=None):
 
 
 def op_nexus(h, job, day=None, source=None):
-    from hosting import builder
+    from hosting import builder, photo_embed
     job, day = _job_day(job, day)
     with h.store().session() as directory:
         inbox = SpreadsheetInbox(directory)
         binding = _build_binding(inbox, job, source)
+        photo_embed.use_stored_certificate(inbox.setting(photo_embed.CERT_KEY, None))
         schedule, windows = inbox.shift_schedule(job), inbox.setting('nexus_windows', None)
     try:
         rows, info = builder.day_rows(job, day, schedule, **binding)

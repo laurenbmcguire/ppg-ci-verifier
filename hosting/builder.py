@@ -96,9 +96,14 @@ def day_rows(job, day, schedule, opener=None, *, site_id=None, list_id=None):
     rows, outside = [], 0
     shift_key = next((k for k,v in names.items() if re.sub(r'[^a-z]', '', str(v).lower()) == 'shift'), 'Shift')
     shift_map = {str(number(sh['name'])):sh for sh in schedule}
-    columns = {c['name']:c for c in lst.get('_capture',{}).get('columns',[])}
+    capture = lst.get('_capture') or {}
+    columns = {c['name']:c for c in capture.get('columns',[])}
+    if capture.get('site_id') != site_id or capture.get('list_id') != list_id:
+        raise BuildError('Source capture identity does not match the selected site and list.')
+    from hosting.source_date_contracts import capture_contract
+    date_contract = capture_contract(site_id,list_id,columns,opener)
     for it in items:
-        business_day = sharepoint._item_day(it, schedule, columns)
+        business_day = sharepoint._item_day(it, schedule, columns, site_id=site_id, list_id=list_id, date_contract=date_contract)
         if business_day is None:
             raise BuildError('Source has unconfirmed business dates; no submission-time assignment was invented.')
         if business_day != day:
@@ -117,7 +122,7 @@ def day_rows(job, day, schedule, opener=None, *, site_id=None, list_id=None):
         rows.append(row)  # preserve every selected source record, including incomplete ones
     rows.sort(key=lambda r: (r['time'] or datetime.min))
     last = max((r['time'] for r in rows if r['time']), default=None)
-    return rows, dict(site=site, site_id=site_id, list_id=list_id, capture=lst.get('_capture'), list=lst.get('displayName'), list_url=lst.get('webUrl'), scans=len(rows), outside=outside,
+    return rows, dict(site=site, site_id=site_id, list_id=list_id, capture=dict(capture,date_contract=date_contract), list=lst.get('displayName'), list_url=lst.get('webUrl'), scans=len(rows), outside=outside,
                       last_scan=last.isoformat() if last else None, columns={v: names.get(k, k) for k, v in roles.items()})
 
 

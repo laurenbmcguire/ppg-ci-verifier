@@ -34,6 +34,9 @@ def source_receipt(item, day, assignment=None, mapping_state=None):
         reasons.append('The saved checker is outdated; recheck before source verification.')
     if not rec: reasons.append('No item-by-item source check is recorded.')
     if rec.get('stale'): reasons.append('The source check is stale.')
+    from hosting.source_date_contracts import receipt_contract_current
+    if rec.get('date_contract') is not None and not receipt_contract_current(rec['date_contract']):
+        reasons.append('Source-date metadata expired or changed. Recheck SharePoint to refresh its timezone and Date-field evidence before generating a verified summary.')
     from hosting.reconcile import current
     if rec and current(item) is None:
         reasons.append('The saved source receipt does not match the current authoritative report scope or binding. Review the layout and compare the source again.')

@@ -322,6 +322,10 @@ class SpreadsheetInbox:
         if rec:
             from hosting import reconcile, registry
             current = reconcile.current(item)
+            if rec.get('date_contract') is not None:
+                from hosting.source_date_contracts import receipt_contract_current
+                if not receipt_contract_current(rec['date_contract']):
+                    out.append(dict(code='source_date_metadata_stale', hard=True, text='Source-date metadata expired or changed. Recheck SharePoint to refresh timezone and Date-field evidence; do not edit report rows to resolve this gap.'))
             counts = rec.get('count_reconciliation') or {}
             if not current or not reconcile.evidence_verified(rec):
                 out.append(dict(code='source_coverage_incomplete' if rec.get('status') == 'incomplete' else 'source_evidence_incomplete', hard=True,

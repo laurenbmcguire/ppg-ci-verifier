@@ -117,7 +117,7 @@ class Differences(unittest.TestCase):
         self.assertEqual(r['status'], 'discrepancies')
         diff = next(x for x in r['rows'] if x['status'] == 'value_differs')
         self.assertEqual((diff['item'], diff['field'], diff['report'], diff['sharepoint']), ('433', 'inspected', '80', '72'))
-        self.assertIn('433_.000', diff['url'])
+        self.assertIsNone(diff['url'])  # synthetic site-1 is not a validated SharePoint tenant ID
         self.assertEqual(r['proposed_corrections'][0]['after'], '72')
         self.assertFalse(r['corrections_applied'])
 

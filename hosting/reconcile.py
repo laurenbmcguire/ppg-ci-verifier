@@ -9,10 +9,9 @@ access denied, throttling, a page that failed, columns the verifier does not und
 coverage is "incomplete" and can never produce a verified result. Differences are listed row by row with a link to
 the SharePoint item. Proposed corrections are kept apart from the workbook; nothing is applied automatically.
 
-Business day: the list's date-only "Date" column is the business date. SharePoint stores a date-only value as
-midnight in the site's time zone expressed in UTC (06:00Z in winter, 05:00Z in summer for America/Chicago), so it
-is converted to America/Chicago before the date is taken, never cut from the UTC text. Submission (Date0/Created)
-and Modified times are only used when a list has no business date, and the result says so.
+Business Date takes precedence over Date0/Created. Timestamp dates require an
+exact verified source contract and matching column metadata; otherwise the day
+remains unknown and verification stays held. Raw evidence is never rewritten.
 """
 import json
 import re
@@ -29,6 +28,7 @@ MAX_ITEMS = 200000
 QTY = ('inspected', 'certified', 'rejected', 'reworked')
 BUSINESS_DATE_FIELDS = ('Date', 'BusinessDate', 'ReportDate', 'InspectionDate')
 SUBMISSION_FIELDS = ('Date0', 'Created')
+VERIFICATION_GAPS = frozenset(('source_day_unconfirmed', 'source_item_unconfirmed'))
 
 
 def now():
@@ -89,18 +89,28 @@ def excel_serial_day(value):
     return (base + timedelta(days=int(n))).isoformat()
 
 
-def item_day(fields, columns, schedule=None):
-    """Production source dates accept calendar dates, never infer a source timezone.
-
-    No verified site/list/field timezone contract is configured. Graph dateOnly
-    and a Chicago-looking timestamp do not supply one. Preserve raw timestamps
-    with an unavailable day until a contract can be recorded and revision-bound.
-    """
+def item_day(fields, columns, schedule=None, *, site_id=None, list_id=None, date_contract=None):
+    """Resolve calendar dates, or aware local-midnight timestamps under an exact contract."""
+    from hosting.source_date_contracts import contract_matches
+    contract = date_contract if contract_matches(date_contract, site_id, list_id, columns) else None
     for name in BUSINESS_DATE_FIELDS:
         if fields.get(name) not in (None, ''):
             value = fields[name]
             if isinstance(value, str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}', value.strip()):
                 return business_day(value.strip()), 'business_date'
+            if contract and name == contract['field']:
+                # datetime truncates sub-microsecond precision; never silently round into midnight.
+                fraction = re.search(r'T\d{2}:\d{2}:\d{2}[.,](\d+)', str(value))
+                if fraction and any(c != '0' for c in fraction.group(1)):
+                    return None, 'timezone_unconfirmed'
+                try:
+                    dt = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+                    if dt.tzinfo is not None and dt.utcoffset() is not None:
+                        local = dt.astimezone(ZoneInfo(contract['zone']))
+                        if not (local.hour or local.minute or local.second or local.microsecond):
+                            return local.date().isoformat(), 'business_date'
+                except (ValueError, TypeError, OverflowError):
+                    pass
             return None, 'timezone_unconfirmed'
     if any(fields.get(name) not in (None, '') for name in SUBMISSION_FIELDS):
         return None, 'submission_time_unconfirmed'
@@ -182,6 +192,26 @@ def _pages(url, cov, opener=None, *, kind='items', cap=None):
     return records
 
 
+def display_item_url(site_name, site_id, list_id, list_metadata, item_id):
+    """Canonical item form from verified list metadata, never from a row URL."""
+    from hosting.sheet_roles import source_url_identity
+    from urllib.parse import quote, urlsplit
+    if not isinstance(item_id, str) or not re.fullmatch(r'[0-9]+', item_id):
+        return None
+    if not isinstance(list_metadata, dict) or list_metadata.get('id') != list_id:
+        return None
+    url = list_metadata.get('webUrl')
+    identity = source_url_identity(url, list_only=True)
+    if not identity or identity.get('item') is not None or urlsplit(url).query:
+        return None
+    host = str(site_id or '').split(',')[0].lower()
+    if (not host.endswith('.sharepoint.com') or identity['origin'] != 'https://' + host
+            or not site_name or identity['site'].casefold() != str(site_name).casefold()):
+        return None
+    return (identity['origin'] + '/sites/' + quote(identity['site'], safe='') + '/Lists/' +
+            quote(identity['list'], safe='') + '/DispForm.aspx?ID=' + item_id)
+
+
 def snapshot(site_name, list_id, opener=None, schedule=None, *, site_id=None):
     """Every item of one SharePoint list, with coverage. Never writes to SharePoint."""
     from hosting.adaptive_reports import field_for_header, header_text
@@ -207,6 +237,8 @@ def snapshot(site_name, list_id, opener=None, schedule=None, *, site_id=None):
     cols = _pages(f'/sites/{site_id}/lists/{list_id}/columns?$top=500', cov, opener, kind='columns')
     columns = {c['name']: c for c in cols if isinstance(c,dict) and c.get('name')}
     snap['columns'] = columns
+    from hosting.source_date_contracts import capture_contract
+    snap['date_contract'] = capture_contract(site_id, list_id, columns, opener)
     if len(columns) != len(cols):
         cov['unknown_schema'] = True; cov['notes'].append('Missing or duplicate column identities.')
     # Lists often keep old, unused columns next to the ones the tablets fill (QtyInspected and Quantity, QtyRejected and
@@ -231,12 +263,12 @@ def snapshot(site_name, list_id, opener=None, schedule=None, *, site_id=None):
         f = it.get('fields') or {}
         if not isinstance(f,dict):
             cov['unknown_schema'] = True; cov['notes'].append('Malformed item fields.'); continue
-        day, basis = item_day(f, columns, schedule)
+        day, basis = item_day(f, columns, schedule, site_id=site_id, list_id=list_id, date_contract=snap['date_contract'])
         snap['items'].append(dict(
             site_id=site_id, list_id=list_id, item=str(it['id']),
             version=f.get('_UIVersionString') or (it.get('eTag') or '').split(',')[-1].strip('"') or None,
             modified=it.get('lastModifiedDateTime'), created=it.get('createdDateTime'),
-            url=it.get('webUrl') or (f'{base}/DispForm.aspx?ID={it["id"]}' if base else None),
+            url=display_item_url(site_name, site_id, list_id, lst, str(it['id'])),
             day=day, day_basis=basis, identifier=f.get('Identifier') or f.get('Title'),
             raw=dict(f), original=it))
     cov['items'] = len(snap['items'])
@@ -252,7 +284,7 @@ def snapshot(site_name, list_id, opener=None, schedule=None, *, site_id=None):
     if cov['date_fallbacks']:
         cov['notes'].append('Some items have only submission timestamps; business-date mapping needs confirmation.')
     if undated:
-        cov['notes'].append(f'{len(undated)} SharePoint item(s) have no business date, so it is unknown which day they belong to '
+        cov['notes'].append(f'{len(undated)} SharePoint item(s) have an unconfirmed business day, so it is unknown which day they belong to '
                             f'(items {", ".join(undated[:10])}{"…" if len(undated) > 10 else ""}).')
     if 'inspected' not in candidates:
         cov['unknown_schema'] = True
@@ -328,6 +360,10 @@ def evidence_verified(rec):
 
 def counts_verified(rec):
     """Do not trust a saved success label without complete count evidence."""
+    if rec.get('date_contract') is not None:
+        from hosting.source_date_contracts import receipt_contract_current
+        if not receipt_contract_current(rec['date_contract']):
+            return False
     c = rec.get('count_reconciliation') or {}
     counts = c.get('record_counts') or {}
     expected = rec.get('report_rows')
@@ -372,7 +408,7 @@ def _count_reconciliation(day, records, items, snap, rows, incomplete):
                        evidence='The same exact source item is referenced by another report row; both rows remain unchanged.')
                   for r in rows if r['status'] == 'item_listed_twice']
     missing = [r for r in rows if r['status'] == 'missing_from_report']
-    unmatched = [r for r in rows if r['status'] in ('not_on_sharepoint', 'not_on_sharepoint_for_day', 'wrong_list', 'report_row_without_item_id')]
+    unmatched = [r for r in rows if r['status'] in ('not_on_sharepoint', 'not_on_sharepoint_for_day', 'wrong_list', 'report_row_without_item_id', 'source_day_unconfirmed', 'source_item_unconfirmed')]
     exclusions = [dict(item=i.get('item'), day=i.get('day'), day_basis=i.get('day_basis'),
                        reason='Outside the requested business date', url=i.get('url'))
                   for i in snap.get('items') or [] if i.get('day') and i['day'] != day and
@@ -436,7 +472,8 @@ def compare(day, records, export_records, snap, confirmed=None, report=None):
             it = all_items.get(src.get('item')) if same_list(src) is True else None
             if not it:
                 missing += 1
-                row('export_item_not_on_sharepoint', src.get('item'), e, note='The captured export lists an item this SharePoint list does not have.')
+                row('export_item_not_on_sharepoint' if cov.get('complete') else 'source_item_unconfirmed', src.get('item'), e,
+                    note='The captured export lists an item this SharePoint list does not have.' if cov.get('complete') else 'The incomplete source capture cannot establish whether this exported item exists. Retry the source check; keep the report row unchanged.')
                 continue
             if src.get('version') and it.get('version') and str(src['version']) != str(it['version']):
                 changed += 1
@@ -476,8 +513,18 @@ def compare(day, records, export_records, snap, confirmed=None, report=None):
         if not it:
             other = all_items.get(key)
             basis = (other or {}).get('day_basis') or 'no business date'
-            row('not_on_sharepoint_for_day' if other else 'not_on_sharepoint', key, r,
-                note=(f'On SharePoint the item is dated {other.get("day") or "nothing"} ({basis.replace("_", " ")}).' if other else 'No such item in the list.'))
+            if not other and not cov.get('complete'):
+                row('source_item_unconfirmed', key, r, note='The source capture is incomplete, so this item could not be confirmed. Retry the source check; keep the report row unchanged.')
+            elif other and not other.get('day'):
+                raw = other.get('raw') or {}
+                name = next((n for n in BUSINESS_DATE_FIELDS if raw.get(n) not in (None, '')), None)
+                evidence = (f'SharePoint {name} contains {raw[name]!s}; its business day could not be confirmed.'
+                            if name else 'No usable business-date value was captured for this SharePoint item.')
+                row('source_day_unconfirmed', key, r,
+                    note=evidence + ' Confirm the source date settings before comparing days. Keep this report row unchanged.')
+            else:
+                row('not_on_sharepoint_for_day' if other else 'not_on_sharepoint', key, r,
+                    note=(f'On SharePoint the item is dated {other["day"]} ({basis.replace("_", " ")}).' if other else 'No such item in the list.'))
             continue
         for f in QTY:
             if f not in cols:
@@ -497,7 +544,7 @@ def compare(day, records, export_records, snap, confirmed=None, report=None):
     status = ('incomplete' if incomplete else 'discrepancies' if rows else
               'unverified' if (not records or unidentified or unconfirmed or doubtful) else 'verified')
     import hashlib, json as _json
-    snap_id = hashlib.sha256(_json.dumps(dict(site_id=snap.get('site_id'), list_id=snap.get('list_id'), columns=snap.get('columns'), items=snap.get('items'), coverage=cov, confirmed_mapping=confirmed), sort_keys=True, default=str).encode()).hexdigest()[:16]
+    snap_id = hashlib.sha256(_json.dumps(dict(site_id=snap.get('site_id'), list_id=snap.get('list_id'), columns=snap.get('columns'), date_contract=snap.get('date_contract'), items=snap.get('items'), coverage=cov, confirmed_mapping=confirmed), sort_keys=True, default=str).encode()).hexdigest()[:16]
     why = []
     if cov.get('timezone_unconfirmed'):
         why.append('Source business-date timestamps have no verified site/list timezone contract. Confirm source date settings before comparing or excluding these records.')
@@ -514,13 +561,24 @@ def compare(day, records, export_records, snap, confirmed=None, report=None):
                 why.append(f'{field.capitalize()} quantity comparison is {count_reconciliation["quantities"][field]["status"]}; explicit values for every report and source record are required.')
     mapping_binding = dict(site_id=snap.get('site_id'), list_id=snap.get('list_id'), mapping=dict(confirmed or {}), revision=None, legacy_requires_confirmation=False)
     return dict(mapping_binding=mapping_binding, count_reconciliation=count_reconciliation, status=status, day=day, captured_at=snap.get('captured_at'), list=snap.get('list'), site=snap.get('site'), site_id=snap.get('site_id'), list_id=snap.get('list_id'),
-                snapshot_id=snap_id, bound_to=dict(report or {}),
+                snapshot_id=snap_id, date_contract=snap.get('date_contract'), bound_to=dict(report or {}),
                 coverage={k: cov.get(k) for k in ('pages', 'items', 'complete', 'denied', 'throttled', 'failed_pages', 'truncated', 'unknown_schema', 'undated', 'date_fallbacks', 'timezone_unconfirmed', 'notes')},
                 quantity_columns=cols, column_mapping=mapping, fields_checked=[f for f in report_fields if f in cols], fields_not_checked=unsupported,
                 day_basis=sorted({i.get('day_basis') for i in items if i.get('day_basis')}),
                 sharepoint_items_for_day=len(items), report_rows=len(records), unidentified_rows=unidentified, unconfirmed_rows=unconfirmed,
                 not_verified_because=why, rows=rows[:2000], rows_truncated=len(rows) > 2000, export=export_summary,
+                verification_gap_count=sum(r['status'] in VERIFICATION_GAPS for r in rows),
+                difference_count=sum(r['status'] not in VERIFICATION_GAPS for r in rows),
                 proposed_corrections=proposals[:2000], corrections_applied=False, verified=status == 'verified')
+
+
+def presentation_row(row):
+    """Read-only correction of the exact historical unknown-date wording bug."""
+    if (row.get('status') == 'not_on_sharepoint_for_day' and
+            row.get('note') == 'On SharePoint the item is dated nothing (timezone unconfirmed).'):
+        return dict(row, status='source_day_unconfirmed',
+                    note='This item exists in SharePoint, but its business day was unconfirmed in the recorded capture. Recheck SharePoint; keep the report row unchanged.')
+    return row
 
 
 def current(result):
@@ -528,6 +586,10 @@ def current(result):
     rec = result.get('source_reconciliation') or None
     if not rec or rec.get('stale'):
         return None
+    if rec.get('date_contract') is not None:
+        from hosting.source_date_contracts import receipt_contract_current
+        if not receipt_contract_current(rec['date_contract']):
+            return None
     bound = rec.get('bound_to') or {}
     if not bound.get('file_hash') or bound.get('file_hash') != result.get('file_hash'):
         return None

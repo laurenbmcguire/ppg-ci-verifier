@@ -678,7 +678,7 @@
   }
   const REC = {verified: 'Matches SharePoint item by item', discrepancies: 'Differs from SharePoint', incomplete: 'SharePoint coverage incomplete: not verified', unverified: 'Not verified'};
   const REC_ROW = {value_differs: 'Value differs', missing_from_report: 'On SharePoint, not in the report', not_on_sharepoint: 'Not on SharePoint',
-    not_on_sharepoint_for_day: 'On SharePoint for another day', report_row_without_item_id: 'No item ID', item_listed_twice: 'Listed twice',
+    source_item_unconfirmed: 'Source capture incomplete', source_day_unconfirmed: 'On SharePoint; business day unconfirmed', not_on_sharepoint_for_day: 'On SharePoint for another day', report_row_without_item_id: 'No item ID', item_listed_twice: 'Listed twice',
     changed_since_export: 'Edited after the export', export_value_differs: 'Export differs from the list', export_item_not_on_sharepoint: 'Export item gone from the list'};
   // One card at the top: what the report is, its totals, the source verdict and what is left to do.
   function reviewCard(r) {
@@ -715,7 +715,7 @@
     const btn = h('button', {type: 'button', class: 'btn small', disabled: can ? null : '', title: can ? 'Read-only: nothing on SharePoint is changed' : 'Choose the client and job first', onclick: run}, x ? 'Reconcile again' : 'Reconcile with SharePoint');
     if (!x) return h('div', {class: 'spjob none'}, h('span', {class: 'spjob-tag'}, 'Source'), h('span', {}, 'Not checked against the live SharePoint list yet.'), btn);
     const c = x.coverage || {};
-    const rows = x.rows || [];
+    const rows = (x.rows || []).map(fdPresentationRow);
     const stale = (r.review?.sharepoint || {}).status === 'stale';
     const verified = r.review?.sharepoint?.source_verified === true && x.status === 'verified' && !stale && !(r.holds || []).some(hold => String(hold.code || '').startsWith('source_'));
     const label = stale ? 'Re-check needed: this check was made for an earlier version' : verified ? REC[x.status] || x.status : r.review?.sharepoint?.message || 'Current exact-source verification is unavailable';
@@ -734,7 +734,7 @@
         try { await api('/api/sharepoint/confirm-columns', mappingRequest); await run({target: e.target}); }
         catch (err) { toast(err.message, true); e.target.disabled = false; } }}, `Confirm ${confirm.map(([f, m]) => `${f} = ${m.column}`).join(', ')}`) : null,
       confirm.length && !mappingRequest.site_id ? h('p', {class: 'note'}, 'Column confirmation unavailable: exact source site identity is missing.') : null,
-      rows.length ? h('details', {class: 'recrows', open: ''}, h('summary', {}, `${rows.length} difference${rows.length === 1 ? '' : 's'} from SharePoint` + (x.proposed_corrections?.length ? ' · the fixes are in the issues below' : '')),
+      rows.length ? h('details', {class: 'recrows', open: ''}, h('summary', {}, `${rows.filter(d => !['source_day_unconfirmed','source_item_unconfirmed'].includes(d.status)).length} differences · ${rows.filter(d => ['source_day_unconfirmed','source_item_unconfirmed'].includes(d.status)).length} verification gaps` + (x.proposed_corrections?.length ? ' · the fixes are in the issues below' : '')),
         h('table', {}, h('thead', {}, h('tr', {}, ...['What', 'Item', 'Where', 'Field', 'Report', 'SharePoint'].map(t => h('th', {}, t)))),
           h('tbody', {}, ...rows.slice(0, 300).map(d => h('tr', {},
             h('td', {}, REC_ROW[d.status] || d.status, d.note ? h('small', {}, ' ' + d.note) : null),
@@ -2659,7 +2659,12 @@
       message, candidates.length ? confirm : null, compare);
   }
   // One difference between the report and SharePoint, in plain words.
+  function fdPresentationRow(row) {
+    return row.status === 'not_on_sharepoint_for_day' && row.note === 'On SharePoint the item is dated nothing (timezone unconfirmed).'
+      ? {...row, status:'source_day_unconfirmed', note:'This item exists in SharePoint, but its business day was unconfirmed in the recorded capture. Recheck SharePoint; keep the report row unchanged.'} : row;
+  }
   function fdDifferenceText(row) {
+    row = fdPresentationRow(row);
     const v = x => x == null ? 'unknown' : x === '' ? 'blank' : String(x);
     const where = [row.sheet, row.row ? 'row ' + row.row : null].filter(Boolean).join(' ');
     const item = row.item != null && row.item !== '' ? `SharePoint item ${row.item}` : null;
@@ -2670,6 +2675,8 @@
       export_value_differs: `${at}: ${field} is ${v(row.report)} in the report but ${v(row.sharepoint)} in SharePoint${item && where ? ` (${item})` : ''}.`,
       changed_since_export: `${item || at}: ${field} was changed in SharePoint after this report was made (now ${v(row.sharepoint)}).`,
       missing_from_report: `${item || 'A SharePoint item'} is in SharePoint for this day but missing from the report.`,
+      source_item_unconfirmed: `${at}: ${item || 'this item'} could not be confirmed because the SharePoint capture is incomplete.`,
+      source_day_unconfirmed: `${at}: ${item || 'this item'} exists in SharePoint, but its business day could not be confirmed.`,
       not_on_sharepoint_for_day: `${at}: this row is not in SharePoint for this day${item && where ? ` (${item})` : ''}.`,
       not_on_sharepoint: `${at}: this row is not in SharePoint${item && where ? ` (${item} does not exist in the list)` : ''}.`,
       item_listed_twice: `${at}: duplicate row. ${item || 'The same SharePoint item'} appears more than once in the report.`,
@@ -2685,8 +2692,10 @@
   function fdRowValues(sheet, rowNo) {
     const g = state.grid; if (!g || g.sheet !== sheet || !rowNo || !Array.isArray(g.rows)) return '';
     const row = g.rows[rowNo - 1]; if (!row) return '';
-    let head = null;
-    for (let i = Math.min(rowNo - 2, 9); i >= 0; i--) { const cand = g.rows[i] || []; if (cand.filter(x => typeof x === 'string' && x.trim() && isNaN(Number(x))).length >= 3) { head = cand; break; } }
+    // Only parsed table headers are labels. A previous data row is never a header.
+    const tableHeaders = (state.report?.sheets || []).find(s => s.name === sheet)?.tables || [];
+    const headerRow = tableHeaders.map(t => t.header_row).filter(n => Number.isInteger(n) && n > 0 && n < rowNo).sort((a,b) => b-a)[0];
+    const head = headerRow ? g.rows[headerRow - 1] : null;
     const parts = [];
     row.forEach((value, i) => { if (value == null || String(value).trim() === '' || parts.length >= 7) return; const text = String(value); if (/^https?:/i.test(text)) return;
       parts.push(`${head && head[i] ? String(head[i]).trim() : 'Column ' + (i + 1)}: ${text.slice(0, 40)}`); });
@@ -2703,7 +2712,9 @@
     const bound = rec.bound_to || {}, current = !rec.stale && bound.file_hash === r.file_hash && !!bound.checker_version && bound.checker_version === r.checker_version;
     const sourceHolds = (r.holds || []).filter(hold => String(hold.code || '').startsWith('source_'));
     const verified = fdSourceVerified(r);
-    const differences = (rec.rows || []).filter(row => row.status && row.status !== 'matched');
+    const gapStatuses = new Set(['source_day_unconfirmed','source_item_unconfirmed']);
+    const gaps = (rec.rows || []).map(fdPresentationRow).filter(row => gapStatuses.has(row.status));
+    const differences = (rec.rows || []).map(fdPresentationRow).filter(row => row.status && row.status !== 'matched' && !gapStatuses.has(row.status));
     const complete = fdSourceComplete(r);
     // "No" needs the same complete, current evidence as "Yes": a difference read through an unconfirmed column or an
     // incomplete read may not be real, so it is listed as unconfirmed instead
@@ -2718,16 +2729,16 @@
     if (rows.duplicate_report_rows) totals.push(`${rows.duplicate_report_rows} duplicate row${rows.duplicate_report_rows === 1 ? '' : 's'} in the report.`);
     const checking = !verified && !differs && (state.fdReconciling || (typeof fdAutoReconcile === 'function' && state.report === r && fdAutoReconcile(r)));
     const possible = !verified && !differs && differences.length > 0;
-    const spIssues = typeof allIssues === 'function' && r.review ? allIssues(r.review).filter(i => String(i.source || '').startsWith('SharePoint') || String(i.code || '').startsWith('sharepoint_')) : [];
+    const spIssues = typeof allIssues === 'function' && r.review ? allIssues(r.review).filter(i => !i.verification_gap).filter(i => String(i.source || '').startsWith('SharePoint') || String(i.code || '').startsWith('sharepoint_')) : [];
     const failed = state.fdAutoSPError?.key === r.file_hash + ':' + r.check_hash ? state.fdAutoSPError.message : null;
     const kinds = new Map(); for (const row of differences) kinds.set(row.status, (kinds.get(row.status) || 0) + 1);
     const kindText = {value_differs: 'values differ from SharePoint', export_value_differs: 'values differ from SharePoint', changed_since_export: 'changed on SharePoint since the export',
-      missing_from_report: 'on SharePoint but missing from the report', not_on_sharepoint_for_day: 'not on SharePoint for this day', not_on_sharepoint: 'not on SharePoint at all',
+      source_item_unconfirmed: 'not yet confirmed because source capture is incomplete', source_day_unconfirmed: 'on SharePoint with an unconfirmed business day', missing_from_report: 'on SharePoint but missing from the report', not_on_sharepoint_for_day: 'not on SharePoint for this day', not_on_sharepoint: 'not on SharePoint at all',
       item_listed_twice: 'duplicate rows', report_row_without_item_id: 'rows with no SharePoint item number', wrong_list: 'from a different SharePoint list'};
     const quick = [...kinds].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${kindText[k] || String(k).replace(/_/g, ' ')}`);
     const answer = verified ? 'Matches SharePoint' : differs ? `Does not match SharePoint · ${differences.length}${rec.rows_truncated ? '+' : ''} ${differences.length === 1 ? 'difference' : 'differences'}`
-      : checking ? 'Checking SharePoint…' : possible ? `${differences.length} possible ${differences.length === 1 ? 'difference' : 'differences'} from SharePoint` : spIssues.length ? `${spIssues.length} ${spIssues.length === 1 ? 'difference' : 'differences'} from SharePoint` : failed ? 'SharePoint could not be checked' : 'SharePoint check is not complete';
-    return h('details', {class: 'fd-comparison ' + (verified ? 'ok' : differs || spIssues.length ? 'bad' : 'unknown'), open: differs || possible || (!verified && spIssues.length > 0) || null},
+      : checking ? 'Checking SharePoint…' : gaps.length ? `SharePoint verification incomplete · ${gaps.length} ${gaps.length === 1 ? 'gap' : 'gaps'}` : possible ? `SharePoint verification incomplete · ${differences.length} ${differences.length === 1 ? 'item' : 'items'} to check` : spIssues.length ? `${spIssues.length} ${spIssues.length === 1 ? 'difference' : 'differences'} from SharePoint` : failed ? 'SharePoint could not be checked' : 'SharePoint check is not complete';
+    return h('details', {class: 'fd-comparison ' + (verified ? 'ok' : differs || (!possible && spIssues.length) ? 'bad' : 'unknown'), open: differs || possible || (!verified && spIssues.length > 0) || null},
       h('summary', {}, verified ? icon('ok', 15) : differs ? icon('x', 15) : checking ? h('span', {class: 'spin'}) : icon('warn', 15), ' ', answer),
       (differs || possible) && quick.length ? h('p', {class: 'fd-sp-quick'}, quick.join(' · ') + '.') : null,
       failed && !checking ? h('p', {class: 'fd-hint'}, failed, ' ', h('button', {type: 'button', class: 'fd-linkbtn', onclick: () => { state.fdAutoSPError = null; fdReconcile(); }}, 'Try again')) : null,
@@ -2739,8 +2750,12 @@
         null) : null,
       !verified && !differs && !checking ? h('p', {class: 'fd-hint'}, current && rec.rows ? `SharePoint was read, but part of the comparison could not be confirmed${sp.message ? ': ' + String(sp.message).split('. ')[0] + '.' : '.'}`
         : (r.assignment || {}).needs_person ? 'Choose the client and job first; then SharePoint is checked automatically.' : 'SharePoint has not answered for this report yet.') : null,
-      possible ? h('section', {}, h('h3', {}, 'What is different'),
-        h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Differences from SharePoint'}, differences.map(row => h('li', {}, fdDifferenceText(row), row.note && /dated/.test(row.note) ? ' ' + row.note : '',
+      gaps.length ? h('section', {}, h('h3', {}, `Verification gaps (${gaps.length})`),
+        h('p', {class: 'fd-hint'}, 'These are not confirmed report errors. Keep the rows unchanged and complete the source check.'),
+        h('ul', {class: 'fd-difference-list'}, gaps.map(row => h('li', {}, fdDifferenceText(row), row.note ? ' ' + row.note : '',
+          row.url ? [' ', h('a', {href: row.url, target: '_blank', rel: 'noopener'}, 'Open in SharePoint')] : null, fdRowLine(row.sheet,row.row))))) : null,
+      possible ? h('section', {}, h('h3', {}, 'What needs verification'),
+        h('ul', {class: 'fd-difference-list', tabindex: '0', 'aria-label': 'Differences from SharePoint'}, differences.map(row => h('li', {}, fdDifferenceText(row), row.note && (['source_day_unconfirmed','source_item_unconfirmed'].includes(row.status) || /dated/.test(row.note)) ? ' ' + row.note : '',
           row.url ? [' ', h('a', {href: row.url, target: '_blank', rel: 'noopener'}, 'Open in SharePoint')] : null, fdRowLine(row.sheet, row.row)))),
         h('p', {class: 'fd-hint'}, 'Earlier comparison, not verified: SharePoint could not be fully confirmed, so some of these may not be real differences.')) : null,
       !verified && !differs && !possible && spIssues.length ? h('section', {}, h('h3', {}, 'What is different'),
@@ -4233,7 +4248,7 @@
           h('div', {}, h('b', {class: counts.missing ? 'bad' : ''}, fmt(counts.missing)), h('span', {}, 'Yesterday’s reports missing')),
           h('div', {}, h('b', {class: counts.hold ? 'bad' : ''}, fmt(counts.hold)), h('span', {}, 'On Hold')),
           h('div', {}, h('b', {}, fmt(counts.send)), h('span', {}, 'Still to send')),
-          h('div', {}, h('b', {}, fmt(rows.reduce((n, r) => n + (sp[r.job]?.today || 0), 0))), h('span', {}, 'Scans today so far'))),
+          h('div', {}, h('b', {}, rows.some(r => !sp[r.job] || sp[r.job].error || sp[r.job].today == null) ? 'Unknown' : fmt(rows.reduce((n, r) => n + sp[r.job].today, 0))), h('span', {}, 'Scans today so far'))),
         h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'Jobs')),
           rows.length ? h('div', {class: 'tablewrap'}, h('table', {class: 'keys pdays'},
             h('thead', {}, h('tr', {}, ['Job', 'Yesterday’s report', 'Today so far', 'Today’s report', ''].map(x => h('th', {}, x)))),

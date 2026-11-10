@@ -62,6 +62,8 @@ def sharepoint_days(job, start, end, schedule=None):
     if not data:
         return {}, f'No "Data #{job}" list was found on SharePoint.'
     _, lst, names, items = data
+    if any(sharepoint._item_day(it, schedule) is None for it in items):
+        return {}, 'SharePoint activity is incomplete: some business dates are unconfirmed. Totals are unknown; no zero was inferred.'
     by_day = defaultdict(list)
     for it in items:
         d = sharepoint._item_day(it, schedule)
@@ -235,6 +237,9 @@ def day_scans(job, day, schedule=None):
     data = sharepoint._list_items(job)
     if not data:
         return dict(found=False)
+    if any(sharepoint._item_day(it, schedule) is None for it in data[3]):
+        return dict(found=True, complete=False, today=None, yesterday=None, last=None, shifts=None,
+                    error='SharePoint activity is incomplete: business dates could not be confirmed. Counts are unknown, not zero.')
     d0 = date.fromisoformat(day)
     prev = (d0 - timedelta(days=1)).isoformat()
     out = dict(found=True, list=data[1].get('displayName'), site=data[0], today=0, yesterday=0, last=None, shifts={})

@@ -496,6 +496,9 @@ class handler(BaseHTTPRequestHandler):
         except (SharePointError, SharePointNotConfigured) as exc:
             with self.store().session() as directory:
                 return SpreadsheetInbox(directory).record_lookup(file_hash, 'error', str(exc), job, day)
+        from hosting import photo_embed
+        with self.store().session() as directory:
+            photo_embed.use_stored_certificate(SpreadsheetInbox(directory).setting(photo_embed.CERT_KEY, None))
         has_ids = any((rec.get('source') or {}).get('item') for rec in item.get('records') or [])
         if (rv.get('day') or day) and (has_ids or item.get('dataset_selection', {}).get('identified_records')):
             try:
@@ -554,6 +557,9 @@ class handler(BaseHTTPRequestHandler):
             binding = None
             coverage_note = str(exc)
         if job and day and binding and sharepoint_configured():
+            from hosting import photo_embed
+            with self.store().session() as directory:
+                photo_embed.use_stored_certificate(SpreadsheetInbox(directory).setting(photo_embed.CERT_KEY, None))
             from hosting.sharepoint import list_history, recent_exports, _list_items, SharePointError
             def add(entries, label):
                 have = {h['day'] for h in history}
@@ -1297,6 +1303,9 @@ class handler(BaseHTTPRequestHandler):
                 if not sharepoint.configured():
                     raise Conflict('SharePoint is not connected.')
                 binding = sharepoint.assignment_identity(a)
+                from hosting import photo_embed
+                with self.store().session() as directory:
+                    photo_embed.use_stored_certificate(SpreadsheetInbox(directory).setting(photo_embed.CERT_KEY, None))
                 snap = reconcile.snapshot(a.get('site'), binding['list_id'], schedule=schedule, site_id=binding['site_id'])
                 with self.store().session() as directory:
                     item = SpreadsheetInbox(directory).source_reconcile(file_hash, snap, rv['day'], expected_check_hash=found.get('check_hash'), expected_assignment=a)
