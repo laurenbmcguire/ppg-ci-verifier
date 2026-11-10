@@ -2109,6 +2109,7 @@
   function fdHoldAction(r, st) {
     // Keep recovery reachable without repeating the hold's long explanation.
     if (st.next === 'recheck') return h('button', {type: 'button', class: 'btn primary', onclick: fdRecheck}, 'Re-check this report');
+    if (st.next === 'reconcile') return fdSourceRefresh(r);
     if (st.next === 'client') return h('button', {type: 'button', class: 'btn primary', onclick: e => assignForm(r, e.currentTarget)}, 'Choose client and job');
     return null;
   }
@@ -2116,7 +2117,7 @@
     const box = (title, text, button) => h('div', {class: 'fd-next ' + st.tone}, h('b', {}, title), text ? h('p', {}, text) : null, button);
     if (st.next === 'recheck') return box('Checks out of date', st.why, h('button', {type: 'button', class: 'btn primary', onclick: fdRecheck}, 'Re-check this report'));
     if (st.next === 'client') return box('Choose the client and job', st.why, h('button', {type: 'button', class: 'btn primary', onclick: e => assignForm(r, e.currentTarget)}, 'Choose client and job'));
-    if (st.next === 'reconcile') return box(st.text, st.why, h('button', {type: 'button', class: 'btn', onclick: () => fdReconcile()}, 'Check against SharePoint'));
+    if (st.next === 'reconcile') return box(st.text, st.why, fdSourceRefresh(r));
     return null;
   }
   function fdClean(r, st) {
@@ -2608,11 +2609,79 @@
     };
     setTimeout(attempt, 0); return true;
   }
-  async function fdReconcile() {
-    toast('Comparing every record with its SharePoint item…');
-    try { await api('/api/spreadsheets/sharepoint', {file_hash: state.report.file_hash}); await openReport(state.report.file_hash, true); loadList();
-      const sp = state.report.review.sharepoint || {}; toast(sp.status === 'match' ? 'Matches SharePoint item by item.' : sp.message || 'SharePoint compared.');
-    } catch (e) { toast(e.message, true); }
+  function fdSourceRefreshReason(r) {
+    if (!r || versionReadOnly(r)) return 'Open the current working copy to refresh SharePoint.';
+    const a = r.assignment || {};
+    if (a.needs_person || !a.site_id || !a.list_id) return 'Choose the client and job with an exact SharePoint site and list before refreshing.';
+    if (state.health?.sharepoint_configured === false) return 'SharePoint is not connected. Ask an administrator to connect the assigned source, then reopen this report.';
+    return '';
+  }
+  function fdSourceRefresh(r) {
+    const binding = JSON.stringify(reviewBinding(r)), assignment = JSON.stringify(r.assignment), reason = fdSourceRefreshReason(r);
+    const pending = !!state.fdReconciling;
+    return h('div', {class: 'fd-source-refresh'},
+      h('button', {type: 'button', class: 'btn fd-source-refresh-button', disabled: !!reason || pending || !!state.rechecking || !!state.busy || !!state.decisionPending || !!state.aiProposalOperation,
+        onclick: () => fdReconcile(r, binding, assignment)}, pending ? 'Refreshing SharePoint…' : 'Refresh SharePoint only'),
+      h('p', {class: 'fd-hint'}, reason || 'Read the assigned SharePoint source again for this exact report. Report rows, original files and saved versions stay unchanged. No workbook re-check, AI, approval or sending.'));
+  }
+  async function fdReconcile(report, binding, assignment) {
+    const hash = report?.file_hash;
+    const current = () => !!hash && state.report === report && state.selected === hash &&
+      JSON.stringify(reviewBinding(report)) === binding && JSON.stringify(report.assignment) === assignment && !versionReadOnly(report);
+    if (!current()) { toast('The report changed. Reopen its current comparison before refreshing SharePoint.', true); return; }
+    const reason = fdSourceRefreshReason(report);
+    if (reason) { toast(reason, true); return; }
+    if (state.fdReconciling || state.fdAutoSPWaiting || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation) return;
+    if (state.gridDraft && gridDirty() || [...document.querySelectorAll('#side input:not([type="checkbox"]):not([type="radio"]), #side textarea, .fd-review-dialog input:not([type="checkbox"]), .fd-review-dialog textarea')].some(node => node.value !== node.defaultValue)) {
+      toast('Save or discard your draft before refreshing SharePoint. Your text and report rows are unchanged.', true); return;
+    }
+    const controls = new Map(), key = hash + ':' + report.check_hash;
+    const operation = {lock: () => {
+      if (!current()) return;
+      document.querySelectorAll('#side button, #side input, #side textarea, #side select, #fd-preview-btn, .fd-mode-selector button, .fd-review-dialog button, .fd-review-dialog input, .fd-review-dialog textarea, dialog .primary').forEach(node => {
+        if (!controls.has(node)) controls.set(node, node.disabled);
+        node.disabled = true;
+      });
+    }};
+    state.fdReconciling = operation; state.rechecking = operation;
+    state.fdAutoSP ||= {}; state.fdAutoSP[key] = true;
+    state.fdAutoSPError = null;
+    let posted = false, failure = null;
+    try {
+      operation.lock(); drawSide();
+      const version = await api('/api/spreadsheets/working-copy?id=' + hash);
+      if (!current()) return;
+      if (version?.requested_hash !== hash || version.status !== 'current' || version.working_hash && version.working_hash !== hash) throw Error('This is no longer the current working copy. Reopen the report before refreshing.');
+      posted = true;
+      try {
+        const answer = await api('/api/spreadsheets/sharepoint', {file_hash: hash});
+        if (answer?.item?.file_hash !== hash || answer.pending || answer.status === 'pending') failure = Error('Source completion was not confirmed.');
+      }
+      catch (error) { failure = error; }
+      if (!current()) return;
+      // A transport answer is not a receipt. Read the exact stored report once, never repeat the POST.
+      const fresh = await fillPages(await api('/api/spreadsheet?id=' + hash));
+      if (!current()) return;
+      if (fresh?.file_hash !== hash || JSON.stringify(fresh.assignment) !== assignment) throw Error('The source receipt no longer belongs to this report assignment. Reopen the report.');
+      if (failure) {
+        state.fdAutoSPError = {key: hash + ':' + fresh.check_hash, message: 'Refresh outcome is unconfirmed. The recorded source receipt was read; no retry was sent. Reopen the report before deciding whether to refresh again.'};
+      }
+      fresh.version_view = report.version_view;
+      state.fdAutoSP[hash + ':' + fresh.check_hash] = true;
+      state.report = fresh; state.fixes = null; state.fdSummaryCache = null;
+      drawReport(); loadFixes(hash); loadList();
+      toast(failure ? state.fdAutoSPError.message : 'Recorded SharePoint receipt loaded. See the comparison for matches, differences and remaining verification gaps.', !!failure);
+    } catch (error) {
+      if (current()) {
+        state.fdAutoSPError = {key, message: (posted ? 'Refresh outcome is unconfirmed. No retry was sent. Reopen the report to read its source receipt. ' : '') + error.message};
+        toast(state.fdAutoSPError.message, true);
+      }
+    } finally {
+      if (state.fdReconciling === operation) state.fdReconciling = null;
+      if (state.rechecking === operation) state.rechecking = false;
+      if (!state.busy && !state.decisionPending && !state.aiProposalOperation && !state.rechecking) controls.forEach((disabled, node) => { if (node.isConnected) node.disabled = disabled; });
+      if (state.selected === hash && state.report?.file_hash === hash) drawSide();
+    }
   }
 
   // ---------- history and sources
@@ -2766,7 +2835,8 @@
     return h('details', {class: 'fd-comparison ' + (verified ? 'ok' : differs || (!possible && spIssues.length) ? 'bad' : 'unknown'), open: differs || possible || (!verified && spIssues.length > 0) || null},
       h('summary', {}, verified ? icon('ok', 15) : differs ? icon('x', 15) : checking ? h('span', {class: 'spin'}) : icon('warn', 15), ' ', answer),
       (differs || possible) && quick.length ? h('p', {class: 'fd-sp-quick'}, quick.join(' · ') + '.') : null,
-      failed && !checking ? h('p', {class: 'fd-hint'}, failed, ' ', h('button', {type: 'button', class: 'fd-linkbtn', onclick: () => { state.fdAutoSPError = null; fdReconcile(); }}, 'Try again')) : null,
+      failed && !checking ? h('p', {class: 'fd-hint', role: 'status'}, failed) : null,
+      fdSourceRefresh(r),
       verified ? h('p', {}, 'Every record and quantity in this report matches SharePoint.') : null,
       differs ? h('section', {}, h('h3', {}, `What is different (${differences.length}${rec.rows_truncated ? '+' : ''})`),
         totals.length ? h('ul', {class: 'fd-difference-totals'}, totals.map(t => h('li', {}, t))) : null,
