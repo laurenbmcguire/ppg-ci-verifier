@@ -244,12 +244,18 @@ def proposals(result, filename, raw, sharepoint_rows=None, context=None):
     if rec:
         for c in rec.get('proposed_corrections') or []:
             if c.get('identity_verified') is True and c.get('sheet') and c.get('column') and c.get('row') and c.get('after') not in (None, 'blank'):
-                v = _num(c['after']) if _num(c['after']) is not None else c['after']
+                # Quantity cells are numeric; identifiers and other text retain their exact spelling.
+                # Keep the source literal in the proposal/receipt so the exact source guard can verify it.
+                v = _num(c['after']) if c.get('field') in _rec.QTY else c['after']
+                if v is None or isinstance(v, bool):
+                    continue
                 n = len(out)
                 add(c['sheet'], f'{col_letter(int(c["column"]) - 1)}{c["row"]}', v,
                     f'SharePoint item {c.get("item")} shows {c["after"]} for {c.get("field")}; the report shows {c.get("before")}.', 'SharePoint')
                 if len(out) > n:   # bound to the SharePoint read it came from: a newer read makes it stale
-                    out[-1].update(snapshot_id=rec.get('snapshot_id'), captured_at=rec.get('captured_at'), item=c.get('item'), field=c.get('field'),
+                    source_after = str(c['after'])
+                    out[-1].update(after=source_after, id=_pid(out[-1]['sheet'], out[-1]['cell'], source_after),
+                                   snapshot_id=rec.get('snapshot_id'), captured_at=rec.get('captured_at'), item=c.get('item'), field=c.get('field'),
                                    source_value=c.get('after'))
 
     # 1c. Blanks on record rows that the report's own SharePoint export fills (matched by SharePoint item ID).

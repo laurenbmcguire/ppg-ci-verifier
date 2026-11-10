@@ -30,7 +30,7 @@
     let data = {};
     try { data = await response.json(); } catch (e) { /* non-JSON error page */ }
     if (response.status === 401 && data.signin) { showSignIn(); throw new Error('Sign in to continue.'); }
-    if (!response.ok) throw new Error(data.error || `The server answered ${response.status}. Try again in a moment.`);
+    if (!response.ok) { const error = new Error(data.error || `The server answered ${response.status}. Try again in a moment.`); error.httpStatus = response.status; throw error; }
     return data;
   }
   let toastTimer;
@@ -1674,6 +1674,18 @@
   // The report reloads on the new version, so fixed errors drop off and only what is left stays listed.
   const fdReadyFix = it => it.fix && it.selectable && ['open', 'selected'].includes(it.state) && (it.evidence === 'source' || (!it.fp && ['mechanical', 'ai'].includes(it.evidence))) ? it.fix : null;
   const fdCanAI = it => !!fdReadyFix(it) || !!(it.fp && it.state === 'open' && state.aiOn);
+  function fdUniqueAIProposals(proposals) {
+    const cells = new Map();
+    const fields = ['before', 'after', 'kind', 'source', 'snapshot_id', 'item', 'field', 'change_set', 'change_set_size'];
+    for (const p of proposals) {
+      const key = JSON.stringify([p.sheet, String(p.cell).toUpperCase()]), prior = cells.get(key);
+      if (prior && fields.some(field => JSON.stringify(prior[field] ?? null) !== JSON.stringify(p[field] ?? null))) {
+        throw new Error(`Conflicting suggestions for ${p.sheet}!${p.cell}. Review this cell manually. No save was started.`);
+      }
+      if (!prior) cells.set(key, p);
+    }
+    return [...cells.values()];
+  }
   async function fdAIFixNow(scope) {
     const report = state.report; if (!report) return;
     const binding = reviewBinding(report), hash = report.file_hash;
@@ -1699,7 +1711,8 @@
         }
         proposals.push(...answer.proposals); skipped.push(...(answer.skipped || []));
       }
-      const cells = new Set(), accepted = proposals.filter(p => { const k = p.sheet + '!' + p.cell; if (cells.has(k)) return false; cells.add(k); return true; });
+      if (state.report !== report || JSON.stringify(reviewBinding(report)) !== JSON.stringify(binding)) throw new Error('The report changed while suggestions were prepared. Reopen it before applying. No save was started.');
+      const accepted = fdUniqueAIProposals(proposals), cells = new Set(accepted.map(p => p.sheet + '!' + p.cell));
       const why = new Map(skipped.map(x => [x.finding_id, String(x.reason || '')]));
       const fixedIds = new Set(scope.filter(it => it.cell && cells.has(it.sheet + '!' + it.cell)).map(it => it.key).concat(accepted.map(p => p.finding_id)));
       const unfixed = scope.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state) && !fixedIds.has(it.key)).map(it => ({key: it.key, where: [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ') || 'Whole report',
@@ -1709,19 +1722,18 @@
       const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
       const capture = captureCorrections(accepted, dec, {}, binding, report);
       state.fdAIRun = {hash, total: todo.length, running: true, saving: accepted.length}; drawSide();
-      const next = await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true});
-      if (!next) throw new Error('The fixes could not be saved. Nothing was changed.');
+      const savedItem = await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true, returnReceipt: true, throwOnError: true});
+      const next = savedItem.file_hash;
       state.fdReviewSelection = null;
       const done = accepted.map(p => { const it = todo.find(x => x.key === p.finding_id); return {where: `${p.sheet} cell ${p.cell}`, text: it?.text || it?.reason || '', before: p.before, after: p.after}; });
-      // Check the saved version really holds every change before saying so.
-      for (let i = 0; state.report?.file_hash !== next && i < 60; i++) await new Promise(r => setTimeout(r, 250));   // the new version is loading
-      if (state.report?.file_hash !== next) await openReport(next, true).catch(() => {});
-      const saved = state.report?.file_hash === next ? (state.report.fixed_from?.changes || []) : [];
-      const has = p => saved.some(c => c.sheet === p.sheet && c.cell === p.cell && String(c.after) === String(p.after));
+      // The successful save receipt is authoritative even if refreshing the list or report fails.
+      // Never turn a committed version into a failed save, or repeat the mutation to recover a read.
+      const saved = savedItem.fixed_from?.file_hash === hash ? (savedItem.fixed_from.changes || []) : [];
+      const has = p => saved.some(c => c.sheet === p.sheet && c.cell === p.cell && String(c.before) === String(p.before) && String(c.after) === String(p.after));
       const confirmed = accepted.filter(has).length;
       state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed, tried: scope.length, skipped, unfixed, from: revisionOf(report), items: done};
       document.body.classList.add('fd-panel-open');
-      fdAIDoneDialog(state.fdAIRun, state.report?.file_hash === next ? state.report : null);
+      fdAIDoneDialog(state.fdAIRun, savedItem);
     } catch (e) { state.fdAIRun = {hash, done: true, error: e?.message || String(e)}; toast('AI fix did not finish: ' + state.fdAIRun.error, true); }
     finally { if (state.report?.file_hash === state.fdAIRun?.hash) drawSide(); }
   }
@@ -3303,15 +3315,18 @@
   }
   async function applyFixes(accepted, dec, edits, opts = {}) {
     const captured = correctionSnapshots.get(accepted);
-    if (!captured?.binding?.expected_check_hash) { toast('Reopen the correction preview before applying.', true); return null; }
+    if (!captured?.binding?.expected_check_hash) { const error = new Error('Reopen the correction preview before applying. No save was started.'); if (opts.throwOnError) throw error; toast(error.message, true); return null; }
     ({accepted, dec, edits} = captured);
     const binding = captured.binding;
-    if (state.busy || state.decisionPending || state.rechecking || state.aiProposalOperation) return; state.busy = true; drawFixes(); updateDownloads();
+    if (state.busy || state.decisionPending || state.rechecking || state.aiProposalOperation) { const error = new Error('Another step is still running. No save was started. Wait for it to finish.'); if (opts.throwOnError) throw error; toast(error.message, true); return null; }
+    state.busy = true; drawFixes(); updateDownloads();
     toast('Building the fixed copy with your changes…');
+    let requestStarted = false, savedItem = null;
     try {
       const changes = accepted.map(f => {
         const after = dec[f.id]?.after ?? f.after;
         return {id: f.id, sheet: f.sheet, cell: f.cell, before: f.before, after, reason: f.reason, source: f.source, snapshot_id: f.snapshot_id, item: f.item, field: f.field,
+          change_set: f.change_set, change_set_size: f.change_set_size,
           kind: f.kind === 'auto' ? 'auto' : after === f.after ? f.kind : (f.kind === 'number' && after.trim() !== '' && !isNaN(Number(after)) ? 'number' : 'text')};
       });
       for (const e of Object.values(edits || {})) {
@@ -3319,7 +3334,10 @@
         changes.push({sheet: e.sheet, cell: e.cell, before: e.before, after: e.after, reason: e.reason || 'Edited by reviewer', source: e.source === 'Claude' ? 'Claude (chat)' : 'Your edit', kind: e.kind === 'auto' ? 'auto' : numeric ? 'number' : 'text',
           change_set: e.change_set || undefined, change_set_size: e.change_set_size || undefined});
       }
+      requestStarted = true;
       const answer = await api('/api/spreadsheets/apply-fixes', {...binding, changes, ...(opts.recommendedOnly ? {recommended_only: true} : {})});
+      if (!answer?.item?.file_hash) throw new Error('The server did not return a saved-version receipt.');
+      savedItem = answer.item;
       if (opts.gridDraft && state.gridDraft === opts.gridDraft) state.gridDraft = null;
       if (state.celebrate) state.celebrate.hash = answer.item.file_hash;
       // Do not carry local review markers into a new file or erase edits made while this request ran.
@@ -3333,9 +3351,25 @@
       const existingVersion = answer.already_applied === true || answer.item.already_applied === true;
       const recordedChanges = answer.item.fixed_from?.changes;
       toast(`${existingVersion ? 'Opened the existing corrected version' : 'Saved the corrected version'} "${answer.item.filename}"${Array.isArray(recordedChanges) ? ` with ${plural(recordedChanges.length, 'recorded change')}` : ''}. ${existingVersion ? 'No new version was created. ' : ''}The original is unchanged.`);
-      if (opts.thenOpen !== false) { await loadList(); select(answer.item.file_hash); }
-      return answer.item.file_hash;
-    } catch (e) { state.celebrate = null; toast(e.message, true); return null; }
+      if (opts.thenOpen !== false) {
+        // These reads cannot undo the successful, committed save above.
+        try { await loadList(); } catch (error) { toast('The corrected version is saved, but the report list could not refresh. Open the saved copy or reload the list.', true); }
+        select(savedItem.file_hash);
+      }
+      return opts.returnReceipt ? savedItem : savedItem.file_hash;
+    } catch (e) {
+      state.celebrate = null;
+      if (savedItem) {
+        toast('The corrected version is saved, but the screen could not refresh. Open the saved copy or reload the report.', true);
+        return opts.returnReceipt ? savedItem : savedItem.file_hash;
+      }
+      // A lost response or server error does not prove the transaction failed. Never retry it here.
+      const error = requestStarted && (!e.httpStatus || e.httpStatus >= 500)
+        ? new Error('The save could not be confirmed. Reload this report and check its saved versions before trying again. ' + (e.message || '')) : e;
+      toast(error.message, true);
+      if (opts.throwOnError) throw error;
+      return null;
+    }
     finally { state.busy = false; if ($('fixes-block')) drawFixes(); }
   }
   // Take out extra copies of duplicate rows (new corrected version; original untouched). Accepted cell changes are saved first.
