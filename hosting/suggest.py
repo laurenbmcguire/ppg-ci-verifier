@@ -66,9 +66,35 @@ HEADER_WORDS = {'shift', 'area', 'auditor', 'identifier', 'part number', 'part n
                 'comments', 'condition', 'supplier', 'date', 'time', 'inspected', 'rejected', 'defect', 'recorded defect', 'project number'}
 
 
+def _empty(v):
+    return v in (None, '') or (isinstance(v, str) and not v.strip())
+
+
+def _cell(rows, r, c):
+    return rows[r][c] if r < len(rows) and c < len(rows[r]) else None
+
+
+def _summary_date_below(sheet, rows, r, c):
+    """The common daily summary has B4 Date, H4 Shift, M4 Area, with values in row 5.
+
+    This exact layout only identifies a value cell, not source authority. Other
+    header arrangements are ambiguous and must not create a horizontal date fix.
+    """
+    if _norm(sheet) != 'daily inspection summary' or (r, c) != (3, 1):
+        return False
+    header = {i: _norm(v) for i, v in enumerate(rows[r]) if not _empty(v)}
+    return (set(header) == {1, 7, 12} and header[7] == 'shift' and header[12] == 'area'
+            and any(w == 'day' and rx.search(header[1]) for rx, w in DETAIL_LABELS))
+
+
 def blank_details(sources, ctx, add, col_letter):
-    """Label/value blocks ("Paying Client" | blank): suggest from the client, job and day, or from a filled twin label."""
-    empty = lambda v: v in (None, '') or (isinstance(v, str) and not v.strip())
+    """Propose values for blank horizontal details or the supported vertical summary date.
+
+    A populated value, including a formula or invalid date, is not a blank. No
+    proposal changes the workbook; source checks and explicit application remain
+    the caller's responsibility.
+    """
+    empty = _empty
     found = {}
     for sheet, rows in sources:
         spots, offsets = [], Counter()
@@ -83,15 +109,29 @@ def blank_details(sources, ctx, add, col_letter):
                 what = next((w for rx, w in DETAIL_LABELS if rx.search(label)), None)
                 if not what:
                     continue
+                if what == 'day':
+                    if _summary_date_below(sheet, rows, r, c):
+                        value = _cell(rows, r + 1, c)
+                        spots.append(dict(sheet=sheet, row=r + 2, col=c + 1, c=c,
+                                          label=val.strip(), what=what,
+                                          filled=not empty(value), value=value))
+                        continue
+                    if ((_norm(sheet) == 'daily inspection summary' and (r, c) == (3, 1))
+                            or any(_norm(v) in ('shift', 'area') for v in row)):
+                        continue   # unknown summary layout or table header, not a horizontal blank
                 k = next((k for k in (1, 2, 3) if c + k < len(row) and not empty(row[c + k])), None)
                 if k and not _is_value(row[c + k], what):
                     k = None   # the next cell is another label, a header or a formula: not this field's value
+                if what == 'day' and not k and not empty(_cell(rows, r + 1, c)):
+                    continue   # possibly a vertical value; do not invent a horizontal target
                 if k:
                     offsets[k] += 1
                 spots.append(dict(sheet=sheet, row=r + 1, c=c, label=val.strip(), what=what, filled=bool(k), value=row[c + k] if k else None))
         step = offsets.most_common(1)[0][0] if offsets else 1   # where values sit on this tab (next cell, or two over)
         for sp in spots:
-            sp['col'] = sp['c'] + step + 1
+            sp.setdefault('col', sp['c'] + step + 1)
+            if not sp['filled'] and not empty(_cell(rows, sp['row'] - 1, sp['col'] - 1)):
+                continue   # an invalid value, label or formula must never be reported as blank
             found.setdefault(sp['what'], []).append(sp)
     for what, spots in found.items():
         twin = next((s['value'] for s in spots if s['filled'] and isinstance(s['value'], str) and s['value'].strip() and _is_value(s['value'], what)), None)   # "Client" filled, "Paying Client" blank
@@ -105,8 +145,8 @@ def blank_details(sources, ctx, add, col_letter):
         known = bool(twin) or what in ('day', 'prepared_by') or (ctx.get('verified') and what in ('client', 'job', 'worksite')) or what in ('job_type', 'description')
         for s in spots:
             if not s['filled']:
-                # data the app already has (the settled client and job, the report's own rows) is filled in, not just suggested
-                add(s['sheet'], f"{col_letter(s['col'] - 1)}{s['row']}", guess, f'"{s["label"]}" is blank. Filled in: {guess}. {why}',
+                # Even a known value is only proposed until an explicit apply succeeds.
+                add(s['sheet'], f"{col_letter(s['col'] - 1)}{s['row']}", guess, f'"{s["label"]}" is blank. Proposed: {guess}. {why}',
                     'Known detail' if known else 'Suggested', 'high' if known else 'medium', sure=True if known else None)
 
 
