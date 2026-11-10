@@ -7,7 +7,7 @@ from http.server import ThreadingHTTPServer
 ROOT=Path(__file__).resolve().parents[1]
 WIDTH=int(sys.argv[1]) if len(sys.argv)>1 else 1200
 MODE=sys.argv[2] if len(sys.argv)>2 else 'success'
-assert MODE in ('success','refresh-fail','backend-reject','lost-response','preview','reuse')
+assert MODE in ('success','refresh-fail','backend-reject','lost-response','preview','reuse','provider-failure')
 assert WIDTH in (1200,390), 'Only the two isolated test viewports are supported.'
 sys.path[:0]=[str(ROOT),str(ROOT/'tests')]
 for key in list(os.environ):
@@ -28,6 +28,9 @@ api_module.ai_review_configured=lambda: True
 provider_calls=[]
 def fake_provider(rows):
     provider_calls.append(rows)
+    if MODE == 'provider-failure':
+        from hosting.ai_review import AIReviewError
+        raise AIReviewError('Synthetic secret must not be exposed', category='provider_http', http_status=503)
     return {'fixes': [dict(finding_id=r['finding_id'], sheet=r['sheet'], cell=r['cell'], before=r['before'], after=' '.join(r['before'].split()), reason='Synthetic whitespace-only suggestion') for r in rows]}
 ai_proposals.ask=fake_provider
 from legacy_storage_fake import PostgresWorkspace
@@ -93,8 +96,10 @@ try:
     print(result.stdout);print(result.stderr,file=sys.stderr);assert result.returncode==0,result.returncode
     with store.session() as directory:
         box=SpreadsheetInbox(directory);parent=box.get(original_hash);assert box.download(original_hash)[1]==raw
-        if MODE=='backend-reject':
+        if MODE in ('backend-reject', 'provider-failure'):
             assert not parent.get('fixes_applied') and box.list()['count']==1
+            if MODE == 'provider-failure':
+                assert not apply_requests and len(provider_calls)==1 and not external
             print(json.dumps(dict(passed=True,mode=MODE,original_byte_identical=True,no_version_created=True)))
             sys.exit(0)
         if MODE=='reuse':

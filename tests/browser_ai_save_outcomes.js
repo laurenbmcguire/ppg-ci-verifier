@@ -35,6 +35,15 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
    assert.deepEqual(errors,[]);assert.deepEqual(external,[]);console.log(JSON.stringify({passed:true,mode,width,preview_and_cancel_no_write:true,exact_two_changes:true,one_apply_request:true}));return;
   }
   await button.click();
+  if(mode==='provider-failure'){
+   await page.locator('#fd-aidone').waitFor({timeout:20000});
+   const text=await page.locator('#fd-aidone').innerText();
+   assert.match(text,/provider rejected the request.*HTTP 503/);
+   assert.doesNotMatch(text,/Synthetic secret|Dex could not be reached|All 2 changes are applied|whole row or an earlier decision/);
+   assert.equal(writes.length,0);assert.equal(proposals.length,1);
+   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
+   console.log(JSON.stringify({passed:true,mode,width,truthful_provider_http:true,no_save:true}));return;
+  }
   if(mode==='backend-reject'||mode==='lost-response'){
    await page.locator('.fd-airun.bad').waitFor();const text=await page.locator('.fd-airun.bad').innerText();
    if(mode==='backend-reject')assert.match(text,/Synthetic source snapshot changed/);
