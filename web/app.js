@@ -887,6 +887,8 @@
     if (sp.status === 'stale') return {tone: 'amber', icon: 'warn', text: 'SharePoint check out of date', next: 'reconcile', why: sp.message};
     if (sp.status !== 'match') return {tone: 'amber', icon: 'warn', text: 'Not verified against SharePoint', next: 'reconcile',
       why: sp.status === 'day_level' ? sp.message : sp.status === 'incomplete' ? 'SharePoint could not be read completely, so the report is not verified. ' + (sp.message || '') : sp.status === 'unverified' ? sp.message || 'Some fields could not be compared.' : sp.status === 'differences' ? 'Differences from SharePoint are listed as blockers.' : 'The report has not been compared with SharePoint item by item yet.'};
+    if (r.checked_copy && !fdCheckedState(r).ready) return {tone: 'amber', icon: 'warn', text: 'Verification not complete', next: 'review', why: fdCheckedState(r).message};
+    if (r.checked_copy && fdCheckedState(r).ready) return {tone: 'green', icon: 'ok', text: '0 remaining detected errors', next: null};
     if (c.review) return {tone: 'amber', icon: 'warn', text: `${c.review} to review`, next: 'review'};
     if (r.approval && rv.approval_current) return {tone: 'green', icon: 'ok', text: 'Internally approved', next: 'send'};
     if (r.approval) return {tone: 'amber', icon: 'warn', text: 'Approval out of date', next: 'approve', why: 'It was approved on an earlier check run. Approve again if it still looks right.'};
@@ -1687,6 +1689,57 @@
     addEventListener('pointermove', move); addEventListener('pointerup', up);
   }
 
+  // A server-wide, exact-version result. Browser selections never clear errors.
+  function fdCheckedState(r, now = Date.now()) {
+    const p = r?.checked_copy;
+    if (!p) return {ready: false, message: 'Verification status is unavailable. Reload the report.'};
+    if (p.file_hash !== r.file_hash || p.check_hash !== r.check_hash) return {ready: false, message: 'The saved check changed. Reload this version.'};
+    if (!p.ready) return {ready: false, message: (p.reasons || []).join(' ') || 'Verification is not complete.'};
+    if (!Number.isFinite(Date.parse(p.expires_at)) || Date.parse(p.expires_at) <= now) return {ready: false, message: 'Source evidence expired. Recheck SharePoint explicitly before downloading a checked copy.'};
+    if (state.report !== r || state.busy || state.rechecking || state.reviewing || state.verifying || state.decisionPending || state.gridDraft || readyChanges().total) return {ready: false, message: 'Finish saving changes and recheck the current version.'};
+    return {ready: true, message: 'This saved version passed the available checks and current exact-source comparison. Original versions are unchanged. This is not an approval or a guarantee of every possible error.'};
+  }
+  async function fdDownloadChecked(r) {
+    const status = fdCheckedState(r);
+    if (!status.ready) { toast(status.message); drawSide(); return; }
+    const p = r.checked_copy, hash = r.file_hash, check = r.check_hash;
+    try {
+      // Construct the exact route from the bound identity, never a sibling URL.
+      const response = await fetch('/api/spreadsheets/download?id=' + encodeURIComponent(hash) + '&checked=1&check=' + encodeURIComponent(check));
+      if (!response.ok) {
+        let message = 'The checked copy is no longer available. Reload and review this version.';
+        try { const error = await response.json(); message = error.error || error.message || message; } catch (_) {}
+        throw new Error(message);
+      }
+      const expectedType = /\.xlsx$/i.test(r.filename) ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv';
+      if (!(response.headers.get('Content-Type') || '').startsWith(expectedType)) throw new Error('The server did not return a workbook. No file was downloaded.');
+      const blob = await response.blob();
+      if (!fdCheckedState(r).ready || state.report?.file_hash !== hash || state.report?.check_hash !== check) throw new Error('This version changed or its evidence expired while downloading. Reload it before trying again.');
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const filename = disposition.match(/filename="([^"]+)"/i)?.[1] || r.filename;
+      const url = URL.createObjectURL(blob), a = h('a', {href: url, download: filename});
+      document.body.append(a); a.click(); a.remove(); globalThis.setTimeout?.(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      // A refused response is never saved with a workbook extension.
+      p.ready = false; p.reasons = [error.message];
+      toast(error.message); if (state.report === r) { drawSide(); fdRefreshFoot(); }
+    }
+  }
+  function fdCheckedCopy(r) {
+    const status = fdCheckedState(r), p = r.checked_copy;
+    const section = h('section', {id: 'fd-checked-copy', class: 'fd-checked-copy ' + (status.ready ? 'checked' : 'pending'), role: 'status'},
+      h('b', {}, status.ready ? '0 remaining detected errors' : 'Verification not complete'),
+      h('p', {}, `${r.filename} · version ${revisionOf(r)}. ${status.message}`),
+      !status.ready && p?.coverage_complete && Number.isInteger(p.remaining_detected_errors) ? h('p', {}, `${p.remaining_detected_errors} unresolved detected findings in the full saved check · ${p.set_aside_unresolved || 0} set aside · ${p.informational || 0} informational. Set-aside findings are not corrections.`) : null,
+      status.ready ? h('button', {type: 'button', class: 'btn primary', onclick: () => fdDownloadChecked(r)}, 'Download checked copy') : null);
+    clearTimeout(state.checkedCopyExpiryTimer);
+    if (status.ready) state.checkedCopyExpiryTimer = globalThis.setTimeout?.(() => {
+      if (state.report !== r) return;
+      drawSide(); fdRefreshFoot();
+    }, Math.max(1, Date.parse(p.expires_at) - Date.now() + 1));
+    return section;
+  }
+
   // ---------- right-hand panel
   function fdCorrections(body) {
     const r = state.report, st = fdStatus(r), c = fdCounts();
@@ -1711,6 +1764,7 @@
       body.append(h('p', {class: 'fd-hint', role: 'status'}, state.fdAutoRecheck[r.file_hash] && !state.rechecking ? 'Some errors were not listed by the last check. Recheck this report to list them all.' : 'Checking the whole report again so every error is listed…'));
     }
     body.append(h('p', {class: 'fd-countline', id: 'fd-countline'}, `${plural(items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length, 'error')} to fix · ${c.applied} fixed in this version · ${c.kept} ignored`));
+    body.append(fdCheckedCopy(r));
     const statuses = [['To fix', ['open', 'selected']], ['Waiting on the SharePoint owner', ['deferred']],
       ['Confirmed, to fix', ['confirmed']], ['Ignored', ['kept', 'rejected']],
       ['Ignored earlier', ['kept_earlier']], ['AI says fine', ['claude']], ['Fixed in a later version', ['corrected']]];
@@ -1732,15 +1786,6 @@
     const historyRecommendations = historyGroups.filter(g => g.status === 'recommendation').reduce((n, g) => n + g.entries.length, 0);
     const appendHistory = () => { if (auto) body.append(h('details', {class: 'fd-history-overview'}, h('summary', {}, `History · ${plural(historyApplied, 'applied change')} · ${plural(historyRecommendations, 'AI recommendation')}`), auto)); };
     const leftNow = items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length;
-    const isFinal = !leftNow && r.review.status === 'clear' && !(r.fixes_applied || []).length && !cov.truncated && !cov.not_listed;
-    if (isFinal) {
-      body.append(h('div', {class: 'fd-final', role: 'status'}, icon('ok', 22),
-        h('div', {}, h('b', {}, `Final version (version ${revisionOf(r)})`), h('p', {}, 'No errors left. This copy is saved in the library under Final reports.'),
-          h('div', {class: 'fd-cardacts'}, h('a', {class: 'btn small', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download final copy'),
-            h('button', {type: 'button', class: 'btn small', onclick: () => { state.filter = 'final'; store.set('rd-filter-v2', 'final'); location.hash = ''; }}, 'Open Final reports')))));
-      state.fdFinalTold ||= {};
-      if (!state.fdFinalTold[r.file_hash] && r.fixed_from) { state.fdFinalTold[r.file_hash] = true; toast(`This is the final version (version ${revisionOf(r)}). A copy is saved in Final reports.`); }
-    }
     if (state.fdAIRun?.hash === r.file_hash) body.append(fdAIRunBanner(state.fdAIRun, items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length));
     if (!items.length) { body.append(fdClean(r, st), recon); appendHistory(); return; }
     const cur = items.find(x => x.key === state.fdCur) || null;
@@ -2121,6 +2166,7 @@
   }
   function fdClean(r, st) {
     const rv = r.review, sp = rv.sharepoint || {}, a = r.assignment || {}, sel = r.dataset_selection || {};
+    if (r.checked_copy) return h('p', {class: 'fd-hint'}, fdCheckedState(r).ready ? 'Download the checked copy above. No approval or sending is required.' : 'No loaded corrections remain. Complete the verification steps above before treating this copy as checked.');
     if (st.next !== 'approve' && st.next !== 'send') return h('div', {class: 'fd-clean muted'}, h('p', {}, 'No corrections to make. The report is not ready for approval until the step above is done.'));
     const approved = r.approval && rv.approval_current;
     const li = (ok, text) => h('li', {class: ok ? 'ok' : 'no'}, icon(ok ? 'ok' : 'warn', 15), text);

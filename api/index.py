@@ -174,12 +174,18 @@ class handler(BaseHTTPRequestHandler):
             source['status'] = 'unverified'
             source['message'] = ' '.join(h['text'] for h in holds if str(h.get('code','')).startswith('source_')) or 'Current exact-source assignment is not verified.'
         rv['sharepoint'] = source
+        from hosting.checked_copy import completion
+        try:
+            working = inbox.working_copy(file_hash, lambda item: self.can_stored_report(inbox, item))
+        except Exception:
+            debug_log(); working = dict(status='unavailable')
+        checked_copy = completion(data, rv, holds, working)
         # counts, holds and approval use every finding; the list itself is sent in pages so a very large report still opens
         page = review_page_size()
         rv['page'] = dict(size=page, issues_total=len(rv.get('issues') or []), dismissed_total=len(rv.get('dismissed') or []), binding=findings_binding(data, rv))
         rv['issues'], rv['dismissed'] = (rv.get('issues') or [])[:page], (rv.get('dismissed') or [])[:page]
         rv['page'].update(issues_returned=len(rv['issues']), dismissed_returned=len(rv['dismissed']))
-        return dict(data, review=rv, other_days=repeats, built=inbox.setting(f'built|{file_hash}', None), assignment=assignment, holds=holds,
+        return dict(data, review=rv, checked_copy=checked_copy, other_days=repeats, built=inbox.setting(f'built|{file_hash}', None), assignment=assignment, holds=holds,
                     sp_job=sharepoint_jobs.lookup(rv.get('job'), inbox.setting(sharepoint_jobs.KEY)))
 
     def can_stored_report(self, inbox, item):
@@ -788,7 +794,24 @@ class handler(BaseHTTPRequestHandler):
                 if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                     raise Conflict('Valid spreadsheet version ID required.')
                 with self.store().session() as directory:
-                    filename, raw = SpreadsheetInbox(directory).download(file_hash)
+                    inbox = SpreadsheetInbox(directory)
+                    query = parse_qs(urlsplit(self.path).query)
+                    if query.get('checked') == ['1']:
+                        self.refresh_session_principal(inbox)
+                        if not self.can_stored_report(inbox, inbox.get(file_hash)):
+                            return self.fail(404, 'Report not found.')
+                        view = self.report_view(inbox, file_hash)
+                        proof = view['checked_copy']
+                        if not proof['ready'] or query.get('check') != [proof['check_hash']]:
+                            raise Conflict('This copy is no longer verified by the current checks. Reload the report; ordinary version downloads remain available.')
+                    filename, raw = inbox.download(file_hash)
+                    if query.get('checked') == ['1']:
+                        self.refresh_session_principal(inbox)
+                        if not self.can_stored_report(inbox, inbox.get(file_hash)):
+                            return self.fail(404, 'Report not found.')
+                        proof = self.report_view(inbox, file_hash)['checked_copy']
+                        if not proof['ready'] or query.get('check') != [proof['check_hash']]:
+                            raise Conflict('This copy changed or its evidence expired while reading the file. Reload before downloading a checked copy.')
                 safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', filename)[:180] or 'report'
                 kind = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if safe.lower().endswith('.xlsx') else 'text/csv; charset=utf-8'
                 return self.send(200, raw, kind, {'Content-Disposition': f'attachment; filename="{safe}"'})

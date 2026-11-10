@@ -1801,3 +1801,10 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .version-readonly .readonly-sheet { min-width: 0; max-width: 100%; margin-top: 16px; }
 .version-readonly .gridwrap { max-width: 100%; overflow: auto; max-height: 65vh; }
 .version-readonly select { max-width: 100%; }
+
+/* Exact-version checked download, separate from historical final/approval UI. */
+.fd-checked-copy{display:flex;flex-direction:column;gap:8px;min-width:0;border:1px solid #a8b8b1;border-radius:10px;padding:12px;margin:10px 0;overflow-wrap:anywhere}
+.fd-checked-copy.checked{background:#e9f6ee;border-color:#1f5e4f}
+.fd-checked-copy.pending{background:#fffaf0;border-color:#bfa66b}
+.fd-checked-copy p{font-size:12px;line-height:1.5;margin:0}
+.fd-checked-copy .btn{width:100%;white-space:normal}
