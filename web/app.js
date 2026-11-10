@@ -2618,10 +2618,10 @@
   }
   function fdSourceRefresh(r) {
     const binding = JSON.stringify(reviewBinding(r)), assignment = JSON.stringify(r.assignment), reason = fdSourceRefreshReason(r);
-    const pending = !!state.fdReconciling;
+    const pending = !!state.fdReconciling || !!state.fdAutoSPWaiting;
     return h('div', {class: 'fd-source-refresh'},
       h('button', {type: 'button', class: 'btn fd-source-refresh-button', disabled: !!reason || pending || !!state.rechecking || !!state.busy || !!state.decisionPending || !!state.aiProposalOperation,
-        onclick: () => fdReconcile(r, binding, assignment)}, pending ? 'Refreshing SharePoint…' : 'Refresh SharePoint only'),
+        onclick: () => fdReconcile(r, binding, assignment)}, state.fdAutoSPWaiting && !state.fdReconciling ? 'Waiting for SharePoint…' : pending ? 'Refreshing SharePoint…' : 'Refresh SharePoint only'),
       h('p', {class: 'fd-hint'}, reason || 'Read the assigned SharePoint source again for this exact report. Report rows, original files and saved versions stay unchanged. No workbook re-check, AI, approval or sending.'));
   }
   async function fdReconcile(report, binding, assignment) {
