@@ -51,12 +51,12 @@ server=ThreadingHTTPServer(('127.0.0.1',0),LocalHandler);server.workspace_store=
 threading.Thread(target=server.serve_forever,daemon=True).start()
 try:
     result=subprocess.run(['node',str(ROOT/'tests/browser_finding_summary.js'),f'http://127.0.0.1:{server.server_port}',original_hash,str(WIDTH)],text=True,capture_output=True,
-        env={k:os.environ[k] for k in ('HOME','PATH','LANG','PLAYWRIGHT_MODULE','CHROMIUM_EXECUTABLE') if k in os.environ},timeout=80)
+        env={k:os.environ[k] for k in ('HOME','TMPDIR','PATH','LANG','PLAYWRIGHT_MODULE','CHROMIUM_EXECUTABLE') if k in os.environ},timeout=80)
     print(result.stdout);print(result.stderr,file=sys.stderr);assert result.returncode==0,result.returncode
     with store.session() as directory:
         box=SpreadsheetInbox(directory);parent=box.get(original_hash);assert box.download(original_hash)[1]==raw
         assert not parent.get('fixes_applied') and not parent.get('finding_decision_log') and not parent.get('approval') and not parent.get('sent')
-    assert len(provider_calls)==2 and not external   # Nov 9: one automatic summary on open + one asked for in the review window
+    assert len(provider_calls)==1 and not external   # Only the explicit review-window action requests a summary.
     context=json.loads(provider_calls[0]['messages'][0]['content'].split('\n',1)[1]);assert context['counts']['available']>0;assert all('ids' not in g for g in context['groups'])
     print(json.dumps(dict(passed=True,width=WIDTH,actual_handler=True,read_only=True,explicit_only=True,no_provider_traffic=True)))
 finally:server.shutdown();server.server_close()

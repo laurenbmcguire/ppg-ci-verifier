@@ -51,7 +51,7 @@ server=ThreadingHTTPServer(('127.0.0.1',0),LocalHandler);server.workspace_store=
 threading.Thread(target=server.serve_forever,daemon=True).start()
 try:
     result=subprocess.run(['node',str(ROOT/'tests/browser_report_screen_summary.js'),f'http://127.0.0.1:{server.server_port}',original_hash,str(WIDTH)],text=True,capture_output=True,
-        env={k:os.environ[k] for k in ('HOME','PATH','LANG','PLAYWRIGHT_MODULE','CHROMIUM_EXECUTABLE') if k in os.environ},timeout=80)
+        env={k:os.environ[k] for k in ('HOME','TMPDIR','PATH','LANG','PLAYWRIGHT_MODULE','CHROMIUM_EXECUTABLE') if k in os.environ},timeout=80)
     print(result.stdout);print(result.stderr,file=sys.stderr);assert result.returncode==0,result.returncode
     with store.session() as directory:
         box=SpreadsheetInbox(directory);parent=box.get(original_hash);assert box.download(original_hash)[1]==raw

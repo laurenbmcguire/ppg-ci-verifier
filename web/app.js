@@ -53,6 +53,11 @@
     state.aiOn = !!hh.ai_review_configured;
     if (!state.aiOn) state.fdSummaryCache = null;
     if (state.report) drawChat();
+    // Configuration arrival only enables an explicit action; it never requests a summary.
+    document.querySelectorAll('.fd-summary-request').forEach(button => {
+      button.disabled = !state.aiOn || !!(state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending);
+      button.textContent = state.aiOn ? 'Generate AI summary' : 'AI summary unavailable: AI is off';
+    });
     const box = $('connections'); box.replaceChildren(
       h('span', {class: 'conn' + (hh.storage === 'vercel-postgres' ? ' on' : '')}, h('i'), 'Saved in the cloud'),
       h('span', {class: 'conn' + (hh.sharepoint_configured ? ' on' : '')}, h('i'), hh.sharepoint_configured ? 'SharePoint connected' : 'SharePoint off'),
@@ -1042,19 +1047,7 @@
     const eligible = fdRecommended(), open = fdItems().filter(it => ['open', 'selected'].includes(it.state));
     const ignorable = open.filter(it => it.fp && it.state === 'open');
     const busy = state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation;
-    let requested = state.fdSummaryCache?.report === r && state.fdSummaryCache?.key === JSON.stringify(binding) && state.fdSummaryCache?.context === fdSummaryContext(r);
-    // The summary writes itself once per report version; it never changes anything.
-    state.fdSummaryAuto ||= {};
-    const autoKey = JSON.stringify(binding);
-    // AI may be reported as on a moment after the report draws, and other steps may be running: keep trying briefly.
-    if (!requested && !state.fdSummaryAuto[autoKey]) { let tries = 0; const attempt = () => {
-      if (state.fdSummaryAuto[autoKey] || !current() || !owner.isConnected) return;
-      const button = owner.querySelector('.fd-summary-request');
-      if (button && state.aiOn && button.disabled && !state.aiProposalOperation && !state.busy && !state.rechecking && !state.decisionPending) button.disabled = false; // drawn before AI was reported on
-      if (!state.aiOn || !button || button.disabled || !state.fixes || state.fdAutoRecheckWaiting || state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending) { if (++tries < 40) setTimeout(attempt, 500); return; }
-      state.fdSummaryAuto[autoKey] = true; button.click();
-    }; setTimeout(attempt, 0); }
-    owner.append(h('summary', {}, 'Quick summary', h('small', {class: 'fd-summary-disclosure'}, state.aiOn ? 'by Dex' : 'AI is off')),
+    owner.append(h('summary', {}, 'Quick summary', h('small', {class: 'fd-summary-disclosure'}, 'From recorded findings')),
       fdSummaryPanel(r, binding, owner, current, true),
       (() => {
         const all = state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)) : [];
@@ -1150,11 +1143,12 @@
   }
   // A plain summary from the error list itself, used whenever Dex's own words are not available.
   function fdPlainSummary() {
-    const open = (state.fdItems || []).filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state));
-    if (!open.length) return 'No errors left to fix on this report.';
+    // Derive from this report now, not the sidebar's possibly older item cache.
+    const open = fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state));
+    if (!open.length) return 'No unresolved possible errors in the loaded findings. This does not establish source completeness or readiness.';
     const groups = fdGroups(open).map(g => [g.items.length, g.title.replace(/ \(and \d+ more like it\)$/, '')]).sort((a, b) => b[0] - a[0]);
     const top = groups.slice(0, 3).map(([n, title]) => `${n} × ${title.charAt(0).toLowerCase() + title.slice(1)}`);
-    return `This report has ${plural(open.length, 'possible error')} in ${plural(groups.length, 'group')}. The biggest: ${top.join('; ')}${groups.length > 3 ? `; and ${groups.length - 3} more ${groups.length - 3 === 1 ? 'group' : 'groups'}` : ''}.`;
+    return `The loaded findings contain ${plural(open.length, 'possible error')} in ${plural(groups.length, 'group')}. The biggest: ${top.join('; ')}${groups.length > 3 ? `; and ${groups.length - 3} more ${groups.length - 3 === 1 ? 'group' : 'groups'}` : ''}.`;
   }
   function fdSummaryContext(report) {
     return JSON.stringify({assignment: report.assignment, holds: report.holds, source: report.source_reconciliation,
@@ -1165,7 +1159,7 @@
     const issues = [...new Map([...allIssues(report.review), ...(report.review.dismissed || [])].map(i => [i.key, i])).values()];
     const incomplete = report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed;
     const counts = ['high', 'medium', 'low', 'info'].map(severity => `${issues.filter(i => i.severity === severity).length} ${severity === 'high' ? 'high severity' : severity === 'info' ? 'informational' : severity}`).join(' · ');
-    const output = h('div', {class: 'fd-summary-answer', 'aria-live': 'polite'}, compact && state.aiOn ? h('p', {class: 'fd-hint'}, 'Dex is writing a summary of this report…') : null);
+    const output = h('div', {class: 'fd-summary-answer', 'aria-live': 'polite'}, compact ? h('p', {class: 'fd-summary-text'}, fdPlainSummary()) : null);
     const renderAnswer = (answer, inventory) => {
       if (compact) {
         const narrative = answer.reply.trim(), short = narrative.length > 360 ? narrative.slice(0, 357) + '…' : narrative;
@@ -1185,13 +1179,16 @@
       const answer = state.fdSummaryCache.answer;
       renderAnswer(answer, fdSummaryInventory(answer, new Set(issues.map(i => i.key))));
     }
+    const pendingText = 'Summarizing the available findings for this exact report version. No changes are being made.';
+    const pending = state.aiProposalOperation?.summary;
+    if (pending?.report === report && pending.key === JSON.stringify(binding) && pending.context === context) output.replaceChildren(h('p', {role: 'status'}, pendingText));
     const button = h('button', {type: 'button', class: 'btn fd-summary-request', disabled: !state.aiOn, onclick: async () => {
       if (!stillCurrent() || !state.aiOn || state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending) return;
       if ([...document.querySelectorAll('#side input:not([type=checkbox]):not([type=radio]), #side textarea, .fd-review-dialog input:not([type=checkbox]), .fd-review-dialog textarea')].some(node => node.value !== node.defaultValue)) {
         toast('Finish or save your typed draft before asking for a summary. Your text is unchanged.', true); return;
       }
       const controls = new Map();
-      const operation = {owner, cancel: () => {
+      const operation = {owner, summary: {report, key: JSON.stringify(binding), context}, cancel: () => {
         if (state.aiProposalOperation !== operation) return;
         state.aiProposalOperation = null;
         if (!state.busy && !state.rechecking && !state.decisionPending) controls.forEach((disabled, node) => { if (node.isConnected) node.disabled = disabled; });
@@ -1204,7 +1201,7 @@
         });
       }};
       state.aiProposalOperation = operation; operation.lock();
-      output.replaceChildren(h('p', {role: 'status'}, 'Summarizing the available findings for this exact report version. No changes are being made.'));
+      output.replaceChildren(h('p', {role: 'status'}, pendingText));
       const active = () => state.aiProposalOperation === operation && stillCurrent() && owner.isConnected;
       try {
         const answer = await api('/api/spreadsheets/review-summary', {scope: 'available_findings', file_hash: binding.file_hash,
@@ -1216,16 +1213,26 @@
             answer.expected_rev !== binding.expected_rev || JSON.stringify(answer.run) !== JSON.stringify(binding.expected_run) || typeof answer.reply !== 'string' || typeof answer.notice !== 'string' || typeof answer.coverage?.label !== 'string' || typeof answer.narrative_notice !== 'string') throw new Error('The summary did not match the current report review. Reload before trying again.');
         const inventory = fdSummaryInventory(answer, new Set(issues.map(i => i.key)));
         state.fdSummaryCache = {key: JSON.stringify(binding), context, report, answer};
+        operation.summary = null; // A replacement panel must render the completed answer, not pending text.
         if (live) renderAnswer(answer, inventory);
         else if (compact) { const shown = document.querySelector('.fd-report-summary'); if (shown && state.report === report) shown.replaceWith(fdReportSummary(report)); }
-      } catch (error) { if (active()) output.replaceChildren(h('p', {role: 'alert'}, `Summary unavailable: ${error.message}. The recorded findings and actions below are unchanged.`)); else if (owner.isConnected && !stillCurrent()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.')); }
+      } catch (error) {
+        // A redraw must not hide a failed explicitly requested summary.
+        const target = active() ? output : compact && stillCurrent() && state.aiProposalOperation === operation
+          ? document.querySelector('.fd-report-summary .fd-summary-answer') : null;
+        if (target) target.replaceChildren(h('p', {role: 'alert'}, `Summary unavailable: ${error.message}. The recorded findings and actions below are unchanged.`));
+        else if (owner.isConnected && !stillCurrent()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.'));
+      }
       finally { operation.cancel(); }
-    }}, state.aiOn ? 'Ask AI to summarize available findings' : 'AI summary unavailable: AI is off');
+    }}, state.aiOn ? 'Generate AI summary' : 'AI summary unavailable: AI is off');
     if (compact) return h('section', {class: 'fd-review-summary fd-summary-compact', 'aria-label': 'Findings summary'},
       output,
+      incomplete ? h('p', {class: 'fd-coverage'}, 'Coverage incomplete. Unavailable or unlisted findings are outside this quick summary; do not treat it as a complete error list.') : null,
+      h('p', {class: 'fd-hint'}, 'Only when you choose Generate AI summary, Dex (AI by Anthropic) receives bounded aggregate finding-group metadata for this report, not workbook contents. Summary text never applies changes.'),
+      button,
       h('details', {class: 'fd-summary-about'}, h('summary', {}, 'About this summary'),
-        h('p', {class: 'fd-hint'}, `${issues.length} loaded finding records, including information and history. Dex (AI by Anthropic) receives bounded finding-group metadata for this report, not workbook contents. Summary text never applies changes.`),
-        button, h('button', {type: 'button', class: 'btn', onclick: () => { if (stillCurrent()) fdReviewDialog(); }}, 'Go to review actions')));
+        h('p', {class: 'fd-hint'}, `${issues.length} loaded finding records, including information and history. This quick summary is based on recorded findings; it is not proof of source completeness or readiness.`),
+        h('button', {type: 'button', class: 'btn', onclick: () => { if (stillCurrent()) fdReviewDialog(); }}, 'Go to review actions')));
     return h('section', {class: 'fd-review-summary', 'aria-label': 'Findings summary'}, h('h3', {}, 'Findings summary'),
       h('p', {}, `${issues.length} loaded finding records, including set-aside history and information: ${counts}.`),
       incomplete ? h('p', {class: 'fd-coverage'}, 'Coverage incomplete. This is not a summary of every possible error; unavailable or unlisted findings remain outside this review.') : h('p', {}, 'All currently loaded finding records are counted. A finding-free report is not proof of source completeness or readiness.'),
