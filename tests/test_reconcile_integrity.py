@@ -1,16 +1,22 @@
 import importlib.util, sys, types, unittest
 from pathlib import Path
 from unittest.mock import patch
+from hosting import source_patterns
+from hosting.adaptive_reports import exact_label_for_header, shape
 ROOT=Path(__file__).parents[1]
 def module(name,file):
     spec=importlib.util.spec_from_file_location(name,ROOT/file);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
 rec=module('reconcile','hosting/reconcile.py');sp=module('sp','hosting/sharepoint.py')
 adaptive=types.ModuleType('hosting.adaptive_reports')
 adaptive.header_text=lambda x:x
+adaptive.exact_label_for_header=exact_label_for_header
+adaptive.shape=shape
 adaptive.field_for_header=lambda x:{'Qty':'inspected','NOK':'rejected'}.get(x)
 hosting=types.ModuleType('hosting');hosting.sharepoint=sp;hosting.reconcile=rec
+# Preserve package discovery for real lazy helpers; do not depend on test collection order.
+hosting.__path__=[str(ROOT/'hosting')]
 registry=types.ModuleType('hosting.registry');registry.RESOLVED=('manual','verified','matched','source');hosting.registry=registry
-STUBS={'hosting':hosting,'hosting.adaptive_reports':adaptive,'hosting.reconcile':rec,'hosting.registry':registry,'hosting.sharepoint':sp}
+STUBS={'hosting':hosting,'hosting.adaptive_reports':adaptive,'hosting.reconcile':rec,'hosting.registry':registry,'hosting.sharepoint':sp,'hosting.source_patterns':source_patterns}
 class ReconcileIntegrity(unittest.TestCase):
     def setUp(self):self.ctx=patch.dict(sys.modules,STUBS);self.ctx.start();self.addCleanup(self.ctx.stop)
     def pages(self):return [(200,{'id':'list','webUrl':'https://ppgquality.sharepoint.com/sites/SL/Lists/Data'}),(200,{'value':[{'name':'Date','dateTime':{'format':'dateOnly'}}],'@odata.nextLink':'/sites/site/lists/list/columns?$skiptoken=2'}),(200,{'value':[{'name':'Qty','displayName':'Qty'}]}),(200,{'value':[{'id':'1','fields':{'Date':'2026-11-07','Qty':10,'Photo':'actual','Shift':2}}]})]
