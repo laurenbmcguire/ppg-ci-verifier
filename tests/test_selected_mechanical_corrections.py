@@ -186,3 +186,14 @@ def test_saved_correction_preserves_source_requirement_as_stale(setup):
     assert failed['source_reconciliation']['bound_to']==rec['bound_to']
     assert box.holds(failed) and reconcile.current(failed) is None
     assert change_summary.source_receipt(failed,'2026-10-07')['status']=='held'
+
+    # Cross-feature contract: the actual saved child has no checked download until
+    # its own source comparison qualifies. A later failed lookup cannot clear this.
+    from hosting.checked_copy import completion
+    for child in (saved, failed):
+        proof = completion(child, summarize(child), box.holds(child), box.working_copy(child['file_hash']))
+        assert proof['ready'] is False and proof['download'] is None
+        assert proof['label'] == 'Verification not complete'
+        assert 'A complete current exact-source comparison is required.' in proof['reasons']
+        assert 'Report or source verification holds remain. Review the listed holds.' in proof['reasons']
+        assert child['source_reconciliation']['bound_to']['file_hash'] != child['file_hash']
