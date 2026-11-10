@@ -7,7 +7,7 @@ const fixture=JSON.parse(fs.readFileSync('tests/fixtures/grouped_review.json','u
 const js=between('  const h = (','  const store =')+`
 const fmt=v=>v==null?'—':String(v);const hm12=x=>x;const toast=()=>{};
 const plural=(n,s)=>n+' '+s+(n===1?'':'s');const icon=()=>document.createElement('span');const showWs=v=>v==null||v===''?'(blank)':String(v);
-`+between('  function fdHistoryGroups(', '  function fdNextStep(')+between('  function fdSourceVerified(', '  function drawReport(')+between('  function reviewBinding(', '  function findingBinding(')+between('  function fdSourceRecovery(', '  function fdSources(')+between('  function nexusCopyAllowed(', '  const hm12 =')+`
+`+between('  function fdHistoryGroups(', '  function fdNextStep(')+between('  function fdSourceVerified(', '  function drawReport(')+between('  function reviewBinding(', '  function findingBinding(')+between('  function versionReadOnly(', '  function versionLinks(')+between('  function fdSourceRefreshReason(', '  async function fdReconcile(')+between('  function fdSourceRecovery(', '  function fdSources(')+between('  function nexusCopyAllowed(', '  const hm12 =')+`
 const fixture=${JSON.stringify(fixture)};const state={report:fixture};document.querySelector('main').append(fdAutoSummary(fixture),fdComparison(fixture));
 const nexus={status:'held',coverage:{complete:false,source_records:2,placed_records:1},unplaced:1,shifts:[{name:'First',start:'06:00',end:'14:00',scans:1,inspected:null,rejected:0,certified:0}],total:{scans:2,inspected:null,rejected:0,certified:0}};
 const nexusSection=document.createElement('section');nexusSection.id='test-nexus';nexusSection.append(nexusTable(nexus));document.querySelector('main').append(nexusSection);`;
@@ -59,9 +59,10 @@ const nexusSection=document.createElement('section');nexusSection.id='test-nexus
   const ai=page.locator('[data-history-status="recommendation"]');assert.match(await ai.innerText(),/not human decisions/);
   await ai.locator('summary').click();assert.match(await ai.innerText(),/does not resolve a source hold/);
   await page.locator('.fd-comparison > summary').click();
+  await page.locator('.fd-comparison').getByText('Technical details',{exact:true}).click();
   const comparisonText=await page.locator('.fd-comparison').innerText();
   assert.match(comparisonText,/Report: Unknown/);assert.match(comparisonText,/Report: 0/);assert.match(comparisonText,/9007199254740993.25/);
-  assert.match(comparisonText,/not verified/);assert.match(comparisonText,/Synthetic missing source page/);
+  assert.match(comparisonText,/verification is unavailable/);assert.match(comparisonText,/Synthetic missing source page/);
   await page.getByText('Duplicate report references · 1',{exact:true}).click();
   await page.getByText('Source records outside the confirmed business date · 1',{exact:true}).click();
   assert.equal(await page.locator('[data-comparison-id]:visible').count(),2);
