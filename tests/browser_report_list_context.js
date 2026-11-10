@@ -17,7 +17,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
    const missing=structuredClone(r);Object.assign(missing,{file_hash:'d'.repeat(64),version:null,assignment:{status:'ambiguous',client:'DO NOT INFER'},review:{status:'clear',day:null,job:null,counts:{high:0,medium:0,low:0},quantities:{},sharepoint:{status:'error'}}});
    const sent=structuredClone(r);Object.assign(sent,{file_hash:'e'.repeat(64)});sent.review.sent_at='2026-11-09T05:00:00Z';sent.review.day='2026-10-08';sent.assignment={status:'manual',client:'Synthetic Beta',client_key:'beta'};
    const extra=[];
-   if(latestClear){newer.review={...newer.review,status:'clear',coverage:{},counts:{high:0,medium:0,low:0},sharepoint:{status:'match'}};const parallel=structuredClone(newer);Object.assign(parallel,{file_hash:'f'.repeat(64),received_at:'2026-11-09T06:00:00Z'});extra.push(parallel);}
+   if(latestClear){newer.review={...newer.review,status:'clear',coverage:{},counts:{high:0,medium:0,low:0},sharepoint:{status:'match',source_verified:true}};newer.verification={source_verified:true,source_status:'match',checks_current:true,holds:[]};const parallel=structuredClone(newer);Object.assign(parallel,{file_hash:'f'.repeat(64),received_at:'2026-11-09T06:00:00Z'});extra.push(parallel);}
    await route.fulfill({response,json:{...data,spreadsheets:[newer,r,separate,missing,sent,...extra],count:130,has_more:true}});
   });
   await page.goto(base+'/app',{waitUntil:'networkidle'});
