@@ -1,6 +1,6 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const source=fs.readFileSync('web/app.js','utf8');
-const ctx=vm.createContext({SETTLED:['manual','verified','matched','source']});
+const ctx=vm.createContext({state:{},SETTLED:['manual','verified','matched','source']});
 vm.runInContext(source.slice(source.indexOf('  const queueDay ='),source.indexOf('  function drawQueue()'))+'\nObject.assign(globalThis,{queueDay,queueFamily,queueNeedsAttention,queueVersion,queueSearch});',ctx);
 const row={file_hash:'a',filename:'Daily.xlsx',received_at:'2026-11-09T10:00:00Z',assignment:{status:'ambiguous',client:'Wrong assumption'},review:{job:'1234',day:null,quantities:{inspected:{value:0,unit:'parts',partial:false},rejected:{value:2,unit:'rows',partial:true}}}};
 test('missing report day is never replaced by upload day, ambiguous client remains explicit',()=>{assert.equal(ctx.queueDay(row),'');assert.equal(ctx.queueClient(row),'Client not confirmed');assert.equal(ctx.queueSearch(row).includes('wrong assumption'),false);});

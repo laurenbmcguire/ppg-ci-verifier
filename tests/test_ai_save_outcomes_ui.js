@@ -9,7 +9,7 @@ function harness(mode='ok'){
  toast:(...a)=>events.push(a),store:{get:()=>({}),set(){}},select:h=>{if(mode==='select-fail')throw Error('Synthetic screen failure');selections.push(h);},
  loadList:async()=>{if(mode==='refresh-fail')throw Error('Synthetic list failure');},
  api:async(path,body)=>{writes.push({path,body});if(mode==='committed-denied')throw Object.assign(Error('The corrected version was saved, but access changed before it could be opened. Ask an admin to review access before trying again.'),{httpStatus:403,saveCommitted:true});if(mode==='rejected')throw Object.assign(Error('Exact source changed. Nothing was applied.'),{httpStatus:409});if(mode==='lost')throw Error('Network response lost');if(mode==='server')throw Object.assign(Error('Unavailable'),{httpStatus:503});if(mode==='malformed')return {};return {item};}});
- vm.runInContext(between('  const correctionSnapshots =','  function readyChanges()')+between('  async function applyFixes(','  // Take out extra copies'),ctx);
+ vm.runInContext(source.slice(source.indexOf('  function versionReadOnly('),source.indexOf('  function versionLinks(')) + between('  const correctionSnapshots =','  function readyChanges()')+between('  async function applyFixes(','  // Take out extra copies'),ctx);
  const binding={file_hash:'original',expected_check_hash:'checked',expected_run:{id:1},expected_rev:2};
  const p={id:'p',sheet:'Sheet',cell:'A1',before:'2',after:'3',kind:'number',source:'SharePoint',snapshot_id:'snap',item:'item',field:'quantity',change_set:'whole',change_set_size:1};
  const capture=ctx.captureCorrections([p],{p:{state:'accepted',after:'3'}},{},binding,report);
@@ -23,7 +23,7 @@ for(const mode of ['lost','server','malformed'])test(`${mode} never claims no ch
 for(const flag of ['busy','decisionPending','rechecking','aiProposalOperation'])test(`${flag} reports no save started`,async()=>{const h=harness();h.state[flag]={};await assert.rejects(h.run(),/No save was started/);assert.equal(h.writes.length,0);});
 
 test('identical repeated cell proposals deduplicate but conflicting values or provenance never choose first',()=>{
- const ctx=vm.createContext({});vm.runInContext(between('  function fdUniqueAIProposals(', '  async function fdAIFixNow('),ctx);
+ const ctx=vm.createContext({});vm.runInContext(source.slice(source.indexOf('  function versionReadOnly('),source.indexOf('  function versionLinks(')) + between('  function fdUniqueAIProposals(', '  async function fdAIFixNow('),ctx);
  const p={sheet:'Sheet',cell:'A1',finding_id:'first',before:'2',after:'3',kind:'number',source:'SharePoint',snapshot_id:'snap',item:'row',field:'quantity',change_set:'atomic',change_set_size:2};
  assert.equal(ctx.fdUniqueAIProposals([p,{...p,finding_id:'second'}]).length,1);
  for(const field of ['before','after','kind','source','snapshot_id','item','field','change_set','change_set_size'])assert.throws(()=>ctx.fdUniqueAIProposals([p,{...p,[field]:'different'}]),/Conflicting suggestions.*No save was started/);

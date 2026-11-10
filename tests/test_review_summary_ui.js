@@ -22,6 +22,6 @@ test('summary cache is reused only for the identical report evidence and changed
 });
 test('every successful same-hash report replacement invalidates cached summaries',async()=>{
  const old={file_hash:'same'},next={file_hash:'same',holds:[{code:'source_mapping_changed'}]},state={selected:'same',report:old,fdSummaryCache:{answer:'old'}};
- const ctx=vm.createContext({state,$:()=>({scrollTop:0}),fillPages:async x=>x,api:async()=>next,drawReport(){assert.equal(state.fdSummaryCache,null)},loadFixes(){}});
+ const ctx=vm.createContext({state,h:()=>({}),closeChat(){},drawQueue(){},versionReadOnly:()=>false,location:{hash:'#r=same'},$:()=>({scrollTop:0,replaceChildren(){}}),fillPages:async x=>x,api:async path=>path.startsWith('/api/spreadsheets/working-copy')?{requested_hash:'same',status:'current',working_hash:'same'}:next,drawReport(){assert.equal(state.fdSummaryCache,null)},loadFixes(){}});
  const a=src.indexOf('  async function openReport('),b=src.indexOf('  // Reports uploaded',a);vm.runInContext(src.slice(a,b),ctx);await ctx.openReport('same',true);assert.equal(state.report,next);assert.equal(state.fdSummaryCache,null);
 });

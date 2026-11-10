@@ -122,12 +122,13 @@
     catch (e) { state.listError = e.message || 'The report list could not be loaded.'; state.list ||= []; drawQueue(); drawClientTabs(); throw e; }
     state.listError = null;
     state.list = data.spreadsheets || [];
+    state.workingCopies = data.working_copies === true;
     state.listTotal = data.count;
     state.listPartial = data.has_more === true;
     drawQueue(); drawClientTabs();
   }
   // an upload the app cleaned automatically is shown once: as its cleaned copy (the original opens from that report)
-  const visibleList = () => { const cleaned = new Set(state.list.flatMap(r => r.review?.auto_hidden || [])); return state.list.filter(r => !cleaned.has(r.file_hash)); };
+  const visibleList = () => { if (state.workingCopies) return state.list; const cleaned = new Set(state.list.flatMap(r => r.review?.auto_hidden || [])); return state.list.filter(r => !cleaned.has(r.file_hash)); };
   // Queue metadata never invents a business date or groups unrelated files by a similar name.
   const queueDay = r => r.review?.day || '';
   const queueFamily = r => JSON.stringify([r.assignment?.client_key || '', r.root_hash || r.file_hash]);
@@ -135,6 +136,7 @@
     !r.review.day || !r.review.job || !r.assignment || !SETTLED.includes(r.assignment.status) || r.assignment.needs_person || r.review.sharepoint?.status !== 'match' ||
     r.internal_check_status === 'outdated_checks_require_recheck' || r.internal_check_status === 'could_not_load_latest_check');
   function queueNewerCopies(r, inventory) {
+    if (state.workingCopies) return []; // Parallel graph leaves are independent, never timestamp winners.
     const saved = Date.parse(r.received_at || '');
     if (!Number.isFinite(saved)) return []; // An unknown save time cannot establish chronology.
     return inventory.filter(other => other.file_hash !== r.file_hash && queueFamily(other) === queueFamily(r) && Date.parse(other.received_at || '') > saved)
@@ -227,7 +229,7 @@
     }
     rows = [...rows].sort((a, b) => queueDay(b).localeCompare(queueDay(a)) || (b.received_at || '').localeCompare(a.received_at || ''));
     const groups = new Map();
-    for (const r of rows) { const k = queueFamily(r); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+    for (const r of rows) { const k = state.workingCopies ? r.file_hash : queueFamily(r); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
     state.openGroups ||= new Set();
     const line = (r, older) => {
       const rv = r.review || {}, [check, tone] = queueCheck(r), current = r.file_hash === (state.selected || state.lastSelected);
@@ -414,9 +416,12 @@
   }
 
   // ---------------------------------------------------------------- routing
-  function select(hash) { state.lastSelected = hash; state.queueScroll = {page: window.scrollY, list: $('queue-list').scrollTop}; if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
+  function select(hash, receipt = false) { if (receipt) state.receiptHash = hash; state.lastSelected = hash; state.queueScroll = {page: window.scrollY, list: $('queue-list').scrollTop}; if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
   window.addEventListener('hashchange', route);
   async function route() {
+    if ((state.busy || state.decisionPending || state.rechecking || state.aiProposalOperation || state.fdAIRun?.running) && !state.receiptHash) { history.replaceState(null, '', state.reportRoute || '#'); toast('Wait for the current operation to finish before changing reports.', true); return; }
+    if (!navigationDrafts()) { history.replaceState(null, '', state.reportRoute || '#'); return; }
+    state.openRequest = (state.openRequest || 0) + 1;
     if (state.gridDraft && !gridDiscard()) { history.replaceState(null, '', '#r=' + state.gridDraft.binding.file_hash); $('grid-cell-input')?.focus(); return; }
     document.body.classList.remove('reportmode');
     document.querySelectorAll('dialog[open]:not(#signin-dialog):not(#fd-aidone)').forEach(d => d.close());   // a window left open must not cover the next page
@@ -433,11 +438,11 @@
     if (location.hash === '#checks') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showChecks(); return; }
     if (location.hash === '#users') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showUsers(); return; }
     if (location.hash === '#api') { closeChat(); document.body.classList.add('viewing'); state.selected = null; state.report = null; drawQueue(); await showApi(); return; }
-    const m = location.hash.match(/^#r=([0-9a-f]{64})$/);
+    const m = location.hash.match(/^#r=([0-9a-f]{64})(&history=1)?$/);
     document.body.classList.toggle('viewing', !!m);
     if (!m) { const returning = !!state.selected; state.selected = null; state.openReviewFor = null; drawQueue(); showEmpty(); if (returning) requestAnimationFrame(() => { const item = [...$('queue-list').querySelectorAll('.item')].find(b => b.getAttribute('data-report-hash') === state.lastSelected); item?.focus({preventScroll: true}); $('queue-list').scrollTop = state.queueScroll?.list || 0; window.scrollTo(0, state.queueScroll?.page || 0); }); return; }
     state.selected = m[1]; drawQueue();
-    await openReport(m[1]);
+    await openReport(m[1], false, !!m[2]);
   }
   const emptyState = $('empty');
   // A very large report sends its findings in pages; every page is loaded before the corrections are drawn, so nothing
@@ -479,24 +484,98 @@
   function showEmpty() { $('report').replaceChildren(emptyState); }
 
   // ---------------------------------------------------------------- report detail
-  async function openReport(hash, keepScroll) {
+  function navigationDrafts() {
+    state.fdManual?.keepDraft?.();
+    const unsavedForm = [...document.querySelectorAll('#side input:not([type=checkbox]):not([type=radio]), #side textarea, .fd-review-dialog input:not([type=checkbox]), .fd-review-dialog textarea')].some(node => node.value !== node.defaultValue);
+    if (unsavedForm && !state.fdManual && !window.confirm('Discard the unsaved review form and leave this report?')) return false;
+    if (state.gridDraft && !gridDiscard()) return false;
+    if (!state.report) return true;
+    const edits = store.get(editsKey(), {}), dec = store.get(decisionsKey(), {});
+    if (Object.keys(edits).length || Object.values(dec).some(d => d.state === 'accepted')) {
+      if (!window.confirm('Leave this report? Typed changes stay with this exact version and will not move to another copy.')) return false;
+    }
+    return true;
+  }
+  function versionReadOnly(r = state.report) {
+    return !!r && (r.version_view?.historical || r.version_view?.status !== 'current' && !!r.version_view ||
+      !!r.version_view?.read_only_reason || !!r.approval || (r.sent || []).some(x => x.sent) || !!r.sending);
+  }
+  function versionLinks(r) {
+    const v = r.version_view || {};
+    return h('details', {class: 'version-history'}, h('summary', {}, 'Saved versions and original downloads'),
+      h('ul', {}, [{file_hash: r.file_hash, filename: r.filename}, ...(v.history || [])].map(x => h('li', {},
+        h('a', {href: '#r=' + x.file_hash + '&history=1'}, x.filename || 'Saved version'), ' · ',
+        h('a', {href: '/api/spreadsheets/download?id=' + x.file_hash, download: x.filename || ''}, 'Download original bytes')))));
+  }
+  function drawReadOnlyReport(r) {
+    document.querySelectorAll('#fd-aidone .fd-cardacts').forEach(node => node.remove());
+    const v = r.version_view || {}, reason = v.unavailable_reason === 'history_inconsistent' ? v.message :
+      v.read_only_reason ? `This version is ${v.read_only_reason} and is read-only.` : 'Historical version. Read-only; findings below belong only to this saved copy.';
+    const sheet = h('section', {class: 'readonly-sheet'});
+    const showSheet = async name => {
+      const request = state.readonlySheetRequest = (state.readonlySheetRequest || 0) + 1;
+      sheet.replaceChildren(h('p', {}, 'Loading saved spreadsheet…'));
+      try {
+        const g = await api('/api/spreadsheets/sheet', {file_hash: r.file_hash, sheet: name});
+        if (state.report !== r || request !== state.readonlySheetRequest) return;
+        const {table} = buildGrid(g, {cells: {}, rows: {}, perSheet: {}});
+        sheet.replaceChildren(h('div', {class: 'gridwrap', tabindex: '0', 'aria-label': 'Saved spreadsheet (read-only)'}, table));
+      } catch (e) { if (state.report === r && request === state.readonlySheetRequest) sheet.replaceChildren(h('p', {role: 'alert'}, e.message)); }
+    };
+    const names = (r.sheets || []).map(x => x.name);
+    $('report').replaceChildren(h('div', {class: 'sheetwrap version-readonly'},
+      h('a', {class: 'btn', href: '#'}, 'All reports'), h('h1', {}, r.filename),
+      h('p', {class: 'note', role: 'status'}, reason),
+      h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download this original version'),
+      v.status !== 'unavailable' && (v.historical || v.status !== 'current') ? h('a', {class: 'btn primary', href: '#r=' + r.file_hash}, 'Return to working copy') : null,
+      versionLinks(r), h('h2', {}, 'Recorded findings for this version'),
+      h('ul', {}, (r.review?.issues || []).map(x => h('li', {}, [x.sheet, x.cell, x.text || x.message || x.code].filter(Boolean).join(' · ')))),
+      names.length ? h('select', {'aria-label': 'Saved sheet', onchange: e => showSheet(e.target.value)}, names.map(n => h('option', {value: n}, n))) : null, sheet));
+    if (names.length) showSheet(names[0]);
+  }
+  async function openReport(hash, keepScroll, historical = false) {
     if (state.gridDraft && !gridDiscard()) return;
-    const report = $('report');
-    if (!keepScroll) report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Opening report…')));
+    const report = $('report'), request = state.openRequest = (state.openRequest || 0) + 1;
+    const receipt = state.receiptHash === hash; state.receiptHash = null;
+    const active = () => request === state.openRequest && state.selected === hash;
+    state.report = null; state.fixes = null; state.fdItems = []; closeChat();
+    report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note'}, 'Opening working copy…')));
     try {
+      let version = await api('/api/spreadsheets/working-copy?id=' + hash);
+      if (!active()) return;
+      if (!version || version.requested_hash !== hash || !['current', 'superseded', 'choice', 'unavailable'].includes(version.status)) throw new Error('The working copy could not be verified. Reload to try again.');
+      if (!historical && !receipt && version.status === 'choice') {
+        state.reportRoute = location.hash;
+        report.replaceChildren(h('div', {class: 'sheetwrap version-choice'}, h('h1', {}, 'Choose a working copy'),
+          h('p', {}, 'Separate corrected copies exist. Choose the branch you want; no copy was selected automatically.'),
+          ...(version.choices || []).map(x => h('p', {}, h('a', {class: 'btn', href: '#r=' + x.file_hash}, `${x.filename || 'Working copy'} · ID ${x.file_hash.slice(0, 12)}`))),
+          h('a', {href: '#r=' + hash + '&history=1'}, 'View the original version (read-only)'))); return;
+      }
+      if (version.status === 'unavailable' && version.unavailable_reason !== 'history_inconsistent') throw new Error('The working copy is unavailable or its history cannot be verified. No version was opened.');
+      if (!historical && !receipt && version.status === 'superseded') {
+        if (!/^[0-9a-f]{64}$/.test(version.working_hash || '')) throw new Error('The working copy could not be verified.');
+        hash = version.working_hash; state.selected = hash;
+        version = await api('/api/spreadsheets/working-copy?id=' + hash);
+        if (!active()) return;
+        if (version.requested_hash !== hash || version.status !== 'current') throw new Error('The working copy changed while opening. Reopen it to try again.');
+        history.replaceState(null, '', '#r=' + hash);
+      }
       const data = await fillPages(await api('/api/spreadsheet?id=' + hash));
-      if (state.selected !== hash) return;
-      if (state.report?.file_hash !== hash) { state.fdSummaryCache = null; state.fdView = 'review'; state.fdCur = null; state.fdTier = null; state.gridSearch = ''; state.sheetScroll = {}; state.gridOnlyMarked = false; state.gridRow = null; if (state.fdAIRun?.hash !== hash) document.body.classList.remove('fd-panel-open'); }
-      state.fdSummaryCache = null;
-      state.report = data; state.fixes = null; state.showAll = false;
-      const top = report.scrollTop;
-      drawReport();
-      if (keepScroll) report.scrollTop = top;
-      loadFixes(hash);
-      if (state.openSendFor && (state.openSendFor === hash || state.openSendFor === 'next' && data.fixed_from)) { state.openSendFor = null; openSend(); }
+      if (!active()) return;
+      if (data.file_hash !== hash) throw new Error('The saved version could not be verified.');
+      data.version_view = {...version, historical: historical || receipt && version.status !== 'current'};
+      if (receipt && version.status !== 'current') history.replaceState(null, '', '#r=' + hash + '&history=1');
+      state.reportRoute = location.hash;
+      state.fdSummaryCache = null; state.fdView = 'review'; state.fdCur = null; state.fdTier = null; state.gridSearch = ''; state.sheetScroll = {}; state.gridOnlyMarked = false; state.gridRow = null;
+      state.report = data; state.fixes = null; state.showAll = false; state.fdManual = null;
+      drawReport(); drawQueue();
+      if (!versionReadOnly(data)) loadFixes(hash);
+      if (!versionReadOnly(data) && state.openSendFor && (state.openSendFor === hash || state.openSendFor === 'next' && data.fixed_from)) { state.openSendFor = null; openSend(); }
     } catch (e) {
-      if (state.selected !== hash) return;
-      report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note'}, e.message)));
+      if (!active()) return;
+      state.report = null; state.fixes = null;
+      report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note', role: 'alert'}, e.message),
+        h('button', {type: 'button', class: 'btn', onclick: () => openReport(hash, false, historical || receipt)}, 'Retry opening report')));
     }
   }
 
@@ -1485,6 +1564,7 @@
       h('button', {type: 'button', class: 'btn primary', onclick: email}, 'Email to client'));
   }
   function drawReport() {
+    if (versionReadOnly()) { drawReadOnlyReport(state.report); return; }
     const r = state.report, rv = r.review;
     document.body.classList.add('reportmode');
     state.sideTab ||= 'fixes'; state.fdView ||= 'review';
@@ -1541,7 +1621,7 @@
         h('span', {class: 'fd-foot-note'}, `Original v1 is kept unchanged${r.fixed_from ? '; this is v' + revisionOf(r) : ''}`)),
       h('button', {type: 'button', class: 'btn fd-mobile-panel', onclick: () => document.body.classList.toggle('fd-panel-open'), 'aria-controls': 'side'}, 'Errors', h('i', {id: 'fd-mobile-count'}, '')),
       h('button', {type: 'button', class: 'btn ' + (sel ? 'primary' : ''), id: 'fd-preview-btn', disabled: !sel || state.busy, onclick: correctionAction(fdPreview)}, icon('eye', 16), ' Preview selected changes'));
-    $('report').replaceChildren(h('div', {class: 'fd'}, rail, h('div', {class: 'fd-main'}, head, fdModeSelector(r), metrics, main), foot));
+    $('report').replaceChildren(h('div', {class: 'fd'}, rail, h('div', {class: 'fd-main'}, head, versionLinks(r), fdModeSelector(r), metrics, main), foot));
     state.aiProposalOperation?.lock?.();
     const w = store.get('fd-aside-w', null); if (w) fdAsideWidth(w);
     if (state.fdView !== 'review') return;
@@ -1892,7 +1972,8 @@
         h('p', {class: 'fd-hint'}, 'These are about a whole row or an earlier decision, so Dex cannot change one cell to fix them. Use Fix manually or Ignore.'),
         h('div', {class: 'fd-cardacts'}, h('button', {type: 'button', class: 'btn', onclick: () => { const list = live(other.map(x => x.key)); close(); if (list.length) fdManualStart(list); }}, 'Fix manually'))) : null,
       h('div', {class: 'fd-modalacts'},
-        run.originalHash ? h('a', {class: 'btn', href: '#r=' + run.originalHash, onclick: close}, `Open starting version ${run.from || 1}`) : null,
+        report && run.reused ? h('a', {class: 'btn', href: '#r=' + report.file_hash, onclick: close}, 'Open working copy') : null,
+        run.originalHash ? h('a', {class: 'btn', href: '#r=' + run.originalHash + '&history=1', onclick: close}, `Open starting version ${run.from || 1}`) : null,
         report && run.fixed ? h('a', {class: 'btn primary', href: '/api/spreadsheets/download?id=' + report.file_hash, download: report.filename}, 'Download updated report') : null,
         h('button', {type: 'button', class: 'btn', onclick: saveText}, 'Download summary'),
         h('button', {type: 'button', class: 'btn', onclick: close}, 'Close')));
@@ -1997,7 +2078,7 @@
         return h('section', {class: 'fd-history-category', 'data-history-status': status}, h('h3', {}, `${title} · ${plural(count, 'occurrence')}`),
           ...selected.map(fdHistoryGroup));
       }),
-      s.from_hash ? h('a', {href: '#r=' + s.from_hash}, 'Open the version before these changes') : null,
+      s.from_hash ? h('a', {href: '#r=' + s.from_hash + '&history=1'}, 'Open the version before these changes') : null,
       (s.notes || []).length ? h('details', {}, h('summary', {}, 'Recorded notes'), h('p', {}, s.notes.join(' '))) : null);
   }
   function fdHoldAction(r, st) {
@@ -2082,7 +2163,7 @@
         dd ? h('button', {type: 'button', class: 'btn subtle', disabled: busy, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => fdSendDecision({action: 'undo', undo_of: dd.decision_id, from: it})}, 'Undo source decision') : null,
         it.state === 'claude' ? h('button', {type: 'button', class: 'btn', disabled: busy, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => { state.fdForm = {item: it, key: it.key, action: 'reject', reason: 'Agreed with Claude: ' + (it.issue?.claude?.reason || it.issue?.verdict_reason || '')}; drawSide(); }}, 'Agree with Dex…') : null,
         it.state === 'claude' || it.state === 'kept_earlier' ? h('button', {type: 'button', class: 'btn subtle', disabled: busy, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null, onclick: () => fdSendDecision({ids: [it.key], action: 'reopen', reason: 'Put back for review', from: it})}, it.state === 'claude' ? 'Put back for review' : 'Review again') : null,
-        it.state === 'corrected' && it.issue?.corrected?.file_hash ? h('a', {class: 'btn subtle', href: '#r=' + it.issue.corrected.file_hash}, `Open v${it.issue.corrected.revision || ''}`) : null,
+        it.state === 'corrected' && it.issue?.corrected?.file_hash ? h('a', {class: 'btn subtle', href: '#r=' + it.issue.corrected.file_hash + '&history=1'}, `Open v${it.issue.corrected.revision || ''}`) : null,
         h('button', {type: 'button', class: 'btn subtle', onclick: () => fdEvidence(it)}, icon('db', 15), ' Source evidence'))),
       fdConflict(it) ? fdCoordinatedForm(it) : it.cell && it.state !== 'kept' ? h('details', {class: 'fd-edit-value'}, h('summary', {class: 'btn subtle'}, 'Edit value'), fdOwnValueForm(it)) : null,
       finding ? null : h('details', {class: 'fd-notebox', open: it.note ? true : null}, h('summary', {}, icon('note', 14), ' Note'),
@@ -2288,6 +2369,7 @@
   // Pending -> saved / failed. A lost answer is reconciled (was it saved?) before anything is retried, and the same
   // request ID is reused, so a retry can never record a decision twice.
   async function fdSendDecision(req) {
+    if (versionReadOnly()) return;
     if (state.gridDraft && gridDirty()) { toast('Preview or discard the spreadsheet draft before deciding findings.', true); return; }
     if (state.decisionPending || state.busy || state.rechecking || state.aiProposalOperation || !state.report) return;
     const binding = req.file_hash ? req : req.from ? findingBinding([req.from]) : null;
@@ -2513,9 +2595,9 @@
     const binding = reviewBinding(r);
     const rv = r.review, rows = [];
     const add = (title, text, link) => rows.push(h('article', {class: 'fd-hist'}, h('b', {}, title), h('span', {}, text), link || null));
-    if (r.fixed_from) add(`v${r.fixed_from.revision || 1} · ${r.fixed_from.filename}`, 'The version these changes were made on. Kept unchanged.', h('a', {href: '#r=' + r.fixed_from.file_hash}, `Open v${r.fixed_from.revision || 1}`));
+    if (r.fixed_from) add(`v${r.fixed_from.revision || 1} · ${r.fixed_from.filename}`, 'The version these changes were made on. Kept unchanged.', h('a', {href: '#r=' + r.fixed_from.file_hash + '&history=1'}, `Open v${r.fixed_from.revision || 1}`));
     add(`v${revisionOf(r)} · this version`, r.fixed_from ? `${plural(r.fixed_from.changes.length, 'change')} applied${r.fixed_from.applied_at ? ' ' + when2(r.fixed_from.applied_at) : ''}: ` + r.fixed_from.changes.slice(0, 8).map(c => `${c.sheet}!${c.cell} ${c.before || '(blank)'} → ${c.after || '(blank)'}`).join('; ') + (r.fixed_from.changes.length > 8 ? '…' : '') : `Uploaded ${when2(r.received_at) || ''}. Stored unchanged (SHA-256 ${r.file_hash.slice(0, 12)}…).`);
-    for (const f of r.fixes_applied || []) add(`v${f.revision || '?'} · ${f.fixed_filename}`, `${plural(f.changes.length, 'change')} applied ${when2(f.applied_at) || ''}.`, h('a', {href: '#r=' + f.fixed_file_hash}, 'Open it'));
+    for (const f of r.fixes_applied || []) add(`v${f.revision || '?'} · ${f.fixed_filename}`, `${plural(f.changes.length, 'change')} applied ${when2(f.applied_at) || ''}.`, h('a', {href: '#r=' + f.fixed_file_hash + '&history=1'}, 'Open it'));
     for (const x of r.recheck_applied || []) add('Re-checked', `${x.by || 'Someone'} re-ran the checks ${when2(x.at) || ''} (from ${x.from_version || '?'} to ${x.to_version || '?'}).`);
     for (const x of (r.review_decision_log || []).slice(-30)) add({keep: 'Kept as recorded', reject: 'Suggestion rejected', note: 'Note', reopen: 'Decision undone'}[x.action] || x.action, `${x.by || 'A reviewer'} ${when2(x.at) || ''}${x.note ? ': “' + x.note + '”' : ''}`);
     // every decision on findings, with its exact scope; any one can be undone (the undo is logged too)
@@ -2893,9 +2975,11 @@
 
   // ---------------- fixes
   async function loadFixes(hash) {
+    const report = state.report;
+    if (!report || versionReadOnly(report)) return;
     try {
       const data = await api('/api/spreadsheets/fixes', {file_hash: hash});
-      if (state.selected !== hash) return;
+      if (state.selected !== hash || state.report !== report || versionReadOnly(report)) return;
       state.fixes = data.proposals || []; state.fixesError = null;
       state.aiFix = data.ai || {status: 'not_run'};
       const carry = store.get('rd-carry:' + hash, null);
@@ -2907,7 +2991,7 @@
         try { localStorage.removeItem('rd-carry:' + hash); } catch (e) { /* convenience only */ }
         if (carry.reviewed.length) drawReport();
       }
-    } catch (e) { if (state.selected !== hash) return; state.fixes = []; state.fixesError = e.message; state.aiFix = {status: 'not_run'}; }
+    } catch (e) { if (state.selected !== hash || state.report !== report || versionReadOnly(report)) return; state.fixes = []; state.fixesError = e.message; state.aiFix = {status: 'not_run'}; }
     drawFixes();
     document.querySelector('.fd-mode-selector')?.replaceWith(fdModeSelector(state.report));
     // first time a report with issues is opened, Claude drafts the fixes, then offers them in the chat
@@ -3352,6 +3436,7 @@
     for (const b of document.querySelectorAll('.dl-changes')) { b.textContent = state.busy ? 'Building the fixed copy…' : label; b.disabled = !!state.busy; b.onclick = () => downloadWithChanges(c); }
   }
   async function applyFixes(accepted, dec, edits, opts = {}) {
+    if (versionReadOnly()) { toast('This saved version is read-only. Open its working copy first.', true); return null; }
     const captured = correctionSnapshots.get(accepted);
     if (!captured?.binding?.expected_check_hash) { const error = new Error('Reopen the correction preview before applying. No save was started.'); if (opts.throwOnError) throw error; toast(error.message, true); return null; }
     ({accepted, dec, edits} = captured);
@@ -3392,7 +3477,7 @@
       if (opts.thenOpen !== false) {
         // These reads cannot undo the successful, committed save above.
         try { await loadList(); } catch (error) { toast('The corrected version is saved, but the report list could not refresh. Open the saved copy or reload the list.', true); }
-        select(savedItem.file_hash);
+        select(savedItem.file_hash, true);
       }
       return opts.returnReceipt ? savedItem : savedItem.file_hash;
     } catch (e) {
@@ -3436,6 +3521,7 @@
     return items.some(it => it.sheet === sheet && (it.cell === cell || !it.cell && it.row === row) && !fdConflict(it) && ['open','selected','confirmed'].includes(it.state));
   }
   async function gridStartEdit(sheet, cell) {
+    if (versionReadOnly()) return;
     if ([...document.querySelectorAll('#side input:not([type=checkbox]):not([type=radio]), #side textarea')].some(el => el.value !== el.defaultValue)) { toast('Finish the correction-panel draft before editing the spreadsheet.', true); return; }
     if (state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation) return;
     if (state.gridDraft && !gridDiscard()) return;
@@ -4887,7 +4973,7 @@
     if (r.fixed_from) items.push(h('p', {class: 'note'}, `This is a fixed copy of "${r.fixed_from.filename}" (version ${r.fixed_from.version}) with ${r.fixed_from.changes.length} approved change(s): `
       + r.fixed_from.changes.map(c => `${c.sheet} ${c.cell} ${c.before || '(blank)'} → ${c.after}`).join('; ') + '.'));
     for (const f of r.fixes_applied || []) items.push(h('p', {class: 'note'}, `${new Date(f.applied_at).toLocaleString()}: fixed version "${f.fixed_filename}" made with ${f.changes.length} change(s). `,
-      h('a', {href: '#r=' + f.fixed_file_hash}, 'Open it')));
+      h('a', {href: '#r=' + f.fixed_file_hash + '&history=1'}, 'Open it')));
     return h('section', {class: 'block'}, h('header', {}, h('h2', {}, 'History')), ...items);
   }
 

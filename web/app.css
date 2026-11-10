@@ -1792,3 +1792,12 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-fixall-q{margin:0 0 8px;font-weight:600}
 .fd-fixall .fd-cardacts{display:flex;flex-wrap:wrap;gap:8px}
 .fd-fixall .fd-hint{margin:8px 0 0}
+
+/* Exact saved versions are deliberately separate from mutation controls. */
+.version-history { margin: 12px 20px; overflow-wrap: anywhere; }
+.version-history li { margin: 10px 0; }
+.version-readonly, .version-choice { max-width: 100%; overflow-wrap: anywhere; }
+.version-readonly > .btn { margin: 6px 8px 12px 0; white-space: normal; }
+.version-readonly .readonly-sheet { min-width: 0; max-width: 100%; margin-top: 16px; }
+.version-readonly .gridwrap { max-width: 100%; overflow: auto; max-height: 65vh; }
+.version-readonly select { max-width: 100%; }
