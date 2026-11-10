@@ -414,7 +414,7 @@
   async function route() {
     if (state.gridDraft && !gridDiscard()) { history.replaceState(null, '', '#r=' + state.gridDraft.binding.file_hash); $('grid-cell-input')?.focus(); return; }
     document.body.classList.remove('reportmode');
-    document.querySelectorAll('dialog[open]:not(#signin-dialog)').forEach(d => d.close());   // a window left open must not cover the next page
+    document.querySelectorAll('dialog[open]:not(#signin-dialog):not(#fd-aidone)').forEach(d => d.close());   // a window left open must not cover the next page
     document.body.dataset.page = (location.hash.match(/^#(today|overview|kpis|periods|checks|api|users)$/) || [])[1] || 'reports';
     const cm = location.hash.match(/^#c=(.+)$/);
     if (cm) { state.client = decodeURIComponent(cm[1]); store.set('rd-client', state.client); drawClientTabs(); }
@@ -1684,7 +1684,15 @@
       if (!next) throw new Error('The fixes could not be saved. Nothing was changed.');
       state.fdReviewSelection = null;
       const done = accepted.map(p => { const it = todo.find(x => x.key === p.finding_id); return {where: `${p.sheet} cell ${p.cell}`, text: it?.text || it?.reason || '', before: p.before, after: p.after}; });
-      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, tried: todo.length, skipped, from: revisionOf(report), items: done};
+      // Check the saved version really holds every change before saying so.
+      for (let i = 0; state.report?.file_hash !== next && i < 60; i++) await new Promise(r => setTimeout(r, 250));   // the new version is loading
+      if (state.report?.file_hash !== next) await openReport(next, true).catch(() => {});
+      const saved = state.report?.file_hash === next ? (state.report.fixed_from?.changes || []) : [];
+      const has = p => saved.some(c => c.sheet === p.sheet && c.cell === p.cell && String(c.after) === String(p.after));
+      const confirmed = accepted.filter(has).length;
+      state.fdAIRun = {hash: next, done: true, fixed: accepted.length, confirmed, tried: todo.length, skipped, from: revisionOf(report), items: done};
+      document.body.classList.add('fd-panel-open');
+      fdAIDoneDialog(state.fdAIRun, state.report?.file_hash === next ? state.report : null);
     } catch (e) { state.fdAIRun = {hash, done: true, error: e?.message || String(e)}; }
     finally { if (state.report?.file_hash === state.fdAIRun?.hash) drawSide(); }
   }
@@ -1770,6 +1778,28 @@
         h('button', {type: 'button', class: 'btn small', disabled: at === 0 || null, onclick: () => { keep(); go(at - 1); }}, 'Previous'),
         at < list.length - 1 ? h('button', {type: 'button', class: 'btn small', onclick: () => { keep(); go(at + 1); }}, 'Skip') : null,
         h('button', {type: 'button', class: 'btn small' + (at < list.length - 1 ? '' : ' subtle'), onclick: save}, `Save my changes${pending ? ` (${pending})` : ''}`)));
+  }
+  // The message box after AI fix: what was fixed, that it is saved, and the new report to download.
+  function fdAIDoneDialog(run, report) {
+    document.getElementById('fd-aidone')?.remove();
+    const left = report && state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
+    const allSaved = run.confirmed === run.fixed, notFixed = run.tried - run.fixed;
+    const d = h('dialog', {id: 'fd-aidone', class: 'fd-modal fd-aidone', 'aria-labelledby': 'fd-aidone-title'});
+    const close = () => { d.close(); d.remove(); };
+    d.append(h('button', {type: 'button', class: 'fd-dialog-x', 'aria-label': 'Close', title: 'Close', onclick: close}, icon('x', 18)),
+      h('h2', {id: 'fd-aidone-title', tabindex: '-1'}, left === 0 && !notFixed ? 'Dex fixed everything' : `Dex fixed ${plural(run.fixed, 'error')}`),
+      h('p', {class: allSaved ? 'fd-aidone-ok' : 'fd-aidone-warn', role: 'status'}, allSaved
+        ? `All ${plural(run.fixed, 'change')} ${run.fixed === 1 ? 'is' : 'are'} applied and saved as version ${(run.from || 1) + 1}. Version ${run.from || 1} is kept.`
+        : `${run.confirmed} of ${run.fixed} changes could be confirmed in the saved version. Open the report again and check the rest.`),
+      left == null ? null : h('p', {}, left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you: fix manually or ignore.` : 'No errors left. This is the final version.'),
+      notFixed > 0 ? h('p', {class: 'fd-hint'}, `${plural(notFixed, 'error')} could not be fixed by Dex; the reasons are in the panel.`) : null,
+      (run.items || []).length ? h('details', {}, h('summary', {}, 'See what changed'), h('ul', {class: 'fd-fixed-list'}, run.items.slice(0, 200).map(x => h('li', {},
+        h('s', {}, x.where), ` ${x.before === '' ? 'blank' : '“' + x.before + '”'} → “${x.after}”`)))) : null,
+      h('div', {class: 'fd-modalacts'},
+        report ? h('a', {class: 'btn primary', href: '/api/spreadsheets/download?id=' + report.file_hash, download: report.filename}, 'Download the new report') : null,
+        h('button', {type: 'button', class: 'btn', onclick: close}, 'Close')));
+    d.addEventListener('cancel', e => { e.preventDefault(); close(); });
+    document.body.append(d); d.showModal(); d.querySelector('h2').focus();
   }
   function fdAIRunBanner(run, left) {
     const dismiss = h('button', {type: 'button', class: 'btn small subtle', onclick: () => { state.fdAIRun = null; drawSide(); }}, 'OK');
