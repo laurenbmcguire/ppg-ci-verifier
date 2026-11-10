@@ -182,6 +182,12 @@ class handler(BaseHTTPRequestHandler):
         return dict(data, review=rv, other_days=repeats, built=inbox.setting(f'built|{file_hash}', None), assignment=assignment, holds=holds,
                     sp_job=sharepoint_jobs.lookup(rv.get('job'), inbox.setting(sharepoint_jobs.KEY)))
 
+    def can_stored_report(self, inbox, item):
+        self.refresh_session_principal(inbox)
+        from hosting.review_summary import summarize
+        review = summarize(item, with_issues=False)
+        return self.can_report(inbox.assignment_for(item, review), review.get('job'))
+
     def fail(self, status, message):
         return self.send(status, json.dumps({'error': message, 'fail_closed': True}).encode())
 
@@ -760,6 +766,17 @@ class handler(BaseHTTPRequestHandler):
                 return self.send(200, data, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                                  {'Content-Disposition': f'attachment; filename="{safe}"', 'X-Photos-Embedded': str(info['embedded']),
                                   'X-Photos-Missing': str(info['missing']), 'X-Photos-Records': str(info['with_photos']), 'X-Photos-Tab': info['tab']})
+            if route == '/api/spreadsheets/working-copy':
+                file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
+                if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+                    raise Conflict('Valid spreadsheet version ID required.')
+                if not self.can_hash(file_hash):
+                    return self.fail(404, 'Report not found.')
+                with self.store().session() as directory:
+                    inbox = SpreadsheetInbox(directory)
+                    self.refresh_session_principal(inbox)
+                    data = inbox.working_copy(file_hash, lambda item: self.can_stored_report(inbox, item))
+                return self.send(200, encode_json(data))
             if route == '/api/spreadsheets/download':
                 file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
                 if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
@@ -816,7 +833,9 @@ class handler(BaseHTTPRequestHandler):
                     data=self.workflow(directory).get(manifest_hash)
                     data['reviewer_identity_available']=False
                 elif route == '/api/spreadsheets':
-                    data = SpreadsheetInbox(directory).list()
+                    working_inbox = SpreadsheetInbox(directory)
+                    self.refresh_session_principal(working_inbox)
+                    data = working_inbox.list(working=True, authorize=lambda item: self.can_stored_report(working_inbox, item))
                     if not self.is_admin():
                         from hosting import registry
                         mine = set((self.current_user() or {}).get('clients') or [])

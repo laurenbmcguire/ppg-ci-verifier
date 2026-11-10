@@ -37,7 +37,10 @@ class VersionReuseTests(unittest.TestCase):
         b = save(self.box, self.a, 'original', 'second')['file_hash']
         c = save(self.box, b, 'second', 'third')['file_hash']
         # A separate child is chronologically newer, but must never substitute for C.
-        d = save(self.box, self.a, 'original', 'parallel')['file_hash']
+        # Seed a legacy parallel branch; the repaired release refuses new stale-parent writes.
+        with patch.object(self.box, '_working_copies') as old_release:
+            old_release.return_value.resolve.return_value = {'status': 'current'}
+            d = save(self.box, self.a, 'original', 'parallel')['file_hash']
         before = self.history(); metadata = copy.deepcopy(self.box.get(c))
         for source, value in [(self.a, 'original'), (d, 'parallel')]:
             result = save(self.box, source, value, 'third')
@@ -181,8 +184,10 @@ class VersionReuseHTTPTests(unittest.TestCase):
         with self.store.session() as directory:self.assertEqual(SpreadsheetInbox(directory).list()['count'],3)
     def test_postcommit_access_loss_is_explicit_without_destination_leak(self):
         original=handler.can_hash
-        def can_read(h,file_hash):return original(h,file_hash) if file_hash==self.a else False
-        payload=self.payload();payload['changes']=[change('original','committed child')]
+        def can_read(h,file_hash):return original(h,file_hash) if file_hash==self.c else False
+        with self.store.session() as directory:
+            current = SpreadsheetInbox(directory).get(self.c)
+        payload=dict(file_hash=self.c, expected_check_hash=current['check_hash'], changes=[change('third','committed child')])
         with patch.object(handler,'can_hash',can_read):status,result=self.request('/api/spreadsheets/apply-fixes',payload)
         self.assertEqual(status,403,result);self.assertTrue(result['save_committed']);self.assertNotIn('item',result)
         self.assertIn('was saved',result['error'])

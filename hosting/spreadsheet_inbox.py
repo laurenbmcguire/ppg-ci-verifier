@@ -932,13 +932,20 @@ class SpreadsheetInbox:
         if not expected_check_hash or expected_check_hash != result.get('check_hash'):
             raise ValueError('This report changed after review. Reload before preparing suggestions.')
         if result.get('approval') or result.get('send_pending') or result.get('send_in_progress') or result.get('fixes_applied') or any(x.get('sent') for x in result.get('sent') or []):
-            raise ValueError('This version is approved, sent, or superseded. Suggestions cannot change it.')
+            if any(x.get('sent') for x in result.get('sent') or []):
+                raise ValueError('This version was sent and is read-only. Open its working copy if one exists.')
+            if result.get('send_pending') or result.get('send_in_progress'):
+                raise ValueError('This version is being sent and is read-only. Wait for sending to finish.')
+            if result.get('approval'):
+                raise ValueError('This version is approved and is read-only. An authorized person must resolve its approval status before editing.')
+            raise ValueError('This version is superseded. Open the working copy before preparing suggestions.')
     def proposal_inputs(self, file_hash, expected_check_hash):
         from hosting.review_summary import summarize
         with self.connect() as db:
             self._begin(db, file_hash)
             original, raw = self._original(db, file_hash)
             item = dict(self.latest(db, file_hash, original))
+            self._require_working_parent(db, file_hash)
             self._check_proposal_state(item, expected_check_hash)
             review = summarize(item)
             decided = item.get('review_decisions') or {}
@@ -949,6 +956,7 @@ class SpreadsheetInbox:
             self._begin(db, file_hash)
             original, _ = self._original(db, file_hash)
             result = dict(self.latest(db, file_hash, original))
+            self._require_working_parent(db, file_hash)
             self._check_proposal_state(result, expected_check_hash)
             result.pop('check_hash', None); result.pop('checked_at', None)
             from hosting.review_summary import check_run
@@ -1181,8 +1189,12 @@ class SpreadsheetInbox:
                 db.execute('LOCK TABLE settings IN SHARE ROW EXCLUSIVE MODE')
             original, _ = self._original(db, file_hash)
             result = dict(self.latest(db, file_hash, original))
-            if result.get('approval') or result.get('send_pending') or any(x.get('sent') for x in result.get('sent') or []):
-                raise ValueError('Approved or sent versions cannot be corrected; withdraw approval first.')
+            if any(x.get('sent') for x in result.get('sent') or []):
+                raise ValueError('This version was sent and is read-only. No correction was saved.')
+            if result.get('send_pending') or result.get('send_in_progress'):
+                raise ValueError('This version is being sent and is read-only. No correction was saved.')
+            if result.get('approval'):
+                raise ValueError('This version is approved and is read-only. An authorized person must resolve its approval status before editing.')
             if not expected_check_hash or expected_check_hash != result.get('check_hash'):
                 raise ValueError('This report changed after the corrections were reviewed. Nothing was applied.')
             if automatic:
@@ -1223,6 +1235,11 @@ class SpreadsheetInbox:
                     # Check before storing bytes, updating either version, or committing.
                     # The API uses the current destination's own assignment semantics.
                     raise CorrectionAccessDenied('Report not found.')
+            # Existing exact-output reuse below is read-only. A new write must still
+            # originate from the current leaf at transaction time, never a stale tab.
+            existing = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (new_hash,)).fetchone()
+            if not existing:
+                self._require_working_parent(db, file_hash)
             new_item = self._store_new(db, new_name, fixed, new_check, new_hash)
             if new_item.get('duplicate'):
                 # the same changes give byte-identical output: that version already exists, so it is opened, never
@@ -1262,6 +1279,29 @@ class SpreadsheetInbox:
         except Exception:
             pass  # search falls back to indexing later
         return new_item
+    def _require_working_parent(self, db, file_hash):
+        current = self._working_copies(db).resolve(file_hash)
+        if current.get('unavailable_reason') == 'history_inconsistent':
+            raise ValueError(current['message'])
+        if current['status'] == 'unavailable':
+            raise ValueError('The working copy could not be verified. Nothing was applied; reload before saving.')
+        if current['status'] != 'current':
+            raise ValueError('This version is superseded. Open the working copy and review your edits there. Nothing was applied.')
+
+    def _working_copies(self, db):
+        from hosting.working_copy import WorkingCopies
+        bases = {}
+        for row in db.execute('SELECT file_hash,result_json FROM spreadsheets').fetchall():
+            bases[row['file_hash']] = json.loads(row['result_json'])
+        histories = {}
+        for row in db.execute('SELECT file_hash,result_json FROM spreadsheet_checks ORDER BY seq ASC').fetchall():
+            histories.setdefault(row['file_hash'], []).append(json.loads(row['result_json']))
+        return WorkingCopies(bases, histories)
+
+    def working_copy(self, file_hash, authorize=None):
+        with self.connect() as db:
+            return self._working_copies(db).resolve(file_hash, authorize or (lambda item: True))
+
     def _shared_correction_ancestry(self, db, left, right):
         """Prove membership from append-only stored parent links, never filename/root hints.
 
@@ -1408,22 +1448,43 @@ class SpreadsheetInbox:
         with self.connect() as db:
             original, raw = self._original(db, file_hash)
         return original['filename'], raw
-    def list(self):
+    def list(self, *, working=False, authorize=None):
         with self.connect() as db:
-            rows = db.execute('SELECT result_json FROM spreadsheets ORDER BY seq DESC LIMIT 100').fetchall()
-            count = db.execute('SELECT COUNT(*) FROM spreadsheets').fetchone()[0]
-            results = []
-            for stored in rows:   # one unreadable report never empties the whole list
-                base = json.loads(stored['result_json'])
-                try:
-                    results.append(self.latest(db, base['file_hash'], base))
-                except Exception:
-                    results.append(dict(base, internal_check_status='could_not_load_latest_check'))
+            if working:
+                graph = self._working_copies(db)
+                results = []
+                for key, item in graph.items.items():
+                    if authorize is not None and not authorize(item):
+                        continue
+                    resolution = graph.resolve(key, authorize or (lambda item: True))
+                    if resolution["status"] in ("superseded", "choice"):
+                        continue
+                    results.append(dict(item, working_copy=resolution))
+                results.sort(key=lambda item: item.get("received_at") or "", reverse=True)
+                count = len(results)
+                results = results[:100]
+            else:
+                results, count = self._listed_results(db)
+        return self._list_payload(results, count, working=working)
+
+    def _listed_results(self, db):
+        rows = db.execute('SELECT result_json FROM spreadsheets ORDER BY seq DESC LIMIT 100').fetchall()
+        count = db.execute('SELECT COUNT(*) FROM spreadsheets').fetchone()[0]
+        results = []
+        for stored in rows:   # one unreadable report never empties the whole list
+            base = json.loads(stored['result_json'])
+            try:
+                results.append(self.latest(db, base['file_hash'], base))
+            except Exception:
+                results.append(dict(base, internal_check_status='could_not_load_latest_check'))
+        return results, count
+
+    def _list_payload(self, results, count, *, working=False):
         for result in results:
             if result.get('checker_version')!=CHECKER_VERSION:
                 result['internal_check_status']='outdated_checks_require_recheck'
         # List endpoint is bounded; detailed results remain available by hash.
-        fields = ('file_hash','filename','version','revision','root_hash','received_at','format','status','internal_check_status','verification_scope','release_status','finding_count','findings_truncated','sheet_count','row_count')
+        fields = ('file_hash','filename','version','revision','root_hash','received_at','format','status','internal_check_status','verification_scope','release_status','finding_count','findings_truncated','sheet_count','row_count','working_copy')
         from hosting.review_summary import summarize
         try:
             ctx = self.assignment_context()
@@ -1442,7 +1503,7 @@ class SpreadsheetInbox:
                     item['assignment'] = None
             return item
         return {'spreadsheets': [row(result) for result in results],
-                'count': count, 'limit':100, 'has_more': count > 100,
+                'count': count, 'limit':100, 'has_more': count > 100, 'working_copies': working,
                 'notice':'Mapped checks and optional separately supplied source comparisons. No source authentication, business approval or release.'}
     def get(self, file_hash):
         """The stored result. A result made by an older checker is returned as it is, marked outdated: new checks
