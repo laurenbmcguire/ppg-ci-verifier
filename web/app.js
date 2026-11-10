@@ -518,6 +518,33 @@
     const reason = v.read_only_reason || (r.sent || []).some(x => x.sent) && 'sent' || r.sending && 'sending' || r.approval && 'approved';
     return reason ? `This version is ${reason} and is read-only.` : 'Historical version. Findings and evidence belong only to this saved copy.';
   }
+  function fdHistoryRecovery(r) {
+    if (r.version_view?.unavailable_reason !== 'history_inconsistent' || state.me?.user?.role !== 'admin') return null;
+    const bound = Object.freeze({file_hash: r.file_hash, expected_check_hash: r.check_hash});
+    const current = () => state.report === r && state.selected === bound.file_hash && state.report?.check_hash === bound.expected_check_hash;
+    const message = h('p', {role: 'status'}, 'An admin can review whether this isolated history conflict is safely recoverable.');
+    const button = h('button', {type: 'button', class: 'btn', onclick: async () => {
+      if (!current() || state.busy || state.rechecking || state.decisionPending) return;
+      button.disabled = true;
+      try {
+        const preview = await api('/api/spreadsheets/history-recovery', bound);
+        if (!current()) return;
+        const plan = preview.result;
+        if (plan?.file_hash !== bound.file_hash || plan?.expected_check_hash !== bound.expected_check_hash || !plan?.recovery_token) throw new Error('Recovery preview did not match this exact saved report.');
+        if (!window.confirm(plan.message + '\n\nRecord this history recovery now?')) return;
+        if (!current()) return;
+        message.textContent = 'Saving the audited history recovery…';
+        const saved = await api('/api/spreadsheets/history-recovery', {...bound, recovery_token: plan.recovery_token, apply: true, confirm: true});
+        if (!saved.applied || saved.result?.file_hash !== bound.file_hash || saved.result?.history_recovery?.from_check !== bound.expected_check_hash) throw new Error('Recovery was not confirmed. Reload the report before retrying.');
+        if (current()) {
+          await openReport(bound.file_hash, true);
+          toast('Review controls restored. Existing findings and source holds still apply.');
+        }
+      } catch (error) { message.textContent = error.message + ' Reload the report before retrying an uncertain save.'; }
+      finally { if (button.isConnected) button.disabled = false; }
+    }}, 'Review history recovery');
+    return h('section', {class: 'fd-history-recovery'}, message, button);
+  }
   // Only saved evidence is grouped here. Browser drafts, suggestions and AI recommendations
   // never become corrections or human decisions just because a historical view was opened.
   function fdRecordedFindingGroups(r) {
@@ -567,7 +594,7 @@
       h('div', {class: 'fd-actions'}, h('span', {class: 'fd-status amber'}, icon('lock', 16), 'Read-only'),
         h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download this original version')));
     const notice = h('section', {class: 'fd-readonly-notice', role: 'status'}, h('b', {}, reason), h('p', {}, locked),
-      h('p', {}, 'Saved checks are shown for inspection. Opening this view does not complete verification or authorize release.'),
+      h('p', {}, 'Saved checks are shown for inspection. Opening this view does not complete verification or authorize release.'), fdHistoryRecovery(r),
       v.status !== 'unavailable' && (v.historical || v.status !== 'current') ? h('a', {class: 'btn', href: '#r=' + r.file_hash}, 'Return to working copy') : null);
     const holds = h('details', {class: 'fd-readonly-holds', open: !!(r.holds || []).length},
       h('summary', {}, `Recorded holds · ${(r.holds || []).length}`),
@@ -2889,6 +2916,14 @@
     const add = (title, text, link) => rows.push(h('article', {class: 'fd-hist'}, h('b', {}, title), h('span', {}, text), link || null));
     const inconsistent = r.version_view?.unavailable_reason === 'history_inconsistent';
     if (inconsistent) add('Saved history could not be verified', fdReadOnlyReason(r) + ' The links below are recorded references, not verified correction ancestry.');
+    if (r.history_recovery) {
+      const receipt = r.history_recovery;
+      if (r.version_view?.history_recovery_verified !== true) add('Recorded recovery claim, unverified', 'The saved recovery receipt could not be verified against complete history. It does not establish recovery or release readiness.');
+      else add('Audited history recovery', `An isolated self-link was excluded from the working-copy graph ${when2(receipt.at) || ''} by ${receipt.by?.name || receipt.by?.email || 'an admin'}. Original bytes and ${receipt.prefix_count} prior check records remain unchanged. This is not verification or approval.`);
+      const claims = receipt.ignored_self_link?.fixed_from?.changes || [];
+      if (claims.length) rows.push(h('details', {}, h('summary', {}, 'Earlier self-link claims, retained as unverified history'),
+        ...fdHistoryGroups({changed: claims}).map(g => fdHistoryGroup(g, {unverified: true, notice: 'An earlier self-link claimed these changes. The recovery does not prove they were applied.'}))));
+    }
     if (r.fixed_from) add(`v${r.fixed_from.revision || 1} · ${r.fixed_from.filename}`, inconsistent ? 'Unverified recorded parent reference.' : 'The version these changes were made on. Kept unchanged.', h('a', {href: '#r=' + r.fixed_from.file_hash + '&history=1'}, `Open v${r.fixed_from.revision || 1}`));
     add(`v${revisionOf(r)} · this version`, r.fixed_from ? `${plural((r.fixed_from.changes || []).length, 'change')} ${inconsistent ? 'recorded in unverified history' : 'applied'}${r.fixed_from.applied_at ? ' ' + when2(r.fixed_from.applied_at) : ''}: ` + (r.fixed_from.changes || []).slice(0, 8).map(c => `${c.sheet}!${c.cell} ${c.before || '(blank)'} → ${c.after || '(blank)'}`).join('; ') + ((r.fixed_from.changes || []).length > 8 ? '…' : '') : `Uploaded ${when2(r.received_at) || ''}. Stored unchanged (SHA-256 ${r.file_hash.slice(0, 12)}…).`);
     if ((r.fixed_from?.changes || []).length) rows.push(h('details', {class: 'fd-saved-history'},

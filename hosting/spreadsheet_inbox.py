@@ -1301,15 +1301,46 @@ class SpreadsheetInbox:
         if current['status'] != 'current':
             raise ValueError('This version is superseded. Open the working copy and review your edits there. Nothing was applied.')
 
-    def _working_copies(self, db):
-        from hosting.working_copy import WorkingCopies
+    def _history_inventory(self, db):
         bases = {}
         for row in db.execute('SELECT file_hash,result_json FROM spreadsheets').fetchall():
             bases[row['file_hash']] = json.loads(row['result_json'])
         histories = {}
         for row in db.execute('SELECT file_hash,result_json FROM spreadsheet_checks ORDER BY seq ASC').fetchall():
             histories.setdefault(row['file_hash'], []).append(json.loads(row['result_json']))
-        return WorkingCopies(bases, histories)
+        return bases, histories
+
+    def _working_copies(self, db):
+        from hosting.working_copy import WorkingCopies
+        return WorkingCopies(*self._history_inventory(db))
+
+    def recover_self_cycle(self, file_hash, *, actor, expected_check_hash, recovery_token=None, apply=False):
+        from hosting import history_recovery as recovery
+        if not isinstance(actor, dict) or actor.get('role') != 'admin' or not actor.get('id'):
+            raise ValueError('Only an authenticated admin can recover version history.')
+        with recovery.outer_commit_only(self), self.connect() as db:
+            self._begin(db, file_hash)
+            if self.pg is not None:
+                db.execute('LOCK TABLE spreadsheets, spreadsheet_checks IN SHARE ROW EXCLUSIVE MODE')
+            original, raw = self._original(db, file_hash)
+            bases, histories = self._history_inventory(db)
+            current = self.latest(db, file_hash, original)
+            if current.get('check_hash') != expected_check_hash:
+                raise ValueError('The report changed. Review current history before recovery.')
+            plan = recovery.proposal(file_hash, bases, histories)
+            plan.update(file_hash=file_hash, expected_check_hash=expected_check_hash, original_sha256=hashlib.sha256(raw).hexdigest())
+            if not apply:
+                return plan
+            if not recovery_token or recovery_token != plan['recovery_token']:
+                raise ValueError('The saved inventory changed. Nothing was recovered; review it again.')
+            result = recovery.cleared(current)
+            result.pop('check_hash', None); result.pop('checked_at', None)
+            result[recovery.FIELD] = dict(plan['receipt'], by={k: actor.get(k) for k in ('id', 'role', 'email', 'name')},
+                                          at=datetime.now(timezone.utc).isoformat())
+            saved = self.save_check(db, result)
+            if self._working_copies(db).resolve(file_hash).get('status') != 'current':
+                raise ValueError('Recovery did not establish a current review root. Nothing was saved.')
+            return saved
 
     def working_copy(self, file_hash, authorize=None):
         with self.connect() as db:
@@ -1323,37 +1354,15 @@ class SpreadsheetInbox:
         must agree with that first record. Missing, cyclic or conflicting chains
         fail closed; no metadata or history is rewritten when a copy is reused.
         """
-        cache = {}
+        graph = self._working_copies(db)
         def chain(start):
             seen = set()
             current = start
             for _ in range(1000):
-                if current in seen:
+                if current in seen or current not in graph.items or current in graph.invalid:
                     return None
                 seen.add(current)
-                if current not in cache:
-                    row = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (current,)).fetchone()
-                    if not row:
-                        return None
-                    records = db.execute('SELECT result_json FROM spreadsheet_checks WHERE file_hash=? ORDER BY seq ASC', (current,)).fetchall()
-                    if not records:
-                        return None
-                    saved_parent = None
-                    for record in records:
-                        link = json.loads(record['result_json']).get('fixed_from')
-                        if saved_parent is not None and link != saved_parent:
-                            return None
-                        if link:
-                            if not isinstance(link, dict):
-                                return None
-                            saved_parent = link
-                    parent = saved_parent.get('file_hash') if saved_parent else None
-                    if saved_parent and not parent:
-                        return None
-                    if parent is not None and (not isinstance(parent, str) or not re.fullmatch(r'[0-9a-f]{64}', parent)):
-                        return None
-                    cache[current] = parent
-                current = cache[current]
+                current = graph.parents.get(current)
                 if current is None:
                     return seen
             return None
@@ -1533,7 +1542,7 @@ class SpreadsheetInbox:
             result=dict(result, internal_check_status='outdated_checks_require_recheck',
                         recheck=dict(available=True, checked_with=result.get('checker_version'), current=CHECKER_VERSION))
         return result
-    RECHECK_KEEP = ('approval','sent','send_pending','send_in_progress','fixes_applied','fixed_from','review_request','source_document','accepted_issues','auto_formatting','ai_fixed',
+    RECHECK_KEEP = ('history_recovery','approval','sent','send_pending','send_in_progress','fixes_applied','fixed_from','review_request','source_document','accepted_issues','auto_formatting','ai_fixed',
                     'source_reconciliation','approval_withdrawn','recheck_applied','review_decisions','review_decision_log','revision','root_hash',
                     'finding_decisions','finding_decision_log','finding_decisions_rev','finding_requests')
     def _fresh_checks(self, file_hash):

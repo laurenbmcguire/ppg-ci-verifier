@@ -9,6 +9,10 @@ HASH = re.compile(r'[0-9a-f]{64}')
 
 class WorkingCopies:
     def __init__(self, bases, histories):
+        from hosting.history_recovery import effective_histories
+        recorded_histories = histories
+        histories = effective_histories(bases, histories)
+        self.recovered = {key for key in histories if histories[key] is not recorded_histories.get(key)}
         self.items = {}; self.parents = {}; self.children = {}; self.invalid = set()
         for key, base in bases.items():
             records = histories.get(key, [])
@@ -60,6 +64,7 @@ class WorkingCopies:
         out = dict(requested_hash=key, status='unavailable', working_hash=None, choices=[], history=[], read_only_reason=None)
         if key not in self.items or not authorize(self.items[key]):
             return out
+        out['history_recovery_verified'] = key in self.recovered
         if self.parents.get(key) == key:
             out['unavailable_reason'] = 'history_inconsistent'
             out['message'] = 'This copy has inconsistent saved version history and is read-only. Its original download is unchanged. Ask an admin to review the version history.'
