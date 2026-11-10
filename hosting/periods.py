@@ -82,7 +82,10 @@ def sharepoint_days(job, start, end, schedule=None):
     if not data:
         return {}, f'No "Data #{job}" list was found on SharePoint.'
     _, lst, names, items = data
-    columns, identity = _activity_date_context(data)
+    try:
+        columns, identity = _activity_date_context(data)
+    except sharepoint.SharePointError as exc:
+        return {}, str(exc)
     if any(sharepoint._item_day(it, schedule, columns, **identity) is None for it in items):
         return {}, 'SharePoint activity is incomplete: some business dates are unconfirmed. Totals are unknown; no zero was inferred.'
     by_day = defaultdict(list)

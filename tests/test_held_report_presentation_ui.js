@@ -8,7 +8,7 @@ const ctx=vm.createContext({state,SETTLED:['manual','verified'],h,Date,visibleLi
   sp:{},day:'2026-11-10',prevDay:'2026-11-09',data:{sharepoint_on:false},fmt:String,
   fdCounts:()=>({}),outdated:r=>r.internal_check_status==='outdated_checks_require_recheck',plural:(n,s)=>`${n} ${s}`,
   fdCheckedState:r=>r.checked_copy});
-vm.runInContext(section('  const queueDay =','  function drawQueue()')+'\nthis.queueNeedsAttention=queueNeedsAttention;\n'+section('      const repCell = (','      const addBox =')+'\nthis.repCell=repCell;\n'+section('  function todaysWins()','  async function autopilotTick()')+section('  function fdStatus(', '  // ---------- corrections:'),ctx);
+vm.runInContext(section('  const queueDay =','  function drawQueue()')+'\nthis.queueNeedsAttention=queueNeedsAttention;\n'+section('      const repCell = (','      // This legacy dashboard')+'\nthis.repCell=repCell;\n'+section('  function todaysWins()','  async function autopilotTick()')+section('  function fdStatus(', '  // ---------- corrections:'),ctx);
 const clean=()=>({file_hash:'synthetic',filename:'Synthetic.xlsx',internal_check_status:'no_findings_in_checks_performed',holds:[],
   assignment:{status:'manual'},review:{status:'clear',job:'SYNTHETIC',day:'2026-11-10',coverage:{truncated:false,not_listed:0},counts:{high:0,medium:0,low:0},
   sharepoint:{status:'match',source_verified:true}},

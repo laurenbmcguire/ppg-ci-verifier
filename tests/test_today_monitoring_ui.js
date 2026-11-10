@@ -24,7 +24,7 @@ async function render(data, scans = {}) {
       if (path === '/api/today/job') return {sharepoint: scans[body.job] || {error: 'Synthetic source unavailable'}};
       throw new Error('Unexpected API path');
     }});
-  vm.runInContext(hSource + todaySource, ctx);
+  vm.runInContext(hSource + between('  function reportVerification(', '  const queueNeedsAttention') + between('  function queueCheck(', '  const queueVersion') + todaySource, ctx);
   await ctx.showToday(); await settle();
   assert.equal(JSON.stringify(data), original, 'existing watched metadata and report data are not mutated');
   return {root, calls, builds, state, location, ctx};

@@ -59,6 +59,8 @@ def test_invalid_capture_identity_stays_blocked(monkeypatch,kind):
     if kind=='wrong_list':data[1]['id']='different'
     else:data[1]['_capture']['columns']*=2
     with pytest.raises(sharepoint.SharePointError):periods.day_scans('synthetic','2026-11-10')
+    days,note=periods.sharepoint_days('synthetic',date(2026,11,9),date(2026,11,10))
+    assert days=={} and 'unknown' in note
 
 def test_ambiguous_job_stays_blocked_without_selecting_a_list(monkeypatch):
     fixture(monkeypatch,[])
