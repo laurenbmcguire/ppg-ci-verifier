@@ -45,6 +45,7 @@ def snapshot(inbox, payload, authorize):
             raise ValueError('Report access changed. Reload before preparing suggestions.')
         original, raw = inbox._original(db, fh)
         item = dict(inbox.latest(db, fh, original))
+        inbox._require_working_parent(db, fh)
         inbox._check_proposal_state(item, payload.get('expected_check_hash'))
         if hashlib.sha256(raw).hexdigest() != fh:
             raise ValueError('The workbook does not match the requested version.')

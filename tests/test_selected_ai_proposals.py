@@ -181,3 +181,32 @@ def test_unknown_source_date_never_reaches_provider(setup,code):
     for issue in issues:issue['code']=code
     out=ap.prepare(box,p,lambda:True,lambda rows:pytest.fail('Source gap sent to provider'))
     assert not out['proposals'] and len(out['skipped'])==2
+
+
+@pytest.mark.parametrize('stage', ['initial', 'before_provider', 'during_provider'])
+def test_invalid_lineage_never_returns_proposals(setup, monkeypatch, stage):
+    box, item, issues, payload, fake_provider = setup
+    called = []
+    raw = box.original_bytes(item['file_hash'])[1]
+    def corrupt():
+        box._update(item['file_hash'], lambda r: r.update(fixed_from={'file_hash': item['file_hash']}))
+    if stage == 'initial':
+        corrupt()
+    if stage == 'before_provider':
+        original_sources = ap._sources
+        def sources(*args):
+            result = original_sources(*args)
+            corrupt()
+            return result
+        monkeypatch.setattr(ap, '_sources', sources)
+    def provider(rows):
+        called.append(True)
+        if stage == 'during_provider':
+            corrupt()
+        return fake_provider(rows)
+    with pytest.raises(ValueError, match='inconsistent'):
+        ap.prepare(box, payload, lambda: True, provider)
+    assert called == ([True] if stage == 'during_provider' else [])
+    assert box.original_bytes(item['file_hash'])[1] == raw
+    assert box.list()['count'] == 1
+    assert not box.get(item['file_hash']).get('ai_fixes')
