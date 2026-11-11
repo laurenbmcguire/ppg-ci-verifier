@@ -168,9 +168,10 @@
 
   // Two lists. Done: sent to the client, or checked with the current checks and no possible errors left.
   // To do: everything else. SharePoint and approval status are shown on the row; they do not move a finished report back.
-  const queueDone = r => !!r.review?.sent_at || (!!r.review && r.review.status === 'clear' && !r.review.coverage?.truncated && !r.review.coverage?.not_listed && r.review.page?.complete !== false &&
-    !['outdated_checks_require_recheck', 'could_not_load_latest_check'].includes(r.internal_check_status) && r.review.sharepoint?.status !== 'differences' &&
-    !!r.review.day && !!r.review.job && !!r.assignment && SETTLED.includes(r.assignment.status) && !r.assignment.needs_person);
+  // Zero possible errors on a current check means the report is done (it moves to the Done list).
+  const queueZero = r => { const rv = r.review; return !!rv && rv.status === 'clear'; };
+  const queueDone = r => !!r.review?.sent_at || (queueZero(r) && !r.review.coverage?.truncated && !r.review.coverage?.not_listed && r.review.page?.complete !== false &&
+    !['outdated_checks_require_recheck', 'could_not_load_latest_check'].includes(r.internal_check_status) && r.review.sharepoint?.status !== 'differences');
   const queueNeedsAttention = r => !queueDone(r);
   function queueNewerCopies(r, inventory) {
     if (state.workingCopies) return []; // Parallel graph leaves are independent, never timestamp winners.
@@ -204,8 +205,7 @@
     if (rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false) return ['Needs a recheck', 'check'];
     if (rv.sent_at) return ['Sent to client', 'clear'];
     if (rv.status === 'clear' && rv.sharepoint?.status === 'differences') return ['Does not match SharePoint', 'check'];
-    if (rv.status === 'clear' && r.assignment !== undefined && (!r.assignment || !SETTLED.includes(r.assignment.status) || r.assignment.needs_person)) return ['Client not confirmed', 'check'];
-    if (rv.status === 'clear') return ['Completed', 'clear'];
+    if (queueZero(r)) return ['Completed', 'clear'];
     const n = [c.high, c.medium, c.low].every(Number.isFinite) ? c.high + c.medium + c.low : null;
     return [n == null ? 'Possible errors to review' : plural(n, 'possible error'), rv.status === 'hold' ? 'hold' : 'check'];
   }

@@ -27,8 +27,8 @@ test('client tab and rail attention badges use exactly the To do predicate and v
  const badge=node=>Number(node.children.find(child=>child?.tag==='i')?.children[0]||0);
  const tabs=Object.fromEntries(bar.children.map(node=>[node.children[0],badge(node)]));
  const rails=Object.fromEntries(rail.children.filter(node=>node.tag==='a').map(node=>[node.children.find(child=>child?.tag==='span').children[0],badge(node)]));
- assert.deepEqual(tabs,{'All clients':4,Alpha:1,Beta:1,'Needs client':2});
- assert.deepEqual(rails,{'All clients':4,Alpha:1,Beta:1,'Needs client':2});
+ assert.deepEqual(tabs,{'All clients':2,Alpha:1,Beta:1,'Needs client':0});
+ assert.deepEqual(rails,{'All clients':2,Alpha:1,Beta:1,'Needs client':0});
  assert.equal(tabs['All clients'],context.visibleList().filter(context.queueNeedsAttention).length);
  // A badge must clear when its only review needs are resolved, without treating sent/hidden rows as work.
  list[0].review.sharepoint={status:'match',source_verified:true};list[3].review={...clear};context.drawClientTabs();
