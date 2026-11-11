@@ -1285,14 +1285,22 @@ class SpreadsheetInbox:
                 if result.get('finding_decisions') or result.get('review_decisions') or result.get('accepted_issues'):
                     raise ValueError('A person has reviewed this report; automatic corrections are disabled.')
             # Never silently rewrite rejected or deferred data, even through a manual batch.
-            for decision in (result.get('finding_decisions') or {}).values():
+            # A decision that names a cell protects that cell. One that names only a row protects the row while the
+            # current checks still report its finding; a decision about the report as a whole locks no cell.
+            _current = None
+            for _key, decision in (result.get('finding_decisions') or {}).items():
                 if decision.get('action') not in ('reject', 'defer'):
                     continue
-                # The decision protects the cell it was made on, or its whole row when it names a row and no cell.
-                # A decision about another row, or about the report as a whole, does not lock the other cells.
                 cell, row = str(decision.get('cell') or '').upper(), decision.get('row')
                 if not cell and not row:
                     continue
+                if not cell:
+                    if _current is None:
+                        from hosting.review_summary import summarize as _summarize
+                        _rv = _summarize(result)
+                        _current = {x.get('key') for x in (_rv.get('issues') or []) + (_rv.get('dismissed') or [])}
+                    if _key not in _current:
+                        continue
                 for c in approved:
                     target = str(c.get('cell') or '').upper()
                     same_row = bool(row) and re.sub(r'^[A-Z]+', '', target) == str(row)

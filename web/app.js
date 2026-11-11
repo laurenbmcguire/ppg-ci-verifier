@@ -1895,7 +1895,8 @@
     const status = fdCheckedState(r), p = r.checked_copy;
     // Nothing left to fix or decide: say Completed. What the SharePoint check could not confirm stays one click away.
     const ignored = p?.set_aside_unresolved || 0;
-    if (!status.ready && p?.coverage_complete && Number.isInteger(p.remaining_detected_errors) && p.remaining_detected_errors - ignored <= 0 && p.file_hash === r.file_hash && p.check_hash === r.check_hash) {
+    if (!status.ready && p?.coverage_complete && Number.isInteger(p.remaining_detected_errors) && p.remaining_detected_errors - ignored <= 0 && p.file_hash === r.file_hash && p.check_hash === r.check_hash &&
+        !(state.fdItems?.length ? state.fdItems : typeof fdItems === 'function' ? fdItems() : []).some(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state))) {
       clearTimeout(state.checkedCopyExpiryTimer);
       return h('section', {id: 'fd-checked-copy', class: 'fd-checked-copy checked fd-completed', role: 'status'},
         h('b', {}, 'Completed'),
@@ -2128,6 +2129,11 @@
     state.fdAIRun = {hash: state.report?.file_hash, done: true, error: 'The report kept updating. Wait a moment and press AI fix again. Nothing was changed.'};
     toast('AI fix did not finish: ' + state.fdAIRun.error, true); drawSide();
   }
+  // Cells (or whole rows) the reviewer ignored or deferred on this version: automatic fixes leave them as written.
+  function fdProtectedCells() {
+    const decided = (state.fdItems?.length ? state.fdItems : typeof fdItems === 'function' ? fdItems() : []).filter(it => ['kept', 'deferred', 'rejected'].includes(it.state) && it.decision && (it.cell || it.row));
+    return p => decided.some(it => (!it.sheet || it.sheet === p.sheet) && (it.cell ? String(it.cell).toUpperCase() === String(p.cell).toUpperCase() : String(p.cell).replace(/^[A-Z]+/i, '') === String(it.row)));
+  }
   async function fdAIFixRun(scope, lastTry = false) {
     const report = state.report, startedAt = Date.now(); if (!report) return;
     const binding = reviewBinding(report), hash = report.file_hash, operation = {};
@@ -2158,8 +2164,7 @@
       }
       if (state.report !== report || JSON.stringify(reviewBinding(report)) !== JSON.stringify(binding)) throw Object.assign(new Error('The report changed while suggestions were prepared. Reopen it before applying. No save was started.'), {reportChanged: true});
       // A cell (or whole row) the reviewer ignored or deferred stays as written: leave those out instead of failing the whole save.
-      const decided = (state.fdItems?.length ? state.fdItems : typeof fdItems === 'function' ? fdItems() : []).filter(it => ['kept', 'deferred', 'rejected'].includes(it.state) && it.decision && (it.cell || it.row));
-      const protectedCell = p => decided.some(it => (!it.sheet || it.sheet === p.sheet) && (it.cell ? String(it.cell).toUpperCase() === String(p.cell).toUpperCase() : String(p.cell).replace(/^[A-Z]+/i, '') === String(it.row)));
+      const protectedCell = fdProtectedCells();
       const accepted = fdUniqueAIProposals(proposals).filter(p => !protectedCell(p));
       const why = new Map(skipped.map(x => [x.finding_id, String(x.reason || '')]));
       const describe = (it, reason, currentKey) => ({key: currentKey || it.key, where: [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ') || 'Whole report',
@@ -3240,9 +3245,9 @@
         h('p', {}, `Fields checked: ${(rec.fields_checked || sp.fields_checked || []).join(', ') || 'Unknown'}. Fields not checked: ${(rec.fields_not_checked || sp.fields_not_checked || []).join(', ') || 'Not specified'}. This does not verify photos, source correctness or release readiness.`),
         (rec.not_verified_because || []).length ? h('ul', {}, rec.not_verified_because.map(reason => h('li', {}, reason))) : null,
         ...[['duplicates', 'Duplicate report references'], ['exclusions', 'Source records outside the confirmed business date']].map(([key, title]) =>
-          (counts?.[key] || []).length ? h('details', {}, h('summary', {}, `${title} · ${counts[key].length}`), h('ul', {}, counts[key].map((x, n) =>
+          (counts?.[key] || []).length ? h('details', {}, h('summary', {}, `${title} · ${counts[key].length}`), h('ul', {}, counts[key].slice(0, 25).map((x, n) =>
             h('li', {'data-comparison-id': `${key}:${n}`}, `${x.sheet ? x.sheet + ' · row ' + x.row + ' · ' : ''}Source item ${value(x.item)}${x.day ? ' · ' + x.day : ''}: ${x.evidence || x.reason || 'Evidence unavailable'}`,
-              x.day_basis ? h('small', {}, ` Date basis: ${x.day_basis}`) : null)))) : null),
+              x.day_basis ? h('small', {}, ` Date basis: ${x.day_basis}`) : null))), counts[key].length > 25 ? h('p', {class: 'fd-hint'}, `…and ${counts[key].length - 25} more.`) : null) : null),
         h('p', {}, counts?.note || 'No report rows are deleted or excluded by this display.'),
         null));
   }
@@ -3462,7 +3467,7 @@
     state.fdAutoTidied ||= {};
     if (!report || state.report !== report || versionReadOnly(report) || state.fdAutoTidied[report.file_hash] || state.fdAIRun?.running || store.get('rd-auto-tidy', true) === false) return;
     let tidy;
-    try { if (state.report.review?.page?.complete === false) return; const cells = new Map(); for (const it of fdItems()) if (fdTidyOnly(it)) cells.set(JSON.stringify([it.sheet, it.cell]), it); tidy = [...cells.values()]; } catch (e) { return; }
+    try { if (state.report.review?.page?.complete === false) return; const cells = new Map(); const kept = fdProtectedCells(); for (const it of fdItems()) if (fdTidyOnly(it) && !kept(it.fix)) cells.set(JSON.stringify([it.sheet, it.cell]), it); tidy = [...cells.values()]; } catch (e) { return; }
     if (!tidy.length) return;
     state.fdAutoTidied[report.file_hash] = true;   // once per version, never in a loop
     state.fdTidying = true;   // the SharePoint check waits for the tidied version instead of running twice
