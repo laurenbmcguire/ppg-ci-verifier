@@ -127,9 +127,15 @@ class Differences(unittest.TestCase):
         self.assertIn('not_on_sharepoint', codes)        # 436 is in the report only
 
     def test_export_edited_after_capture_is_shown(self):
-        items = list(ALL); items[0] = sp_item(432, version='4.0')
+        # edited on SharePoint and a quantity now differs from the export: raised
+        items = list(ALL); items[0] = sp_item(432, version='4.0', inspected=71)
         r = run(sl_daily(), snap([items]))
         self.assertTrue(any(x['status'] == 'changed_since_export' for x in r['rows']))
+        # edited on SharePoint but every exported quantity still matches: counted, not raised
+        items = list(ALL); items[0] = sp_item(432, version='4.0')
+        same = run(sl_daily(), snap([items]))
+        self.assertFalse(any(x['status'] == 'changed_since_export' for x in same['rows']))
+        self.assertEqual(same['export']['edited_with_same_quantities'], 1)
         self.assertEqual(r['export']['rows'], 5)
 
 

@@ -464,7 +464,7 @@ def compare(day, records, export_records, snap, confirmed=None, report=None):
     # 1. captured export (inside the workbook) against the live list
     export_summary = None
     if export_records:
-        changed = missing = 0
+        changed = missing = edited_same = 0
         for e in export_records:
             src = e.get('source') or {}
             if same_list(src) is None:
@@ -478,14 +478,20 @@ def compare(day, records, export_records, snap, confirmed=None, report=None):
                     note='The captured export lists an item this SharePoint list does not have.' if cov.get('complete') else 'The incomplete source capture cannot establish whether this exported item exists. Retry the source check; keep the report row unchanged.')
                 continue
             if src.get('version') and it.get('version') and str(src['version']) != str(it['version']):
-                changed += 1
-                row('changed_since_export', it['item'], e, field='version', report_value=src['version'], sharepoint=it['version'],
-                    note='The SharePoint item was edited after the export was captured.')
+                compared = [f for f in QTY if f in e['values'] and f in it['values']]
+                if compared and all(e['values'][f] == it['values'][f] for f in compared):
+                    # Edited on SharePoint after the export, but every quantity the export records still equals the
+                    # live item: counted for the record, not raised as a difference a person has to clear.
+                    edited_same += 1
+                else:
+                    changed += 1
+                    row('changed_since_export', it['item'], e, field='version', report_value=src['version'], sharepoint=it['version'],
+                        note='The SharePoint item was edited after the export was captured.')
             for f in QTY:
                 if f in e['values'] and f in it['values'] and e['values'][f] != it['values'][f]:
                     changed += 1
                     row('export_value_differs', it['item'], e, f, _show(e['values'][f]), _show(it['values'][f]))
-        export_summary = dict(rows=len(export_records), changed=changed, missing=missing)
+        export_summary = dict(rows=len(export_records), changed=changed, missing=missing, edited_with_same_quantities=edited_same)
 
     # 2. the record rows against the snapshot: identity is site + list + item
     seen, unidentified, unconfirmed = set(), 0, 0

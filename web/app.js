@@ -2144,7 +2144,7 @@
       if (state.report?.file_hash !== run.hash || !state.fixes || versionReadOnly(state.report)) return;
       const mine = new Set((run.unfixed || []).map(x => x.key));
       // A difference from SharePoint is never set aside automatically either.
-      const soft = fdItems().filter(it => mine.has(it.key) && it.fp && it.state === 'open' && it.tier !== 'blocker' && it.issue?.severity !== 'high' && it.source == null && !/^SharePoint/i.test(String(it.issue?.source || '')));
+      const soft = fdItems().filter(it => mine.has(it.key) && it.fp && it.state === 'open' && (/_format_differs$/.test(it.issue?.code || '') || it.tier !== 'blocker' && it.issue?.severity !== 'high') && it.source == null && !/^SharePoint/i.test(String(it.issue?.source || '')));
       let leftAsWritten = 0;
       if (soft.length && soft.length <= 1000) {
         try {
