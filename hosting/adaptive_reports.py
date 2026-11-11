@@ -601,8 +601,11 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None, *
         if len(codes) >= 4:
             common, n = shapes.most_common(1)[0]
             if n >= 0.75 * len(codes):
+                # A value written the same way on several rows is a real value (another model or variant), not a slip
+                # of the keyboard: only a one-off odd pattern is worth a look.
+                repeats = Counter(c for _, c in codes)
                 for r, c in codes:
-                    if shape(c) != common:
+                    if shape(c) != common and repeats[c] < 2:
                         finding(f'{kind}_format_differs', r['sheet'], r['row'],
                                 message=f'{"Identifier" if kind == "identifier" else "Part number"} {c} has a different format from the other {n} (expected like {common.replace("9", "#")}).')
     parts = Counter((r['labels'].get('part') or '').strip().upper() for r in detail if r['labels'].get('part'))

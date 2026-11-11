@@ -248,6 +248,14 @@ class UnusedColumnTests(unittest.TestCase):
         missing = [(f['row'], f['column']) for f in result['findings'] if f['code'] == 'missing_cell']
         self.assertEqual(missing, [(3, 2)])   # qty blank on row 3 is flagged; the all-blank notes column is not
 
+    def test_part_pattern_used_on_several_rows_is_not_flagged_but_a_one_off_is(self):
+        head = 'Date,Shift,Area,Auditor,Identifier,Part Number,Qty Inspected,Qty OK,Qty Reworked,Qty NOK,Defect,Comments,Condition,Picture File\n'
+        parts = ['Santa Fe (MX5A)'] * 12 + ['Tucson (NX4A)'] * 3 + ['Tucson-NX4']
+        rows = [f'2026-10-07,1,,A,ID{n:03},{part},1,1,,0,,,OK,' for n, part in enumerate(parts)]
+        result = inspect_spreadsheet('x.csv', ('\ufeff' + head + '\n'.join(rows) + '\n').encode())
+        flagged = [f['row'] for f in result['findings'] if f['code'] == 'part_format_differs']
+        self.assertEqual(flagged, [17])   # only the single odd value, not the model used on three rows
+
     def test_blank_reject_cell_is_missing_only_when_parts_are_unaccounted_for(self):
         head = 'Date,Shift,Area,Auditor,Identifier,Part Number,Qty Inspected,Qty OK,Qty Reworked,Qty NOK,Defect,Comments,Condition,Picture File\n'
         rows = ['2026-10-07,1,,A,ID1,P1,34,34,,,,,OK,',        # every part is OK: the blank NOK cell has nothing to hold

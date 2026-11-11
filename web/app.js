@@ -290,6 +290,7 @@
         h('span', {class: 'queue-quantities'}, ...quantities.map(text => h('span', {}, text))),
         h('span', {class: 'queue-version'}, `${file} · ${version}${earlier ? ' · earlier copy' : ''}${current ? ' · last opened' : ''} · ${note}`));
       return h('div', {class: 'queue-entry' + (earlier ? ' older-entry' : '')}, open,
+        sharePointUrl(r) ? h('a', {class: 'queue-sp', href: sharePointUrl(r), target: '_blank', rel: 'noopener', 'aria-label': `Open SharePoint data for ${name}`}, 'SharePoint data') : null,
         newer.length ? h('details', {class: 'queue-newer'}, h('summary', {class: 'linkish'}, `${newer.length} newer saved cop${newer.length === 1 ? 'y' : 'ies'} available`),
           h('p', {class: 'hint'}, 'These copies may be parallel branches. Each keeps its own findings and decisions.'),
           ...newer.map(copy => h('button', {type: 'button', class: 'linkish queue-newer-copy', 'data-newer-hash': copy.file_hash,
@@ -628,7 +629,7 @@
           h('p', {}, `SHA-256: ${r.file_hash}`), h('p', {}, `Check: ${r.check_hash || 'Unavailable'} · Checker: ${r.checker_version || 'Unknown'}`))),
       h('div', {class: 'fd-actions'}, h('span', {class: 'fd-status amber'}, icon('lock', 16), 'Read-only'),
         /^[0-9a-f]{64}$/.test(v.working_hash || '') && v.working_hash !== r.file_hash ? h('a', {class: 'btn primary', id: 'fd-back-to-working', href: '#r=' + v.working_hash}, 'Back to the fixed version') : null,
-        rv.sharepoint?.web_url ? h('a', {class: 'btn', href: rv.sharepoint.web_url, target: '_blank', rel: 'noopener'}, 'SharePoint data') : null,
+        sharePointUrl(r) ? h('a', {class: 'btn', href: sharePointUrl(r), target: '_blank', rel: 'noopener'}, 'Open SharePoint data') : null,
         h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download this original version')));
     const notice = h('section', {class: 'fd-readonly-notice', role: 'status'}, h('b', {}, reason), h('p', {}, locked),
       h('p', {}, 'Saved checks are shown for inspection. Opening this view does not complete verification or authorize release.'), fdHistoryRecovery(r),
@@ -1754,9 +1755,16 @@
         const history = r.version_view?.history || [], original = r.fixed_from ? (r.root_hash || history[history.length - 1]?.file_hash || r.fixed_from.file_hash) : null;
         return original && original !== r.file_hash ? h('a', {class: 'btn', id: 'fd-view-original', href: '#r=' + original + '&history=1', title: 'Opens the first version, unchanged, to look at. Nothing is edited.'}, 'View original') : null;
       })(),
-      r.review?.sharepoint?.web_url ? h('a', {class: 'btn', id: 'fd-open-sharepoint', href: r.review.sharepoint.web_url, target: '_blank', rel: 'noopener', title: 'Opens the SharePoint list this report was compared with, in a new tab.'}, 'SharePoint data') : null,
+      sharePointUrl(r) ? h('a', {class: 'btn', id: 'fd-open-sharepoint', href: sharePointUrl(r), target: '_blank', rel: 'noopener', title: 'Opens the SharePoint list for this report in a new tab.'}, 'Open SharePoint data') : null,
       h('button', {type: 'button', class: 'btn', onclick: download}, 'Download'),
       h('button', {type: 'button', class: 'btn primary', onclick: email}, 'Email to client'));
+  }
+  // The SharePoint list a report belongs to: the one it was compared with, or the list of its confirmed client and job.
+  function sharePointUrl(r) {
+    const a = r?.assignment || {}, cands = a.candidates || [];
+    const pick = cands.find(c => c.url && a.list_id && c.list_id === a.list_id) || (cands.filter(c => c.url).length === 1 ? cands.find(c => c.url) : null);
+    const url = r?.review?.sharepoint?.web_url || a.url || pick?.url || '';
+    return /^https:\/\/[a-z0-9-]+\.sharepoint\.com\//i.test(url) ? url : null;
   }
   function drawReport() {
     if (versionReadOnly()) { drawReadOnlyReport(state.report); return; }
@@ -1909,6 +1917,7 @@
         h('b', {}, 'Completed'),
         h('p', {}, `${r.filename} · version ${revisionOf(r)}. No possible errors left${ignored ? ` (${ignored} ignored, left as written)` : ''}.`),
         h('a', {class: 'btn primary', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download report'),
+        typeof sharePointUrl === 'function' && sharePointUrl(r) ? h('a', {class: 'btn', href: sharePointUrl(r), target: '_blank', rel: 'noopener'}, 'Open SharePoint data') : null,
         h('details', {class: 'fd-completed-notes'}, h('summary', {}, 'SharePoint check notes'), h('p', {}, status.message)));
     }
     const section = h('section', {id: 'fd-checked-copy', class: 'fd-checked-copy ' + (status.ready ? 'checked' : 'pending'), role: 'status'},
@@ -2355,6 +2364,7 @@
         report && run.reused ? h('a', {class: 'btn', href: '#r=' + report.file_hash, onclick: close}, 'Open working copy') : null,
         run.originalHash ? h('a', {class: 'btn', href: '#r=' + run.originalHash + '&history=1', onclick: close}, `Open starting version ${run.from || 1}`) : null,
         report && run.fixed ? h('a', {class: 'btn primary', href: '/api/spreadsheets/download?id=' + report.file_hash, download: report.filename}, 'Download updated report') : null,
+        typeof sharePointUrl === 'function' && sharePointUrl(report || state.report) ? h('a', {class: 'btn', href: sharePointUrl(report || state.report), target: '_blank', rel: 'noopener'}, 'Open SharePoint data') : null,
         h('button', {type: 'button', class: 'btn', onclick: saveText}, 'Download summary'),
         h('button', {type: 'button', class: 'btn', onclick: close}, 'Close')));
     d.addEventListener('cancel', e => { e.preventDefault(); close(); });

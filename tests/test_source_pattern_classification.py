@@ -123,7 +123,7 @@ class BoundedSourcePatterns(unittest.TestCase):
         from hosting.source_patterns import MAX_RECEIPT_BYTES
         for huge in (False, True):
             rows=[['Identifier','Part number','Inspected','OK','NOK']]
-            rows += [[f'LOT-{n:05}', ('X'*4000 if huge else '00356870-V-LH') if n>=1500 else '12345678 AA',1,1,0] for n in range(2000)]
+            rows += [[f'LOT-{n:05}', ('X'*3995+f'{n:05}' if huge else f'{n:08}-V-LH') if n>=1500 else '12345678 AA',1,1,0] for n in range(2000)]
             item=inspect_adaptive([('Inspection Detail',rows)],{'limitations':[]})
             item.update(file_hash='a'*64,checker_version=CHECKER_VERSION)
             for group in (item['records'],item['_detail_records']):
