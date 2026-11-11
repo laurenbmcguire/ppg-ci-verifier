@@ -1209,7 +1209,7 @@
         return h('div', {class: 'fd-fixall'},
           h('p', {class: 'fd-fixall-q'}, some ? `${plural(ticked.length, 'possible error')} selected. What would you like to do?` : `What would you like to do with ${all.length === 1 ? 'this possible error' : `these ${all.length} possible errors`}?`),
           h('div', {class: 'fd-cardacts'},
-            h('button', {type: 'button', class: 'btn primary', id: 'fd-fix-everything', disabled: off || !ai.length || null, onclick: () => { if (current()) fdAIFixNow(scope, {everything: !some}); }}, some ? 'Fix selected with AI' : 'Fix everything with AI'),
+            h('button', {type: 'button', class: 'btn primary', id: 'fd-fix-everything', disabled: off || !(ai.length || (store.get('rd-auto-tidy', true) !== false && scope.some(it => it.fp && it.state === 'open'))) || null, onclick: () => { if (current()) fdAIFixNow(scope, {everything: !some}); }}, some ? 'Fix selected with AI' : 'Fix everything with AI'),
             h('button', {type: 'button', class: 'btn', id: 'fd-fix-all-manual', disabled: off || null, onclick: () => { if (current()) fdManualStart(scope); }}, 'Fix manually'),
             h('button', {type: 'button', class: 'btn', id: 'fd-ignore-all', disabled: off || null, onclick: () => { if (current()) fdReviewDialog(scope, 'ignore'); }}, 'Ignore possible errors')),
           h('p', {class: 'fd-hint'}, ai.length ? (some ? 'Untick everything to work on the whole report.' : 'Dex fixes every error it can in one go and saves a new version. To pick only some, tick them in the list below.') : state.aiOn ? 'Dex has no safe fix for these. Fix them manually or ignore them.' : 'AI is off. Fix these manually or ignore them.'));
@@ -2133,9 +2133,10 @@
   // the result box with its choices is shown instead.
   function fdAfterAI(run, report) {
     if (typeof store === 'undefined' || store.get('rd-auto-tidy', true) === false) { fdAIDoneDialog(run, report); return; }
+    state.fdAfterAIPending = true;
     (async () => {
       const pause = ms => new Promise(r => setTimeout(r, ms)), openStates = ['open', 'selected', 'deferred', 'confirmed'];
-      for (let i = 0; i < 200 && (state.report?.file_hash !== run.hash || !state.fixes || fdBackgroundBusy() || state.aiProposalOperation); i++) await pause(400);
+      for (let i = 0; i < 200 && (state.report?.file_hash !== run.hash || !state.fixes || fdActiveBusy() || state.aiProposalOperation); i++) await pause(400);
       if (state.report?.file_hash !== run.hash || !state.fixes || versionReadOnly(state.report)) return;
       const mine = new Set((run.unfixed || []).map(x => x.key));
       // A difference from SharePoint is never set aside automatically either.
@@ -2153,7 +2154,7 @@
       state.fdAIRun = {...run, leftAsWritten}; drawSide();
       toast(`${run.fixed ? `Dex fixed ${plural(run.fixed, 'cell')}` : 'Dex had nothing to change'}${leftAsWritten ? ` and left ${leftAsWritten} as written` : ''}. ` +
         (left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you (serious, or different from SharePoint): ${left === 1 ? 'it is' : 'they are'} listed on the right.` : 'No possible errors left.'), left > 0);
-    })();
+    })().finally(() => { state.fdAfterAIPending = false; });
   }
   function fdSummaryWhenReady() {
     if (state.fdSummaryWanted) return;
@@ -2173,15 +2174,19 @@
   // A SharePoint check or recheck that starts by itself when a report opens must never make AI fix fail:
   // AI fix waits for it, then works on the report as it is now, and starts again by itself if the report updates mid-way.
   const fdBackgroundBusy = () => !!(state.fdTidying || state.fdReconciling || state.fdAutoSPWaiting || state.fdAutoRecheckWaiting || state.rechecking || state.busy || state.decisionPending);
+  // Steps that are really running now. A SharePoint check that is only queued does not count: AI fix goes first and the
+  // check runs afterwards on the fixed version.
+  const fdActiveBusy = () => !!(state.fdTidying || state.fdReconciling || state.fdAutoRecheckWaiting || state.rechecking || state.busy || state.decisionPending);
   async function fdAIFixNow(scope, opts = {}) {
     const keys = new Set(scope.map(it => it.key)), pause = ms => new Promise(r => setTimeout(r, ms));
     for (let attempt = 0; attempt < 3; attempt++) {
       const first = state.report; if (!first) return;
+      if (!state.fdAIRun?.running) state.fdAIRun = {hash: first.file_hash, total: scope.length, running: true, waiting: true};
       let list = scope;
-      if (attempt || fdBackgroundBusy()) {
+      if (attempt || fdActiveBusy()) {
         document.querySelectorAll('dialog.fd-review-dialog[open]').forEach(d => d.close());
         state.fdAIRun = {hash: first.file_hash, total: scope.length, running: true, waiting: true}; drawSide();
-        for (let i = 0; (fdBackgroundBusy() || state.report && !state.fixes) && i < 300; i++) await pause(400);
+        for (let i = 0; (fdActiveBusy() || state.report && !state.fixes) && i < 300; i++) await pause(400);
         const now = state.report; if (!now || now.file_hash !== first.file_hash && !attempt) { state.fdAIRun = null; return; }
         const open = fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state));
         list = opts.everything ? open : open.filter(it => keys.has(it.key));
@@ -2190,7 +2195,7 @@
       const before = state.report;
       if (await fdAIFixRun(list, attempt === 2) !== 'changed') return;
       // The saved check moved on (for example the SharePoint check finished): read the report again before the next try.
-      if (state.report === before && !fdBackgroundBusy()) { try { await openReport(before.file_hash, true); } catch (e) { /* the next try reports it */ } }
+      if (state.report === before && !fdActiveBusy()) { try { await openReport(before.file_hash, true); } catch (e) { /* the next try reports it */ } }
       state.fdAIRun = {hash: state.report?.file_hash || before.file_hash, total: scope.length, running: true, waiting: true};
     }
     state.fdAIRun = {hash: state.report?.file_hash, done: true, error: 'The report kept updating. Wait a moment and press AI fix again. Nothing was changed.'};
@@ -2208,7 +2213,15 @@
     // Errors that already have a checked answer (SharePoint's own value, or a clean-up with no open question) are applied as they are;
     // Dex is only asked about the rest, and never guesses a value it cannot know.
     const todo = scope.filter(fdCanAI), ready = todo.filter(fdReadyFix), ask = todo.filter(it => !fdReadyFix(it));
-    if (!todo.length) { toast('Dex can only fix errors that are still open. Fix these manually or ignore them.', true); return; }
+    if (!todo.length) {
+      // Nothing Dex can change. In automatic mode the minor ones are still left as written, so the count can reach zero.
+      if (typeof store !== 'undefined' && store.get('rd-auto-tidy', true) !== false && scope.some(it => it.fp && it.state === 'open')) {
+        state.fdAIRun = {hash, done: true, fixed: 0, confirmed: 0, tried: scope.length, skipped: [], unfixed: scope.map(it => ({key: it.key})), items: []}; drawSide();
+        fdAfterAI(state.fdAIRun, report); return;
+      }
+      if (state.fdAIRun?.waiting) { state.fdAIRun = null; drawSide(); }
+      toast('Dex can only fix errors that are still open. Fix these manually or ignore them.', true); return;
+    }
     document.querySelectorAll('dialog.fd-review-dialog[open]').forEach(d => d.close());
     state.fdAIRun = {hash, total: todo.length, running: true}; drawSide();
     for (let i = 0; state.aiProposalOperation && i < 200; i++) await new Promise(r => setTimeout(r, 300)); // let the summary finish first
@@ -3023,16 +3036,15 @@
     // A saved comparison that was waiting for a column confirmation, or was made for an earlier client assignment, is
     // read again once: the columns are now settled without asking.
     const redo = Object.values(rec.column_mapping || {}).some(m => m?.status === 'needs_confirmation') || (r.holds || []).some(x => x.code === 'source_assignment_changed');
-    // Never in a loop: one automatic re-read per version for the "redo" case, and at most two automatic SharePoint
-    // checks per version in a visit, whatever the result. After that the page stays still; the refresh button remains.
+    // Never in a loop: one automatic SharePoint check per version in a visit, whatever the result. After that the page stays still; the refresh button remains.
     state.fdAutoSPRuns ||= {}; state.fdAutoSPRedone ||= {};
     const runs = state.fdAutoSPRuns[r.file_hash] || 0;
-    if ((fresh && (!redo || state.fdAutoSPRedone[r.file_hash])) || runs >= 2 || state.fdAutoSP[key] || (r.assignment || {}).needs_person) return false;
+    if ((fresh && (!redo || state.fdAutoSPRedone[r.file_hash])) || runs >= 1 || state.fdAutoSP[key] || (r.assignment || {}).needs_person) return false;
     if (state.fdAutoSPWaiting) return true;
     state.fdAutoSPWaiting = true; let tries = 0;
     const attempt = async () => {
       if (state.report !== r || versionReadOnly(r) || state.fdAutoSP[key]) { state.fdAutoSPWaiting = false; return; }
-      if (state.fdTidying || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || state.fdAutoRecheckWaiting || state.fdReconciling || !state.fixes) { if (++tries < 120) setTimeout(attempt, 500); else state.fdAutoSPWaiting = false; return; }
+      if (state.fdAIRun?.running || state.fdAfterAIPending || state.fdTidying || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || state.fdAutoRecheckWaiting || state.fdReconciling || !state.fixes) { if (++tries < 240) setTimeout(attempt, 500); else state.fdAutoSPWaiting = false; return; }
       state.fdAutoSP[key] = true; state.fdAutoSPRuns[r.file_hash] = (state.fdAutoSPRuns[r.file_hash] || 0) + 1; if (redo) state.fdAutoSPRedone[r.file_hash] = true;
       state.fdReconciling = true; drawSide();
       try { await api('/api/spreadsheets/sharepoint', {file_hash: r.file_hash}); state.fdLastBackground = Date.now(); state.fdReconciling = false; state.fdAutoSPWaiting = false;
