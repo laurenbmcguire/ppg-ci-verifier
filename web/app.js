@@ -1910,13 +1910,13 @@
     const status = fdCheckedState(r), p = r.checked_copy;
     // Nothing left to fix or decide: say Completed. What the SharePoint check could not confirm stays one click away.
     const ignored = p?.set_aside_unresolved || 0;
-    if (!status.ready && p?.coverage_complete && Number.isInteger(p.remaining_detected_errors) && p.remaining_detected_errors - ignored <= 0 && p.file_hash === r.file_hash && p.check_hash === r.check_hash &&
+    if (!status.ready && state.fixes && r.review?.page?.complete !== false && (!p || p.coverage_complete !== false && p.file_hash === r.file_hash && p.check_hash === r.check_hash) &&
         !(state.fdItems?.length ? state.fdItems : typeof fdItems === 'function' ? fdItems() : []).some(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state))) {
       clearTimeout(state.checkedCopyExpiryTimer);
       return h('section', {id: 'fd-checked-copy', class: 'fd-checked-copy checked fd-completed', role: 'status'},
         h('b', {}, 'Completed'),
         h('p', {}, `${r.filename} · version ${revisionOf(r)}. No possible errors left${ignored ? ` (${ignored} ignored, left as written)` : ''}.`),
-        h('a', {class: 'btn primary', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download report'),
+        h('a', {class: 'btn primary', id: 'fd-download-fixed', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report'),
         typeof sharePointUrl === 'function' && sharePointUrl(r) ? h('a', {class: 'btn', href: sharePointUrl(r), target: '_blank', rel: 'noopener'}, 'Open SharePoint data') : null,
         h('details', {class: 'fd-completed-notes'}, h('summary', {}, 'SharePoint check notes'), h('p', {}, status.message)));
     }
@@ -3352,7 +3352,9 @@
     const body = h('div', {class: 'sidebody', id: 'side-body'});
     const open = state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
     side.replaceChildren(h('header', {class: 'fd-apphead'},
-        h('p', {class: 'fd-errcount'}, open == null ? 'Counting possible errors…' : plural(open, 'possible error')),
+        h('p', {class: 'fd-errcount' + (open === 0 ? ' done' : '')}, open == null ? 'Counting possible errors…' : open === 0 ? [icon('ok', 18), ' 0 possible errors'] : plural(open, 'possible error')),
+        // Nothing left: the copy with every fix applied is one click away, right at the top.
+        open === 0 ? h('a', {class: 'btn primary', id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
         h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors')),
       fdReportSummary(r), fdComparison(r), h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
     drawSideTabs();
