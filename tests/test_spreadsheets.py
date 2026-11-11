@@ -247,3 +247,13 @@ class UnusedColumnTests(unittest.TestCase):
         result = inspect_spreadsheet('t.csv', b'part,qty,notes\nA,1,\nB,,\nC,3,\n')
         missing = [(f['row'], f['column']) for f in result['findings'] if f['code'] == 'missing_cell']
         self.assertEqual(missing, [(3, 2)])   # qty blank on row 3 is flagged; the all-blank notes column is not
+
+    def test_blank_reject_cell_is_missing_only_when_parts_are_unaccounted_for(self):
+        head = 'Date,Shift,Area,Auditor,Identifier,Part Number,Qty Inspected,Qty OK,Qty Reworked,Qty NOK,Defect,Comments,Condition,Picture File\n'
+        rows = ['2026-10-07,1,,A,ID1,P1,34,34,,,,,OK,',        # every part is OK: the blank NOK cell has nothing to hold
+                '2026-10-07,1,,A,ID2,P1,34,30,,4,Holes,x,NOK,',
+                '2026-10-07,1,,A,ID3,P1,34,30,,,,,OK,',        # 4 parts are unaccounted for: the blank NOK cell is missing
+                '2026-10-07,1,,A,ID4,P1,20,20,,,,,OK,']
+        result = inspect_spreadsheet('x.csv', ('\ufeff' + head + '\n'.join(rows) + '\n').encode())
+        self.assertEqual(result['mapping_mode'], 'adaptive')
+        self.assertEqual([(f['row'], f['column']) for f in result['findings'] if f['code'] == 'missing_cell'], [(4, 10)])

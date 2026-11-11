@@ -19,7 +19,7 @@ window.test={state,drawSide,exerciseCoverage,reset:()=>{state.report=${JSON.stri
 (async()=>{
 const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE});
 try{for(const width of [1200,390]){
-const context=await browser.newContext({viewport:{width,height:1000}}),page=await context.newPage(),requests=[],errors=[],pending=[];let mode='normal',working='current';
+const context=await browser.newContext({viewport:{width,height:1000}}),page=await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})(),requests=[],errors=[],pending=[];let mode='normal',working='current';
 page.on('pageerror',e=>errors.push(String(e)));
 await context.route('**/*',route=>{
  const request=route.request(),url=new URL(request.url());assert.equal(url.origin,'https://synthetic.invalid');

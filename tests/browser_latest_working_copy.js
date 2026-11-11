@@ -3,7 +3,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
 (async()=>{
  const [base,raw,w]=process.argv.slice(2),c=JSON.parse(raw),width=Number(w);
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE});
- const context=await browser.newContext({viewport:{width,height:900}}),page=await context.newPage(),errors=[],external=[],writes=[];
+ const context=await browser.newContext({viewport:{width,height:900}}),page=await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})(),errors=[],external=[],writes=[];
  await context.route('**/*',r=>{if(!r.request().url().startsWith(base+'/')){external.push(r.request().url());return r.abort();}return r.continue();});
  page.on('pageerror',e=>errors.push(String(e)));page.on('request',r=>{if(/apply-fixes|ai-proposals|decide|recheck|source-reconcile/.test(r.url()))writes.push(r.url());});
  const open=async hash=>{await page.goto(base+'/app#r='+hash,{waitUntil:'networkidle'});};

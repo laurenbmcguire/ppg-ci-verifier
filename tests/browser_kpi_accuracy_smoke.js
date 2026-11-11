@@ -22,7 +22,7 @@ const requests=[],server=http.createServer((req,res)=>{
 });await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const base=`http://127.0.0.1:${server.address().port}`,browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE||undefined}),results=[];
 try{for(const width of [1200,390])for(const mode of ['kpis','overview']){
- const context=await browser.newContext({viewport:{width,height:850}}),page=await context.newPage(),errors=[],external=[];
+ const context=await browser.newContext({viewport:{width,height:850}}),page=await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})(),errors=[],external=[];
  await context.route('**/*',r=>{if(r.request().url().startsWith(base+'/'))return r.continue();external.push(r.request().url());return r.abort();});
  page.on('pageerror',e=>errors.push(String(e)));await page.goto(base+'/#'+mode);await page.waitForSelector('body[data-ready=yes]');
  const body=await page.locator('body').innerText();assert.match(body,/Findings on first uploads/);assert.match(body,/Known subtotal: 12.5/);assert.match(body,/Unknown/);assert.match(body,/Synthetic north/);assert.match(body,/Synthetic south/);assert.ok(!body.includes('synthetic-site|'));

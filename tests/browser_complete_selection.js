@@ -2,7 +2,7 @@ const assert=require('node:assert/strict');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
 (async()=>{
  const [base,hash,viewport]=process.argv.slice(2),width=Number(viewport),browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE});
- const context=await browser.newContext({viewport:{width,height:900}}),page=await context.newPage(),errors=[],external=[],proposals=[],pages=[];
+ const context=await browser.newContext({viewport:{width,height:900}}),page=await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})(),errors=[],external=[],proposals=[],pages=[];
  await context.route('**/*',async route=>{const req=route.request();if(!req.url().startsWith(base+'/')){external.push(req.url());return route.abort();}if(req.url().endsWith('/ai-proposals'))proposals.push(req.postDataJSON());if(req.url().endsWith('/findings'))pages.push(req.postDataJSON());return route.continue();});
  page.on('pageerror',e=>errors.push(String(e)));
  try{
@@ -22,11 +22,11 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
   await page.getByRole('button',{name:'Show fewer',exact:true}).click();await page.getByRole('button',{name:'Show all 1301',exact:true}).click();
   assert.equal(await page.locator('.fd-problems input[data-tick]').last().isChecked(),false);
   if(process.env.QA_SCREENSHOT_DIR)await page.screenshot({path:process.env.QA_SCREENSHOT_DIR+'/selection-last-page-'+width+'.png',fullPage:true});
-  await page.locator('.fd-tickbar').getByRole('button',{name:'AI fix',exact:true}).click();await page.locator('#fd-aidone').waitFor({timeout:60000});
+  await page.locator('#fd-fix-everything').click();await page.locator('#fd-aidone').waitFor({timeout:60000});
   const keys=proposals.flatMap(p=>p.ids);assert.equal(keys.length,1300);assert.equal(new Set(keys).size,1300);assert.ok(!keys.includes(excluded));assert.equal(proposals.length,11);assert.ok(proposals.every(p=>p.ids.length<=120));
   assert.ok(pages.length>=4&&pages.every(p=>p.expected_binding.file_hash===hash));assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   await page.locator('#fd-aidone').getByRole('button',{name:'Close',exact:true}).last().click();
-  await page.locator('.fd-tickbar').getByRole('button',{name:'Fix manually',exact:true}).click();
+  await page.locator('#fd-fix-all-manual').click();
   const draft=page.locator('.fd-manual input[data-cell]');await draft.waitFor();await draft.fill('Synthetic draft kept');
   await page.getByRole('button',{name:'Previous errors',exact:true}).click();assert.equal(await draft.inputValue(),'Synthetic draft kept');
   await page.getByRole('button',{name:'Show fewer',exact:true}).click();assert.equal(await draft.inputValue(),'Synthetic draft kept');

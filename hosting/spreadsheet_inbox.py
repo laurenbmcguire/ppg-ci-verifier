@@ -859,14 +859,38 @@ class SpreadsheetInbox:
                 out[h] = {r['ident'] for r in db.execute('SELECT ident FROM vin_index WHERE file_hash=?', (h,)).fetchall()}
         return out
     # ---------------- settings (shift times, reviewer rules)
+    @contextmanager
+    def reading(self):
+        """One read-only request asks for the same settings once per report. Inside this block each setting is read
+        from storage once and reused (every caller still gets its own decoded copy); any write clears it."""
+        if getattr(self, '_settings_read', None) is not None:
+            yield
+            return
+        self._settings_read = {}
+        try:
+            yield
+        finally:
+            self._settings_read = None
     def setting(self, key, default=None):
+        cache = getattr(self, '_settings_read', None)
+        if cache is not None and ('one', key) in cache:
+            raw = cache[('one', key)]
+            return json.loads(raw) if raw is not None else default
         with self.connect() as db:
             row = db.execute('SELECT value_json FROM settings WHERE key=?', (key,)).fetchone()
+        if cache is not None:
+            cache[('one', key)] = row['value_json'] if row else None
         return json.loads(row['value_json']) if row else default
     def settings_with_prefix(self, prefix):
-        with self.connect() as db:
-            rows = db.execute('SELECT key, value_json FROM settings WHERE key LIKE ?', (prefix.replace('%', '') + '%',)).fetchall()
-        return {r['key'][len(prefix):]: json.loads(r['value_json']) for r in rows}
+        cache = getattr(self, '_settings_read', None)
+        if cache is not None and ('prefix', prefix) in cache:
+            rows = cache[('prefix', prefix)]
+        else:
+            with self.connect() as db:
+                rows = [(r['key'], r['value_json']) for r in db.execute('SELECT key, value_json FROM settings WHERE key LIKE ?', (prefix.replace('%', '') + '%',)).fetchall()]
+            if cache is not None:
+                cache[('prefix', prefix)] = rows
+        return {key[len(prefix):]: json.loads(value) for key, value in rows}
     def review_summary(self, item, **kwargs):
         """Read-only classification using current assignment and source mapping, never saved success flags."""
         from hosting.review_summary import summarize
@@ -900,6 +924,8 @@ class SpreadsheetInbox:
         a['needs_person'] = a['status'] in registry.NEEDS_PERSON
         return a
     def set_setting(self, key, value):
+        if getattr(self, '_settings_read', None) is not None:
+            self._settings_read.clear()
         with self.connect() as db:
             db.execute('INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json',
                        (key, json.dumps(value)))
@@ -1517,6 +1543,10 @@ class SpreadsheetInbox:
             original, raw = self._original(db, file_hash)
         return original['filename'], raw
     def list(self, *, working=False, authorize=None):
+        with self.reading():
+            return self._list(working=working, authorize=authorize)
+
+    def _list(self, *, working=False, authorize=None):
         with self.connect() as db:
             if working:
                 graph = self._working_copies(db)

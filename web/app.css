@@ -1829,3 +1829,11 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 }
 
 .version-readonly .fd-history-unverified .fd-autohead{background:#fffaf0;color:#8b5000}
+
+/* home list: date · client · job, one status, one short reason */
+.queue-name{font-weight:700;font-size:15px}
+.queue-why{color:var(--red,#b42318);font-weight:600}
+.queue-state{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.queue-version{color:var(--muted,#667085);font-size:12px}
+.queue-hint{color:var(--muted,#667085)}
+.fd-autotidy{display:flex;gap:8px;align-items:flex-start;margin:10px 0 0;color:var(--muted,#667085);font-size:13px}

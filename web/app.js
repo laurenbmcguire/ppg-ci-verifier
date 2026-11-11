@@ -46,7 +46,7 @@
   const statusNote = r => { const c = r.counts || {}; if (r.coverage?.truncated || r.coverage?.not_listed || r.page?.complete === false) return 'Recheck needed'; if (r.status === 'hold') return `${c.high || 0} high-severity finding${c.high === 1 ? '' : 's'}`; if (r.status === 'check') return `${(c.medium || 0) + (c.low || 0)} medium/low finding${(c.medium || 0) + (c.low || 0) === 1 ? '' : 's'}`; return 'Nothing flagged'; };
 
   // ---------------------------------------------------------------- state
-  const state = {list: [], filter: store.get('rd-filter-v2', 'all'), search: '', selected: null, report: null, fixes: null, issueSource: 'All', showAll: false, busy: false};
+  const state = {list: [], filter: store.get('rd-filter-v3', 'attention'), search: '', selected: null, report: null, fixes: null, issueSource: 'All', showAll: false, busy: false};
 
   // ---------------------------------------------------------------- connections
   api('/api/health').then(hh => { state.health = hh;
@@ -131,6 +131,23 @@
     state.listTotal = data.count;
     state.listPartial = data.has_more === true;
     drawQueue(); drawClientTabs();
+    if (typeof queueAutoRecheck === 'function') queueAutoRecheck();
+  }
+  // Reports last checked with older checks are checked again by themselves while the list is open: newest first,
+  // one at a time, a few per visit, and never while a report is open or another step is running.
+  async function queueAutoRecheck() {
+    if (state.queueRechecking) return;
+    state.queueRechecking = true; state.queueRechecked ||= new Set();
+    try {
+      for (let n = 0; n < 12; n++) {
+        if (state.selected || state.busy || state.rechecking || state.decisionPending || typeof document !== 'undefined' && document.hidden) break;
+        const r = visibleList().find(x => x.internal_check_status === 'outdated_checks_require_recheck' && !x.review?.sent_at && !x.review?.approved && !state.queueRechecked.has(x.file_hash));
+        if (!r) break;
+        state.queueRechecked.add(r.file_hash);
+        try { await api('/api/spreadsheets/recheck', {file_hash: r.file_hash, apply: true, by: myName() || 'Reviewer'}); } catch (e) { continue; }
+        if (!state.selected) { try { const data = await api('/api/spreadsheets'); state.list = data.spreadsheets || state.list; drawQueue(); drawClientTabs(); } catch (e) { /* the next visit picks it up */ } }
+      }
+    } finally { state.queueRechecking = false; }
   }
   // an upload the app cleaned automatically is shown once: as its cleaned copy (the original opens from that report)
   const visibleList = () => { if (state.workingCopies) return state.list; const cleaned = new Set(state.list.flatMap(r => r.review?.auto_hidden || [])); return state.list.filter(r => !cleaned.has(r.file_hash)); };
@@ -149,9 +166,12 @@
     return {held, sourceVerified, sourceStatus, complete: knownHolds && !held && sourceVerified && sourceStatus === 'match' && checksCurrent};
   }
 
-  const queueNeedsAttention = r => !r.review?.sent_at && (!r.review || r.review.status !== 'clear' || r.review.coverage?.truncated || r.review.coverage?.not_listed || r.review.page?.complete === false ||
-    !r.review.day || !r.review.job || !r.assignment || !SETTLED.includes(r.assignment.status) || r.assignment.needs_person || r.review.sharepoint?.status !== 'match' ||
-    r.internal_check_status === 'outdated_checks_require_recheck' || r.internal_check_status === 'could_not_load_latest_check' || !reportVerification(r).complete);
+  // Two lists. Done: sent to the client, or checked with the current checks and no possible errors left.
+  // To do: everything else. SharePoint and approval status are shown on the row; they do not move a finished report back.
+  const queueDone = r => !!r.review?.sent_at || (!!r.review && r.review.status === 'clear' && !r.review.coverage?.truncated && !r.review.coverage?.not_listed && r.review.page?.complete !== false &&
+    !['outdated_checks_require_recheck', 'could_not_load_latest_check'].includes(r.internal_check_status) && r.review.sharepoint?.status !== 'differences' &&
+    !!r.review.day && !!r.review.job && !!r.assignment && SETTLED.includes(r.assignment.status) && !r.assignment.needs_person);
+  const queueNeedsAttention = r => !queueDone(r);
   function queueNewerCopies(r, inventory) {
     if (state.workingCopies) return []; // Parallel graph leaves are independent, never timestamp winners.
     const saved = Date.parse(r.received_at || '');
@@ -159,12 +179,7 @@
     return inventory.filter(other => other.file_hash !== r.file_hash && queueFamily(other) === queueFamily(r) && Date.parse(other.received_at || '') > saved)
       .sort((a, b) => Date.parse(b.received_at) - Date.parse(a.received_at));
   }
-  // Final also requires current complete source verification and no holds; zero open findings alone is insufficient.
-  function queueFinal(r, inventory) {
-    const rv = r.review;
-    return !!rv && rv.status === 'clear' && reportVerification(r).complete && !!rv.day && !!rv.job && SETTLED.includes(r.assignment?.status) && !r.assignment?.needs_person && !rv.coverage?.truncated && !rv.coverage?.not_listed && rv.page?.complete !== false &&
-      !['could_not_load_latest_check', 'outdated_checks_require_recheck'].includes(r.internal_check_status) && queueNewerCopies(r, inventory).length === 0;
-  }
+  function queueFinal(r, inventory) { return queueDone(r) && queueNewerCopies(r, inventory).length === 0; }
   function queueClient(r) {
     const a = r.assignment;
     return a && SETTLED.includes(a.status) && a.client ? a.client : 'Client not confirmed';
@@ -185,17 +200,20 @@
   function queueCheck(r) {
     const rv = r.review, c = rv?.counts || {};
     if (!rv || r.internal_check_status === 'could_not_load_latest_check') return ['Check unavailable', 'check'];
-    if (r.internal_check_status === 'outdated_checks_require_recheck') return ['Checks out of date', 'check'];
-    if (rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false) return ['Recheck needed', 'check'];
-    const verification = reportVerification(r);
-    if (verification.held) return ['Verification held', 'hold'];
-    if (rv.status === 'clear') {
-      if (verification.complete) return ['No open findings', 'clear'];
-      return [verification.sourceStatus === 'error' ? 'Source check failed' : 'Verification incomplete', 'check'];
-    }
-    const high = c.high, other = Number.isFinite(c.medium) && Number.isFinite(c.low) ? c.medium + c.low : null;
-    if (rv.status === 'hold') return [high == null ? 'High-severity findings' : `${high} high-severity finding${high === 1 ? '' : 's'}`, 'hold'];
-    return [other == null ? 'Findings need review' : `${other} medium/low finding${other === 1 ? '' : 's'}`, 'check'];
+    if (r.internal_check_status === 'outdated_checks_require_recheck') return ['Needs a recheck', 'check'];
+    if (rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false) return ['Needs a recheck', 'check'];
+    if (rv.sent_at) return ['Sent to client', 'clear'];
+    if (rv.status === 'clear' && rv.sharepoint?.status === 'differences') return ['Does not match SharePoint', 'check'];
+    if (rv.status === 'clear' && r.assignment !== undefined && (!r.assignment || !SETTLED.includes(r.assignment.status) || r.assignment.needs_person)) return ['Client not confirmed', 'check'];
+    if (rv.status === 'clear') return ['Completed', 'clear'];
+    const n = [c.high, c.medium, c.low].every(Number.isFinite) ? c.high + c.medium + c.low : null;
+    return [n == null ? 'Possible errors to review' : plural(n, 'possible error'), rv.status === 'hold' ? 'hold' : 'check'];
+  }
+  // Report name everyone can read: date, client, job.
+  function queueTitle(r) {
+    const rv = r.review || {}, day = queueDay(r), d = day ? new Date(day + 'T12:00:00') : null;
+    const date = d && !isNaN(d) ? d.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'}) : 'No date';
+    return `${date} · ${queueClient(r)} · ${rv.job ? 'Job ' + rv.job : 'Job not found'}`;
   }
   const queueVersion = value => Number.isInteger(value) && value > 0 ? String(value) : 'unknown';
   const queueSearch = r => [r.filename, r.review?.job, queueDay(r), queueClient(r), r.assignment?.status, r.review?.sharepoint?.source,
@@ -208,18 +226,18 @@
     if (state.filter === 'final') rows = rows.filter(r => queueFinal(r, shown));
     const mine = shown.filter(r => inClientR(r));
     const attention = mine.filter(queueNeedsAttention).length, waiting = mine.filter(r => r.review?.review_state === 'waiting').length;
-    const label = {attention: 'To do', all: 'All', review: 'Review requested', final: 'Final reports'};
+    const label = {attention: 'To do', all: 'All', review: 'Review requested', final: 'Done'};
     document.querySelectorAll('.segmented button').forEach(b => {
       const n = b.dataset.filter === 'attention' ? attention : b.dataset.filter === 'review' ? waiting : b.dataset.filter === 'final' ? mine.filter(r => queueFinal(r, shown)).length : 0;
       b.classList.toggle('on', b.dataset.filter === state.filter);
       b.setAttribute('aria-pressed', String(b.dataset.filter === state.filter));
       if (b.dataset.filter === 'attention') { b.setAttribute('title', `${attention} saved versions needing attention, including earlier copies. Findings are not combined across versions.`); b.setAttribute('aria-label', `To do: ${attention} saved versions needing attention`); }
       b.replaceChildren(label[b.dataset.filter] || b.textContent, n ? h('i', {class: 'segn'}, String(n)) : null);
+      if (b.dataset.filter === 'review') b.hidden = !waiting && state.filter !== 'review';   // only shown when someone asked for a review
     });
     const todo = shown.filter(queueNeedsAttention).length;
     document.title = (todo ? `(${todo}) ` : '') + 'PPG Verifier';
     const list = $('queue-list'); list.replaceChildren();
-    if (state.filter === 'attention') list.append(h('p', {class: 'queue-scope'}, `${rows.length} saved version${rows.length === 1 ? '' : 's'} match${rows.length === 1 ? 'es' : ''} this To do view. Earlier copies keep their own findings.`));
     if (state.listPartial) list.append(h('p', {class: 'queue-notice', role: 'status'}, 'Only the most recent saved reports are loaded. Search, filters and counts cover this loaded list, not the full report history.'));
     if (state.listError) {
       list.append(h('div', {class: 'listerror', role: 'alert'}, h('b', {}, 'The report list could not be loaded.'),
@@ -242,7 +260,7 @@
     }
     if (!rows.length) {
       list.append(h('p', {class: 'queue-empty'}, state.list.length
-        ? (state.client && !q && !state.list.some(r => inClientR(r)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'No reports have a review request. Use To do to find reports with findings.' : state.filter === 'final' && !q ? 'No final reports yet. A report lands here once it has no open findings, current source verification, and no holds.' : state.filter === 'attention' && !q ? h('span', {}, 'No matching to-do reports in this loaded list. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter-v2', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
+        ? (state.client && !q && !state.list.some(r => inClientR(r)) ? `No reports for ${clientName()} yet.` : state.filter === 'review' && !q ? 'No reports have a review request. Use To do to find reports with findings.' : state.filter === 'final' && !q ? 'Nothing is done yet. A report moves here when it has no possible errors left.' : state.filter === 'attention' && !q ? h('span', {}, 'No matching to-do reports in this loaded list. ', h('button', {type: 'button', class: 'linkish', onclick: () => { state.filter = 'all'; store.set('rd-filter-v2', 'all'); drawQueue(); }}, 'Show all reports')) : 'No reports match that search.')
         : 'No reports yet. Upload an end-of-shift report to start.'));
       return;
     }
@@ -252,23 +270,26 @@
     state.openGroups ||= new Set();
     const line = (r, older) => {
       const rv = r.review || {}, [check, tone] = queueCheck(r), current = r.file_hash === (state.selected || state.lastSelected);
-      const name = r.filename || 'Report name unavailable', client = queueClient(r), day = queueDay(r);
+      const file = r.filename || 'Report name unavailable', name = queueTitle(r), done = queueDone(r);
       const newer = queueNewerCopies(r, shown), earlier = older || newer.length > 0;
-      const identity = `${client} · ${rv.job ? 'Job ' + rv.job : 'Job not found'} · ${day ? 'Report date ' + day : 'Report date not found'}`;
-      const version = `${queueVersion(r.version) === 'unknown' ? 'Version unknown' : 'File v' + queueVersion(r.version)}${r.revision == null ? '' : ' · Revision ' + queueVersion(r.revision)} · ID ${String(r.file_hash || '').slice(0, 12) || 'unknown'}`;
-      const uploaded = r.received_at && !isNaN(new Date(r.received_at)) ? new Date(r.received_at).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : 'Unknown';
-      const workflow = rv.sent_at ? 'Previously sent' : rv.approved ? (rv.approval_current ? 'Approved for this version' : 'Earlier approval; review again') : rv.review_state === 'waiting' ? 'Review requested' : rv.review_state === 'sent_back' ? 'Sent back' : '';
+      const version = `${queueVersion(r.version) === 'unknown' ? 'Version unknown' : 'Version ' + queueVersion(r.version)}`;
+      const uploaded = r.received_at && !isNaN(new Date(r.received_at)) ? new Date(r.received_at).toLocaleString('en-US', {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}) : 'unknown';
+      const workflow = rv.sent_at ? '' : rv.approved ? (rv.approval_current ? 'Approved' : 'Earlier approval; review again') : rv.review_state === 'waiting' ? 'Review requested' : rv.review_state === 'sent_back' ? 'Sent back' : '';
       const quantities = [['inspected', 'Inspected'], ['certified', 'OK'], ['rejected', 'Rejected']].map(([key, label]) => `${label}: ${queueQuantity(r, key)}`);
+      // Why a report is still to do, or what to know about a finished one, in one short line.
+      const holds = (r.verification?.holds || r.holds || []).map(x => x.text).filter(Boolean);
+      const why = !done && tone === 'hold' ? `Blocked: ${Number.isFinite(rv.counts?.high) ? plural(rv.counts.high, 'serious error') : 'serious errors'} must be fixed or ignored.`
+        : !done && tone === 'check' && /recheck|unavailable/i.test(check) ? 'Open it and the checks run again by themselves.' : '';
+      const short = text => { const first = String(text).split(/[:.](\s|$)/)[0].trim(); return first.length > 90 ? first.slice(0, 87) + '…' : first; };
+      const note = queueSource(r) === 'Source comparison matched' ? 'Matches SharePoint' : short(holds[0] || queueSource(r)).replace(/^Source/, 'SharePoint');
       const open = h('button', {type: 'button', class: 'item' + (current ? ' sel' : '') + (earlier ? ' older' : ''), 'data-report-hash': r.file_hash,
-        onclick: () => select(r.file_hash), 'aria-label': `Open ${name}. ${identity}. ${version}. ${rv.fixed_from ? 'Corrected copy' : 'Uploaded file'}. ${earlier ? 'Earlier saved copy. ' : ''}${newer.length ? newer.length + ' newer saved copies available. ' : ''}${check}. ${queueSource(r)}. ${workflow}. Report values: ${quantities.join('. ')}. Uploaded ${uploaded}`},
+        title: `${file} · ${version} · ID ${String(r.file_hash || '').slice(0, 12)} · uploaded ${uploaded}`,
+        onclick: () => select(r.file_hash), 'aria-label': `Open ${name}. ${file}. ${version}. ${earlier ? 'Earlier saved copy. ' : ''}${check}. ${why} ${note}. ${workflow}`},
         h('span', {class: 'queue-name'}, name),
-        h('span', {class: 'queue-identity'}, identity),
-        h('span', {class: 'queue-quantities'}, h('b', {}, 'Report values'), ...quantities.map(text => h('span', {}, text))),
-        h('span', {class: 'queue-state'}, queueFinal(r, shown) ? h('span', {class: 'tag tag-final'}, 'FINAL VERSION') : null, h('span', {class: 'tag tag-' + tone}, check), h('span', {}, queueSource(r)), workflow ? h('span', {}, workflow) : null),
-        h('span', {class: 'queue-version'}, rv.fixed_from ? 'Corrected copy' : 'Uploaded file', earlier ? ' · Earlier saved copy' : '', ` · ${version} · Uploaded ${uploaded}`, current ? ' · Last opened' : ''),
-        rv.sharepoint?.source ? h('span', {class: 'queue-source'}, `Source: ${rv.sharepoint.source}`) : null);
+        h('span', {class: 'queue-state'}, h('span', {class: 'tag tag-' + (done ? 'final' : tone)}, check), why ? h('span', {class: tone === 'hold' ? 'queue-why' : 'queue-hint'}, why) : null, workflow ? h('span', {}, workflow) : null),
+        h('span', {class: 'queue-quantities'}, ...quantities.map(text => h('span', {}, text))),
+        h('span', {class: 'queue-version'}, `${file} · ${version}${earlier ? ' · earlier copy' : ''}${current ? ' · last opened' : ''} · ${note}`));
       return h('div', {class: 'queue-entry' + (earlier ? ' older-entry' : '')}, open,
-        queueNeedsAttention(r) ? h('button', {type: 'button', class: 'queue-review', 'aria-label': `Needs review: ${name}, ${version}`, onclick: () => { state.openReviewFor = r.file_hash; select(r.file_hash); }}, 'Needs review') : null,
         newer.length ? h('details', {class: 'queue-newer'}, h('summary', {class: 'linkish'}, `${newer.length} newer saved cop${newer.length === 1 ? 'y' : 'ies'} available`),
           h('p', {class: 'hint'}, 'These copies may be parallel branches. Each keeps its own findings and decisions.'),
           ...newer.map(copy => h('button', {type: 'button', class: 'linkish queue-newer-copy', 'data-newer-hash': copy.file_hash,
@@ -337,7 +358,7 @@
       try { const out = await api('/api/vins/search', {q: state.search}); if (state.search === out.query) { state.vinHits = out; drawQueue(); } } catch (err) { /* plain list filtering still works */ }
     }, 350);
   });
-  document.querySelectorAll('.segmented button').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.filter; store.set('rd-filter-v2', state.filter); drawQueue(); }));
+  document.querySelectorAll('.segmented button').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.filter; store.set('rd-filter-v3', state.filter); drawQueue(); }));
 
   // ---------------------------------------------------------------- sign-in and who is using the app
   function showSignIn(message) {
@@ -1179,14 +1200,16 @@
       (() => {
         const all = state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)) : [];
         if (!all.length) return null;
-        const ai = all.filter(fdCanAI), off = busy || state.fdAIRun?.running;
+        // One place for the three choices: they act on the ticked errors, or on every error when none is ticked.
+        const ticked = fdPicked(all), scope = ticked.length ? ticked : all, some = ticked.length > 0;
+        const ai = scope.filter(fdCanAI), off = busy || state.fdAIRun?.running;
         return h('div', {class: 'fd-fixall'},
-          h('p', {class: 'fd-fixall-q'}, `What would you like to do with ${all.length === 1 ? 'this possible error' : `these ${all.length} possible errors`}?`),
+          h('p', {class: 'fd-fixall-q'}, some ? `${plural(ticked.length, 'possible error')} selected. What would you like to do?` : `What would you like to do with ${all.length === 1 ? 'this possible error' : `these ${all.length} possible errors`}?`),
           h('div', {class: 'fd-cardacts'},
-            h('button', {type: 'button', class: 'btn primary', id: 'fd-fix-everything', disabled: off || !ai.length || null, onclick: () => { if (current()) fdAIFixNow(all); }}, 'Fix everything with AI'),
-            h('button', {type: 'button', class: 'btn', id: 'fd-fix-all-manual', disabled: off || null, onclick: () => { if (current()) fdManualStart(all); }}, 'Fix manually'),
-            h('button', {type: 'button', class: 'btn', id: 'fd-ignore-all', disabled: off || null, onclick: () => { if (current()) fdReviewDialog(all, 'ignore'); }}, 'Ignore possible errors')),
-          h('p', {class: 'fd-hint'}, ai.length ? 'Dex fixes every error it can in one go, saves a new version and shows you what changed. The original is kept.' : state.aiOn ? 'Dex has no safe fix for these. Fix them manually or ignore them.' : 'AI is off. Fix these manually or ignore them.'));
+            h('button', {type: 'button', class: 'btn primary', id: 'fd-fix-everything', disabled: off || !ai.length || null, onclick: () => { if (current()) fdAIFixNow(scope, {everything: !some}); }}, some ? 'Fix selected with AI' : 'Fix everything with AI'),
+            h('button', {type: 'button', class: 'btn', id: 'fd-fix-all-manual', disabled: off || null, onclick: () => { if (current()) fdManualStart(scope); }}, 'Fix manually'),
+            h('button', {type: 'button', class: 'btn', id: 'fd-ignore-all', disabled: off || null, onclick: () => { if (current()) fdReviewDialog(scope, 'ignore'); }}, 'Ignore possible errors')),
+          h('p', {class: 'fd-hint'}, ai.length ? (some ? 'Untick everything to work on the whole report.' : 'Dex fixes every error it can in one go and saves a new version. To pick only some, tick them in the list below.') : state.aiOn ? 'Dex has no safe fix for these. Fix them manually or ignore them.' : 'AI is off. Fix these manually or ignore them.'));
       })(),
       h('div', {class: 'fd-cardacts', hidden: true},
         h('button', {type: 'button', class: 'btn', disabled: busy || !eligible.length, onclick: () => { if (current()) fdPreviewRecommended(binding); }}, `Accept All · ${eligible.length} proposed changes`),
@@ -1666,7 +1689,22 @@
   }
 
   // ---------- the page
-  function fdGlobalStatus(st) { return st.next === 'blockers' ? 'Review blocked' : st.next === 'review' ? 'Review needed' : st.text; }
+  function fdGlobalStatus(st) { return fdShown(st).text; }
+  // The header says what is going on in plain words: a report with no possible errors left is Completed, and a blocked
+  // one says what is blocking it.
+  function fdShown(st) {
+    const r = state.report, left = r && state.fixes ? (state.fdItems?.length ? state.fdItems : fdItems()).filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
+    if (left === 0 && st.tone !== 'red' && !['Check unavailable', 'Checks out of date'].includes(st.text))
+      return {tone: 'green', icon: 'ok', text: 'Completed', why: st.tone === 'amber' ? [st.text, st.why].filter(Boolean).join('. ') : ''};
+    if (st.next === 'blockers') {
+      const serious = (state.fdItems || []).filter(x => x.tier === 'blocker' && !['rejected', 'kept'].includes(x.state)).length;
+      const holds = (r?.holds || []).filter(x => x.hard && x.code !== 'awaiting_source_owner').map(x => x.text).filter(Boolean);
+      const why = [serious ? `${plural(serious, 'serious error')} must be fixed or ignored first` : '', ...holds].filter(Boolean).join('. ');
+      return {...st, text: 'Blocked' + (why ? ': ' + why : ''), why};
+    }
+    if (st.next === 'review') return {...st, text: 'Review needed' + (st.why ? ': ' + st.why : st.text && !/to review$/.test(st.text) ? ': ' + st.text : '')};
+    return st;
+  }
   function fdPanelStatus(r, st) {
     const findings = (state.fdItems || []).filter(item => item.tier === 'blocker' && !['rejected', 'kept'].includes(item.state)).length;
     const holds = (r.holds || []).filter(hold => hold.hard).length;
@@ -1743,7 +1781,7 @@
           (sp.fields_checked || []).length ? h('span', {title: (sp.fields_not_checked || []).length ? 'Not checked: ' + sp.fields_not_checked.join(', ') : null},
             `Fields checked: ${sp.fields_checked.join(', ')}${(sp.fields_not_checked || []).length ? ` · not checked: ${sp.fields_not_checked.join(', ')}` : ''}`) : null)),
       h('div', {class: 'fd-actions'},
-        h('div', {class: `fd-status fd-global-status ${st.tone}`, role: 'status'}, icon(st.icon, 16), h('span', {}, fdGlobalStatus(st))),
+        (shown => h('div', {class: `fd-status fd-global-status ${shown.tone}`, role: 'status', title: shown.why || null}, icon(shown.icon, 16), h('span', {}, shown.text)))(fdShown(st)),
         more, h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download this version')));
     const metrics = fdMetrics(r);
     const rail = fdReportRail();
@@ -1926,11 +1964,8 @@
       const busyNow = !!(state.busy || state.rechecking || state.decisionPending || run?.running);
       body.append(h('div', {class: 'fd-tickbar'},
         h('label', {class: 'fd-tickall'}, allBox, ` Select all ${plural(fixable.length, 'error')}`),
-        h('p', {class: 'fd-tickcount', role: 'status'}, ticked.length ? `${ticked.length} selected` : 'Tick the errors to fix, or select all.'),
-        h('div', {class: 'fd-cardacts'},
-          h('button', {type: 'button', class: 'btn primary', disabled: busyNow || !ticked.some(fdCanAI) || null, onclick: () => fdAIFixNow(fdPicked(fixable))}, 'AI fix'),
-          h('button', {type: 'button', class: 'btn', disabled: busyNow || !ticked.length || null, onclick: () => fdManualStart(fdPicked(fixable))}, 'Fix manually'),
-          h('button', {type: 'button', class: 'btn', disabled: busyNow || !ticked.length || null, onclick: () => fdReviewDialog(fdPicked(fixable), 'ignore')}, 'Ignore'))));
+        h('p', {class: 'fd-tickcount', role: 'status'}, ticked.length ? `${ticked.length} selected` : 'Tick the errors to work on only those, or leave them all unticked.'),
+        null));
     }
     if (!tierGroups.length) body.append(h('p', {class: 'fd-hint'}, 'No open items in this list. Ignored and AI-set-aside findings may still be unresolved; see Possible errors by status and verification above.'));
     const manual = fdManualList(items);
@@ -1946,7 +1981,7 @@
         h('button', {type: 'button', class: 'fd-grouphead', 'aria-expanded': String(!!cur && cur.group === g.key), onclick: () => fdReviewDialog(g.items, null, g.title)},
           h('span', {class: 'fd-gtitle'}, g.unresolved ? '' : icon('ok', 14), g.unresolved ? '' : ' ', g.title),
           h('span', {class: 'fd-gmeta'}, `${plural(g.items.length, 'error')}${g.unresolved && g.unresolved < g.items.length ? ` · ${g.unresolved} to fix` : ''}${g.status && g.status !== 'Needs review' ? ` · ${g.status}` : ''}`)),
-        fdDirectControls(g.items.filter(x => ['open', 'selected', 'deferred', 'confirmed'].includes(x.state))),
+        (open => open.length > 1 ? h('div', {class: 'fd-direct-actions'}, fdProblemList(open)) : null)(g.items.filter(x => ['open', 'selected', 'deferred', 'confirmed'].includes(x.state))),
         false && r.review.page?.complete !== false && g.tier !== 'format' && !selectable.length && g.open > 1 && g.items.every(x => !x.fix) ? h('button', {type: 'button', class: 'btn small fd-selectall', disabled: state.decisionPending || state.rechecking || state.busy || null, 'data-recheck-disabled': state.rechecking && !state.decisionPending && !state.busy ? true : null,
           onclick: () => { state.fdBatch = {items: g.items.slice(), group: g.key, off: new Set(), action: 'reject', which: 'open'}; drawSide(); }}, `Keep ${g.open} as recorded…`) : null,
         r.review.page?.complete !== false && g.items[0].state === 'claude' ? h('div', {class: 'fd-cardacts'},
@@ -2057,8 +2092,34 @@
     return Number.isInteger(run.resolved) ? `${plural(run.resolved, 'selected finding')} cleared by the saved check. ${run.informational ? plural(run.informational, 'source-confirmed pattern hint') + ' informational; identifiers unchanged. ' : ''}${run.appliedProposals ? plural(run.appliedProposals, 'selected suggestion') + ' applied. ' : ''}${plural((run.unfixed || []).length, 'selected finding')} still ${(run.unfixed || []).length === 1 ? 'needs' : 'need'} review.`
       : 'Saved changes are in History. Findings are removed only when the saved check no longer detects them.';
   }
-  async function fdAIFixNow(scope) {
-    const report = state.report; if (!report) return;
+  // A SharePoint check or recheck that starts by itself when a report opens must never make AI fix fail:
+  // AI fix waits for it, then works on the report as it is now, and starts again by itself if the report updates mid-way.
+  const fdBackgroundBusy = () => !!(state.fdTidying || state.fdReconciling || state.fdAutoSPWaiting || state.fdAutoRecheckWaiting || state.rechecking || state.busy || state.decisionPending);
+  async function fdAIFixNow(scope, opts = {}) {
+    const keys = new Set(scope.map(it => it.key)), pause = ms => new Promise(r => setTimeout(r, ms));
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const first = state.report; if (!first) return;
+      let list = scope;
+      if (attempt || fdBackgroundBusy()) {
+        document.querySelectorAll('dialog.fd-review-dialog[open]').forEach(d => d.close());
+        state.fdAIRun = {hash: first.file_hash, total: scope.length, running: true, waiting: true}; drawSide();
+        for (let i = 0; (fdBackgroundBusy() || state.report && !state.fixes) && i < 300; i++) await pause(400);
+        const now = state.report; if (!now || now.file_hash !== first.file_hash && !attempt) { state.fdAIRun = null; return; }
+        const open = fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state));
+        list = opts.everything ? open : open.filter(it => keys.has(it.key));
+        if (!list.length) { state.fdAIRun = null; drawSide(); toast('Those errors are already cleared.'); return; }
+      }
+      const before = state.report;
+      if (await fdAIFixRun(list, attempt === 2) !== 'changed') return;
+      // The saved check moved on (for example the SharePoint check finished): read the report again before the next try.
+      if (state.report === before && !fdBackgroundBusy()) { try { await openReport(before.file_hash, true); } catch (e) { /* the next try reports it */ } }
+      state.fdAIRun = {hash: state.report?.file_hash || before.file_hash, total: scope.length, running: true, waiting: true};
+    }
+    state.fdAIRun = {hash: state.report?.file_hash, done: true, error: 'The report kept updating. Wait a moment and press AI fix again. Nothing was changed.'};
+    toast('AI fix did not finish: ' + state.fdAIRun.error, true); drawSide();
+  }
+  async function fdAIFixRun(scope, lastTry = false) {
+    const report = state.report, startedAt = Date.now(); if (!report) return;
     const binding = reviewBinding(report), hash = report.file_hash, operation = {};
     state.fdAIOperation = operation;
     // Errors that already have a checked answer (SharePoint's own value, or a clean-up with no open question) are applied as they are;
@@ -2078,13 +2139,14 @@
           fdPrepareAI(chunk, binding, {owner: document.body, active: () => state.report === report, pending: () => {}, failure: error => resolve({error}), success: a => resolve(a)}).then(() => resolve(null), error => resolve({error}));
         });
         if (!answer || answer.error) {
+          if (state.report && (state.report !== report || JSON.stringify(reviewBinding(state.report)) !== JSON.stringify(binding) || !lastTry && answer?.error?.httpStatus === 409 && (fdBackgroundBusy() || (state.fdLastBackground || 0) >= startedAt))) throw Object.assign(new Error('The report updated while Dex was working.'), {reportChanged: true});
           const failure = fdAIRequestFailure(answer?.error);
           if (!proposals.length) throw Object.assign(new Error(failure.reason), {httpStatus: failure.http_status, aiCategory: failure.category});
           skipped.push(...ask.slice(i).map(it => ({finding_id: it.key, ...failure}))); break; // guarded save still validates any already prepared fixes
         }
         proposals.push(...answer.proposals); skipped.push(...(answer.skipped || []));
       }
-      if (state.report !== report || JSON.stringify(reviewBinding(report)) !== JSON.stringify(binding)) throw new Error('The report changed while suggestions were prepared. Reopen it before applying. No save was started.');
+      if (state.report !== report || JSON.stringify(reviewBinding(report)) !== JSON.stringify(binding)) throw Object.assign(new Error('The report changed while suggestions were prepared. Reopen it before applying. No save was started.'), {reportChanged: true});
       const accepted = fdUniqueAIProposals(proposals);
       const why = new Map(skipped.map(x => [x.finding_id, String(x.reason || '')]));
       const describe = (it, reason, currentKey) => ({key: currentKey || it.key, where: [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ') || 'Whole report',
@@ -2128,7 +2190,9 @@
       if (location.hash === '#r=' + next || location.hash === '#r=' + hash) {
         document.body.classList.add('fd-panel-open'); fdAIDoneDialog(state.fdAIRun, savedItem);
       }
-    } catch (e) { state.fdAIRun = {hash, done: true, saveCommitted: e?.saveCommitted === true, http_status: e?.httpStatus || null, category: e?.aiCategory || null, error: e?.message || String(e)}; toast((state.fdAIRun.saveCommitted ? '' : 'AI fix did not finish: ') + state.fdAIRun.error, true); }
+    } catch (e) {
+      if (e?.reportChanged && !lastTry && state.report?.file_hash === hash && state.fdAIOperation === operation) { state.fdAIRun = {hash, total: todo.length, running: true, waiting: true}; return 'changed'; }
+      state.fdAIRun = {hash, done: true, saveCommitted: e?.saveCommitted === true, http_status: e?.httpStatus || null, category: e?.aiCategory || null, error: e?.message || String(e)}; toast((state.fdAIRun.saveCommitted ? '' : 'AI fix did not finish: ') + state.fdAIRun.error, true); }
     finally { if (state.report?.file_hash === state.fdAIRun?.hash) drawSide(); }
   }
   // Fix manually: one error at a time, with its cell highlighted in the spreadsheet. Typed values are kept until
@@ -2230,8 +2294,10 @@
     document.getElementById('fd-aidone')?.remove();
     const allSaved = run.confirmed === run.fixed, unfixed = run.unfixed || [];
     const live = keys => { if (state.report?.file_hash !== run.hash) return []; const all = state.fdItems || fdItems(); return keys.map(k => all.find(it => it.key === k)).filter(Boolean); };
-    const unknown = unfixed.filter(x => !x.reason || /No supported cell suggestion|could not return a safe|source authority|source correction/i.test(x.reason));
-    const other = unfixed.filter(x => !unknown.includes(x));
+    // A part number or ID written in a different pattern from the rest is a hint, never an error by itself.
+    const patterns = unfixed.filter(x => /has a different format from the other/i.test(String(x.text)));
+    const unknown = unfixed.filter(x => !patterns.includes(x) && (!x.reason || /No supported cell suggestion|could not return a safe|source authority|source correction/i.test(x.reason)));
+    const other = unfixed.filter(x => !unknown.includes(x) && !patterns.includes(x));
     const d = h('dialog', {id: 'fd-aidone', class: 'fd-modal fd-aidone', 'aria-labelledby': 'fd-aidone-title'});
     const close = () => { d.close(); d.remove(); };
     const saveText = () => { const a = h('a', {href: URL.createObjectURL(new Blob([fdAISummaryText(run, report)], {type: 'text/plain'})), download: `AI fix summary - ${(report?.filename || 'report').replace(/\.[^.]+$/, '')}.txt`}); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); };
@@ -2252,6 +2318,11 @@
         h('div', {class: 'fd-cardacts'},
           h('button', {type: 'button', class: 'btn primary', onclick: () => { const list = live(unknown.map(x => x.key)); close(); if (list.length) fdManualStart(list); }}, unknown.length === 1 ? 'Add a value' : 'Add values'),
           h('button', {type: 'button', class: 'btn', onclick: () => { const list = live(unknown.map(x => x.key)); close(); if (list.length) fdReviewDialog(list, 'ignore'); }}, unknown.length === 1 ? 'Leave it blank' : 'Leave them blank'))) : null,
+      patterns.length ? h('section', {class: 'fd-aidone-ask'}, h('h3', {}, `${plural(patterns.length, 'part number or ID is', 'part numbers or IDs are')} written in a different pattern`),
+        h('p', {}, `For example: ${String(patterns[0].text).replace(/\s*\(expected like.*$/, '')}. A different pattern alone is not an error, so Dex left ${patterns.length === 1 ? 'it' : 'them'} exactly as written.`),
+        h('div', {class: 'fd-cardacts'},
+          h('button', {type: 'button', class: 'btn primary', onclick: () => { const list = live(patterns.map(x => x.key)); close(); if (list.length) fdReviewDialog(list, 'ignore'); }}, patterns.length === 1 ? 'Ignore it' : `Ignore all ${patterns.length}`),
+          h('button', {type: 'button', class: 'btn', onclick: () => { const list = live(patterns.map(x => x.key)); close(); if (list.length) fdManualStart(list); }}, 'Fix manually'))) : null,
       other.length ? h('section', {}, h('h3', {}, `Needs a person (${other.length})`), h('ul', {class: 'fd-fixed-list'}, other.slice(0, 100).map(x => h('li', {}, h('b', {}, x.where), `: ${x.text}`, x.reason ? h('p', {class: 'fd-hint'}, x.reason) : null))),
         h('p', {class: 'fd-hint'}, 'These findings have not been confirmed resolved. Review the reason for each before deciding what to do next.'),
         h('div', {class: 'fd-cardacts'}, h('button', {type: 'button', class: 'btn', onclick: () => { const list = live(other.map(x => x.key)); close(); if (list.length) fdManualStart(list); }}, 'Fix manually'))) : null,
@@ -2266,7 +2337,7 @@
   }
   function fdAIRunBanner(run, left) {
     const dismiss = h('button', {type: 'button', class: 'btn small subtle', onclick: () => { state.fdAIRun = null; drawSide(); }}, 'OK');
-    if (run.running) return h('div', {class: 'fd-airun', role: 'status'}, h('span', {class: 'spin'}), run.saving ? ` Saving ${plural(run.saving, 'fix', 'fixes')}…` : ` Dex is fixing ${plural(run.total, 'error')}…`);
+    if (run.running) return h('div', {class: 'fd-airun', role: 'status'}, h('span', {class: 'spin'}), run.waiting ? ' Getting the report ready for Dex…' : run.saving ? ` Saving ${plural(run.saving, 'fix', 'fixes')}…` : ` Dex is fixing ${plural(run.total, 'error')}…`);
     if (run.error) return h('div', {class: 'fd-airun bad', role: 'alert'}, h('p', {}, run.saveCommitted ? run.error : `AI fix did not finish: ${run.error}`), dismiss);
     const plain = t => /report holds/i.test(t) ? 'This report is on hold (for example the client or SharePoint is not confirmed yet), so Dex is not allowed to change it.'
       : /source authority|source correction/i.test(t) ? 'This one depends on SharePoint, so Dex cannot decide the right value.'
@@ -2730,7 +2801,7 @@
     if (b) { b.disabled = !sel || state.busy; b.classList.toggle('primary', !!sel); b.onclick = correctionAction(fdPreview); }
     if (n) n.textContent = sel ? plural(sel, 'change') + ' selected' : 'No changes selected';
     if (state.report) { const st = fdStatus(state.report);
-      document.querySelectorAll('.fd-status').forEach(pill => { const global = pill.classList.contains('fd-global-status'); pill.className = 'fd-status ' + (global ? 'fd-global-status ' : 'fd-panel-status ') + st.tone; pill.replaceChildren(icon(st.icon, 16), h('span', {}, global ? fdGlobalStatus(st) : fdPanelStatus(state.report, st))); }); }
+      document.querySelectorAll('.fd-status').forEach(pill => { const global = pill.classList.contains('fd-global-status'); const shown = global ? fdShown(st) : st; pill.className = 'fd-status ' + (global ? 'fd-global-status ' : 'fd-panel-status ') + shown.tone; pill.replaceChildren(icon(shown.icon, 16), h('span', {}, global ? shown.text : fdPanelStatus(state.report, st))); }); }
   }
   function fdRefresh() {
     state.fdItems = fdItems(); drawSide(); drawGrid(); fdRefreshFoot();
@@ -2845,6 +2916,7 @@
     } catch (e) { if (state.report === report) toast(e.message, true); }
     finally {
       if (state.rechecking !== operation) return;
+      state.fdLastBackground = Date.now();
       state.rechecking = false;
       if (!state.busy && !state.decisionPending) {
         controls.forEach((disabled, node) => { if (node.isConnected) node.disabled = disabled; });
@@ -2865,9 +2937,9 @@
     state.fdAutoSPWaiting = true; let tries = 0;
     const attempt = async () => {
       if (state.report !== r || versionReadOnly(r) || state.fdAutoSP[key]) { state.fdAutoSPWaiting = false; return; }
-      if (state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || state.fdAutoRecheckWaiting || state.fdReconciling || !state.fixes) { if (++tries < 120) setTimeout(attempt, 500); else state.fdAutoSPWaiting = false; return; }
+      if (state.fdTidying || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || state.fdAutoRecheckWaiting || state.fdReconciling || !state.fixes) { if (++tries < 120) setTimeout(attempt, 500); else state.fdAutoSPWaiting = false; return; }
       state.fdAutoSP[key] = true; state.fdReconciling = true; drawSide();
-      try { await api('/api/spreadsheets/sharepoint', {file_hash: r.file_hash}); state.fdReconciling = false; state.fdAutoSPWaiting = false;
+      try { await api('/api/spreadsheets/sharepoint', {file_hash: r.file_hash}); state.fdLastBackground = Date.now(); state.fdReconciling = false; state.fdAutoSPWaiting = false;
         if (state.report === r) { await openReport(r.file_hash, true); loadList(); } }
       catch (e) { state.fdReconciling = false; state.fdAutoSPWaiting = false; state.fdAutoSPError = {key, message: e.message}; if (state.report === r) drawSide(); }
     };
@@ -2943,6 +3015,7 @@
         toast(state.fdAutoSPError.message, true);
       }
     } finally {
+      state.fdLastBackground = Date.now();
       if (state.fdReconciling === operation) state.fdReconciling = null;
       if (state.rechecking === operation) state.rechecking = false;
       if (!state.busy && !state.decisionPending && !state.aiProposalOperation && !state.rechecking) controls.forEach((disabled, node) => { if (node.isConnected) node.disabled = disabled; });
@@ -3222,6 +3295,9 @@
       fdCorrections(body);
       body.append(h('button', {type: 'button', class: 'btn', disabled: state.busy || state.rechecking || state.decisionPending || !!state.aiProposalOperation, onclick: fdRecheck}, 'Recheck this report'));
       body.append(h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'sources'; drawReport(); }}, 'Source evidence and coverage'));
+      body.append(h('label', {class: 'fd-autotidy'}, h('input', {type: 'checkbox', 'data-selection': 'true', checked: store.get('rd-auto-tidy', true) !== false || null,
+        onchange: e => { store.set('rd-auto-tidy', e.target.checked); if (e.target.checked && state.report) { delete (state.fdAutoTidied || {})[state.report.file_hash]; fdAutoTidy(state.report); } }}),
+        ' Fix formatting automatically (capital letters, extra spaces, numbers typed as text)'));
       const sc = shiftCard(rv); if (sc) body.append(h('div', {id: 'shiftfix'}, sc));
     } else {
       body.append(h('div', {id: 'chat', class: 'chat embedded', 'aria-label': 'Ask Dex'}));
@@ -3366,6 +3442,27 @@
   }
 
   // ---------------- fixes
+  // Formatting-only clean-ups (capital letters, extra spaces, hidden characters, numbers typed as text) are never shown
+  // as errors: the checked ones are made as soon as the report opens, saved as a new version (the original is kept).
+  const fdTidyOnly = it => !!it.fix && !!fmtKind(it.fix) && it.selectable && ['open', 'selected'].includes(it.state) && !it.own && !it.previous && it.proposed === it.fix.after;
+  async function fdAutoTidy(report) {
+    state.fdAutoTidied ||= {};
+    if (!report || state.report !== report || versionReadOnly(report) || state.fdAutoTidied[report.file_hash] || state.fdAIRun?.running || store.get('rd-auto-tidy', true) === false) return;
+    let tidy;
+    try { if (state.report.review?.page?.complete === false) return; const cells = new Map(); for (const it of fdItems()) if (fdTidyOnly(it)) cells.set(JSON.stringify([it.sheet, it.cell]), it); tidy = [...cells.values()]; } catch (e) { return; }
+    if (!tidy.length) return;
+    state.fdAutoTidied[report.file_hash] = true;   // once per version, never in a loop
+    state.fdTidying = true;   // the SharePoint check waits for the tidied version instead of running twice
+    try {
+      for (let i = 0; (state.fdReconciling || state.fdAutoRecheckWaiting || state.rechecking || state.busy || state.decisionPending || state.aiProposalOperation) && i < 150; i++) await new Promise(r => setTimeout(r, 400));
+      if (state.report !== report || versionReadOnly(report) || state.gridDraft || state.fdAIRun?.running) return;
+      const binding = reviewBinding(report), accepted = tidy.map(it => it.fix);
+      const dec = Object.fromEntries(accepted.map(f => [f.id, {state: 'accepted', after: f.after}]));
+      const capture = captureCorrections(accepted, dec, {}, binding, report);
+      await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true, quiet: true, throwOnError: true});
+    } catch (e) { /* the clean-ups stay available under Fix everything with AI */ }
+    finally { state.fdTidying = false; if (state.report === report && $('side')) drawSide(); }
+  }
   async function loadFixes(hash) {
     const report = state.report;
     if (!report || versionReadOnly(report)) return;
@@ -3385,6 +3482,7 @@
       }
     } catch (e) { if (state.selected !== hash || state.report !== report || versionReadOnly(report)) return; state.fixes = []; state.fixesError = e.message; state.aiFix = {status: 'not_run'}; }
     drawFixes();
+    fdAutoTidy(report);
     document.querySelector('.fd-mode-selector')?.replaceWith(fdModeSelector(state.report));
     // first time a report with issues is opened, Claude drafts the fixes, then offers them in the chat
     const rv = state.report?.review || {}, open = (rv.issues || []).filter(i => i.severity !== 'info').length + (rv.dismissed || []).length;
@@ -3835,7 +3933,7 @@
     const binding = captured.binding, reportAtSave = state.report, openAtSave = state.openRequest, selectedAtSave = state.selected, routeAtSave = globalThis.location?.hash;
     if (state.busy || state.decisionPending || state.rechecking || state.aiProposalOperation) { const error = new Error('Another step is still running. No save was started. Wait for it to finish.'); if (opts.throwOnError) throw error; toast(error.message, true); return null; }
     state.busy = true; drawFixes(); updateDownloads();
-    toast('Building the fixed copy with your changes…');
+    if (!opts.quiet) toast('Building the fixed copy with your changes…');
     let requestStarted = false, savedItem = null;
     try {
       const changes = accepted.map(f => {
@@ -3866,14 +3964,15 @@
       }
       const existingVersion = answer.already_applied === true || answer.item.already_applied === true;
       const recordedChanges = existingVersion ? null : answer.item.fixed_from?.changes;
-      toast(`${existingVersion ? 'Opened the existing matching version' : 'Saved the corrected version'} "${answer.item.filename}"${Array.isArray(recordedChanges) ? ` with ${plural(recordedChanges.length, 'recorded change')}` : ''}. ${existingVersion ? 'No new version was created. ' : ''}The original is unchanged.`);
+      if (!opts.quiet) toast(`${existingVersion ? 'Opened the existing matching version' : 'Saved the corrected version'} "${answer.item.filename}"${Array.isArray(recordedChanges) ? ` with ${plural(recordedChanges.length, 'recorded change')}` : ''}. ${existingVersion ? 'No new version was created. ' : ''}The original is unchanged.`);
       if (opts.thenOpen !== false) {
         // These reads cannot undo the successful, committed save above.
-        try { await loadList(); } catch (error) { toast('The corrected version is saved, but the report list could not refresh. Open the saved copy or reload the list.', true); }
+        // Open the saved version straight away; the report list catches up behind it instead of holding the screen.
         if (state.report === reportAtSave && state.openRequest === openAtSave && state.selected === selectedAtSave && globalThis.location?.hash === routeAtSave) {
           opts.beforeOpen?.(); // A confirmed preview's saved inputs are no longer unsaved drafts.
           select(savedItem.file_hash, true);
         }
+        loadList().catch(() => { toast('The corrected version is saved, but the report list could not refresh. Open the saved copy or reload the list.', true); });
       }
       return opts.returnReceipt ? savedItem : savedItem.file_hash;
     } catch (e) {
@@ -3885,7 +3984,7 @@
       // A lost response or server error does not prove the transaction failed. Never retry it here.
       const error = !e.saveCommitted && requestStarted && (!e.httpStatus || e.httpStatus >= 500)
         ? new Error('The save could not be confirmed. Reload this report and check its saved versions before trying again. ' + (e.message || '')) : e;
-      toast(error.message, true);
+      if (!opts.quiet) toast(error.message, true);
       if (opts.throwOnError) throw error;
       return null;
     }

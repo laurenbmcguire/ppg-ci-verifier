@@ -20,7 +20,7 @@ const nexusSection=document.createElement('section');nexusSection.id='test-nexus
  const base=`http://127.0.0.1:${server.address().port}`,browser=await chromium.launch({executablePath:process.env.CHROMIUM_EXECUTABLE||undefined,headless:true});
  const results=[];
  try{for(const width of [1200,390]){
-  const context=await browser.newContext({viewport:{width,height:850}}),page=await context.newPage(),errors=[],external=[];
+  const context=await browser.newContext({viewport:{width,height:850}}),page=await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})(),errors=[],external=[];
   await context.route('**/*',route=>{if(route.request().url().startsWith(base+'/'))return route.continue();external.push(route.request().url());return route.abort();});
   page.on('pageerror',e=>errors.push(String(e)));await page.goto(base,{waitUntil:'networkidle'});
   assert.equal(await page.locator('.fd-history-group').count(),3);

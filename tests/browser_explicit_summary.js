@@ -28,7 +28,7 @@ ${health}
 (async () => {
  const browser = await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE});
  try { for (const width of [1200,390]) {
-  const context = await browser.newContext({viewport:{width,height:900}}), page = await context.newPage();
+  const context = await browser.newContext({viewport:{width,height:900}}), page = await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})();
   const requests=[],pending=[],errors=[]; let healthRoute;
   page.on('pageerror',e=>errors.push(String(e)));
   await page.clock.install();

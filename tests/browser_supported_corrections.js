@@ -5,7 +5,7 @@ const path=require('node:path');
 (async()=>{
  const [base,config,viewport]=process.argv.slice(2),cases=JSON.parse(config),width=Number(viewport);
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE});
- const context=await browser.newContext({viewport:{width,height:900}}),page=await context.newPage(),errors=[],external=[],writes=[],requests=[];
+ const context=await browser.newContext({viewport:{width,height:900}}),page=await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})(),errors=[],external=[],writes=[],requests=[];
  await context.route('**/*',r=>r.request().url().startsWith(base+'/')?r.continue():(external.push(r.request().url()),r.abort()));
  page.on('pageerror',e=>errors.push(String(e)));
  page.on('request',r=>{if(r.url().endsWith('/apply-fixes'))writes.push(r.postDataJSON());if(r.url().endsWith('/ai-proposals'))requests.push(r.postDataJSON());});

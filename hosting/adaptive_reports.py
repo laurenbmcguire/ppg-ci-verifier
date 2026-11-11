@@ -523,8 +523,14 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None, *
                 if n != n.to_integral_value():
                     finding('fractional_count', r['sheet'], r['row'], c[f])
         if any(st in KNOWN for st in s.values()):
+            # When the counts already written on the row add up to everything inspected, a blank OK / NOK / rework cell
+            # has nothing left to hold (no parts are unaccounted for), so it is not a missing value.
+            parts = [v[f] for f in ('certified', 'rejected', 'reworked') if v.get(f) is not None]
+            accounted = v.get('inspected') is not None and bool(parts) and sum(parts) == v['inspected']
             for f in v:
                 if s[f] == 'blank' and (r['sheet'], f) in used_fields:
+                    if accounted and f in ('certified', 'rejected', 'reworked'):
+                        continue
                     finding('missing_cell', r['sheet'], r['row'], c[f])
         ins, ok, nok, rw = v.get('inspected'), v.get('certified'), v.get('rejected'), v.get('reworked')
         if ins is not None and ok is not None and nok is not None:

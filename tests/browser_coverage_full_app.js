@@ -1,6 +1,6 @@
 // New fake-only actual-handler harness. No user browser, real DB or provider calls.
 const assert=require('node:assert/strict');const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
-(async()=>{const [base,hash,viewport]=process.argv.slice(2);const width=Number(viewport||1200);const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE});const context=await browser.newContext({viewport:{width,height:900}});const page=await context.newPage(),errors=[],external=[],writes=[];
+(async()=>{const [base,hash,viewport]=process.argv.slice(2);const width=Number(viewport||1200);const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE});const context=await browser.newContext({viewport:{width,height:900}});const page=await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})(),errors=[],external=[],writes=[];
 await context.route('**/*',r=>{if(r.request().url().startsWith(base+'/'))return r.continue();external.push(r.request().url());return r.abort();});page.on('pageerror',e=>errors.push(String(e)));page.on('request',r=>{if(r.url().endsWith('/api/spreadsheets/apply-fixes'))writes.push(r.postDataJSON());});
 try{
 // Render fabricated missing coverage and image placements through the complete app.

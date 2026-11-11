@@ -186,7 +186,7 @@ test('blocker and approval-hold counts live beside sheet, not in report title',(
  const ctx=vm.createContext({state:{fdItems:[{tier:'blocker',state:'open'},{tier:'blocker',state:'kept'}]},plural:(n,s)=>`${n} ${s}${n===1?'':'s'}`});
  vm.runInContext(between('  function fdGlobalStatus(', '  function fdSourceVerified('),ctx);
  const st={next:'blockers',text:'4 blockers'};
- assert.equal(ctx.fdGlobalStatus(st),'Review blocked');
+ assert.equal(ctx.fdGlobalStatus(st),'Blocked: 1 serious error must be fixed or ignored first');
  assert.equal(ctx.fdPanelStatus({holds:[{hard:true},{hard:true},{hard:true}]},st),'1 blocker · 3 approval holds');
  assert.ok(between('  function drawReport(', '  function fdMetrics(').includes('fd-global-status'));
  assert.ok(!between('  function fdCorrections(', '  // ---------- the app fixes').includes('fd-hold-details'));

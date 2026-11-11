@@ -3,7 +3,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
 (async()=>{
  const [base,config,w,mode]=process.argv.slice(2),width=Number(w),cases=JSON.parse(config);
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE});
- const context=await browser.newContext({viewport:{width,height:900}}),page=await context.newPage(),errors=[],external=[],writes=[],dialogs=[];
+ const context=await browser.newContext({viewport:{width,height:900}}),page=await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})(),errors=[],external=[],writes=[],dialogs=[];
  let current,saved=false,receipt,release,arrived;
  await context.route('**/*',async route=>{
   const req=route.request(),url=req.url();if(!url.startsWith(base+'/')){external.push(url);return route.abort();}
@@ -48,7 +48,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
     await page.screenshot({path:path.join(process.env.EVIDENCE_DIR||'/tmp',`finding-open-list-manual-${width}.png`),fullPage:true});continue;
    }
    const prior=writes.length,hold=new Promise(r=>arrived=r);
-   if(c.name==='standalone'){await dialog.getByRole('button',{name:'Close review',exact:true}).click();await page.locator('#side input[data-tick*="fmt:extra spaces"]').first().check();await page.locator('.fd-tickbar').getByRole('button',{name:'AI fix',exact:true}).click();}
+   if(c.name==='standalone'){await dialog.getByRole('button',{name:'Close review',exact:true}).click();await page.locator('#side input[data-tick*="fmt:extra spaces"]').first().check();await page.locator('#fd-fix-everything').click();}
    else await dialog.getByRole('button',{name:'AI fix selected',exact:true}).click();
    if(c.name==='navigation'){
     await hold;await page.evaluate(()=>location.hash='');await page.waitForFunction(h=>location.hash==='#r='+h,c.hash);

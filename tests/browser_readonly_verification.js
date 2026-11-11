@@ -41,7 +41,7 @@ const resolver=id=>({requested_hash:id,working_hash:id,status:id===A?'unavailabl
  });await new Promise(r=>server.listen(0,'127.0.0.1',r));
  const base='http://127.0.0.1:'+server.address().port,browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE||undefined}).catch(async error=>{await new Promise(r=>server.close(r));throw error;}),results=[];
  try{for(const width of [1200,390]){
-  const context=await browser.newContext({viewport:{width,height:900}}),page=await context.newPage(),errors=[],external=[];
+  const context=await browser.newContext({viewport:{width,height:900}}),page=await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})(),errors=[],external=[];
   await context.route('**/*',route=>{if(route.request().url().startsWith(base+'/'))return route.continue();external.push(route.request().url());return route.abort();});page.on('pageerror',e=>errors.push(String(e)));
   const open=async(hash,history=false)=>{await page.goto(base+'/app#r='+hash+(history?'&history=1':''),{waitUntil:'networkidle'});await page.locator('.version-readonly').waitFor();};
   await open(A);console.log(JSON.stringify({stage:'opened',width}));

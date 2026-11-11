@@ -12,7 +12,7 @@ const executablePath = process.env.CHROMIUM_EXECUTABLE || undefined;
  try {
   for (const width of [1440, 390]) {
    const context = await browser.newContext({viewport: {width, height: 900}});
-   const page = await context.newPage(), errors = [], external = [];
+   const page = await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})(), errors = [], external = [];
    await context.route('**/*', route => { if (route.request().url().startsWith(base + '/')) return route.continue(); external.push(route.request().url()); return route.abort(); });
    page.on('pageerror', e => errors.push(String(e)));
    await page.goto(base + '/app#r=' + hash, {waitUntil: 'networkidle'});

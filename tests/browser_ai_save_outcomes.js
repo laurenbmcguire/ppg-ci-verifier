@@ -4,7 +4,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright-core');
 (async()=>{
  const [base,hash,viewport,mode]=process.argv.slice(2),width=Number(viewport);
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE});
- const context=await browser.newContext({viewport:{width,height:900}}),page=await context.newPage();
+ const context=await browser.newContext({viewport:{width,height:900}}),page=await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})();
  const errors=[],external=[],writes=[],proposals=[];let saved=false,receipt=null;
  await context.route('**/*',async route=>{
   const req=route.request(),url=req.url();

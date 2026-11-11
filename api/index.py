@@ -792,7 +792,8 @@ class handler(BaseHTTPRequestHandler):
                 with self.store().session() as directory:
                     inbox = SpreadsheetInbox(directory)
                     self.refresh_session_principal(inbox)
-                    data = inbox.working_copy(file_hash, lambda item: self.can_stored_report(inbox, item))
+                    with inbox.reading():
+                        data = inbox.working_copy(file_hash, lambda item: self.can_stored_report(inbox, item))
                 return self.send(200, encode_json(data))
             if route == '/api/spreadsheets/download':
                 file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
@@ -887,7 +888,9 @@ class handler(BaseHTTPRequestHandler):
                     file_hash = parse_qs(urlsplit(self.path).query).get('id', [''])[0]
                     if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
                         raise Conflict('Valid spreadsheet version ID required.')
-                    data = self.report_view(SpreadsheetInbox(directory), file_hash)
+                    viewed = SpreadsheetInbox(directory)
+                    with viewed.reading():
+                        data = self.report_view(viewed, file_hash)
                 else:
                     data = {'status': 'ready', 'storage': getattr(self.store(), 'storage_label', 'unconfigured'), 'live_connectors_enabled': False, 'sharepoint_configured': sharepoint_configured(), 'ai_review_configured': ai_review_configured(), 'spreadsheet_scope': 'internal_checks_only', 'send_enabled': mail_configured(), 'reviewer_identity_available': False, 'prototype': True, 'local_only': not hosted_preview(), 'development_demo': self.demo_enabled()}
                 body = encode_json(data)

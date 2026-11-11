@@ -67,7 +67,7 @@ const server = http.createServer((req, res) => {
   try {
     for (const width of [1200, 390]) {
       const context = await browser.newContext({viewport: {width, height: 900}, acceptDownloads: true});
-      const page = await context.newPage(), errors = [], external = [], downloads = [];
+      const page = await (async()=>{await context.addInitScript(()=>{try{localStorage.setItem('rd-auto-tidy','false')}catch(e){}});return context.newPage()})(), errors = [], external = [], downloads = [];
       page.on('pageerror', error => errors.push(String(error)));
       page.on('download', download => downloads.push(download));
       await context.route('**/*', route => {if (route.request().url().startsWith(base + '/')) return route.continue(); external.push(route.request().url()); return route.abort();});
