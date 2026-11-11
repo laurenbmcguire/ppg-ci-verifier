@@ -2157,7 +2157,10 @@
         proposals.push(...answer.proposals); skipped.push(...(answer.skipped || []));
       }
       if (state.report !== report || JSON.stringify(reviewBinding(report)) !== JSON.stringify(binding)) throw Object.assign(new Error('The report changed while suggestions were prepared. Reopen it before applying. No save was started.'), {reportChanged: true});
-      const accepted = fdUniqueAIProposals(proposals);
+      // A cell (or whole row) the reviewer ignored or deferred stays as written: leave those out instead of failing the whole save.
+      const decided = (state.fdItems?.length ? state.fdItems : typeof fdItems === 'function' ? fdItems() : []).filter(it => ['kept', 'deferred', 'rejected'].includes(it.state) && it.decision && (it.cell || it.row));
+      const protectedCell = p => decided.some(it => (!it.sheet || it.sheet === p.sheet) && (it.cell ? String(it.cell).toUpperCase() === String(p.cell).toUpperCase() : String(p.cell).replace(/^[A-Z]+/i, '') === String(it.row)));
+      const accepted = fdUniqueAIProposals(proposals).filter(p => !protectedCell(p));
       const why = new Map(skipped.map(x => [x.finding_id, String(x.reason || '')]));
       const describe = (it, reason, currentKey) => ({key: currentKey || it.key, where: [it.sheet, it.cell ? 'cell ' + it.cell : it.row ? 'row ' + it.row : null].filter(Boolean).join(' ') || 'Whole report',
         text: it.text || it.reason || '', now: it.report, reason: why.get(it.key) || reason || (fdSourceGap(it) ? 'The source evidence must be verified first. AI cannot establish the source date or authority.' : '')});

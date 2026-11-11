@@ -1288,8 +1288,15 @@ class SpreadsheetInbox:
             for decision in (result.get('finding_decisions') or {}).values():
                 if decision.get('action') not in ('reject', 'defer'):
                     continue
+                # The decision protects the cell it was made on, or its whole row when it names a row and no cell.
+                # A decision about another row, or about the report as a whole, does not lock the other cells.
+                cell, row = str(decision.get('cell') or '').upper(), decision.get('row')
+                if not cell and not row:
+                    continue
                 for c in approved:
-                    if (not decision.get('sheet') or decision.get('sheet') == c.get('sheet')) and (not decision.get('cell') or str(decision['cell']).upper() == str(c.get('cell') or '').upper()):
+                    target = str(c.get('cell') or '').upper()
+                    same_row = bool(row) and re.sub(r'^[A-Z]+', '', target) == str(row)
+                    if (not decision.get('sheet') or decision.get('sheet') == c.get('sheet')) and (target == cell if cell else same_row):
                         raise ValueError('Reopen the rejected or deferred finding before correcting its data.')
             self._validate_correction_batch(approved)
             if recommended_only:
