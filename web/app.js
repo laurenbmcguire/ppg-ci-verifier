@@ -1312,7 +1312,7 @@
     const issues = [...new Map([...allIssues(report.review), ...(report.review.dismissed || [])].map(i => [i.key, i])).values()];
     const incomplete = report.review.page?.complete === false || report.review.coverage?.truncated || report.review.coverage?.not_listed;
     const counts = ['high', 'medium', 'low', 'info'].map(severity => `${issues.filter(i => i.severity === severity).length} ${severity === 'high' ? 'high severity' : severity === 'info' ? 'informational' : severity}`).join(' · ');
-    const output = h('div', {class: 'fd-summary-answer', 'aria-live': 'polite'}, compact ? h('p', {class: 'fd-summary-text'}, fdPlainSummary()) : null);
+    const output = h('div', {class: 'fd-summary-answer', 'aria-live': 'polite'}, compact ? (state.fdSummaryWanted ? h('p', {role: 'status'}, 'Getting the report ready. The summary starts by itself in a moment…') : h('p', {class: 'fd-summary-text'}, fdPlainSummary())) : null);
     const renderAnswer = (answer, inventory) => {
       if (compact) {
         const narrative = answer.reply.trim(), short = narrative.length > 360 ? narrative.slice(0, 357) + '…' : narrative;
@@ -1336,6 +1336,12 @@
     const pending = state.aiProposalOperation?.summary;
     if (pending?.report === report && pending.key === JSON.stringify(binding) && pending.context === context) output.replaceChildren(h('p', {role: 'status'}, pendingText));
     const button = h('button', {type: 'button', class: 'btn fd-summary-request', disabled: !state.aiOn, onclick: async () => {
+      // While the report is still being made ready (recheck, formatting clean-up, SharePoint check) it reloads, which
+      // would throw a summary away. The request is remembered and starts by itself once the report holds still.
+      if (typeof fdBackgroundBusy === 'function' && state.aiOn && (fdBackgroundBusy() || state.busy || state.rechecking)) {
+        output.replaceChildren(h('p', {role: 'status'}, 'Getting the report ready. The summary starts by itself in a moment…'));
+        fdSummaryWhenReady(); return;
+      }
       if (!stillCurrent() || !state.aiOn || state.aiProposalOperation || state.busy || state.rechecking || state.decisionPending) return;
       if ([...document.querySelectorAll('#side input:not([type=checkbox]):not([type=radio]), #side textarea, .fd-review-dialog input:not([type=checkbox]), .fd-review-dialog textarea')].some(node => node.value !== node.defaultValue)) {
         toast('Finish or save your typed draft before asking for a summary. Your text is unchanged.', true); return;
@@ -2148,6 +2154,21 @@
       toast(`${run.fixed ? `Dex fixed ${plural(run.fixed, 'cell')}` : 'Dex had nothing to change'}${leftAsWritten ? ` and left ${leftAsWritten} as written` : ''}. ` +
         (left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you (serious, or different from SharePoint): ${left === 1 ? 'it is' : 'they are'} listed on the right.` : 'No possible errors left.'), left > 0);
     })();
+  }
+  function fdSummaryWhenReady() {
+    if (state.fdSummaryWanted) return;
+    state.fdSummaryWanted = true; let still = 0, tries = 0;
+    const tick = () => {
+      if (!state.report || location.hash.indexOf('#r=') !== 0 || ++tries > 360) { state.fdSummaryWanted = false; return; }
+      const quiet = !fdBackgroundBusy() && !state.busy && !state.rechecking && !state.decisionPending && !state.aiProposalOperation && !!state.fixes;
+      still = quiet ? still + 1 : 0;
+      if (still < 3) {   // quiet for a second and a half, so nothing is about to reload the report
+        setTimeout(tick, 500); return;
+      }
+      state.fdSummaryWanted = false;
+      document.querySelector('.fd-report-summary .fd-summary-request')?.click();
+    };
+    setTimeout(tick, 500);
   }
   // A SharePoint check or recheck that starts by itself when a report opens must never make AI fix fail:
   // AI fix waits for it, then works on the report as it is now, and starts again by itself if the report updates mid-way.
@@ -3002,13 +3023,18 @@
     // A saved comparison that was waiting for a column confirmation, or was made for an earlier client assignment, is
     // read again once: the columns are now settled without asking.
     const redo = Object.values(rec.column_mapping || {}).some(m => m?.status === 'needs_confirmation') || (r.holds || []).some(x => x.code === 'source_assignment_changed');
-    if ((fresh && !redo) || state.fdAutoSP[key] || (r.assignment || {}).needs_person) return false;
+    // Never in a loop: one automatic re-read per version for the "redo" case, and at most two automatic SharePoint
+    // checks per version in a visit, whatever the result. After that the page stays still; the refresh button remains.
+    state.fdAutoSPRuns ||= {}; state.fdAutoSPRedone ||= {};
+    const runs = state.fdAutoSPRuns[r.file_hash] || 0;
+    if ((fresh && (!redo || state.fdAutoSPRedone[r.file_hash])) || runs >= 2 || state.fdAutoSP[key] || (r.assignment || {}).needs_person) return false;
     if (state.fdAutoSPWaiting) return true;
     state.fdAutoSPWaiting = true; let tries = 0;
     const attempt = async () => {
       if (state.report !== r || versionReadOnly(r) || state.fdAutoSP[key]) { state.fdAutoSPWaiting = false; return; }
       if (state.fdTidying || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation || state.fdAutoRecheckWaiting || state.fdReconciling || !state.fixes) { if (++tries < 120) setTimeout(attempt, 500); else state.fdAutoSPWaiting = false; return; }
-      state.fdAutoSP[key] = true; state.fdReconciling = true; drawSide();
+      state.fdAutoSP[key] = true; state.fdAutoSPRuns[r.file_hash] = (state.fdAutoSPRuns[r.file_hash] || 0) + 1; if (redo) state.fdAutoSPRedone[r.file_hash] = true;
+      state.fdReconciling = true; drawSide();
       try { await api('/api/spreadsheets/sharepoint', {file_hash: r.file_hash}); state.fdLastBackground = Date.now(); state.fdReconciling = false; state.fdAutoSPWaiting = false;
         if (state.report === r) { await openReport(r.file_hash, true); loadList(); } }
       catch (e) { state.fdReconciling = false; state.fdAutoSPWaiting = false; state.fdAutoSPError = {key, message: e.message}; if (state.report === r) drawSide(); }
