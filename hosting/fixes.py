@@ -208,7 +208,7 @@ def proposals(result, filename, raw, sharepoint_rows=None, context=None):
             sure = confidence == 'high' and source in SURE_SOURCES
         only = WRITTEN_ONLY.get(source)
         if source == 'Spelling' and 'different capitals' in reason:
-            only = 'Only the capital letters are different. Same part; nothing else is wrong.'
+            only = 'Only the capital letters are different. Same value; nothing else is wrong.'
         out.append(dict(id=_pid(sheet, cell, after_text), sheet=sheet, cell=cell, before=_show(before), after=after_text,
                         kind=kind, reason=reason, source=source, confidence=confidence, sure=bool(sure), only=only))
 
@@ -350,7 +350,10 @@ def proposals(result, filename, raw, sharepoint_rows=None, context=None):
             spellings = groups[re.sub(r'[^A-Z0-9]', '', v.upper())]
             common, n = spellings.most_common(1)[0]
             if v != common and n > spellings[v]:
-                add(r['sheet'], text_cell(r, kind), common, f'Uses the spelling "{common}" found on {n} other row(s).', 'Spelling')
+                if ' '.join(v.split()).casefold() == ' '.join(common.split()).casefold():   # only the capitals (or doubled spaces) differ
+                    add(r['sheet'], text_cell(r, kind), common, f'Written as "{common}" on {n} other row(s); same value, different capitals.', 'Spelling', sure=True)
+                else:
+                    add(r['sheet'], text_cell(r, kind), common, f'Uses the spelling "{common}" found on {n} other row(s).', 'Spelling')
 
     # 4b. Part numbers that differ only in upper/lower case → the most common form (uppercase on a tie).
     groups = defaultdict(Counter)
@@ -366,6 +369,21 @@ def proposals(result, filename, raw, sharepoint_rows=None, context=None):
         best = max(spellings.items(), key=lambda kv: (kv[1], kv[0] == kv[0].upper()))[0]
         if v != best:
             add(r['sheet'], text_cell(r, 'part'), best, f'Part number written as "{best}" on {spellings[best]} other row(s); same part, different capitals.', 'Spelling', sure=True)   # only the capitals differ
+
+    # 4c. Identifiers that differ only in upper/lower case → the most common form (uppercase on a tie).
+    groups = defaultdict(Counter)
+    for r in detail:
+        v = (r['labels'].get('identifier') or '').strip()
+        if v:
+            groups[' '.join(v.split()).casefold()][v] += 1
+    for r in detail:
+        v = (r['labels'].get('identifier') or '').strip()
+        spellings = groups.get(' '.join(v.split()).casefold()) if v else None
+        if not spellings or len(spellings) < 2:
+            continue
+        best = max(spellings.items(), key=lambda kv: (kv[1], kv[0] == kv[0].upper()))[0]
+        if v != best:
+            add(r['sheet'], text_cell(r, 'identifier'), best, f'Identifier written as "{best}" on {spellings[best]} other row(s); same value, different capitals.', 'Spelling', sure=True)
 
     # 5. Numbers typed as text in quantity columns.
     for r in detail:

@@ -138,6 +138,9 @@ def run(sources, cached, sheets, detail, finding, hidden=None):
             for variant, m in spellings.items():
                 if variant == common:
                     continue
+                # Only the capital letters (or doubled spaces) differ: not an error. The clean-up makes them match by itself.
+                if ' '.join(variant.split()).casefold() == ' '.join(common.split()).casefold():
+                    continue
                 first = where[variant][0]
                 if kind == 'identifier':
                     finding('duplicate_identifier_variant', first['sheet'], first['row'],

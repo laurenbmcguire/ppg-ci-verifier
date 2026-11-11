@@ -34,10 +34,16 @@ class CommonIssueTests(unittest.TestCase):
         self.assertEqual(codes(rows)[0]['hidden_characters'], 2)
 
     def test_same_value_written_differently(self):
-        rows = clean_rows(); rows[4][8] = 'HOLES '; rows[5][3] = rows[6][3].replace('8010', '8010-')
+        rows = clean_rows(); rows[4][8] = 'Holes/'; rows[5][3] = rows[6][3].replace('8010', '8010-')
         found = codes(rows)[0]
         self.assertIn('inconsistent_spelling', found)
         self.assertIn('duplicate_identifier_variant', found)
+
+    def test_capital_letters_alone_are_not_an_error(self):
+        rows = clean_rows(); rows[4][8] = 'HOLES '; rows[5][3] = rows[6][3].lower()
+        found = codes(rows)[0]
+        self.assertNotIn('inconsistent_spelling', found)
+        self.assertNotIn('duplicate_identifier_variant', found)
 
     def test_placeholders_and_scientific_notation(self):
         rows = clean_rows(); rows[0][2] = 'TBD'; rows[1][3] = '8.01081E+09'; rows[2][4] = '0000'
