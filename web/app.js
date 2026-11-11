@@ -2455,10 +2455,11 @@
     return h('div', {class: 'fd-airun fd-revision ' + (left ? '' : 'good'), role: 'status'},
       h('h3', {}, 'Revision summary'),
       h('ul', {class: 'fd-revision-counts'},
-        h('li', {}, h('b', {}, String(run.fixed || 0)), run.fixed === 1 ? ' cell fixed by Dex' : ' cells fixed by Dex'),
+        run.tidy ? null : h('li', {}, h('b', {}, String(run.fixed || 0)), run.fixed === 1 ? ' cell fixed by Dex' : ' cells fixed by Dex'),
         tidied.length ? h('li', {}, h('b', {}, String(tidied.length)), ' formatting clean-ups made when the report opened') : null,
-        h('li', {}, h('b', {}, String(run.leftAsWritten || 0)), ' left as written'),
+        run.tidy ? null : h('li', {}, h('b', {}, String(run.leftAsWritten || 0)), ' left as written'),
         h('li', {class: left ? 'fd-revision-open' : ''}, h('b', {}, String(left)), left === 1 ? ' possible error still needs you' : ' possible errors still need you')),
+      left === 0 ? h('p', {class: 'fd-hint'}, 'Nothing is left to fix, so the Fix buttons are not shown. Download the fixed report below.') : null,
       run.fixed ? h('p', {class: 'fd-hint'}, `${run.reused ? 'Matches saved version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept unchanged.`) : null,
       list(`See the ${plural(items.length, 'change')} Dex made`, items), list(`See the ${plural(tidied.length, 'formatting clean-up')}`, tidied),
       h('div', {class: 'fd-cardacts'},
@@ -3439,7 +3440,10 @@
         open === 0 ? h('a', {class: 'btn primary', id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
         h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors')),
       // Progress of an AI fix, then its revision summary, sit at the very top where the button was pressed.
-      state.fdAIRun?.hash === r.file_hash && fdAutoMode() ? fdAIRunBanner(state.fdAIRun, open ?? 0) : null,
+      state.fdTidying && fdAutoMode() ? h('div', {class: 'fd-airun fd-airun-busy', role: 'status'}, h('p', {}, h('span', {class: 'spin'}), ` Fixing formatting in ${plural(state.fdTidying.count || 0, 'cell')}…`),
+        h('div', {class: 'fd-progress fd-progress-moving', role: 'progressbar', 'aria-label': 'Formatting clean-up progress'}, h('div', {class: 'fd-progress-bar'})),
+        h('p', {class: 'fd-hint'}, 'This takes up to a minute. The buttons below turn on when it is saved.'))
+        : state.fdAIRun?.hash === r.file_hash && fdAutoMode() ? fdAIRunBanner(state.fdAIRun, open ?? 0) : null,
       fdReportSummary(r), fdComparison(r), h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
     drawSideTabs();
     if (tab === 'fixes') {
@@ -3603,14 +3607,17 @@
     try { if (state.report.review?.page?.complete === false) return; const cells = new Map(); const kept = fdProtectedCells(); for (const it of fdItems()) if (fdTidyOnly(it) && !kept(it.fix)) cells.set(JSON.stringify([it.sheet, it.cell]), it); tidy = [...cells.values()]; } catch (e) { return; }
     if (!tidy.length) return;
     state.fdAutoTidied[report.file_hash] = true;   // once per version, never in a loop
-    state.fdTidying = true;   // the SharePoint check waits for the tidied version instead of running twice
+    state.fdTidying = {count: tidy.length};   // the SharePoint check waits for the tidied version instead of running twice
+    if ($('side')) drawSide();   // show the progress bar straight away: the buttons are off until this is saved
     try {
       for (let i = 0; (state.fdReconciling || state.fdAutoRecheckWaiting || state.rechecking || state.busy || state.decisionPending || state.aiProposalOperation) && i < 150; i++) await new Promise(r => setTimeout(r, 400));
       if (state.report !== report || versionReadOnly(report) || state.gridDraft || state.fdAIRun?.running) return;
       const binding = reviewBinding(report), accepted = tidy.map(it => it.fix);
       const dec = Object.fromEntries(accepted.map(f => [f.id, {state: 'accepted', after: f.after}]));
       const capture = captureCorrections(accepted, dec, {}, binding, report);
-      await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true, quiet: true, throwOnError: true});
+      const receipt = await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true, quiet: true, throwOnError: true, returnReceipt: true});
+      // Say what was done on the fixed version, so an empty to-do list is never a mystery.
+      if (receipt?.file_hash && !state.fdAIRun?.running) state.fdAIRun = {hash: receipt.file_hash, done: true, tidy: true, fixed: 0, leftAsWritten: 0, summary: true, items: []};
     } catch (e) { /* the clean-ups stay available under Fix everything with AI */ }
     finally { state.fdTidying = false; if (state.report === report && $('side')) drawSide(); }
   }

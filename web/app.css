@@ -1855,3 +1855,6 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-revision .fd-fixed-list li{overflow-wrap:anywhere}.fd-revision .fd-fixed-list{max-height:260px;overflow:auto}
 #side>.fd-airun{margin:10px 14px}
 .fd-revision .fd-fixed-list li{white-space:pre-wrap}
+.fd-progress-moving .fd-progress-bar{width:40%;animation:fd-progress-slide 1.4s ease-in-out infinite}
+@keyframes fd-progress-slide{from{margin-left:-40%}to{margin-left:100%}}
+@media (prefers-reduced-motion:reduce){.fd-progress-moving .fd-progress-bar{width:100%;margin-left:0;animation:none;opacity:.6}}
