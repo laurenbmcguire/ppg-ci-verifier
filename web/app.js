@@ -627,6 +627,8 @@
         h('details', {class: 'fd-exact-version'}, h('summary', {}, 'Exact saved version and check'),
           h('p', {}, `SHA-256: ${r.file_hash}`), h('p', {}, `Check: ${r.check_hash || 'Unavailable'} · Checker: ${r.checker_version || 'Unknown'}`))),
       h('div', {class: 'fd-actions'}, h('span', {class: 'fd-status amber'}, icon('lock', 16), 'Read-only'),
+        /^[0-9a-f]{64}$/.test(v.working_hash || '') && v.working_hash !== r.file_hash ? h('a', {class: 'btn primary', id: 'fd-back-to-working', href: '#r=' + v.working_hash}, 'Back to the fixed version') : null,
+        rv.sharepoint?.web_url ? h('a', {class: 'btn', href: rv.sharepoint.web_url, target: '_blank', rel: 'noopener'}, 'SharePoint data') : null,
         h('a', {class: 'btn', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download this original version')));
     const notice = h('section', {class: 'fd-readonly-notice', role: 'status'}, h('b', {}, reason), h('p', {}, locked),
       h('p', {}, 'Saved checks are shown for inspection. Opening this view does not complete verification or authorize release.'), fdHistoryRecovery(r),
@@ -1748,6 +1750,11 @@
     const pending = readyChanges().total;
     return h('div', {class: 'fd-sheetbar'},
       h('span', {class: 'fd-sheetbar-what'}, `Saved working copy: version ${revisionOf(r)}${r.fixed_from ? ` · ${plural((r.fixed_from.changes || []).length, 'change')} saved` : ' · original'}${pending ? ` · ${pending} typed, not saved yet` : ''}`),
+      (() => {   // the file exactly as it was first uploaded or built, opened read-only beside the fixed copy
+        const history = r.version_view?.history || [], original = r.fixed_from ? (r.root_hash || history[history.length - 1]?.file_hash || r.fixed_from.file_hash) : null;
+        return original && original !== r.file_hash ? h('a', {class: 'btn', id: 'fd-view-original', href: '#r=' + original + '&history=1', title: 'Opens the first version, unchanged, to look at. Nothing is edited.'}, 'View original') : null;
+      })(),
+      r.review?.sharepoint?.web_url ? h('a', {class: 'btn', id: 'fd-open-sharepoint', href: r.review.sharepoint.web_url, target: '_blank', rel: 'noopener', title: 'Opens the SharePoint list this report was compared with, in a new tab.'}, 'SharePoint data') : null,
       h('button', {type: 'button', class: 'btn', onclick: download}, 'Download'),
       h('button', {type: 'button', class: 'btn primary', onclick: email}, 'Email to client'));
   }
