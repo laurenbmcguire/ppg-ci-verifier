@@ -460,8 +460,10 @@
   function select(hash, receipt = false) { if (receipt) state.receiptHash = hash; state.lastSelected = hash; state.queueScroll = {page: window.scrollY, list: $('queue-list').scrollTop}; if (location.hash !== '#r=' + hash) location.hash = 'r=' + hash; else route(); }
   window.addEventListener('hashchange', route);
   async function route() {
-    if ((state.busy || state.decisionPending || state.rechecking || state.aiProposalOperation || state.fdAIRun?.running) && !state.receiptHash) { history.replaceState(null, '', state.reportRoute || '#'); toast('Wait for the current operation to finish before changing reports.', true); return; }
-    if (!navigationDrafts()) { history.replaceState(null, '', state.reportRoute || '#'); return; }
+    // While something is being saved the screen stays on the open report (never the home page).
+    const stay = () => state.reportRoute || (state.report ? '#r=' + state.report.file_hash : state.fdAIRun?.running && state.fdAIRun.hash ? '#r=' + state.fdAIRun.hash : '#');
+    if ((state.busy || state.decisionPending || state.rechecking || state.aiProposalOperation || state.fdAIRun?.running) && !state.receiptHash) { history.replaceState(null, '', stay()); toast('Wait for the current operation to finish before changing reports.', true); return; }
+    if (!navigationDrafts()) { history.replaceState(null, '', stay()); return; }
     state.openRequest = (state.openRequest || 0) + 1;
     if (state.gridDraft && !gridDiscard()) { history.replaceState(null, '', '#r=' + state.gridDraft.binding.file_hash); $('grid-cell-input')?.focus(); return; }
     document.body.classList.remove('reportmode');
@@ -1987,7 +1989,7 @@
     const historyRecommendations = historyGroups.filter(g => g.status === 'recommendation').reduce((n, g) => n + g.entries.length, 0);
     const appendHistory = () => { if (auto) body.append(h('details', {class: 'fd-history-overview'}, h('summary', {}, `History · ${plural(historyApplied, 'applied change')} · ${plural(historyRecommendations, 'AI recommendation')}`), auto)); };
     const leftNow = items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length;
-    if (state.fdAIRun?.hash === r.file_hash) body.append(fdAIRunBanner(state.fdAIRun, items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length));
+    if (state.fdAIRun?.hash === r.file_hash && !fdAutoMode()) body.append(fdAIRunBanner(state.fdAIRun, items.filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length));
     if (!items.length) { body.append(fdClean(r, st), recon); appendHistory(); return; }
     const cur = items.find(x => x.key === state.fdCur) || null;
     const tierGroups = groups.filter(g => g.unresolved || (cur && cur.group === g.key));
@@ -2131,9 +2133,11 @@
   // for and that is not a serious error is left as written (recorded as ignored, with the reason, and can be reopened).
   // Serious errors are never set aside automatically: they stay in the list for a person. With the automatic switch off,
   // the result box with its choices is shown instead.
+  const fdAutoMode = () => typeof store !== 'undefined' && store.get('rd-auto-tidy', true) !== false;
   function fdAfterAI(run, report) {
     if (typeof store === 'undefined' || store.get('rd-auto-tidy', true) === false) { fdAIDoneDialog(run, report); return; }
     state.fdAfterAIPending = true;
+    state.fdAIRun = {...run, finishing: true, pct: 93}; if (state.report?.file_hash === run.hash) drawSide();
     (async () => {
       const pause = ms => new Promise(r => setTimeout(r, ms)), openStates = ['open', 'selected', 'deferred', 'confirmed'];
       for (let i = 0; i < 200 && (state.report?.file_hash !== run.hash || !state.fixes || fdActiveBusy() || state.aiProposalOperation); i++) await pause(400);
@@ -2151,10 +2155,11 @@
       }
       if (state.report?.file_hash !== run.hash) return;
       const left = fdItems().filter(it => openStates.includes(it.state)).length;
-      state.fdAIRun = {...run, leftAsWritten}; drawSide();
+      state.fdAIRun = {...run, leftAsWritten, summary: true}; drawSide();
+      globalThis.setTimeout?.(() => { const side = document.getElementById('side'); if (side) side.scrollTop = 0; }, 0);
       toast(`${run.fixed ? `Dex fixed ${plural(run.fixed, 'cell')}` : 'Dex had nothing to change'}${leftAsWritten ? ` and left ${leftAsWritten} as written` : ''}. ` +
         (left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you (serious, or different from SharePoint): ${left === 1 ? 'it is' : 'they are'} listed on the right.` : 'No possible errors left.'), left > 0);
-    })().finally(() => { state.fdAfterAIPending = false; });
+    })().finally(() => { state.fdAfterAIPending = false; if (state.fdAIRun?.finishing) { state.fdAIRun = {...state.fdAIRun, finishing: false, summary: true}; if (state.report?.file_hash === state.fdAIRun.hash) drawSide(); } });
   }
   function fdSummaryWhenReady() {
     if (state.fdSummaryWanted) return;
@@ -2181,7 +2186,7 @@
     const keys = new Set(scope.map(it => it.key)), pause = ms => new Promise(r => setTimeout(r, ms));
     for (let attempt = 0; attempt < 3; attempt++) {
       const first = state.report; if (!first) return;
-      if (!state.fdAIRun?.running) state.fdAIRun = {hash: first.file_hash, total: scope.length, running: true, waiting: true};
+      if (!state.fdAIRun?.running) { state.fdAIRun = {hash: first.file_hash, total: scope.length, running: true, waiting: true, pct: 8}; drawSide(); if (fdAutoMode()) globalThis.setTimeout?.(() => { const side = document.getElementById('side'); if (side) side.scrollTop = 0; }, 0); }
       let list = scope;
       if (attempt || fdActiveBusy()) {
         document.querySelectorAll('dialog.fd-review-dialog[open]').forEach(d => d.close());
@@ -2223,7 +2228,7 @@
       toast('Dex can only fix errors that are still open. Fix these manually or ignore them.', true); return;
     }
     document.querySelectorAll('dialog.fd-review-dialog[open]').forEach(d => d.close());
-    state.fdAIRun = {hash, total: todo.length, running: true}; drawSide();
+    state.fdAIRun = {hash, total: todo.length, running: true, pct: 18}; drawSide();
     for (let i = 0; state.aiProposalOperation && i < 200; i++) await new Promise(r => setTimeout(r, 300)); // let the summary finish first
     const proposals = [], skipped = [];
     try {
@@ -2231,6 +2236,7 @@
       for (const it of ready) proposals.push({...it.fix, finding_id: it.key, after: it.proposed ?? it.fix.after});
       for (let i = 0; i < ask.length; i += 120) {
         const chunk = ask.slice(i, i + 120);
+        if (state.fdAIRun?.running && state.fdAIOperation === operation) { state.fdAIRun = {...state.fdAIRun, asking: true, part: Math.floor(i / 120) + 1, parts: Math.ceil(ask.length / 120), pct: 20 + Math.round(45 * i / ask.length)}; drawSide(); }
         const answer = await new Promise(resolve => {
           fdPrepareAI(chunk, binding, {owner: document.body, active: () => state.report === report, pending: () => {}, failure: error => resolve({error}), success: a => resolve(a)}).then(() => resolve(null), error => resolve({error}));
         });
@@ -2270,7 +2276,7 @@
       }
       const dec = Object.fromEntries(accepted.map(p => [p.id, {state: 'accepted', after: p.after}]));
       const capture = captureCorrections(accepted, dec, {}, binding, report);
-      state.fdAIRun = {hash, total: todo.length, running: true, saving: accepted.length}; drawSide();
+      state.fdAIRun = {hash, total: todo.length, running: true, saving: accepted.length, pct: 72}; drawSide();
       const savedItem = await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true, returnReceipt: true, throwOnError: true});
       const next = savedItem.file_hash;
       if (state.fdReviewSelection?.binding === JSON.stringify(binding)) state.fdReviewSelection = null;
@@ -2278,6 +2284,7 @@
       // The successful save receipt is authoritative even if refreshing the list or report fails.
       // Never turn a committed version into a failed save, or repeat the mutation to recover a read.
       const reused = savedItem.save_outcome?.type === 'existing_version';
+      if (state.fdAIOperation === operation) { state.fdAIRun = {hash: next, total: todo.length, running: true, checking: true, pct: 86}; if (state.report?.file_hash === next) drawSide(); }
       const {fresh, working} = await fdReadSavedCheck(savedItem);
       const resolution = fdSavedFindingResolution(scope, accepted, binding, savedItem, fresh, working);
       if (state.fdAIOperation !== operation) return;
@@ -2285,6 +2292,7 @@
         tried: scope.length, skipped: skipped.filter(x => !resolution.informational.includes(x.finding_id)), unfixed: resolution.remaining.map(x => describe(x.item, x.reason, x.currentKey)),
         from: revisionOf(report), version: revisionOf(savedItem), reused, originalHash: hash, items: done};
       // A finished save must not pull the user back from a newer navigation or open a dialog over another report.
+      if ((location.hash === '' || location.hash === '#') && typeof select === 'function') select(next, true);   // never end on the home page
       if (location.hash === '#r=' + next || location.hash === '#r=' + hash) {
         document.body.classList.add('fd-panel-open'); fdAfterAI(state.fdAIRun, savedItem);
       }
@@ -2436,9 +2444,40 @@
     d.addEventListener('cancel', e => { e.preventDefault(); close(); });
     document.body.append(d); d.showModal(); d.querySelector('h2').focus();
   }
+  // What changed in this run, shown on the report itself (no extra window): fixed, left as written, still open.
+  function fdRevisionSummary(run, left, dismiss) {
+    const r = state.report, items = run.items || [];
+    // Formatting the app cleaned up by itself when the report opened is part of this version too.
+    const tidied = !items.length && r?.fixed_from?.changes?.length ? r.fixed_from.changes.map(c => ({where: `${c.sheet} cell ${c.cell}`, before: c.before ?? '', after: c.after ?? ''})) : [];
+    const show = v => v === '' || v == null ? 'blank' : '“' + String(v).slice(0, 80) + '”';
+    const list = (title, rows) => rows.length ? h('details', {class: 'fd-saved-changes'}, h('summary', {}, title),
+      h('ul', {class: 'fd-fixed-list'}, rows.slice(0, 200).map(x => h('li', {}, h('b', {}, x.where), ` ${show(x.before)} → ${show(x.after)}`)), rows.length > 200 ? h('li', {}, `…and ${rows.length - 200} more (see History).`) : null)) : null;
+    return h('div', {class: 'fd-airun fd-revision ' + (left ? '' : 'good'), role: 'status'},
+      h('h3', {}, 'Revision summary'),
+      h('ul', {class: 'fd-revision-counts'},
+        h('li', {}, h('b', {}, String(run.fixed || 0)), run.fixed === 1 ? ' cell fixed by Dex' : ' cells fixed by Dex'),
+        tidied.length ? h('li', {}, h('b', {}, String(tidied.length)), ' formatting clean-ups made when the report opened') : null,
+        h('li', {}, h('b', {}, String(run.leftAsWritten || 0)), ' left as written'),
+        h('li', {class: left ? 'fd-revision-open' : ''}, h('b', {}, String(left)), left === 1 ? ' possible error still needs you' : ' possible errors still need you')),
+      run.fixed ? h('p', {class: 'fd-hint'}, `${run.reused ? 'Matches saved version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept unchanged.`) : null,
+      list(`See the ${plural(items.length, 'change')} Dex made`, items), list(`See the ${plural(tidied.length, 'formatting clean-up')}`, tidied),
+      h('div', {class: 'fd-cardacts'},
+        r && (run.fixed || tidied.length) ? h('a', {class: 'btn primary small', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download fixed report') : null,
+        run.fixed || tidied.length ? h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'history'; drawReport(); }}, 'View history') : null,
+        dismiss));
+  }
   function fdAIRunBanner(run, left) {
     const dismiss = h('button', {type: 'button', class: 'btn small subtle', onclick: () => { state.fdAIRun = null; drawSide(); }}, 'OK');
-    if (run.running) return h('div', {class: 'fd-airun', role: 'status'}, h('span', {class: 'spin'}), run.waiting ? ' Getting the report ready for Dex…' : run.saving ? ` Saving ${plural(run.saving, 'fix', 'fixes')}…` : ` Dex is fixing ${plural(run.total, 'error')}…`);
+    if (run.running || run.finishing) {
+      const label = run.finishing ? 'Finishing up…' : run.waiting ? 'Getting the report ready for Dex…' : run.checking ? 'Checking the saved version…' : run.saving ? `Saving ${plural(run.saving, 'fix', 'fixes')}…`
+        : run.asking && run.parts > 1 ? `Dex is fixing ${plural(run.total, 'error')} (part ${run.part} of ${run.parts})…` : `Dex is fixing ${plural(run.total, 'error')}…`;
+      const pct = Math.max(4, Math.min(99, Math.round(run.pct || 12)));
+      const bar = h('div', {class: 'fd-progress-bar'}); if (bar.style) bar.style.width = pct + '%';   // set through the DOM: inline style attributes are blocked
+      return h('div', {class: 'fd-airun fd-airun-busy', role: 'status'}, h('p', {}, h('span', {class: 'spin'}), ' ' + label, h('span', {class: 'fd-progress-pct'}, `${pct}%`)),
+        h('div', {class: 'fd-progress', role: 'progressbar', 'aria-label': 'Fix with AI progress', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(pct)}, bar),
+        h('p', {class: 'fd-hint'}, 'Stay on this page. The fixed report opens here when Dex is done.'));
+    }
+    if (run.summary && !run.error) return fdRevisionSummary(run, left, dismiss);
     if (run.error) return h('div', {class: 'fd-airun bad', role: 'alert'}, h('p', {}, run.saveCommitted ? run.error : `AI fix did not finish: ${run.error}`), dismiss);
     const plain = t => /report holds/i.test(t) ? 'This report is on hold (for example the client or SharePoint is not confirmed yet), so Dex is not allowed to change it.'
       : /source authority|source correction/i.test(t) ? 'This one depends on SharePoint, so Dex cannot decide the right value.'
@@ -3399,6 +3438,8 @@
         // Nothing left: the copy with every fix applied is one click away, right at the top.
         open === 0 ? h('a', {class: 'btn primary', id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
         h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors')),
+      // Progress of an AI fix, then its revision summary, sit at the very top where the button was pressed.
+      state.fdAIRun?.hash === r.file_hash && fdAutoMode() ? fdAIRunBanner(state.fdAIRun, open ?? 0) : null,
       fdReportSummary(r), fdComparison(r), h('div', {class: 'sidetabs', id: 'sidetabs', role: 'tablist'}), body);
     drawSideTabs();
     if (tab === 'fixes') {

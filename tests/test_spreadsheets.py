@@ -265,3 +265,41 @@ class UnusedColumnTests(unittest.TestCase):
         result = inspect_spreadsheet('x.csv', ('\ufeff' + head + '\n'.join(rows) + '\n').encode())
         self.assertEqual(result['mapping_mode'], 'adaptive')
         self.assertEqual([(f['row'], f['column']) for f in result['findings'] if f['code'] == 'missing_cell'], [(4, 10)])
+
+
+def test_fixes_are_written_into_workbooks_saved_with_prefixed_tags(tmp_path):
+    """Workbooks built from the SharePoint template use <ns0:c> tags. A fix must change the cell there too, never
+    return the untouched file as a saved version."""
+    import io, re, zipfile
+    import xml.etree.ElementTree as ET
+    import openpyxl
+    from hosting.spreadsheet_inbox import SpreadsheetInbox
+    from sl_daily_fixture import sl_daily, records
+    recs = records(n=4, same_values=True)
+    for i, r in enumerate(recs):
+        r['ident'] = f'LPC2TD26092302{i:04}26I140AAR692181020        000000000000030'
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(sl_daily(recs))) as src, zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if re.fullmatch(r'xl/worksheets/[^/]+\.xml', info.filename) or info.filename == 'xl/workbook.xml':
+                saved = dict(ET._namespace_map)
+                try:
+                    for url in [u for u, prefix in ET._namespace_map.items() if 'spreadsheetml/2006/main' in u or 'officeDocument/2006/relationships' in u]:
+                        del ET._namespace_map[url]
+                    data = ET.tostring(ET.fromstring(data), encoding='utf-8', xml_declaration=True)
+                finally:
+                    ET._namespace_map.clear(); ET._namespace_map.update(saved)
+                assert b'<ns0:' in data
+            dst.writestr(info, data)
+    box = SpreadsheetInbox(tmp_path)
+    item = box.ingest('SL Alabama - 2214 - 2026-11-06.xlsx', out.getvalue())
+    proposals = box.fix_proposals(item['file_hash'])['proposals']
+    assert proposals and all('        ' in p['before'] for p in proposals)
+    fixed = box.apply_fixes(item['file_hash'], proposals, expected_check_hash=box.get(item['file_hash'])['check_hash'])
+    assert fixed['file_hash'] != item['file_hash'] and not fixed.get('already_applied')
+    assert box.fix_proposals(fixed['file_hash'])['proposals'] == []
+    _, raw = box.original_bytes(fixed['file_hash'])
+    book = openpyxl.load_workbook(io.BytesIO(raw))
+    first = proposals[0]
+    assert book[first['sheet']][first['cell']].value == first['after']

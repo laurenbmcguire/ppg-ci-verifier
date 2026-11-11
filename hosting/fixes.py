@@ -420,6 +420,27 @@ def _xml_text(value):
     return value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
+_MAIN_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+_REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+
+
+def _plain_namespaces(xml):
+    """The same XML with the spreadsheet namespace as the default one (<c>, not <ns0:c>) and relationships as r:.
+    Workbooks built from the SharePoint template are written with prefixed tags; every edit and the recalculation
+    here read plain tags, so a prefixed sheet would otherwise be left untouched while the save still reported success."""
+    m = re.search(rf'\sxmlns:([A-Za-z_][\w.-]*)="{re.escape(_MAIN_NS)}"', xml)
+    if m and not re.search(r'\sxmlns="', xml):
+        xml = re.sub(rf'(</?){re.escape(m.group(1))}:', r'\1', xml)
+        xml = xml.replace(m.group(0), f' xmlns="{_MAIN_NS}"', 1)
+    r = re.search(rf'\sxmlns:([A-Za-z_][\w.-]*)="{re.escape(_REL_NS)}"', xml)
+    if r and r.group(1) != 'r' and not re.search(r'\sxmlns:r="', xml):
+        attr = re.compile(rf'(\s){re.escape(r.group(1))}:(?=[\w.-]+=")')
+        xml = re.sub(r'<[^>]+>', lambda tag: attr.sub(r'\1r:', tag.group(0)), xml)
+        xml = xml.replace(f' xmlns:r:{r.group(1)}=', f' xmlns:{r.group(1)}=')  # never touch the declaration itself
+        xml = xml.replace(r.group(0), f' xmlns:r="{_REL_NS}"', 1)
+    return xml
+
+
 def _new_cell(attrs, address, value, kind):
     style = re.search(r'\bs="(\d+)"', attrs)
     s = f' s="{style.group(1)}"' if style else ''
@@ -529,17 +550,22 @@ def _apply_xlsx(raw, edits):
     with zipfile.ZipFile(io.BytesIO(raw)) as src, zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as dst:
         for info in src.infolist():
             data = src.read(info.filename)
+            if re.fullmatch(r'xl/worksheets/[^/]+\.xml', info.filename) or info.filename == 'xl/workbook.xml':
+                data = _plain_namespaces(data.decode('utf-8')).encode('utf-8')
             if info.filename in by_path:
                 xml = data.decode('utf-8')
                 for cell, (after, kind) in by_path[info.filename].items():
                     pattern = re.compile(rf'<c\b(?=[^>]*\br="{cell}")([^>]*?)(?:/>|>(.*?)</c>)', re.S)
                     m = pattern.search(xml)
+                    unchanged = xml
                     if m:
                         if m.group(2) and re.search(r'<f(?:\s|>|/)', m.group(2)):
                             raise FixError(f'{cell} is a formula; nothing was changed.')
                         xml = xml[:m.start()] + _new_cell(m.group(1), cell, after, kind) + xml[m.end():]
                     else:
                         xml = _insert_cell(xml, cell, after, kind)
+                        if xml == unchanged:   # the sheet has no place this cell could be written: never report that as saved
+                            raise FixError(f'{cell} could not be written in this workbook layout; nothing was changed.')
                     done.add((info.filename, cell))
                 data = xml.encode('utf-8')
             elif info.filename == 'xl/workbook.xml':
