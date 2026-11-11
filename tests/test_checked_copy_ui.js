@@ -39,9 +39,9 @@ test('saved-version, empty-list and AI-result surfaces never promise finality fo
   vm.runInContext(part('  function fdSheetBar(', '  function drawReport(')+part('  function fdCheckedState(', '  async function fdDownloadChecked(')+part('  function fdCheckedCopy(', '  // ---------- right-hand panel')+part('  function fdCorrections(', '  // One selection, shared')+part('  function fdResolutionText(', '  async function fdAIFixNow(')+part('  function fdAIRunBanner(', '  // ---------- the app fixes'),ctx);
   const bar=text(ctx.fdSheetBar(report));assert.match(bar,/Saved working copy: version 2/);assert.doesNotMatch(bar,/FINAL/);
   const panel=h('div',{});ctx.fdCorrections(panel);const rendered=text(panel);
-  assert.match(rendered,/Verification not complete/);assert.match(rendered,/No open items in this list/);assert.match(rendered,/Ignored and AI-set-aside findings may still be unresolved/);assert.doesNotMatch(rendered,/No errors left to fix|0 remaining detected errors|Download checked copy/);
+  assert.match(rendered,mode==='incomplete'?/Verification not complete/:/Completed/);assert.match(rendered,/Nothing left to fix/);assert.doesNotMatch(rendered,/No errors left to fix|0 remaining detected errors|Download checked copy/);
   if(mode==='expired')assert.match(rendered,/Source evidence expired/);
-  if(mode==='ignored'||mode==='ai-set-aside')assert.match(rendered,/1 unresolved detected findings/);
+  if(mode==='ignored'||mode==='ai-set-aside')assert.match(rendered,/1 ignored, left as written/);
   if(mode==='source-hold')assert.match(rendered,/Source verification holds remain/);
  }
 });

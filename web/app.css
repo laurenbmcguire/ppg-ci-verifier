@@ -1837,3 +1837,5 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .queue-version{color:var(--muted,#667085);font-size:12px}
 .queue-hint{color:var(--muted,#667085)}
 .fd-autotidy{display:flex;gap:8px;align-items:flex-start;margin:10px 0 0;color:var(--muted,#667085);font-size:13px}
+.fd-completed-notes{margin-top:8px;font-size:13px;color:var(--muted,#667085)}
+.fd-completed-notes summary{cursor:pointer}

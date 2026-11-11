@@ -1893,6 +1893,16 @@
   }
   function fdCheckedCopy(r) {
     const status = fdCheckedState(r), p = r.checked_copy;
+    // Nothing left to fix or decide: say Completed. What the SharePoint check could not confirm stays one click away.
+    const ignored = p?.set_aside_unresolved || 0;
+    if (!status.ready && p?.coverage_complete && Number.isInteger(p.remaining_detected_errors) && p.remaining_detected_errors - ignored <= 0 && p.file_hash === r.file_hash && p.check_hash === r.check_hash) {
+      clearTimeout(state.checkedCopyExpiryTimer);
+      return h('section', {id: 'fd-checked-copy', class: 'fd-checked-copy checked fd-completed', role: 'status'},
+        h('b', {}, 'Completed'),
+        h('p', {}, `${r.filename} · version ${revisionOf(r)}. No possible errors left${ignored ? ` (${ignored} ignored, left as written)` : ''}.`),
+        h('a', {class: 'btn primary', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download report'),
+        h('details', {class: 'fd-completed-notes'}, h('summary', {}, 'SharePoint check notes'), h('p', {}, status.message)));
+    }
     const section = h('section', {id: 'fd-checked-copy', class: 'fd-checked-copy ' + (status.ready ? 'checked' : 'pending'), role: 'status'},
       h('b', {}, status.ready ? '0 remaining detected errors' : 'Verification not complete'),
       h('p', {}, `${r.filename} · version ${revisionOf(r)}. ${status.message}`),
@@ -1967,7 +1977,7 @@
         h('p', {class: 'fd-tickcount', role: 'status'}, ticked.length ? `${ticked.length} selected` : 'Tick the errors to work on only those, or leave them all unticked.'),
         null));
     }
-    if (!tierGroups.length) body.append(h('p', {class: 'fd-hint'}, 'No open items in this list. Ignored and AI-set-aside findings may still be unresolved; see Possible errors by status and verification above.'));
+    if (!tierGroups.length) body.append(h('p', {class: 'fd-hint'}, 'Nothing left to fix. Errors you ignored are listed under Possible errors by status.'));
     const manual = fdManualList(items);
     if (manual) body.append(fdManualCard(manual));
     else if (cur) body.append(h('p', {id: 'fd-correction-context', class: 'fd-grid-context', role: 'status'}, `Current correction: ${cur.sheet || 'Report'} · ${cur.cell || (cur.row ? 'row ' + cur.row : 'report-level')}. Filtering the sheet does not change this correction.`), fdCard(cur, groups));
@@ -2351,7 +2361,7 @@
       h('p', {}, h('b', {}, `${run.reused ? 'Requested changes match' : run.manual ? 'You saved' : 'Dex saved'} ${plural(run.fixed, 'cell change')}.`), ` ${run.reused ? 'Opened existing version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}; version ${run.from || 1} is kept. ${run.reused ? 'No new version was created.' : ''}`),
       h('p', {}, fdResolutionText(run)),
       h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'history'; drawReport(); }}, 'View saved changes in History'),
-      h('p', {}, left ? `${plural(left, 'error')} left to fix. ${left === 1 ? 'It is' : 'They are'} listed below.` : 'No open items in this list. Ignored and AI-set-aside findings may still be unresolved; check the verification status above.'), why, dismiss);
+      h('p', {}, left ? `${plural(left, 'error')} left to fix. ${left === 1 ? 'It is' : 'They are'} listed below.` : 'Nothing left to fix.'), why, dismiss);
   }
   // ---------- the app fixes what it can by itself (new version, original kept), then shows only what needs a person
   function fdAutoEligible(r) {
@@ -2455,7 +2465,7 @@
   }
   function fdClean(r, st) {
     const rv = r.review, sp = rv.sharepoint || {}, a = r.assignment || {}, sel = r.dataset_selection || {};
-    if (r.checked_copy) return h('p', {class: 'fd-hint'}, fdCheckedState(r).ready ? 'Download the checked copy above. No approval or sending is required.' : 'No loaded corrections remain. Complete the verification steps above before treating this copy as checked.');
+    if (r.checked_copy) return h('p', {class: 'fd-hint'}, fdCheckedState(r).ready ? 'Download the checked copy above. No approval or sending is required.' : 'Nothing left to fix on this report.');
     if (st.next !== 'approve' && st.next !== 'send') return h('div', {class: 'fd-clean muted'}, h('p', {}, 'No corrections to make. The report is not ready for approval until the step above is done.'));
     const approved = r.approval && rv.approval_current;
     const li = (ok, text) => h('li', {class: ok ? 'ok' : 'no'}, icon(ok ? 'ok' : 'warn', 15), text);
