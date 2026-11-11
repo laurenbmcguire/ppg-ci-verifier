@@ -349,6 +349,7 @@ def build(rows,head,cap,bind,blobs):
     wraps.update((photo_sheet,col+str(rr)) for rr in range(8,photo_total) for col in ('B','C','D','E','G','H','I'))
     wraps.update((summary,col+str(rr)) for rr in range(29,end+1) for col in ('B','E','H'))
     _wrap_formats(p,roots,wraps)
+    _one_entry_fill(p)
     for rr in range(29,end+1):
         node=next(n for n in roots[summary].find('m:sheetData',tx.NS) if n.get('r')==str(rr))
         height=max([18]+[15*lx.printed_lines(expected[(summary,col+str(rr))]['value'],16) for col in ('B','E','H') if expected[(summary,col+str(rr))]['value'] is not None])
@@ -368,6 +369,14 @@ def build(rows,head,cap,bind,blobs):
     verification['part_totals']=part_totals
     verification['output_budgets']=budgets
     return raw,verification
+
+
+def _one_entry_fill(parts):
+    """Every detail cell on the report uses the same soft cream. The template shaded cells a person fills in a
+    stronger yellow than cells filled from the source, which read as an uneven patchwork on the finished report."""
+    raw=parts['xl/styles.xml'];text=raw.decode('utf-8') if isinstance(raw,bytes) else raw
+    for strong in ('FFFFF6C7','FFFFF2CC'):text=text.replace('rgb="'+strong+'"','rgb="FFFFFCEE"')
+    parts['xl/styles.xml']=text.encode('utf-8') if isinstance(raw,bytes) else text
 
 
 def _text_formats(parts,roots,targets):

@@ -139,7 +139,7 @@
     if (state.queueRechecking) return;
     state.queueRechecking = true; state.queueRechecked ||= new Set();
     try {
-      for (let n = 0; n < 12; n++) {
+      for (let n = 0; n < 80; n++) {   // every out-of-date report, one after another, so finished ones return to Done by themselves
         if (state.selected || state.busy || state.rechecking || state.decisionPending || typeof document !== 'undefined' && document.hidden) break;
         const r = visibleList().find(x => x.internal_check_status === 'outdated_checks_require_recheck' && !x.review?.sent_at && !x.review?.approved && !state.queueRechecked.has(x.file_hash));
         if (!r) break;
