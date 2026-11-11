@@ -2332,6 +2332,8 @@
     const patterns = unfixed.filter(x => /has a different format from the other/i.test(String(x.text)));
     const unknown = unfixed.filter(x => !patterns.includes(x) && (!x.reason || /No supported cell suggestion|could not return a safe|source authority|source correction/i.test(x.reason)));
     const other = unfixed.filter(x => !unknown.includes(x) && !patterns.includes(x));
+    // "Blank" is only said about cells that really are empty.
+    const allBlank = unknown.length > 0 && unknown.every(x => (x.now == null || x.now === '') && /^Missing cell\.?$|blank/i.test(String(x.text).trim()));
     const d = h('dialog', {id: 'fd-aidone', class: 'fd-modal fd-aidone', 'aria-labelledby': 'fd-aidone-title'});
     const close = () => { d.close(); d.remove(); };
     const saveText = () => { const a = h('a', {href: URL.createObjectURL(new Blob([fdAISummaryText(run, report)], {type: 'text/plain'})), download: `AI fix summary - ${(report?.filename || 'report').replace(/\.[^.]+$/, '')}.txt`}); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); };
@@ -2348,10 +2350,10 @@
         h('b', {}, x.where), ` ${x.before === '' ? 'blank' : '“' + x.before + '”'} → “${x.after}”`)))) : null,
       unknown.length ? h('section', {class: 'fd-aidone-ask'}, h('h3', {}, `Dex does not know the right value for ${unknown.length === 1 ? 'this one' : 'these ' + unknown.length}`),
         h('ul', {class: 'fd-fixed-list'}, unknown.slice(0, 100).map(line)),
-        h('p', {}, 'Would you like to add a value, or leave it as it is?'),
+        h('p', {}, allBlank ? `Would you like to add ${unknown.length === 1 ? 'a value' : 'values'}, or leave ${unknown.length === 1 ? 'it' : 'them'} blank?` : `Would you like to change ${unknown.length === 1 ? 'it' : 'them'}, or leave ${unknown.length === 1 ? 'it' : 'them'} as written?`),
         h('div', {class: 'fd-cardacts'},
-          h('button', {type: 'button', class: 'btn primary', onclick: () => { const list = live(unknown.map(x => x.key)); close(); if (list.length) fdManualStart(list); }}, unknown.length === 1 ? 'Add a value' : 'Add values'),
-          h('button', {type: 'button', class: 'btn', onclick: () => { const list = live(unknown.map(x => x.key)); close(); if (list.length) fdReviewDialog(list, 'ignore'); }}, unknown.length === 1 ? 'Leave it blank' : 'Leave them blank'))) : null,
+          h('button', {type: 'button', class: 'btn primary', onclick: () => { const list = live(unknown.map(x => x.key)); close(); if (list.length) fdManualStart(list); }}, allBlank ? (unknown.length === 1 ? 'Add a value' : 'Add values') : (unknown.length === 1 ? 'Change the value' : 'Change the values')),
+          h('button', {type: 'button', class: 'btn', onclick: () => { const list = live(unknown.map(x => x.key)); close(); if (list.length) fdReviewDialog(list, 'ignore'); }}, allBlank ? (unknown.length === 1 ? 'Leave it blank' : 'Leave them blank') : (unknown.length === 1 ? 'Leave it as is' : 'Leave them as is')))) : null,
       patterns.length ? h('section', {class: 'fd-aidone-ask'}, h('h3', {}, `${plural(patterns.length, 'part number or ID is', 'part numbers or IDs are')} written in a different pattern`),
         h('p', {}, `For example: ${String(patterns[0].text).replace(/\s*\(expected like.*$/, '')}. A different pattern alone is not an error, so Dex left ${patterns.length === 1 ? 'it' : 'them'} exactly as written.`),
         h('div', {class: 'fd-cardacts'},
