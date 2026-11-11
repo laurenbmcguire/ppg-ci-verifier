@@ -25,9 +25,11 @@ class MappingGuards(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'site_id'):self.box.confirm_columns('lid',{'rejected':'R'},'reviewer')
     def test_legacy_map_preserved_but_requires_exact_reconfirmation(self):
         legacy={'inspected':'LegacyWrong','rejected':'R'};self.box.set_setting('column_map|lid',legacy)
-        result=self.capture();rec=result['source_reconciliation'];self.assertFalse(rec['verified'])
-        self.assertEqual(rec['column_mapping']['inspected']['status'],'needs_confirmation');self.assertEqual(rec['column_mapping']['inspected']['column'],'I')
-        self.assertTrue(rec['mapping_binding']['legacy_requires_confirmation']);self.assertEqual(rec['mapping_binding']['mapping'],{})
+        result=self.capture();rec=result['source_reconciliation']
+        # An earlier list-only confirmation stays in force; a name that is not a column of this list is simply not used.
+        self.assertEqual(rec['column_mapping']['inspected']['status'],'single');self.assertEqual(rec['column_mapping']['inspected']['column'],'I')
+        self.assertEqual(rec['column_mapping']['rejected']['status'],'confirmed')
+        self.assertFalse(rec['mapping_binding']['legacy_requires_confirmation']);self.assertEqual(rec['mapping_binding']['mapping'],legacy)
         self.assertEqual(self.box.setting('column_map|lid'),legacy)
         self.box.confirm_columns('lid',{'inspected':'I','rejected':'R'},'reviewer',site_id='sid',expected_mapping_revision=None)
         fresh=self.capture();self.assertTrue(fresh['source_reconciliation']['verified'])

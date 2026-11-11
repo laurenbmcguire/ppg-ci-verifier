@@ -239,9 +239,16 @@ class SpreadsheetInbox:
     def source_mapping(self, site_id, list_id):
         key = self.source_mapping_key(site_id, list_id)
         saved = self.setting(key, None)
-        return dict(site_id=site_id, list_id=list_id, mapping=dict((saved or {}).get('mapping') or {}),
-                    revision=(saved or {}).get('revision'),
-                    legacy_requires_confirmation=bool(saved is None and self.setting(f'column_map|{list_id}', None)))
+        mapping = dict((saved or {}).get('mapping') or {})
+        if saved is None:
+            # A mapping a person confirmed earlier for this list stays in force. A SharePoint list ID is unique, so the
+            # earlier list-only record names the same list; nobody is asked to confirm the same columns a second time.
+            legacy = self.setting(f'column_map|{list_id}', None)
+            legacy_map = legacy.get('mapping') if isinstance(legacy, dict) and isinstance(legacy.get('mapping'), dict) else legacy
+            if isinstance(legacy_map, dict):
+                mapping = {k: str(v)[:120] for k, v in legacy_map.items() if k in ('inspected', 'certified', 'rejected', 'reworked') and isinstance(v, str) and v}
+        return dict(site_id=site_id, list_id=list_id, mapping=mapping,
+                    revision=(saved or {}).get('revision'), legacy_requires_confirmation=False)
     def confirm_columns(self, list_id, mapping, by, *, site_id=None, expected_mapping_revision=Ellipsis, file_hash=None, expected_check_hash=None, expected_snapshot_id=None):
         """Confirm only an exact source pair. Old list-only records remain unchanged."""
         key = self.source_mapping_key(site_id, list_id)

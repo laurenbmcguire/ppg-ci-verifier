@@ -1702,10 +1702,12 @@
     if (st.next === 'blockers') {
       const serious = (state.fdItems || []).filter(x => x.tier === 'blocker' && !['rejected', 'kept'].includes(x.state)).length;
       const holds = (r?.holds || []).filter(x => x.hard && x.code !== 'awaiting_source_owner').map(x => x.text).filter(Boolean);
+      // Short and plain on the page; the full technical wording stays in the hover text.
+      const short = [serious ? `${plural(serious, 'serious error')} must be fixed or ignored first` : '', holds.length ? 'the SharePoint check is not finished (open SharePoint check details on the right)' : ''].filter(Boolean).join('; ');
       const why = [serious ? `${plural(serious, 'serious error')} must be fixed or ignored first` : '', ...holds].filter(Boolean).join('. ');
-      return {...st, text: 'Blocked' + (why ? ': ' + why : ''), why};
+      return {...st, text: 'Blocked' + (short ? ': ' + short : ''), why};
     }
-    if (st.next === 'review') return {...st, text: 'Review needed' + (st.why ? ': ' + st.why : st.text && !/to review$/.test(st.text) ? ': ' + st.text : '')};
+    if (st.next === 'review') return {...st, text: 'Review needed' + (st.text && !/to review$/.test(st.text) ? ': ' + st.text : '')};
     return st;
   }
   function fdPanelStatus(r, st) {
@@ -2997,7 +2999,10 @@
     const fresh = !rec.stale && bound.file_hash === r.file_hash && !!bound.checker_version && bound.checker_version === r.checker_version && !!rec.snapshot_id && sp.status && sp.status !== 'stale';
     state.fdAutoSP ||= {};
     const key = r.file_hash + ':' + r.check_hash;
-    if (fresh || state.fdAutoSP[key] || (r.assignment || {}).needs_person) return false;
+    // A saved comparison that was waiting for a column confirmation, or was made for an earlier client assignment, is
+    // read again once: the columns are now settled without asking.
+    const redo = Object.values(rec.column_mapping || {}).some(m => m?.status === 'needs_confirmation') || (r.holds || []).some(x => x.code === 'source_assignment_changed');
+    if ((fresh && !redo) || state.fdAutoSP[key] || (r.assignment || {}).needs_person) return false;
     if (state.fdAutoSPWaiting) return true;
     state.fdAutoSPWaiting = true; let tries = 0;
     const attempt = async () => {

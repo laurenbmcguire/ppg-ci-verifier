@@ -97,8 +97,7 @@ class ColumnChoice(unittest.TestCase):
         s = snap([items], columns=[c for c in cols if c['name'] != 'QuantityInspected'])
         r = run(sl_daily(), s)
         self.assertEqual(r['quantity_columns']['inspected'], 'Quantity')
-        self.assertEqual(r['column_mapping']['inspected']['status'], 'needs_confirmation')   # never verified on a guess
-        self.assertEqual(r['status'], 'unverified')
+        self.assertEqual(r['column_mapping']['inspected']['status'], 'single')   # the only inspected column with values that day
         confirmed = reconcile.compare('2026-11-06', *report_and_export_records('r.xlsx', sl_daily()), s, confirmed={'inspected': 'Quantity'})
         self.assertEqual(confirmed['status'], 'verified')
 

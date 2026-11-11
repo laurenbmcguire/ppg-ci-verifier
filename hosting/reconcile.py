@@ -314,8 +314,8 @@ def _show(v):
 # ---------------------------------------------------------------- comparing
 def choose_columns(snap, day_items, confirmed=None):
     """Which SharePoint column holds each quantity. Never decided by which column is fuller in general:
-    one candidate -> used; a person's confirmed mapping -> used; several candidates -> the one filled for this day's
-    items is shown as needing confirmation, and several filled ones that disagree are a conflict.
+    one candidate -> used; a person's confirmed mapping -> used; several candidates -> the only one filled for this
+    day's items is used; several filled ones need confirmation, and ones that disagree are a conflict.
     Returns (columns {field: name}, mapping {field: dict(status, column, candidates, evidence)})."""
     cols, mapping = {}, {}
     for field, cands in (snap.get('quantity_candidates') or {}).items():
@@ -332,8 +332,10 @@ def choose_columns(snap, day_items, confirmed=None):
         if len(filled) == 1:
             cols[field] = filled[0]
             others = ', '.join(c for c in cands if c != filled[0])
-            mapping[field] = dict(status='needs_confirmation', column=filled[0], candidates=cands,
-                                  evidence=f'{filled[0]} is filled for this day; {others} {"is" if len(cands) == 2 else "are"} empty. Confirm {filled[0]} is the {field} column.')
+            # Exactly one candidate holds values on this day's records and every other one is empty on all of them:
+            # an empty column cannot be the quantity, so nobody is asked to confirm it.
+            mapping[field] = dict(status='single', column=filled[0], candidates=cands,
+                                  evidence=f'{filled[0]} is the only {field} column with values for this day; {others} {"is" if len(cands) == 2 else "are"} empty.')
         elif len(filled) > 1:
             agree = all(len({_num(it['raw'].get(c)) for c in filled if it['raw'].get(c) not in (None, '')}) <= 1 for it in day_items)
             cols[field] = filled[0]
