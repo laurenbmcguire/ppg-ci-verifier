@@ -2119,6 +2119,34 @@
     return Number.isInteger(run.resolved) ? `${plural(run.resolved, 'selected finding')} cleared by the saved check. ${run.informational ? plural(run.informational, 'source-confirmed pattern hint') + ' informational; identifiers unchanged. ' : ''}${run.appliedProposals ? plural(run.appliedProposals, 'selected suggestion') + ' applied. ' : ''}${plural((run.unfixed || []).length, 'selected finding')} still ${(run.unfixed || []).length === 1 ? 'needs' : 'need'} review.`
       : 'Saved changes are in History. Findings are removed only when the saved check no longer detects them.';
   }
+  // After an AI fix nobody is asked to pick again. The fixed version is already on screen; anything Dex had no safe change
+  // for and that is not a serious error is left as written (recorded as ignored, with the reason, and can be reopened).
+  // Serious errors are never set aside automatically: they stay in the list for a person. With the automatic switch off,
+  // the result box with its choices is shown instead.
+  function fdAfterAI(run, report) {
+    if (typeof store === 'undefined' || store.get('rd-auto-tidy', true) === false) { fdAIDoneDialog(run, report); return; }
+    (async () => {
+      const pause = ms => new Promise(r => setTimeout(r, ms)), openStates = ['open', 'selected', 'deferred', 'confirmed'];
+      for (let i = 0; i < 200 && (state.report?.file_hash !== run.hash || !state.fixes || fdBackgroundBusy() || state.aiProposalOperation); i++) await pause(400);
+      if (state.report?.file_hash !== run.hash || !state.fixes || versionReadOnly(state.report)) return;
+      const mine = new Set((run.unfixed || []).map(x => x.key));
+      // A difference from SharePoint is never set aside automatically either.
+      const soft = fdItems().filter(it => mine.has(it.key) && it.fp && it.state === 'open' && it.tier !== 'blocker' && it.issue?.severity !== 'high' && it.source == null && !/^SharePoint/i.test(String(it.issue?.source || '')));
+      let leftAsWritten = 0;
+      if (soft.length && soft.length <= 1000) {
+        try {
+          await fdSendDecision({...findingBinding(soft), ids: soft.map(x => x.key), action: 'reject', from: soft[0], batch: true,
+            reason: 'Dex had no safe change to make, so this was left as written by Fix with AI.'});
+          if (!state.decisionFailed) leftAsWritten = soft.length; else { state.decisionFailed = null; drawSide(); }
+        } catch (e) { /* they stay in the list */ }
+      }
+      if (state.report?.file_hash !== run.hash) return;
+      const left = fdItems().filter(it => openStates.includes(it.state)).length;
+      state.fdAIRun = {...run, leftAsWritten}; drawSide();
+      toast(`${run.fixed ? `Dex fixed ${plural(run.fixed, 'cell')}` : 'Dex had nothing to change'}${leftAsWritten ? ` and left ${leftAsWritten} as written` : ''}. ` +
+        (left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you (serious, or different from SharePoint): ${left === 1 ? 'it is' : 'they are'} listed on the right.` : 'No possible errors left.'), left > 0);
+    })();
+  }
   // A SharePoint check or recheck that starts by itself when a report opens must never make AI fix fail:
   // AI fix waits for it, then works on the report as it is now, and starts again by itself if the report updates mid-way.
   const fdBackgroundBusy = () => !!(state.fdTidying || state.fdReconciling || state.fdAutoSPWaiting || state.fdAutoRecheckWaiting || state.rechecking || state.busy || state.decisionPending);
@@ -2200,7 +2228,7 @@
             state.report = fresh; state.fixes = null; state.fdItems = [];
             drawReport(); loadFixes(hash);
           }
-          document.body.classList.add('fd-panel-open'); fdAIDoneDialog(state.fdAIRun, fresh?.file_hash === hash ? fresh : report);
+          document.body.classList.add('fd-panel-open'); fdAfterAI(state.fdAIRun, fresh?.file_hash === hash ? fresh : report);
         }
         return;
       }
@@ -2222,7 +2250,7 @@
         from: revisionOf(report), version: revisionOf(savedItem), reused, originalHash: hash, items: done};
       // A finished save must not pull the user back from a newer navigation or open a dialog over another report.
       if (location.hash === '#r=' + next || location.hash === '#r=' + hash) {
-        document.body.classList.add('fd-panel-open'); fdAIDoneDialog(state.fdAIRun, savedItem);
+        document.body.classList.add('fd-panel-open'); fdAfterAI(state.fdAIRun, savedItem);
       }
     } catch (e) {
       if (e?.reportChanged && !lastTry && state.report?.file_hash === hash && state.fdAIOperation === operation) { state.fdAIRun = {hash, total: todo.length, running: true, waiting: true}; return 'changed'; }
@@ -3334,7 +3362,7 @@
       body.append(h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'sources'; drawReport(); }}, 'Source evidence and coverage'));
       body.append(h('label', {class: 'fd-autotidy'}, h('input', {type: 'checkbox', 'data-selection': 'true', checked: store.get('rd-auto-tidy', true) !== false || null,
         onchange: e => { store.set('rd-auto-tidy', e.target.checked); if (e.target.checked && state.report) { delete (state.fdAutoTidied || {})[state.report.file_hash]; fdAutoTidy(state.report); } }}),
-        ' Fix formatting automatically (capital letters, extra spaces, numbers typed as text)'));
+        ' Work automatically: fix formatting when a report opens, and after an AI fix leave what Dex cannot change as written without asking'));
       const sc = shiftCard(rv); if (sc) body.append(h('div', {id: 'shiftfix'}, sc));
     } else {
       body.append(h('div', {id: 'chat', class: 'chat embedded', 'aria-label': 'Ask Dex'}));
