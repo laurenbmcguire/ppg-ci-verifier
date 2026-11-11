@@ -303,3 +303,33 @@ def test_fixes_are_written_into_workbooks_saved_with_prefixed_tags(tmp_path):
     book = openpyxl.load_workbook(io.BytesIO(raw))
     first = proposals[0]
     assert book[first['sheet']][first['cell']].value == first['after']
+
+
+def test_restyle_saves_a_copy_with_one_cream_fill_and_no_value_change(tmp_path):
+    """A workbook with the template's cream and yellow patchwork can be saved again with only its look tidied."""
+    import pytest
+    import io
+    import openpyxl
+    from openpyxl.styles import PatternFill, Alignment
+    from hosting.fixes import needs_restyle, FixError
+    from hosting.spreadsheet_inbox import SpreadsheetInbox
+    from sl_daily_fixture import sl_daily
+    book = openpyxl.load_workbook(io.BytesIO(sl_daily()))
+    sheet = book[book.sheetnames[0]]
+    sheet['Z1'].fill = PatternFill('solid', fgColor='FFFFF6C7'); sheet['Z2'].fill = PatternFill('solid', fgColor='FFFFFCEE')
+    out = io.BytesIO(); book.save(out)
+    box = SpreadsheetInbox(tmp_path)
+    item = box.ingest('SL Alabama - 2214 - 2026-11-06.xlsx', out.getvalue())
+    assert box.fix_proposals(item['file_hash'])['restyle'] is True
+    with pytest.raises(ValueError):
+        box.apply_fixes(item['file_hash'], [], expected_check_hash=box.get(item['file_hash'])['check_hash'])
+    fixed = box.apply_fixes(item['file_hash'], [], expected_check_hash=box.get(item['file_hash'])['check_hash'], restyle=True)
+    assert fixed['file_hash'] != item['file_hash'] and fixed['fixed_from']['changes'] == []
+    _, raw = box.original_bytes(fixed['file_hash'])
+    assert not needs_restyle(fixed['filename'], raw)
+    after = openpyxl.load_workbook(io.BytesIO(raw))[book.sheetnames[0]]
+    assert after['Z1'].fill.fgColor.rgb == 'FFFFFCEE' and after['Z2'].fill.fgColor.rgb == 'FFFFFCEE'
+    before_values = [[c.value for c in row] for row in sheet.iter_rows()]
+    assert [[c.value for c in row] for row in after.iter_rows()] == before_values
+    with pytest.raises((ValueError, FixError)):   # nothing left to tidy: no empty version is ever made
+        box.apply_fixes(fixed['file_hash'], [], expected_check_hash=box.get(fixed['file_hash'])['check_hash'], restyle=True)

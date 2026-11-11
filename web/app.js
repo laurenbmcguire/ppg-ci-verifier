@@ -692,8 +692,16 @@
     const report = $('report'), request = state.openRequest = (state.openRequest || 0) + 1;
     const receipt = state.receiptHash === hash; state.receiptHash = null;
     const active = () => request === state.openRequest && state.selected === hash;
+    // Refreshing the report that is already on screen (after a save, a recheck or a SharePoint check) keeps it visible,
+    // dimmed and not clickable, until the new copy arrives: no blank screen in between.
+    const shown = state.report, side = typeof document !== 'undefined' ? document.getElementById('side') : null;
+    const refresh = !!shown && !historical && (shown.file_hash === hash || receipt || shown.root_hash && shown.root_hash === hash) && !!report.querySelector?.('.sheetwrap, .fd-sheetbar, table');
     state.report = null; state.fixes = null; state.fdItems = []; closeChat();
-    report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note'}, 'Opening working copy…')));
+    const settle = () => { for (const el of [report, side]) { el?.classList?.remove('fd-refreshing'); el?.removeAttribute?.('inert'); } if (typeof document !== 'undefined') document.getElementById('fd-refresh-note')?.remove(); };
+    if (refresh) {
+      for (const el of [report, side]) { el?.classList?.add('fd-refreshing'); el?.setAttribute?.('inert', ''); }
+      if (typeof document !== 'undefined' && !document.getElementById('fd-refresh-note')) document.body.append(h('div', {id: 'fd-refresh-note', role: 'status'}, h('span', {class: 'spin'}), ' Updating this report…'));
+    } else report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note'}, 'Opening working copy…')));
     try {
       let version = await api('/api/spreadsheets/working-copy?id=' + hash);
       if (!active()) return;
@@ -722,12 +730,12 @@
       state.reportRoute = location.hash;
       state.fdSummaryCache = null; state.fdView = 'review'; state.fdCur = null; state.fdTier = null; state.gridSearch = ''; state.sheetScroll = {}; state.gridOnlyMarked = false; state.gridRow = null;
       state.report = data; state.fixes = null; state.showAll = false; state.fdManual = null;
-      drawReport(); drawQueue();
+      settle(); drawReport(); drawQueue();
       if (!versionReadOnly(data)) loadFixes(hash);
       if (!versionReadOnly(data) && state.openSendFor && (state.openSendFor === hash || state.openSendFor === 'next' && data.fixed_from)) { state.openSendFor = null; openSend(); }
     } catch (e) {
       if (!active()) return;
-      state.report = null; state.fixes = null;
+      state.report = null; state.fixes = null; settle();
       report.replaceChildren(h('div', {class: 'sheetwrap'}, h('p', {class: 'note', role: 'alert'}, e.message),
         h('button', {type: 'button', class: 'btn', onclick: () => openReport(hash, false, historical || receipt)}, 'Retry opening report')));
     }
@@ -2457,13 +2465,14 @@
       h('ul', {class: 'fd-revision-counts'},
         run.tidy ? null : h('li', {}, h('b', {}, String(run.fixed || 0)), run.fixed === 1 ? ' cell fixed by Dex' : ' cells fixed by Dex'),
         tidied.length ? h('li', {}, h('b', {}, String(tidied.length)), ' formatting clean-ups made when the report opened') : null,
+        run.look ? h('li', {}, 'Report colours made consistent (one cream, no yellow patches); no value was changed') : null,
         run.tidy ? null : h('li', {}, h('b', {}, String(run.leftAsWritten || 0)), ' left as written'),
         h('li', {class: left ? 'fd-revision-open' : ''}, h('b', {}, String(left)), left === 1 ? ' possible error still needs you' : ' possible errors still need you')),
       left === 0 ? h('p', {class: 'fd-hint'}, 'Nothing is left to fix, so the Fix buttons are not shown. Download the fixed report below.') : null,
       run.fixed ? h('p', {class: 'fd-hint'}, `${run.reused ? 'Matches saved version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept unchanged.`) : null,
       list(`See the ${plural(items.length, 'change')} Dex made`, items), list(`See the ${plural(tidied.length, 'formatting clean-up')}`, tidied),
       h('div', {class: 'fd-cardacts'},
-        r && (run.fixed || tidied.length) ? h('a', {class: 'btn primary small', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download fixed report') : null,
+        r && (run.fixed || tidied.length || run.look) ? h('a', {class: 'btn primary small', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download fixed report') : null,
         run.fixed || tidied.length ? h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'history'; drawReport(); }}, 'View history') : null,
         dismiss));
   }
@@ -3440,7 +3449,7 @@
         open === 0 ? h('a', {class: 'btn primary', id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
         h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors')),
       // Progress of an AI fix, then its revision summary, sit at the very top where the button was pressed.
-      state.fdTidying && fdAutoMode() ? h('div', {class: 'fd-airun fd-airun-busy', role: 'status'}, h('p', {}, h('span', {class: 'spin'}), ` Fixing formatting in ${plural(state.fdTidying.count || 0, 'cell')}…`),
+      state.fdTidying && fdAutoMode() ? h('div', {class: 'fd-airun fd-airun-busy', role: 'status'}, h('p', {}, h('span', {class: 'spin'}), state.fdTidying.look ? ' Making the report colours consistent…' : ` Fixing formatting in ${plural(state.fdTidying.count || 0, 'cell')}…`),
         h('div', {class: 'fd-progress fd-progress-moving', role: 'progressbar', 'aria-label': 'Formatting clean-up progress'}, h('div', {class: 'fd-progress-bar'})),
         h('p', {class: 'fd-hint'}, 'This takes up to a minute. The buttons below turn on when it is saved.'))
         : state.fdAIRun?.hash === r.file_hash && fdAutoMode() ? fdAIRunBanner(state.fdAIRun, open ?? 0) : null,
@@ -3605,14 +3614,25 @@
     if (!report || state.report !== report || versionReadOnly(report) || state.fdAutoTidied[report.file_hash] || state.fdAIRun?.running || store.get('rd-auto-tidy', true) === false) return;
     let tidy;
     try { if (state.report.review?.page?.complete === false) return; const cells = new Map(); const kept = fdProtectedCells(); for (const it of fdItems()) if (fdTidyOnly(it) && !kept(it.fix)) cells.set(JSON.stringify([it.sheet, it.cell]), it); tidy = [...cells.values()]; } catch (e) { return; }
-    if (!tidy.length) return;
+    // No cell to clean, but the workbook's colours are a patchwork: save one copy with only the look tidied.
+    const lookOnly = !tidy.length && state.fixesRestyle === report.file_hash;
+    if (!tidy.length && !lookOnly) return;
     state.fdAutoTidied[report.file_hash] = true;   // once per version, never in a loop
-    state.fdTidying = {count: tidy.length};   // the SharePoint check waits for the tidied version instead of running twice
+    state.fdTidying = {count: tidy.length, look: lookOnly};   // the SharePoint check waits for the tidied version instead of running twice
     if ($('side')) drawSide();   // show the progress bar straight away: the buttons are off until this is saved
     try {
       for (let i = 0; (state.fdReconciling || state.fdAutoRecheckWaiting || state.rechecking || state.busy || state.decisionPending || state.aiProposalOperation) && i < 150; i++) await new Promise(r => setTimeout(r, 400));
       if (state.report !== report || versionReadOnly(report) || state.gridDraft || state.fdAIRun?.running) return;
       const binding = reviewBinding(report), accepted = tidy.map(it => it.fix);
+      if (lookOnly) {
+        state.busy = true;
+        let answer; try { answer = await api('/api/spreadsheets/apply-fixes', {...binding, changes: [], restyle: true}); } finally { state.busy = false; }
+        if (answer?.item?.file_hash && state.report === report && location.hash === '#r=' + report.file_hash) {
+          state.fdAIRun = {hash: answer.item.file_hash, done: true, tidy: true, look: true, fixed: 0, leftAsWritten: 0, summary: true, items: []};
+          select(answer.item.file_hash, true); loadList().catch(() => {});
+        }
+        return;
+      }
       const dec = Object.fromEntries(accepted.map(f => [f.id, {state: 'accepted', after: f.after}]));
       const capture = captureCorrections(accepted, dec, {}, binding, report);
       const receipt = await applyFixes(capture.accepted, capture.dec, capture.edits, {download: false, binding, independentScope: true, quiet: true, throwOnError: true, returnReceipt: true});
@@ -3627,7 +3647,7 @@
     try {
       const data = await api('/api/spreadsheets/fixes', {file_hash: hash});
       if (state.selected !== hash || state.report !== report || versionReadOnly(report)) return;
-      state.fixes = data.proposals || []; state.fixesError = null;
+      state.fixes = data.proposals || []; state.fixesError = null; state.fixesRestyle = data.restyle === true ? hash : null;
       state.aiFix = data.ai || {status: 'not_run'};
       const carry = store.get('rd-carry:' + hash, null);
       if (carry) {  // what was ignored on the earlier version stays ignored on this corrected copy

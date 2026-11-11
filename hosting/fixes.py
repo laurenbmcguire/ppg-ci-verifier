@@ -441,6 +441,80 @@ def _plain_namespaces(xml):
     return xml
 
 
+_STRONG_FILLS = ('FFFFF6C7', 'FFFFF2CC')   # the template's stronger yellows; every detail cell uses the one soft cream
+_ONE_FILL = 'FFFFFCEE'
+_SQUEEZED = ('Unknown', 'Unreported')       # words that break across two lines in the narrow summary cells
+
+
+def _restyle(raw, paths):
+    """{part: text} for the parts whose look changes: one cream instead of a cream and yellow patchwork, and the
+    summary words that wrapped mid-word shrink to fit their cell. Values, formulas and layout are untouched."""
+    out = {}
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        names = set(z.namelist())
+        if 'xl/styles.xml' not in names:
+            return out
+        original = styles = z.read('xl/styles.xml').decode('utf-8')
+        for strong in _STRONG_FILLS:
+            styles = re.sub(rf'rgb="{strong}"', f'rgb="{_ONE_FILL}"', styles, flags=re.I)
+        block = re.search(r'(<cellXfs\b[^>]*>)(.*?)(</cellXfs>)', styles, re.S)
+        summary = paths.get('Summary')
+        if block and summary in names:
+            xfs = re.findall(r'<xf\b[^>]*?/>|<xf\b[^>]*?>.*?</xf>', block.group(2), re.S)
+            sheet_original = sheet = _plain_namespaces(z.read(summary).decode('utf-8'))
+            added, cache = [], {}
+
+            def shrink(index):
+                if index not in cache and 0 <= index < len(xfs):
+                    xf = xfs[index]
+                    if 'shrinkToFit="1"' in xf and 'wrapText="1"' not in xf:
+                        cache[index] = index
+                    else:
+                        if re.search(r'<alignment\b', xf):
+                            xf = re.sub(r'\s(?:wrapText|shrinkToFit)="[^"]*"', '', xf)
+                            xf = re.sub(r'<alignment\b', '<alignment shrinkToFit="1"', xf, count=1)
+                        elif xf.endswith('/>'):
+                            xf = xf[:-2] + '><alignment shrinkToFit="1"/></xf>'
+                        else:
+                            xf = xf.replace('</xf>', '<alignment shrinkToFit="1"/></xf>')
+                        if 'applyAlignment=' in xf:
+                            xf = re.sub(r'applyAlignment="[^"]*"', 'applyAlignment="1"', xf, count=1)
+                        else:
+                            xf = xf.replace('<xf', '<xf applyAlignment="1"', 1)
+                        added.append(xf)
+                        cache[index] = len(xfs) + len(added) - 1
+                return cache.get(index, index)
+
+            def cell(m):
+                attrs, body = m.group(1), m.group(2)
+                text = ''.join(re.findall(r'<(?:v|t)\b[^>]*>(.*?)</(?:v|t)>', body, re.S)).strip()
+                style = re.search(r'\bs="(\d+)"', attrs)
+                if text not in _SQUEEZED or not style or 't="s"' in attrs:
+                    return m.group(0)
+                new = shrink(int(style.group(1)))
+                return m.group(0) if new == int(style.group(1)) else m.group(0).replace(style.group(0), f's="{new}"', 1)
+
+            sheet = re.sub(r'<c\b([^>]*)>(.*?)</c>', cell, sheet, flags=re.S)
+            if added:
+                opening = re.sub(r'count="\d+"', f'count="{len(xfs) + len(added)}"', block.group(1))
+                styles = styles[:block.start()] + opening + block.group(2) + ''.join(added) + block.group(3) + styles[block.end():]
+                out[summary] = sheet
+        if styles != original:
+            out['xl/styles.xml'] = styles
+    return out
+
+
+def needs_restyle(filename, raw):
+    """True when saving this workbook again would tidy its colours or squeezed summary words."""
+    if not str(filename).lower().endswith('.xlsx'):
+        return False
+    try:
+        from hosting.spreadsheet_demo import sheet_paths
+        return bool(_restyle(raw, sheet_paths(raw)))
+    except Exception:
+        return False
+
+
 def _new_cell(attrs, address, value, kind):
     style = re.search(r'\bs="(\d+)"', attrs)
     s = f' s="{style.group(1)}"' if style else ''
@@ -480,9 +554,12 @@ def _insert_cell(xml, address, value, kind):
     return xml.replace('</sheetData>', new_row + '</sheetData>')
 
 
-def apply_fixes(filename, raw, approved):
-    """Bytes of a corrected copy with exactly the approved changes; raises FixError if any can't be applied."""
+def apply_fixes(filename, raw, approved, restyle=False):
+    """Bytes of a corrected copy with exactly the approved changes; raises FixError if any can't be applied.
+    ``restyle`` saves a copy with no cell change at all, only the tidied look, when there is something to tidy."""
     if not approved:
+        if restyle and needs_restyle(filename, raw):
+            return _apply_xlsx(raw, [])
         raise FixError('Approve at least one change first.')
     sources, _ = _sources(filename, raw)
     merged = merged_ranges(filename, raw)
@@ -577,7 +654,18 @@ def _apply_xlsx(raw, edits):
     if len(done) != len(edits):
         raise FixError('Not every approved change could be applied; nothing was changed.')
     from hosting.recalc import recalc
-    return recalc(out.getvalue())  # saved formula results match the new values, as if Excel had saved it
+    result = recalc(out.getvalue())  # saved formula results match the new values, as if Excel had saved it
+    try:   # the look is optional; the approved values are not
+        styled = _restyle(result, paths)   # after recalculation, so words produced by formulas are tidied too
+        if styled:
+            tidy = io.BytesIO()
+            with zipfile.ZipFile(io.BytesIO(result)) as src, zipfile.ZipFile(tidy, 'w', zipfile.ZIP_DEFLATED) as dst:
+                for info in src.infolist():
+                    dst.writestr(info, styled[info.filename].encode('utf-8') if info.filename in styled else src.read(info.filename))
+            result = tidy.getvalue()
+    except Exception:
+        pass
+    return result
 
 
 def fixed_filename(filename):

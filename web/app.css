@@ -1858,3 +1858,6 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-progress-moving .fd-progress-bar{width:40%;animation:fd-progress-slide 1.4s ease-in-out infinite}
 @keyframes fd-progress-slide{from{margin-left:-40%}to{margin-left:100%}}
 @media (prefers-reduced-motion:reduce){.fd-progress-moving .fd-progress-bar{width:100%;margin-left:0;animation:none;opacity:.6}}
+/* a report being refreshed stays on screen, dimmed, instead of a blank page */
+.fd-refreshing{opacity:.55;transition:opacity .15s}
+#fd-refresh-note{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:60;background:#17352b;color:#fff;border-radius:999px;padding:6px 14px;font-size:.9rem;box-shadow:0 4px 14px rgba(0,0,0,.18);display:flex;align-items:center;gap:6px}

@@ -980,7 +980,8 @@ class handler(BaseHTTPRequestHandler):
                             review = summarize(candidate, with_issues=False)
                             return self.can_report(inbox.assignment_for(candidate, review), review.get('job'))
                         fixed = inbox.apply_fixes(file_hash, changes, expected_check_hash=payload.get('expected_check_hash'),
-                                                  recommended_only=payload.get('recommended_only') is True, authorize_destination=authorize_destination)
+                                                  recommended_only=payload.get('recommended_only') is True, authorize_destination=authorize_destination,
+                                                  restyle=payload.get('restyle') is True and changes == [])
                 except CorrectionAccessDenied:
                     return self.fail(404, 'Report not found.')
                 except FixError as exc:

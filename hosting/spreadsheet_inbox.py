@@ -47,6 +47,9 @@ class _NoChange(Exception):
     pass
 
 
+_INVENTORY_TEXT = {}   # stored text of the last version-history inventory read by this server process
+
+
 class SpreadsheetInbox:
     def __init__(self, root):
         self.root = Path(root)
@@ -1104,7 +1107,8 @@ class SpreadsheetInbox:
             props.append(dict(id=f['id'], sheet=f['sheet'], cell=f['cell'], before=f['before'], after=f['after'], kind='auto',
                               reason=f['reason'], source='AI fix', confidence=f.get('confidence') or 'medium', sure=False))
         self._mark_recommended_proposals(item, props, raw)
-        return dict(file_hash=file_hash, filename=item['filename'], proposals=props, applied=item.get('fixes_applied') or [],
+        from hosting.fixes import needs_restyle
+        return dict(file_hash=file_hash, filename=item['filename'], proposals=props, applied=item.get('fixes_applied') or [], restyle=needs_restyle(item['filename'], raw),
                     ai=dict(status=ai.get('status') or 'not_run', made_at=ai.get('made_at'), count=len(ai.get('fixes') or []),
                             skipped=ai.get('skipped') or [], dropped=ai.get('dropped') or 0, message=ai.get('message')))
     def _mark_recommended_proposals(self, item, props, raw):
@@ -1224,13 +1228,14 @@ class SpreadsheetInbox:
             if any(size != len(sizes) for size in sizes):
                 raise ValueError(f'Change set {name} is incomplete ({len(sizes)} of its cells were sent). Nothing was applied.')
 
-    def apply_fixes(self, file_hash, approved, *, auto=False, automatic=False, expected_check_hash=None, recommended_only=False, authorize_destination=None):
+    def apply_fixes(self, file_hash, approved, *, auto=False, automatic=False, expected_check_hash=None, recommended_only=False, authorize_destination=None, restyle=False):
         """Write a corrected copy with the approved changes as a new upload; the original is untouched.
         Source freshness, change sets and (for the automatic pass, ``auto=True``) a person's decisions are checked under
         the report's lock, and the new version is created in the same transaction: a SharePoint read or decision that
         lands in between refuses the whole set and no corrected version is made."""
         from hosting.fixes import apply_fixes, fixed_filename, FixError
-        if not isinstance(approved, list) or not approved or not all(isinstance(c, dict) for c in approved):
+        # ``restyle``: a copy with no cell change, only the tidied colours, when the workbook has something to tidy.
+        if not isinstance(approved, list) or not (approved or restyle is True) or not all(isinstance(c, dict) for c in approved):
             raise ValueError('Send at least one approved change.')
         self._validate_correction_batch(approved)
         # A typed value is the person's proposal, never a claim about source evidence.
@@ -1256,11 +1261,11 @@ class SpreadsheetInbox:
         item = self.get(file_hash)
         _, raw = self.original_bytes(file_hash)
         self._check_changes(item, approved, auto, raw=raw)  # repeated under the lock
-        fixed = apply_fixes(item['filename'], raw, approved)  # the original file never changes, so this can be built first
+        fixed = apply_fixes(item['filename'], raw, approved, restyle=restyle is True and not approved)  # the original file never changes, so this can be built first
         new_name = fixed_filename(item['filename'])
         new_hash = hashlib.sha256(fixed).hexdigest()
         new_check = inspect_spreadsheet(new_name, fixed)
-        record = dict(fixed_file_hash=new_hash, fixed_filename=new_name, applied_at=datetime.now(timezone.utc).isoformat(),
+        record = dict(fixed_file_hash=new_hash, fixed_filename=new_name, applied_at=datetime.now(timezone.utc).isoformat(), **({'restyle': True} if restyle is True and not approved else {}),
                       changes=[{k: c.get(k) for k in ('sheet', 'cell', 'before', 'after', 'reason', 'source', 'snapshot_id', 'item', 'field', 'change_set', 'change_set_size') if c.get(k) is not None or k in ('before', 'after')} for c in approved])
         with self.connect() as db:
             if self.pg is not None:   # both reports, always in the same order: two corrections in opposite directions cannot deadlock
@@ -1394,12 +1399,30 @@ class SpreadsheetInbox:
             raise ValueError('This version is superseded. Open the working copy and review your edits there. Nothing was applied.')
 
     def _history_inventory(self, db):
-        bases = {}
-        for row in db.execute('SELECT file_hash,result_json FROM spreadsheets').fetchall():
-            bases[row['file_hash']] = json.loads(row['result_json'])
+        # Both tables are append-only, so their row count, newest row and newest check identify the whole inventory.
+        # A warm server keeps the stored text of the last inventory it read and only asks the database for it again
+        # when one of those changed. Every caller still gets its own freshly decoded objects.
+        marker = None
+        try:
+            a = db.execute('SELECT COUNT(*) AS n, MAX(seq) AS m FROM spreadsheets').fetchone()
+            b = db.execute('SELECT COUNT(*) AS n, MAX(seq) AS m FROM spreadsheet_checks').fetchone()
+            newest_base = db.execute('SELECT file_hash FROM spreadsheets ORDER BY seq DESC LIMIT 1').fetchone()
+            newest_check = db.execute('SELECT check_hash FROM spreadsheet_checks ORDER BY seq DESC LIMIT 1').fetchone()
+            marker = (str(self.root) if self.pg is None else 'pg', a['n'], a['m'], b['n'], b['m'],
+                      newest_base['file_hash'] if newest_base else None, newest_check['check_hash'] if newest_check else None)
+        except Exception:
+            marker = None
+        cached = _INVENTORY_TEXT.get('rows') if marker is not None and _INVENTORY_TEXT.get('marker') == marker else None
+        if cached is None:
+            base_rows = [(row['file_hash'], row['result_json']) for row in db.execute('SELECT file_hash,result_json FROM spreadsheets').fetchall()]
+            check_rows = [(row['file_hash'], row['result_json']) for row in db.execute('SELECT file_hash,result_json FROM spreadsheet_checks ORDER BY seq ASC').fetchall()]
+            cached = (base_rows, check_rows)
+            if marker is not None and marker[0] == 'pg':   # only the hosted database is slow enough to be worth keeping
+                _INVENTORY_TEXT.update(marker=marker, rows=cached)
+        bases = {key: json.loads(text) for key, text in cached[0]}
         histories = {}
-        for row in db.execute('SELECT file_hash,result_json FROM spreadsheet_checks ORDER BY seq ASC').fetchall():
-            histories.setdefault(row['file_hash'], []).append(json.loads(row['result_json']))
+        for key, text in cached[1]:
+            histories.setdefault(key, []).append(json.loads(text))
         return bases, histories
 
     def _working_copies(self, db):
