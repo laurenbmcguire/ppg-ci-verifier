@@ -48,7 +48,7 @@ class SourcePatterns(unittest.TestCase):
         self.assertEqual(out['source_support']['cell'],'B15')
         self.assertEqual(item,before)
         self.assertEqual(pattern(json.loads(json.dumps(item, default=str)))['severity'],'info')
-        self.assertEqual(pattern(item, None)['severity'],'high')
+        self.assertEqual(pattern(item, None)['severity'],'low')
         from api.index import findings_binding
         original_binding=findings_binding(item,summarize(item,source_context=CONTEXT))
         self.assertNotEqual(original_binding,findings_binding(item,summarize(item)))
@@ -64,10 +64,10 @@ class SourcePatterns(unittest.TestCase):
     def test_exact_equality_not_cosmetic_or_normalized(self):
         for value in ('00356870-v-lh','0356870-V-LH','OO356870-V-LH','00356870 V LH','00356870-V-LH ', ''):
             item,snap,compare=fixture(); snap['items'][13]['raw']['Part']=value; compare()
-            self.assertEqual(pattern(item)['severity'],'high',repr(value))
+            self.assertEqual(pattern(item)['severity'],'low',repr(value))
         item,snap,compare=fixture('00356870-V-LH ')
         snap['items'][13]['raw']['Part']='00356870-V-LH';compare()
-        self.assertEqual(pattern(item)['severity'],'high')
+        self.assertEqual(pattern(item)['severity'],'low')
 
     def test_ambiguous_partial_wrong_source_and_stale_proof_fail_closed(self):
         mutations = [lambda i,s:s['coverage'].update(complete=False),
@@ -79,17 +79,17 @@ class SourcePatterns(unittest.TestCase):
             lambda i,s:s.update(captured_at='invalid')]
         for mutate in mutations:
             item,snap,compare=fixture();mutate(item,snap);compare()
-            self.assertEqual(pattern(item)['severity'],'high')
+            self.assertEqual(pattern(item)['severity'],'low')
         for key,value in [('file_hash','b'*64),('checker_version','old'),('records_truncated',True)]:
             item,_,_=fixture();item[key]=value
-            self.assertEqual(pattern(item)['severity'],'high')
+            self.assertEqual(pattern(item)['severity'],'low')
         item,_,_=fixture();item['source_reconciliation']['snapshot_id']='other'
-        self.assertEqual(pattern(item)['severity'],'high')
+        self.assertEqual(pattern(item)['severity'],'low')
         item,_,_=fixture();item['source_reconciliation']['date_contract']={}
         with patch('hosting.source_date_contracts.receipt_contract_current',return_value=False):
-            self.assertEqual(pattern(item)['severity'],'high')
+            self.assertEqual(pattern(item)['severity'],'low')
         for context in (dict(CONTEXT,valid=False),dict(CONTEXT,list_id='other')):
-            item,_,_=fixture();self.assertEqual(pattern(item,context)['severity'],'high')
+            item,_,_=fixture();self.assertEqual(pattern(item,context)['severity'],'low')
 
     def test_ambiguous_workbook_headers_do_not_create_exact_labels(self):
         rows=[['Identifier','Part number','Part number','Inspected','OK','NOK'],['LOT','00356870-V-LH','other',1,1,0]]
@@ -98,11 +98,11 @@ class SourcePatterns(unittest.TestCase):
 
     def test_proof_tampering_and_ambiguous_records_fail_closed(self):
         item,_,_=fixture();item['source_reconciliation']['identifier_pattern_evidence']['proofs'][0]['value']='tampered'
-        self.assertEqual(pattern(item)['severity'],'high')
+        self.assertEqual(pattern(item)['severity'],'low')
         item,_,_=fixture();item['records'][0]['source']=item['records'][13]['source']
-        self.assertEqual(pattern(item)['severity'],'high')
+        self.assertEqual(pattern(item)['severity'],'low')
         item,_,_=fixture();item['records'].pop()
-        self.assertEqual(pattern(item)['severity'],'high')
+        self.assertEqual(pattern(item)['severity'],'low')
 
     def test_ai_verdict_does_not_turn_source_support_into_a_correction_or_dismissal(self):
         item,_,_=fixture();finding=pattern(item)
@@ -112,7 +112,7 @@ class SourcePatterns(unittest.TestCase):
         self.assertFalse(result['dismissed']);self.assertEqual(result['reconcile']['corrected'],0)
         self.assertTrue(result['reconcile']['adds_up'])
         item['finding_decisions']={finding['key']:dict(fp=finding['fp'],action='defer',reason='Owner investigating')}
-        self.assertEqual(pattern(item)['severity'],'high')
+        self.assertEqual(pattern(item)['severity'],'low')
         self.assertTrue(summarize(item,source_context=CONTEXT)['reconcile']['adds_up'])
 
 if __name__=='__main__':unittest.main()
@@ -140,7 +140,7 @@ class BoundedSourcePatterns(unittest.TestCase):
             self.assertLess(time.monotonic()-started,5)
             patterns=[i for i in review['issues'] if i['code']=='part_format_differs']
             self.assertEqual(len(patterns),500)
-            self.assertTrue(all(i['severity']==('high' if huge else 'info') for i in patterns))
+            self.assertTrue(all(i['severity']==('low' if huge else 'info') for i in patterns))
             if huge:self.assertFalse(receipt['complete']);self.assertEqual(receipt['proofs'],[])
 
 
@@ -189,12 +189,12 @@ class PersistedSourcePatterns(unittest.TestCase):
             self.assertTrue(any(x['code']=='source_evidence_incomplete' for x in box.holds(box.get(h))))
             box.propose_recheck(h);box.apply_recheck(h,'Synthetic reviewer')
             box=SpreadsheetInbox(root)
-            self.assertEqual(finding()['severity'],'high')  # recheck invalidates earlier source proof
+            self.assertEqual(finding()['severity'],'low')  # recheck invalidates earlier source proof
             box.source_reconcile(h,snapshot,'2026-11-06',expected_check_hash=box.get(h)['check_hash'],expected_assignment=assigned)
             self.assertEqual(finding()['severity'],'info')
             self.assertEqual(box.original_bytes(h)[1],raw)
             assigned['list_id']='wrong-list'
-            self.assertEqual(finding()['severity'],'high')
+            self.assertEqual(finding()['severity'],'low')
             assigned['list_id']=LIST
             box.set_setting(box.source_mapping_key('site-1',LIST),dict(mapping={},revision='changed'))
-            self.assertEqual(finding()['severity'],'high')
+            self.assertEqual(finding()['severity'],'low')

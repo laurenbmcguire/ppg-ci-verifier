@@ -1734,6 +1734,8 @@
       // Short and plain on the page; the full technical wording stays in the hover text.
       const short = [serious ? `${plural(serious, 'serious error')} must be fixed or ignored first` : '', holds.length ? 'the SharePoint check is not finished (open SharePoint check details on the right)' : ''].filter(Boolean).join('; ');
       const why = [serious ? `${plural(serious, 'serious error')} must be fixed or ignored first` : '', ...holds].filter(Boolean).join('. ');
+      // Only a SharePoint check note and no serious error: say what is left to do, not "Blocked". The note stays in the hover text.
+      if (!serious && left) return {tone: 'amber', icon: st.icon, text: `${plural(left, 'possible error')} to fix or ignore`, why};
       return {...st, text: 'Blocked' + (short ? ': ' + short : ''), why};
     }
     if (st.next === 'review') return {...st, text: 'Review needed' + (st.text && !/to review$/.test(st.text) ? ': ' + st.text : '')};

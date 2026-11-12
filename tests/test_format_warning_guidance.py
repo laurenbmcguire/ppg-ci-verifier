@@ -30,7 +30,7 @@ class FormatWarningGuidance(unittest.TestCase):
         self.assertIn('alone does not establish an error', finding['why'])
         self.assertIn('Keep the value unchanged', finding['fix'])
         # Presentation guidance does not claim verification, clear holds or change stored evidence.
-        self.assertEqual(finding['severity'], 'high')
+        self.assertEqual(finding['severity'], 'low')
         self.assertEqual(item, before)
 
     def test_case_is_already_ignored_by_pattern_but_values_are_not_rewritten(self):

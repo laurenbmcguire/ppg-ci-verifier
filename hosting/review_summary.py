@@ -13,7 +13,10 @@ INFO = {'hyperlink_formula', 'external_hyperlink', 'known_template_layout_differ
 # New checks that are worth a look but should not stop a report on their own.
 MEDIUM = {'duplicate_count_block', 'total_row_blank', 'defect_reject_mismatch'}
 LOW = {'labeled_total_unit_differs', 'date_stored_as_text', 'zero_inspected', 'hidden_columns_with_data',
-       'extra_spaces', 'number_stored_as_text'}
+       'extra_spaces', 'number_stored_as_text',
+       # A value written in a different pattern from its neighbours is a hint, not proof of an error: scanners enter
+       # other barcode formats and typed-in values. It is listed, but never holds a report as a serious error.
+       'identifier_format_differs', 'part_format_differs'}
 HIGH = re.compile(r'duplicate|total|differs|missing_from_report|not_on_sharepoint|typo|mismatch|exceeds|future|invalid|'
                   r'excel_error|wrong_column|scientific')
 RANK = {'high': 0, 'medium': 1, 'low': 2, 'info': 3}
