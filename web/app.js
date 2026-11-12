@@ -751,7 +751,8 @@
       if (receipt && version.status !== 'current') history.replaceState(null, '', '#r=' + hash + '&history=1');
       state.reportRoute = location.hash;
       state.fdSummaryCache = null; state.fdView = 'review'; state.fdCur = null; state.fdTier = null; state.gridSearch = ''; state.sheetScroll = {}; state.gridOnlyMarked = false; state.gridRow = null;
-      state.report = data; state.fixes = null; state.showAll = false; state.fdManual = null;
+      const sameVersion = state.report?.file_hash === data.file_hash;   // a refresh of the version on screen keeps manual work open
+      state.report = data; state.fixes = null; state.showAll = false; if (!sameVersion) { state.fdManual = null; state.fdFree = null; }
       settle(); drawReport(); drawQueue();
       if (!versionReadOnly(data)) loadFixes(hash);
       if (!versionReadOnly(data) && state.openSendFor && (state.openSendFor === hash || state.openSendFor === 'next' && data.fixed_from)) { state.openSendFor = null; openSend(); }
@@ -2355,7 +2356,7 @@
   }
   // Edit a cell manually: pick any cell in the spreadsheet (flagged or not), type the right value, repeat, then save
   // everything as one new version. The earlier version is kept, exactly like every other fix.
-  const fdFreeActive = () => !!state.fdFree && !!state.report && state.fdFree.binding === JSON.stringify(reviewBinding(state.report));
+  const fdFreeActive = () => !!state.fdFree && !!state.report && fdRebind(state.fdFree);
   function fdFreeStart() {
     if (!state.report || versionReadOnly()) return;
     state.fdManual = null; state.fdCur = null;
@@ -2423,9 +2424,19 @@
         f.cell && !f.loading ? h('button', {type: 'button', class: 'btn', id: 'fd-free-another', onclick: another}, 'Change another cell') : null,
         h('button', {type: 'button', class: 'btn ghost', onclick: cancel}, 'Cancel')));
   }
+  // Fixing by hand survives the app's own background updates of the same saved version (a recheck, the SharePoint
+  // check, a refresh): the work in progress is carried over to the updated check instead of closing by itself.
+  function fdRebind(m) {
+    if (!m || !state.report) return false;
+    const now = JSON.stringify(reviewBinding(state.report));
+    if (m.binding === now) return true;
+    let was = null; try { was = JSON.parse(m.binding); } catch (e) { was = null; }
+    if (was?.file_hash !== state.report.file_hash) return false;
+    m.binding = now; return true;
+  }
   function fdManualList(items) {
     const m = state.fdManual;
-    if (!m || !state.report || m.binding !== JSON.stringify(reviewBinding(state.report))) return null;
+    if (!m || !state.report || !fdRebind(m)) return null;
     const list = m.keys.map(k => items.find(it => it.key === k)).filter(Boolean);
     return list.length ? {list, at: Math.min(m.at, list.length - 1)} : null;
   }
@@ -2458,9 +2469,10 @@
     if (it.cell && rowCells && !one) rowNote = 'This cell holds a formula or is protected, so it cannot be typed over here.';
     const rowFields = rowCells && !it.cell ? rowCells.map(c => h('label', {class: 'fd-manual-rowfield'}, h('span', {}, `${c.header || 'Column'} (${c.cell})`),
       field(c.cell, c.before, edits[editId(it.sheet, c.cell)]?.after ?? c.before, `${c.header || c.cell}`))) : null;
-    const manualBinding = JSON.stringify(reviewBinding(state.report));
+    const manualBinding = state.report.file_hash;   // the saved version this card belongs to
     const keep = (dirtyOnly = false) => {
-      if (!state.report || state.fdManual?.binding !== manualBinding || JSON.stringify(reviewBinding(state.report)) !== manualBinding) return;
+      let bound = null; try { bound = JSON.parse(state.fdManual?.binding || 'null'); } catch (e) { bound = null; }
+      if (!state.report || bound?.file_hash !== manualBinding || state.report.file_hash !== manualBinding) return;
       const all = store.get(editsKey(), {});
       for (const el of document.querySelectorAll('.fd-manual input[data-cell]')) {
         if (dirtyOnly && el.value === el.getAttribute('data-initial-value')) continue;
