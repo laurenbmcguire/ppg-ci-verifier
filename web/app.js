@@ -1722,8 +1722,12 @@
   // one says what is blocking it.
   function fdShown(st) {
     const r = state.report, left = r && state.fixes ? (state.fdItems?.length ? state.fdItems : fdItems()).filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
-    if (left === 0 && st.tone !== 'red' && !['Check unavailable', 'Checks out of date'].includes(st.text))
-      return {tone: 'green', icon: 'ok', text: 'Completed', why: st.tone === 'amber' ? [st.text, st.why].filter(Boolean).join('. ') : ''};
+    // Zero possible errors is Completed, also when a SharePoint check note remains: those notes stay readable in the
+    // hover text and under "SharePoint check notes", they are no longer shown as a block.
+    if (left === 0 && !['Check unavailable', 'Checks out of date'].includes(st.text)) {
+      const notes = (r?.holds || []).filter(x => x.hard && x.code !== 'awaiting_source_owner').map(x => x.text).filter(Boolean);
+      return {tone: 'green', icon: 'ok', text: 'Completed', why: [st.tone === 'amber' ? st.text : '', st.tone === 'amber' ? st.why : '', ...notes].filter(Boolean).join('. ')};
+    }
     if (st.next === 'blockers') {
       const serious = (state.fdItems || []).filter(x => x.tier === 'blocker' && !['rejected', 'kept'].includes(x.state)).length;
       const holds = (r?.holds || []).filter(x => x.hard && x.code !== 'awaiting_source_owner').map(x => x.text).filter(Boolean);
