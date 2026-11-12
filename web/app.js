@@ -30,7 +30,9 @@
     let data = {};
     try { data = await response.json(); } catch (e) { /* non-JSON error page */ }
     if (response.status === 401 && data.signin) { showSignIn(); const error = new Error('Sign in to continue.'); error.httpStatus = 401; throw error; }
-    if (!response.ok) { const error = new Error(data.error || `The server answered ${response.status}. Try again in a moment.`); error.httpStatus = response.status; error.saveCommitted = data.save_committed === true; throw error; }
+    // A crashed or timed-out server answers with an error object, not a sentence: say something a person can read.
+    const said = typeof data.error === 'string' ? data.error : data.error?.message && typeof data.error.message === 'string' ? `The server could not finish this (${data.error.message}). Try again in a moment.` : '';
+    if (!response.ok) { const error = new Error(said || `The server answered ${response.status}. Try again in a moment.`); error.httpStatus = response.status; error.saveCommitted = data.save_committed === true; throw error; }
     return data;
   }
   let toastTimer;
