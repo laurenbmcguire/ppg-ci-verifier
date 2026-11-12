@@ -283,7 +283,7 @@
       const quantities = [['inspected', 'Inspected'], ['certified', 'OK'], ['rejected', 'Rejected']].map(([key, label]) => `${label}: ${queueQuantity(r, key)}`);
       // Why a report is still to do, or what to know about a finished one, in one short line.
       const holds = (r.verification?.holds || r.holds || []).map(x => x.text).filter(Boolean);
-      const why = !done && tone === 'hold' ? `Blocked: ${Number.isFinite(rv.counts?.high) ? plural(rv.counts.high, 'serious error') : 'serious errors'} must be fixed or ignored.`
+      const why = !done && tone === 'hold' ? `${Number.isFinite(rv.counts?.high) ? plural(rv.counts.high, 'serious error') : 'Serious errors'} to fix or ignore.`
         : !done && tone === 'check' && /recheck|unavailable/i.test(check) ? 'Open it and the checks run again by themselves.' : '';
       const short = text => { const first = String(text).split(/[:.](\s|$)/)[0].trim(); return first.length > 90 ? first.slice(0, 87) + '…' : first; };
       const note = queueSource(r) === 'Source comparison matched' ? 'Matches SharePoint' : short(holds[0] || queueSource(r)).replace(/^Source/, 'SharePoint');
@@ -1733,6 +1733,9 @@
       const notes = (r?.holds || []).filter(x => x.hard && x.code !== 'awaiting_source_owner').map(x => x.text).filter(Boolean);
       return {tone: 'green', icon: 'ok', text: 'Completed', why: [st.tone === 'amber' ? st.text : '', st.tone === 'amber' ? st.why : '', ...notes].filter(Boolean).join('. ')};
     }
+    // While Dex is working, or the list of possible errors is still loading, say that: never a passing "Blocked".
+    if (state.fdAIRun && (state.fdAIRun.running || state.fdAIRun.finishing) && (!r || state.fdAIRun.hash === r.file_hash)) return {tone: 'amber', icon: st.icon, text: 'Dex is working…', why: ''};
+    if (st.next === 'blockers' && r && !state.fixes) return {tone: 'amber', icon: st.icon, text: 'Loading possible errors…', why: ''};
     if (st.next === 'blockers') {
       const serious = (state.fdItems || []).filter(x => x.tier === 'blocker' && !['rejected', 'kept'].includes(x.state)).length;
       const holds = (r?.holds || []).filter(x => x.hard && x.code !== 'awaiting_source_owner').map(x => x.text).filter(Boolean);
@@ -1741,7 +1744,7 @@
       const why = [serious ? `${plural(serious, 'serious error')} must be fixed or ignored first` : '', ...holds].filter(Boolean).join('. ');
       // Only a SharePoint check note and no serious error: say what is left to do, not "Blocked". The note stays in the hover text.
       if (!serious && left) return {tone: 'amber', icon: st.icon, text: `${plural(left, 'possible error')} to fix or ignore`, why};
-      return {...st, text: 'Blocked' + (short ? ': ' + short : ''), why};
+      return {...st, text: serious ? `${plural(serious, 'serious error')} to fix or ignore` : short || st.text, why};
     }
     if (st.next === 'review') return {...st, text: 'Review needed' + (st.text && !/to review$/.test(st.text) ? ': ' + st.text : '')};
     return st;
@@ -3532,6 +3535,9 @@
     // Paging, selection and async refreshes must not discard typed manual text.
     state.fdManual?.keepDraft?.();
     const side = $('side'), r = state.report; if (!side || !r) return;
+    // The header status follows every redraw of the panel (for example when Dex starts or finishes).
+    { const pill = typeof document !== 'undefined' && document.querySelector?.('.fd-global-status');
+      if (pill) { const shown = fdShown(fdStatus(r)); pill.className = 'fd-status fd-global-status ' + shown.tone; pill.title = shown.why || ''; pill.replaceChildren(icon(shown.icon, 16), h('span', {}, shown.text)); } }
     if (state.sideTab === 'facts') state.sideTab = 'fixes';
     const rv = r.review, tab = state.sideTab || 'fixes';
     const body = h('div', {class: 'sidebody', id: 'side-body'});
