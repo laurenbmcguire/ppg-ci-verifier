@@ -2328,6 +2328,76 @@
     if (first) fdOpen(first); else drawSide();
     document.getElementById('side')?.scrollTo?.({top: 0});
   }
+  // Edit a cell manually: pick any cell in the spreadsheet (flagged or not), type the right value, repeat, then save
+  // everything as one new version. The earlier version is kept, exactly like every other fix.
+  const fdFreeActive = () => !!state.fdFree && !!state.report && state.fdFree.binding === JSON.stringify(reviewBinding(state.report));
+  function fdFreeStart() {
+    if (!state.report || versionReadOnly()) return;
+    state.fdManual = null; state.fdCur = null;
+    state.fdFree = {binding: JSON.stringify(reviewBinding(state.report)), ids: [], cell: null};
+    document.body.classList.remove('fd-panel-open');   // on a phone the spreadsheet has to be visible to pick a cell
+    drawSide(); toast('Click the cell you want to change.');
+  }
+  async function fdFreePick(sheet, cell) {
+    const f = state.fdFree, report = state.report, g = state.grid, row = splitCell(cell)?.[1];
+    if (!fdFreeActive() || !row) return;
+    fdFreeKeep();
+    if ((g?.formulas || []).includes(cell)) { toast('That cell is a formula. Change the cells it adds up instead.', true); return; }
+    Object.assign(f, {sheet, cell, loading: true, before: null, error: null}); document.body.classList.add('fd-panel-open'); drawSide(); drawGrid();
+    try {
+      const data = await api('/api/spreadsheets/cells', {file_hash: report.file_hash, sheet, row});
+      if (state.fdFree !== f || state.report !== report || f.cell !== cell || f.sheet !== sheet) return;
+      const exact = (data.cells || []).find(c => c.cell === cell);
+      if (!exact || exact.formula || typeof exact.before !== 'string') Object.assign(f, {loading: false, error: 'This cell holds a formula or is protected, so it cannot be typed over. Pick another cell.'});
+      else Object.assign(f, {loading: false, before: exact.before, header: exact.header || ''});
+    } catch (e) { if (state.fdFree === f) Object.assign(f, {loading: false, error: `This cell could not be opened: ${e.message}`}); }
+    if (state.fdFree === f && state.report === report) { drawSide(); globalThis.setTimeout?.(() => { const el = document.getElementById('fd-free-input'); if (el) { el.focus(); el.select(); } }, 0); }
+  }
+  // Remember what is typed in the open cell (nothing is saved to the report yet).
+  function fdFreeKeep() {
+    const f = state.fdFree, el = typeof document !== 'undefined' ? document.getElementById('fd-free-input') : null;
+    if (!fdFreeActive() || !el || !f.cell || typeof f.before !== 'string') return;
+    const all = store.get(editsKey(), {}), id = editId(f.sheet, f.cell);
+    if (el.value === f.before) { delete all[id]; f.ids = f.ids.filter(x => x !== id); }
+    else { all[id] = {sheet: f.sheet, cell: f.cell, before: f.before, after: el.value, header: '', source: 'Your edit', reason: 'Typed by the reviewer'}; if (!f.ids.includes(id)) f.ids.push(id); }
+    store.set(editsKey(), all);
+  }
+  function fdFreeCard() {
+    if (!fdFreeActive()) return null;
+    const f = state.fdFree, edits = store.get(editsKey(), {}), mine = f.cell ? edits[editId(f.sheet, f.cell)] : null;
+    const pending = f.ids.filter(id => edits[id] && id !== (f.cell ? editId(f.sheet, f.cell) : null));
+    const show = v => v === '' || v == null ? 'blank' : '“' + String(v).slice(0, 60) + '”';
+    const cancel = () => { const all = store.get(editsKey(), {}); for (const id of f.ids) delete all[id]; store.set(editsKey(), all); state.fdFree = null; drawSide(); drawGrid(); };
+    const another = () => { fdFreeKeep(); f.cell = null; f.before = null; document.body.classList.remove('fd-panel-open'); drawSide(); toast('Click the next cell you want to change.'); };
+    const save = async () => {
+      fdFreeKeep(); const c = readyChanges();
+      if (!c.total) { toast('Nothing was changed yet. Type a different value first.'); return; }
+      const report = state.report, from = revisionOf(report);
+      state.fdFree = null; drawSide();   // the typed box is captured above; left on screen it would count as an unsaved draft and block opening the saved version
+      const receipt = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding: c.binding, returnReceipt: true}), next = receipt?.file_hash;
+      if (next) state.fdAIRun = {hash: next, done: true, fixed: c.total, tried: c.total, from, version: revisionOf(receipt), reused: receipt.save_outcome?.type === 'existing_version', originalHash: report.file_hash, manual: true, summary: fdAutoMode(), leftAsWritten: 0,
+        items: Object.values(c.edits).map(e => ({where: `${e.sheet} cell ${e.cell}`, text: '', before: e.before, after: e.after}))};
+      if (state.report?.file_hash === next) drawSide();
+    };
+    const input = f.cell && typeof f.before === 'string' ? h('input', {id: 'fd-free-input', class: 'fd-manual-input', 'aria-label': `New value for ${f.sheet} cell ${f.cell}`, value: mine ? mine.after : f.before, placeholder: 'Type the correct value'}) : null;
+    return h('section', {class: 'fd-manual fd-free', 'aria-label': 'Edit a cell manually'},
+      h('div', {class: 'fd-manual-top'}, h('b', {}, 'Edit a cell manually'),
+        h('button', {type: 'button', class: 'fd-iconbtn', 'aria-label': 'Stop editing manually', title: 'Close', onclick: cancel}, icon('x', 16))),
+      !f.cell ? h('p', {role: 'status'}, 'Click the cell you want to change in the spreadsheet.')
+        : f.loading ? h('p', {role: 'status'}, h('span', {class: 'spin'}), ` Opening ${f.sheet} cell ${f.cell}…`)
+        : f.error ? h('p', {class: 'note', role: 'alert'}, f.error)
+        : h('form', {class: 'fd-manual-form', onsubmit: e => { e.preventDefault(); save(); }},
+            h('p', {class: 'fd-manual-where'}, h('b', {}, `${f.sheet} · cell ${f.cell}`), f.header ? ` · ${f.header}` : ''),
+            h('p', {class: 'fd-hint'}, `Now: ${show(f.before)}. An empty box clears the cell (blank is not zero).`),
+            input),
+      pending.length ? h('details', {class: 'fd-saved-changes', open: true}, h('summary', {}, `${plural(pending.length, 'other change')} waiting to be saved`),
+        h('ul', {class: 'fd-fixed-list'}, pending.map(id => h('li', {}, h('b', {}, `${edits[id].sheet} cell ${edits[id].cell}`), ` ${show(edits[id].before)} → ${show(edits[id].after)} `,
+          h('button', {type: 'button', class: 'btn ghost small', onclick: () => { const all = store.get(editsKey(), {}); delete all[id]; store.set(editsKey(), all); f.ids = f.ids.filter(x => x !== id); drawSide(); }}, 'Remove'))))) : null,
+      h('div', {class: 'fd-cardacts'},
+        h('button', {type: 'button', class: 'btn primary', id: 'fd-free-save', disabled: state.busy || null, onclick: save}, 'Save my changes'),
+        f.cell && !f.loading ? h('button', {type: 'button', class: 'btn', id: 'fd-free-another', onclick: another}, 'Change another cell') : null,
+        h('button', {type: 'button', class: 'btn ghost', onclick: cancel}, 'Cancel')));
+  }
   function fdManualList(items) {
     const m = state.fdManual;
     if (!m || !state.report || m.binding !== JSON.stringify(reviewBinding(state.report))) return null;
@@ -2472,14 +2542,14 @@
     return h('div', {class: 'fd-airun fd-revision ' + (left ? '' : 'good'), role: 'status'},
       h('h3', {}, 'Revision summary'),
       h('ul', {class: 'fd-revision-counts'},
-        run.tidy ? null : h('li', {}, h('b', {}, String(run.fixed || 0)), run.fixed === 1 ? ' cell fixed by Dex' : ' cells fixed by Dex'),
+        run.tidy ? null : h('li', {}, h('b', {}, String(run.fixed || 0)), run.manual ? (run.fixed === 1 ? ' cell changed by you' : ' cells changed by you') : run.fixed === 1 ? ' cell fixed by Dex' : ' cells fixed by Dex'),
         tidied.length ? h('li', {}, h('b', {}, String(tidied.length)), ' formatting clean-ups made when the report opened') : null,
         run.look ? h('li', {}, 'Report colours made consistent (one cream, no yellow patches); no value was changed') : null,
-        run.tidy ? null : h('li', {}, h('b', {}, String(run.leftAsWritten || 0)), ' left as written'),
+        run.tidy || run.manual ? null : h('li', {}, h('b', {}, String(run.leftAsWritten || 0)), ' left as written'),
         h('li', {class: left ? 'fd-revision-open' : ''}, h('b', {}, String(left)), left === 1 ? ' possible error still needs you' : ' possible errors still need you')),
       left === 0 ? h('p', {class: 'fd-hint'}, 'Nothing is left to fix, so the Fix buttons are not shown. Download the fixed report below.') : null,
       run.fixed ? h('p', {class: 'fd-hint'}, `${run.reused ? 'Matches saved version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept unchanged.`) : null,
-      list(`See the ${plural(items.length, 'change')} Dex made`, items), list(`See the ${plural(tidied.length, 'formatting clean-up')}`, tidied),
+      list(run.manual ? `See the ${plural(items.length, 'change')} you made` : `See the ${plural(items.length, 'change')} Dex made`, items), list(`See the ${plural(tidied.length, 'formatting clean-up')}`, tidied),
       h('div', {class: 'fd-cardacts'},
         r && (run.fixed || tidied.length || run.look) ? h('a', {class: 'btn primary small', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download fixed report') : null,
         run.fixed || tidied.length ? h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'history'; drawReport(); }}, 'View history') : null,
@@ -3456,7 +3526,10 @@
         h('p', {class: 'fd-errcount' + (open === 0 ? ' done' : '')}, open == null ? 'Counting possible errors…' : open === 0 ? [icon('ok', 18), ' 0 possible errors'] : plural(open, 'possible error')),
         // Nothing left: the copy with every fix applied is one click away, right at the top.
         open === 0 ? h('a', {class: 'btn primary', id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
+        // Change any cell by hand, whether or not it was flagged.
+        !versionReadOnly(r) ? h('button', {type: 'button', class: 'btn', id: 'fd-edit-any', disabled: !state.fixes || fdBackgroundBusy() || !!state.fdAIRun?.running || null, onclick: () => fdFreeStart()}, 'Edit a cell manually') : null,
         h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors')),
+      fdFreeCard(),
       // Progress of an AI fix, then its revision summary, sit at the very top where the button was pressed.
       state.fdTidying && fdAutoMode() ? h('div', {class: 'fd-airun fd-airun-busy', role: 'status'}, h('p', {}, h('span', {class: 'spin'}), state.fdTidying.look ? ' Making the report colours consistent…' : ` Fixing formatting in ${plural(state.fdTidying.count || 0, 'cell')}…`),
         h('div', {class: 'fd-progress fd-progress-moving', role: 'progressbar', 'aria-label': 'Formatting clean-up progress'}, h('div', {class: 'fd-progress-bar'})),
@@ -4381,6 +4454,7 @@
       const addr = td.dataset.cell, row = splitCell(addr)[1];
       const hit = (state.fdItems || []).find(x => x.sheet === sheet && x.cell === addr) || (state.fdItems || []).find(x => x.sheet === sheet && !x.cell && x.row === row);
       state.gridCell = addr; state.gridRow = row;
+      if (fdFreeActive()) { fdFreePick(sheet, addr); return; }
       if (hit) { if (state.sideTab !== 'fixes') state.sideTab = 'fixes'; fdOpen(hit, addr); return; }
       state.gridRequest = (state.gridRequest || 0) + 1; state.fdOpenRequest = (state.fdOpenRequest || 0) + 1;
       state.gridCell = addr; state.gridRow = row; state.fdCur = null; drawGrid(); if (state.sideTab === 'fixes') drawSide();
