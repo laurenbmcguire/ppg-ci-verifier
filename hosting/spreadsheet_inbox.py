@@ -47,7 +47,7 @@ class _NoChange(Exception):
     pass
 
 
-_INVENTORY_TEXT = {}   # stored text of the last version-history inventory read by this server process
+_CHECK_LINKS = {}   # check row number -> (check hash, its version links as JSON text, has a history-repair record); rows never change
 
 
 class SpreadsheetInbox:
@@ -1401,31 +1401,56 @@ class SpreadsheetInbox:
         if current['status'] != 'current':
             raise ValueError('This version is superseded. Open the working copy and review your edits there. Nothing was applied.')
 
-    def _history_inventory(self, db):
-        # Both tables are append-only, so their row count, newest row and newest check identify the whole inventory.
-        # A warm server keeps the stored text of the last inventory it read and only asks the database for it again
-        # when one of those changed. Every caller still gets its own freshly decoded objects.
-        marker = None
-        try:
-            a = db.execute('SELECT COUNT(*) AS n, MAX(seq) AS m FROM spreadsheets').fetchone()
-            b = db.execute('SELECT COUNT(*) AS n, MAX(seq) AS m FROM spreadsheet_checks').fetchone()
-            newest_base = db.execute('SELECT file_hash FROM spreadsheets ORDER BY seq DESC LIMIT 1').fetchone()
-            newest_check = db.execute('SELECT check_hash FROM spreadsheet_checks ORDER BY seq DESC LIMIT 1').fetchone()
-            marker = (str(self.root) if self.pg is None else 'pg', a['n'], a['m'], b['n'], b['m'],
-                      newest_base['file_hash'] if newest_base else None, newest_check['check_hash'] if newest_check else None)
-        except Exception:
-            marker = None
-        cached = _INVENTORY_TEXT.get('rows') if marker is not None and _INVENTORY_TEXT.get('marker') == marker else None
-        if cached is None:
-            base_rows = [(row['file_hash'], row['result_json']) for row in db.execute('SELECT file_hash,result_json FROM spreadsheets').fetchall()]
-            check_rows = [(row['file_hash'], row['result_json']) for row in db.execute('SELECT file_hash,result_json FROM spreadsheet_checks ORDER BY seq ASC').fetchall()]
-            cached = (base_rows, check_rows)
-            if marker is not None and marker[0] == 'pg':   # only the hosted database is slow enough to be worth keeping
-                _INVENTORY_TEXT.update(marker=marker, rows=cached)
-        bases = {key: json.loads(text) for key, text in cached[0]}
+    def _history_inventory(self, db, full=False):
+        """Every stored version and its check history, for the version graph.
+
+        The hosted database holds hundreds of megabytes of saved checks. Reading and decoding all of it on every
+        request made every screen slow and could exhaust the server's memory. The graph only needs, from each
+        earlier check, which version it was made from and which versions were made from it, so on the hosted
+        database only those links are read for earlier checks, and the complete record only for each version's
+        newest check. Check rows are never changed once written, so the links are remembered per row by this
+        server. A version with a recorded history repair, or one linked to itself, is still read in full, and
+        ``full`` reads everything (the audited history repair works on complete records only).
+        """
+        bases = {row['file_hash']: json.loads(row['result_json']) for row in db.execute('SELECT file_hash,result_json FROM spreadsheets').fetchall()}
         histories = {}
-        for key, text in cached[1]:
-            histories.setdefault(key, []).append(json.loads(text))
+        if self.pg is None or full:
+            for row in db.execute('SELECT file_hash,result_json FROM spreadsheet_checks ORDER BY seq ASC').fetchall():
+                histories.setdefault(row['file_hash'], []).append(json.loads(row['result_json']))
+            return bases, histories
+        index = db.execute('SELECT seq,file_hash,check_hash FROM spreadsheet_checks ORDER BY seq ASC').fetchall()
+        missing = [row['seq'] for row in index if _CHECK_LINKS.get(row['seq'], (None,))[0] != row['check_hash']]
+        for start in range(0, len(missing), 200):
+            part = missing[start:start + 200]
+            rows = db.execute(
+                "SELECT seq, check_hash, CASE WHEN result_json LIKE '%\"fixed_from\"%' OR result_json LIKE '%\"fixes_applied\"%' "
+                "THEN jsonb_build_object('fixed_from', result_json::jsonb->'fixed_from', 'fixes_applied', result_json::jsonb->'fixes_applied')::text "
+                "ELSE '{}' END AS links, (result_json LIKE '%\"history_recovery\"%') AS marked "
+                'FROM spreadsheet_checks WHERE seq IN (' + ','.join('?' * len(part)) + ')', part).fetchall()
+            for row in rows:
+                _CHECK_LINKS[row['seq']] = (row['check_hash'], row['links'], bool(row['marked']))
+        if len(_CHECK_LINKS) > 20000:   # another database's rows, or a very long-lived server: start again
+            _CHECK_LINKS.clear()
+            return self._history_inventory(db, full=True)
+        whole = set()
+        for row in index:
+            check_hash, links, marked = _CHECK_LINKS[row['seq']]
+            record = json.loads(links)
+            key = row['file_hash']
+            if marked or (record.get('fixed_from') or {}).get('file_hash') == key or any(
+                    isinstance(f, dict) and f.get('fixed_file_hash') == key for f in record.get('fixes_applied') or []):
+                whole.add(key)
+            record.update(file_hash=key, check_hash=check_hash)
+            histories.setdefault(key, []).append(record)
+        for row in db.execute('SELECT DISTINCT ON (file_hash) file_hash,result_json FROM spreadsheet_checks ORDER BY file_hash, seq DESC').fetchall():
+            if histories.get(row['file_hash']):
+                histories[row['file_hash']][-1] = json.loads(row['result_json'])
+        if whole:
+            keys = sorted(whole)
+            for key in keys:
+                histories[key] = []
+            for row in db.execute('SELECT file_hash,result_json FROM spreadsheet_checks WHERE file_hash IN (' + ','.join('?' * len(keys)) + ') ORDER BY seq ASC', keys).fetchall():
+                histories[row['file_hash']].append(json.loads(row['result_json']))
         return bases, histories
 
     def _working_copies(self, db):
@@ -1441,7 +1466,7 @@ class SpreadsheetInbox:
             if self.pg is not None:
                 db.execute('LOCK TABLE spreadsheets, spreadsheet_checks IN SHARE ROW EXCLUSIVE MODE')
             original, raw = self._original(db, file_hash)
-            bases, histories = self._history_inventory(db)
+            bases, histories = self._history_inventory(db, full=True)
             current = self.latest(db, file_hash, original)
             if current.get('check_hash') != expected_check_hash:
                 raise ValueError('The report changed. Review current history before recovery.')

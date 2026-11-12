@@ -333,3 +333,29 @@ def test_restyle_saves_a_copy_with_one_cream_fill_and_no_value_change(tmp_path):
     assert [[c.value for c in row] for row in after.iter_rows()] == before_values
     with pytest.raises((ValueError, FixError)):   # nothing left to tidy: no empty version is ever made
         box.apply_fixes(fixed['file_hash'], [], expected_check_hash=box.get(fixed['file_hash'])['check_hash'], restyle=True)
+
+
+def test_version_graph_needs_only_links_from_earlier_checks(tmp_path):
+    """The hosted database reads complete records only for each version's newest check and just the version links
+    for earlier ones. The graph built that way must equal the graph built from everything."""
+    from hosting.spreadsheet_inbox import SpreadsheetInbox
+    from hosting.working_copy import WorkingCopies
+    from sl_daily_fixture import sl_daily, records
+    recs = records(n=4, same_values=True)
+    for i, r in enumerate(recs):
+        r['ident'] = f'LPC2TD26092302{i:04}26I140AAR692181020        000000000000030'
+    box = SpreadsheetInbox(tmp_path)
+    item = box.ingest('SL Alabama - 2214 - 2026-11-06.xlsx', sl_daily(recs))
+    box.ingest('SL Alabama - 2214 - 2026-11-07.xlsx', sl_daily(records(n=3)))
+    fixed = box.apply_fixes(item['file_hash'], box.fix_proposals(item['file_hash'])['proposals'], expected_check_hash=box.get(item['file_hash'])['check_hash'])
+    with box.connect() as db:
+        bases, histories = box._history_inventory(db)
+    slim = {key: [dict(file_hash=key, check_hash=r.get('check_hash'), fixed_from=r.get('fixed_from'), fixes_applied=r.get('fixes_applied')) for r in rows[:-1]] + rows[-1:]
+            for key, rows in histories.items()}
+    full_graph, slim_graph = WorkingCopies(bases, histories), WorkingCopies(bases, slim)
+    assert any(len(rows) > 1 for rows in histories.values())
+    for name in ('parents', 'children', 'invalid', 'items', 'recovered'):
+        assert getattr(full_graph, name) == getattr(slim_graph, name), name
+    for key in bases:
+        assert full_graph.resolve(key) == slim_graph.resolve(key)
+    assert slim_graph.resolve(item['file_hash'])['working_hash'] == fixed['file_hash']
