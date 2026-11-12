@@ -818,6 +818,11 @@ class handler(BaseHTTPRequestHandler):
                         proof = self.report_view(inbox, file_hash)['checked_copy']
                         if not proof['ready'] or proof.get('file_hash') != file_hash or query.get('check') != [proof['check_hash']]:
                             raise Conflict('This copy changed or its evidence expired while reading the file. Reload before downloading a checked copy.')
+                if query.get('checked') != ['1']:
+                    # An ordinary download opens in Excel without its repair prompt; the stored version and the
+                    # exact checked copy are never altered.
+                    from hosting.xlsx_repair import excel_safe
+                    raw = excel_safe(filename, raw)
                 safe = re.sub(r'[^A-Za-z0-9 ._()-]', '_', filename)[:180] or 'report'
                 kind = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if safe.lower().endswith('.xlsx') else 'text/csv; charset=utf-8'
                 headers = {'Content-Disposition': f'attachment; filename="{safe}"'}
