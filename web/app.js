@@ -2568,7 +2568,10 @@
       run.fixed ? h('p', {class: 'fd-hint'}, `${run.reused ? 'Matches saved version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept unchanged.`) : null,
       list(run.manual ? `See the ${plural(items.length, 'change')} you made` : `See the ${plural(items.length, 'change')} Dex made`, items), list(`See the ${plural(tidied.length, 'formatting clean-up')}`, tidied),
       h('div', {class: 'fd-cardacts'},
-        r && (run.fixed || tidied.length || run.look) ? h('a', {class: 'btn primary small', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download fixed report') : null,
+        // What is left can be fixed by hand or ignored right here, without looking for the buttons further down.
+        left ? h('button', {type: 'button', class: 'btn primary small', id: 'fd-revision-manual', onclick: () => { const open = fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)); if (open.length) { state.fdAIRun = null; fdManualStart(open); } }}, 'Fix manually') : null,
+        left ? h('button', {type: 'button', class: 'btn small', id: 'fd-revision-ignore', onclick: () => { const open = fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)); if (open.length) fdReviewDialog(open, 'ignore'); }}, left === 1 ? 'Ignore it' : 'Ignore them') : null,
+        r && (run.fixed || tidied.length || run.look) ? h('a', {class: 'btn ' + (left ? '' : 'primary ') + 'small', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download fixed report') : null,
         run.fixed || tidied.length ? h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'history'; drawReport(); }}, 'View history') : null,
         dismiss));
   }
