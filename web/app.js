@@ -2018,7 +2018,7 @@
       })));
     if (dc.stale) body.append(h('p', {class: 'fd-coverage', role: 'note'}, icon('warn', 14), ` ${plural(dc.stale, 'earlier decision')} no longer match${dc.stale === 1 ? 'es' : ''} what the finding says now, so ${dc.stale === 1 ? 'it is' : 'they are'} not applied. Decide again.`));
     if (state.decisionPending) body.append(h('p', {class: 'fd-saving', role: 'status'}, h('span', {class: 'spin'}), ' Saving your decision…'));
-    if (state.decisionFailed) body.append(h('div', {class: 'fd-failed', role: 'alert'}, icon('warn', 14), ' ', state.decisionFailed.message,
+    if (state.decisionFailed && !state.fdAfterAIPending) body.append(h('div', {class: 'fd-failed', role: 'alert'}, icon('warn', 14), ' ', state.decisionFailed.message,
       state.decisionFailed.retry ? h('button', {type: 'button', class: 'btn small', onclick: () => fdSendDecision(state.decisionFailed.retry)}, 'Try again') : null,
       h('button', {type: 'button', class: 'btn small subtle', onclick: () => { state.decisionFailed = null; drawSide(); }}, 'Dismiss')));
     // a report that is not ready says why, with one clear next step
@@ -2189,13 +2189,24 @@
       const soft = fdItems().filter(it => mine.has(it.key) && it.fp && it.state === 'open' && (/_format_differs$/.test(it.issue?.code || '') ||
         it.tier !== 'blocker' && it.issue?.severity !== 'high' && it.source == null && !/^SharePoint/i.test(String(it.issue?.source || ''))));
       let leftAsWritten = 0;
-      if (soft.length && soft.length <= 1000) {
+      // Dex's own follow-up never shows an error: if the report was updated in the meantime (its SharePoint check
+      // finished, for example) the step is simply done again on the updated report.
+      const softNow = () => fdItems().filter(it => mine.has(it.key) && it.fp && it.state === 'open' && (/_format_differs$/.test(it.issue?.code || '') ||
+        it.tier !== 'blocker' && it.issue?.severity !== 'high' && it.source == null && !/^SharePoint/i.test(String(it.issue?.source || ''))));
+      for (let attempt = 0, todo = soft; attempt < 3 && todo.length && todo.length <= 1000; attempt++) {
         try {
-          await fdSendDecision({...findingBinding(soft), ids: soft.map(x => x.key), action: 'reject', from: soft[0], batch: true,
+          await fdSendDecision({...findingBinding(todo), ids: todo.map(x => x.key), action: 'reject', from: todo[0], batch: true, quiet: true,
             reason: 'Dex had no safe change to make, so this was left as written by Fix with AI.'});
-          if (!state.decisionFailed) leftAsWritten = soft.length; else { state.decisionFailed = null; drawSide(); }
         } catch (e) { /* they stay in the list */ }
+        const failed = !!state.decisionFailed; state.decisionFailed = null;
+        for (let i = 0; i < 100 && (state.report?.file_hash !== run.hash || !state.fixes || fdActiveBusy()); i++) await pause(400);
+        if (state.report?.file_hash !== run.hash || !state.fixes) break;
+        const rest = softNow();
+        leftAsWritten += todo.length - rest.length;
+        if (!failed && rest.length === todo.length) break;   // nothing moved and nothing failed: leave them listed
+        todo = rest;
       }
+      leftAsWritten = Math.max(0, leftAsWritten);
       if (state.report?.file_hash !== run.hash) return;
       const left = fdItems().filter(it => openStates.includes(it.state)).length;
       state.fdAIRun = {...run, leftAsWritten, summary: true}; drawSide();
@@ -2341,7 +2352,7 @@
       }
     } catch (e) {
       if (e?.reportChanged && !lastTry && state.report?.file_hash === hash && state.fdAIOperation === operation) { state.fdAIRun = {hash, total: todo.length, running: true, waiting: true}; return 'changed'; }
-      state.fdAIRun = {hash, done: true, saveCommitted: e?.saveCommitted === true, http_status: e?.httpStatus || null, category: e?.aiCategory || null, error: e?.message || String(e)}; toast((state.fdAIRun.saveCommitted ? '' : 'AI fix did not finish: ') + state.fdAIRun.error, true); }
+      state.fdAIRun = {hash, done: true, saveCommitted: e?.saveCommitted === true, http_status: e?.httpStatus || null, category: e?.aiCategory || null, error: e?.message || String(e)}; toast((state.fdAIRun.saveCommitted ? '' : 'AI fix did not finish: ') + state.fdAIRun.error, !state.fdAIRun.saveCommitted); }
     finally { if (state.report?.file_hash === state.fdAIRun?.hash) drawSide(); }
   }
   // Fix manually: one error at a time, with its cell highlighted in the spreadsheet. Typed values are kept until
@@ -3026,7 +3037,7 @@
     state.decisionPending = false;
     if (!response.ok) {   // refused (409 stale / unknown findings, 400 missing reason, 403 not allowed): nothing was saved
       state.decisionFailed = {message: 'Not saved: ' + (data.error || `the server answered ${response.status}.`), retry: null};
-      if (response.status === 409) { toast('Not saved. The report changed; showing its current state.', true); await openReport(hash, true); state.decisionFailed = {message: 'Not saved: ' + (data.error || 'the report changed.'), retry: null}; drawSide(); }
+      if (response.status === 409) { if (!req.quiet) toast('Not saved. The report changed; showing its current state.', true); await openReport(hash, true); state.decisionFailed = {message: 'Not saved: ' + (data.error || 'the report changed.'), retry: null}; drawSide(); }
       else drawSide();
       return;
     }
