@@ -147,6 +147,14 @@ def resolve(result, filename, job, day, registry, snapshot, manual=None):
         if len(by_site) == 1:
             c = by_site[0]
             return _pick(out, c, job, 'verified' if c.get('verified') else 'matched')
+        # Several lists on the site carry the job label (for example an empty "#2" copy). The report's own source
+        # record URLs name the exact list its rows came from, which settles it without asking a person.
+        from urllib.parse import unquote
+        named_lists = {str(l.get('list') or '').strip().lower() for l in (result.get('dataset_selection') or {}).get('source_lists') or [] if l.get('list')}
+        exact = [c for c in by_site if c.get('url') and unquote(str(c['url']).rstrip('/').rsplit('/', 1)[-1]).strip().lower() in named_lists]
+        if len(named_lists) == 1 and len(exact) == 1:
+            out['evidence'].append(f'Its source record URLs point to the list "{sorted(named_lists)[0]}".')
+            return _pick(out, exact[0], job, 'verified' if exact[0].get('verified') else 'matched')
         return dict(out, status='ambiguous', job=job, evidence=out['evidence'] + ['Several lists on that site carry this job label.'])
     pool = cands
     for label, hint in (('report title', title_hint), ('filename', file_hint)):

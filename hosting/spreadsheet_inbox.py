@@ -929,7 +929,9 @@ class SpreadsheetInbox:
         ctx = ctx or self.assignment_context()
         rv = review or {}
         a = registry.resolve(result, result.get('filename'), rv.get('job'), rv.get('day'), ctx['registry'], ctx['snapshot'],
-                             ctx['manual'].get(result.get('file_hash')))
+                             # a person's client choice stays with the report through its fixed copies
+                             ctx['manual'].get(result.get('file_hash')) or ctx['manual'].get((result.get('fixed_from') or {}).get('file_hash'))
+                             or ctx['manual'].get(result.get('root_hash')))
         a['label'] = registry.label(a)
         a['needs_person'] = a['status'] in registry.NEEDS_PERSON
         return a

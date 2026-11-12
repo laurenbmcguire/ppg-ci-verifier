@@ -359,3 +359,19 @@ def test_version_graph_needs_only_links_from_earlier_checks(tmp_path):
     for key in bases:
         assert full_graph.resolve(key) == slim_graph.resolve(key)
     assert slim_graph.resolve(item['file_hash'])['working_hash'] == fixed['file_hash']
+
+
+def test_client_choice_follows_the_report_and_source_list_settles_same_site_lists():
+    """A reviewer's client choice stays with the fixed copies of a report, and when two lists on one site carry the
+    job label the list named by the report's own source record URLs decides."""
+    from hosting import registry
+    cands = [dict(client_key='SLAlabama', client='SL Alabama', site='SLAlabama_AlexanderCity', job='2169-SLALAL-SLAL', list_id='a',
+                  url='https://x.sharepoint.com/sites/SLAlabama_AlexanderCity/Lists/Data%202169SLALALSLAL'),
+             dict(client_key='SLAlabama', client='SL Alabama', site='SLAlabama_AlexanderCity', job='2169-SLALAL-SLAL', list_id='b',
+                  url='https://x.sharepoint.com/sites/SLAlabama_AlexanderCity/Lists/Data%202169SLALALSLAL%202')]
+    snapshot = [dict(key='SLAlabama', client='SL Alabama', jobs=[dict(job=c['job'], site=c['site'], list_id=c['list_id'], url=c['url']) for c in cands])]
+    result = dict(filename='SL Alabama - 2169 - 2026-11-06.xlsx', dataset_selection=dict(source_lists=[dict(site='SLAlabama_AlexanderCity', list='Data 2169SLALALSLAL')]))
+    got = registry.resolve(result, result['filename'], 'SLALAL-SLAL-2169', '2026-11-06', [], snapshot)
+    assert got['status'] in ('matched', 'verified') and got['client'] == 'SL Alabama' and got['list_id'] == 'a'
+    unknown = dict(result, dataset_selection=dict(source_lists=[dict(site='SLAlabama_AlexanderCity', list='Some other list')]))
+    assert registry.resolve(unknown, result['filename'], 'SLALAL-SLAL-2169', '2026-11-06', [], snapshot)['status'] == 'ambiguous'
