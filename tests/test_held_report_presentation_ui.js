@@ -37,7 +37,7 @@ test('incomplete, unavailable or out-of-date checks never become Completed',()=>
  }
  // A finished report whose checks are merely being refreshed after a checker update stays Completed and in Done.
  {const o=clean();delete o.holds;o.internal_check_status='outdated_checks_require_recheck';assert.equal(ctx.queueCheck(o)[0],'Completed');assert.equal(ctx.queueNeedsAttention(o),false);
-  o.review.status='check';assert.equal(ctx.queueCheck(o)[0],'Needs a recheck');assert.equal(ctx.queueNeedsAttention(o),true);}
+  o.review.status='check';assert.notEqual(ctx.queueCheck(o)[0],'Completed');assert.notEqual(ctx.queueCheck(o)[0],'Needs a recheck');assert.equal(ctx.queueNeedsAttention(o),true);}
  const r=clean();r.verification.source_verified=false;r.verification.source_status='error';assert.equal(ctx.queueCheck(r)[0],'Completed');
  assert.equal(ctx.queueSource(r),'Source not verified');
 });

@@ -203,8 +203,9 @@
   function queueCheck(r) {
     const rv = r.review, c = rv?.counts || {};
     if (!rv || r.internal_check_status === 'could_not_load_latest_check') return ['Check unavailable', 'check'];
-    if (r.internal_check_status === 'outdated_checks_require_recheck') return queueDone(r) && !rv.sent_at ? ['Completed', 'clear'] : ['Needs a recheck', 'check'];
-    if (rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false) return ['Needs a recheck', 'check'];
+    // Out-of-date checks are refreshed by the app itself in the background; the list keeps showing the last result
+    // (Completed or the number of possible errors) instead of asking anyone for a recheck.
+    if (rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false) return ['Check incomplete', 'check'];
     if (rv.sent_at) return ['Sent to client', 'clear'];
     if (rv.status === 'clear' && rv.sharepoint?.status === 'differences') return ['Does not match SharePoint', 'check'];
     if (queueZero(r)) return ['Completed', 'clear'];
