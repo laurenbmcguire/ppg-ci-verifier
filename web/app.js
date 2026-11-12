@@ -2172,7 +2172,10 @@
       if (state.report?.file_hash !== run.hash || !state.fixes || versionReadOnly(state.report)) return;
       const mine = new Set((run.unfixed || []).map(x => x.key));
       // A difference from SharePoint is never set aside automatically either.
-      const soft = fdItems().filter(it => mine.has(it.key) && it.fp && it.state === 'open' && (/_format_differs$/.test(it.issue?.code || '') || it.tier !== 'blocker' && it.issue?.severity !== 'high') && it.source == null && !/^SharePoint/i.test(String(it.issue?.source || '')));
+      // A value that is only written in a different pattern is always left as written, also when SharePoint holds the
+      // very same value (that confirms it, it is not a difference).
+      const soft = fdItems().filter(it => mine.has(it.key) && it.fp && it.state === 'open' && (/_format_differs$/.test(it.issue?.code || '') ||
+        it.tier !== 'blocker' && it.issue?.severity !== 'high' && it.source == null && !/^SharePoint/i.test(String(it.issue?.source || ''))));
       let leftAsWritten = 0;
       if (soft.length && soft.length <= 1000) {
         try {
@@ -2186,7 +2189,7 @@
       state.fdAIRun = {...run, leftAsWritten, summary: true}; drawSide();
       globalThis.setTimeout?.(() => { const side = document.getElementById('side'); if (side) side.scrollTop = 0; }, 0);
       toast(`${run.fixed ? `Dex fixed ${plural(run.fixed, 'cell')}` : 'Dex had nothing to change'}${leftAsWritten ? ` and left ${leftAsWritten} as written` : ''}. ` +
-        (left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you (serious, or different from SharePoint): ${left === 1 ? 'it is' : 'they are'} listed on the right.` : 'No possible errors left.'), left > 0);
+        (left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you (serious, or different from SharePoint): ${left === 1 ? 'it is' : 'they are'} listed on the right.` : 'No possible errors left.'));   // a result, not a failure: never shown as an error message
     })().finally(() => { state.fdAfterAIPending = false; if (state.fdAIRun?.finishing) { state.fdAIRun = {...state.fdAIRun, finishing: false, summary: true}; if (state.report?.file_hash === state.fdAIRun.hash) drawSide(); } });
   }
   function fdSummaryWhenReady() {
