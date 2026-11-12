@@ -2174,6 +2174,12 @@
   // Serious errors are never set aside automatically: they stay in the list for a person. With the automatic switch off,
   // the result box with its choices is shown instead.
   const fdAutoMode = () => typeof store !== 'undefined' && store.get('rd-auto-tidy', true) !== false;
+  // What Dex had left as written on the version being edited by hand: the same items are left as written again on
+  // the newly saved version, so a manual fix never brings back errors that were already settled.
+  const fdDexLeft = () => fdItems().filter(it => it.state === 'kept' && /^Dex had no safe change/.test(String(it.decision?.reason || ''))).map(it => ({key: it.key}));
+  function fdManualSaved(run, receipt, carried) {
+    if (carried.length && fdAutoMode()) fdAfterAI({...run, unfixed: carried}, receipt); else state.fdAIRun = run;
+  }
   function fdAfterAI(run, report) {
     if (typeof store === 'undefined' || store.get('rd-auto-tidy', true) === false) { fdAIDoneDialog(run, report); return; }
     state.fdAfterAIPending = true;
@@ -2211,7 +2217,7 @@
       const left = fdItems().filter(it => openStates.includes(it.state)).length;
       state.fdAIRun = {...run, leftAsWritten, summary: true}; drawSide();
       globalThis.setTimeout?.(() => { const side = document.getElementById('side'); if (side) side.scrollTop = 0; }, 0);
-      toast(`${run.fixed ? `Dex fixed ${plural(run.fixed, 'cell')}` : 'Dex had nothing to change'}${leftAsWritten ? ` and left ${leftAsWritten} as written` : ''}. ` +
+      toast(`${run.manual ? `You changed ${plural(run.fixed, 'cell')}` : run.fixed ? `Dex fixed ${plural(run.fixed, 'cell')}` : 'Dex had nothing to change'}${leftAsWritten ? ` and left ${leftAsWritten} as written` : ''}. ` +
         (left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you (serious, or different from SharePoint): ${left === 1 ? 'it is' : 'they are'} listed on the right.` : 'No possible errors left.'));   // a result, not a failure: never shown as an error message
     })().finally(() => { state.fdAfterAIPending = false; if (state.fdAIRun?.finishing) { state.fdAIRun = {...state.fdAIRun, finishing: false, summary: true}; if (state.report?.file_hash === state.fdAIRun.hash) drawSide(); } });
   }
@@ -2410,10 +2416,11 @@
       fdFreeKeep(); const c = readyChanges();
       if (!c.total) { toast('Nothing was changed yet. Type a different value first.'); return; }
       const report = state.report, from = revisionOf(report);
+      const carried = fdDexLeft();
       state.fdFree = null; drawSide();   // the typed box is captured above; left on screen it would count as an unsaved draft and block opening the saved version
       const receipt = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding: c.binding, returnReceipt: true}), next = receipt?.file_hash;
-      if (next) state.fdAIRun = {hash: next, done: true, fixed: c.total, tried: c.total, from, version: revisionOf(receipt), reused: receipt.save_outcome?.type === 'existing_version', originalHash: report.file_hash, manual: true, summary: fdAutoMode(), leftAsWritten: 0,
-        items: Object.values(c.edits).map(e => ({where: `${e.sheet} cell ${e.cell}`, text: '', before: e.before, after: e.after}))};
+      if (next) fdManualSaved({hash: next, done: true, fixed: c.total, tried: c.total, from, version: revisionOf(receipt), reused: receipt.save_outcome?.type === 'existing_version', originalHash: report.file_hash, manual: true, summary: fdAutoMode(), leftAsWritten: 0,
+        items: Object.values(c.edits).map(e => ({where: `${e.sheet} cell ${e.cell}`, text: '', before: e.before, after: e.after}))}, receipt, carried);
       if (state.report?.file_hash === next) drawSide();
     };
     const input = f.cell && typeof f.before === 'string' ? h('input', {id: 'fd-free-input', class: 'fd-manual-input', 'aria-label': `New value for ${f.sheet} cell ${f.cell}`, value: mine ? mine.after : f.before, placeholder: 'Type the correct value'}) : null;
@@ -2498,10 +2505,11 @@
       keep(); const c = readyChanges();
       if (!c.total) { toast('Nothing typed yet. Nothing was changed.'); return; }
       const report = state.report, from = revisionOf(report);
+      const carried = fdDexLeft();
       state.fdManual = null;
       const receipt = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding: c.binding, returnReceipt: true}), next = receipt?.file_hash;
-      if (next) state.fdAIRun = {hash: next, done: true, fixed: c.total, tried: c.total, from, version: revisionOf(receipt), reused: receipt.save_outcome?.type === 'existing_version', originalHash: report.file_hash, manual: true,
-        items: Object.values(c.edits).map(e => ({where: `${e.sheet} cell ${e.cell}`, text: '', before: e.before, after: e.after}))};
+      if (next) fdManualSaved({hash: next, done: true, fixed: c.total, tried: c.total, from, version: revisionOf(receipt), reused: receipt.save_outcome?.type === 'existing_version', originalHash: report.file_hash, manual: true,
+        items: Object.values(c.edits).map(e => ({where: `${e.sheet} cell ${e.cell}`, text: '', before: e.before, after: e.after}))}, receipt, carried);
       if (state.report?.file_hash === next) drawSide();
     };
     setTimeout(() => { const el = document.querySelector('.fd-manual-input'); if (el && document.activeElement?.tagName !== 'INPUT') { el.focus(); el.select(); } }, 0);
@@ -3053,7 +3061,7 @@
     const e = data.entry || {}, n = (e.ids || []).length;
     const words = {reject: 'kept as recorded', defer: 'waiting for the source owner', confirm: 'confirmed as needing a correction', reopen: 'back on the list for review', undo: 'put back as it was'}[e.action] || 'saved';
     if (req.from) fdAdvanceAfter(req.from, `${n === 1 ? '1 finding' : n + ' findings'} ${words}. Saved.`);
-    else { drawReport(); toast(`Saved: ${words}.`); }
+    else { drawReport(); if (!req.quiet) toast(`Saved: ${words}.`); }
   }
   function fdAdvanceAfter(done, msg) {
     state.fdItems = fdItems();
@@ -4244,7 +4252,21 @@
     const captured = correctionSnapshots.get(accepted);
     if (!captured?.binding?.expected_check_hash) { const error = new Error('Reopen the correction preview before applying. No save was started.'); if (opts.throwOnError) throw error; toast(error.message, true); return null; }
     ({accepted, dec, edits} = captured);
-    const binding = captured.binding, reportAtSave = state.report, openAtSave = state.openRequest, selectedAtSave = state.selected, routeAtSave = globalThis.location?.hash;
+    let binding = captured.binding;
+    if (state.busy || state.decisionPending || state.rechecking || state.aiProposalOperation) { const error = new Error('Another step is still running. No save was started. Wait for it to finish.'); if (opts.throwOnError) throw error; toast(error.message, true); return null; }
+    // Typing a new value into a cell whose error was ignored or set aside puts that error back on the list first
+    // (recorded as a reopen in the history), so the correction is saved instead of being refused.
+    try {
+      const typed = Object.values(edits || {}).filter(e => e.source !== 'Claude');
+      const held = typed.length && state.report?.file_hash === binding.file_hash ? fdItems().filter(it => ['kept', 'deferred', 'rejected'].includes(it.state) && it.decision && it.binding && (it.cell || it.row) &&
+        typed.some(e => (!it.sheet || it.sheet === e.sheet) && (it.cell ? String(it.cell).toUpperCase() === String(e.cell).toUpperCase() : String(e.cell).replace(/^[A-Z]+/i, '') === String(it.row)))) : [];
+      if (held.length) {
+        await fdSendDecision({...findingBinding(held), ids: held.map(it => it.key), action: 'reopen', reason: 'Put back on the list because the reviewer typed a correction for this cell.', quiet: true, batch: true});
+        if (state.decisionFailed) { const message = state.decisionFailed.message; state.decisionFailed = null; throw new Error(message); }
+        if (state.report?.file_hash === binding.file_hash) binding = {...binding, ...reviewBinding(state.report)};
+      }
+    } catch (e) { const error = new Error('The ignored error could not be put back on the list, so nothing was saved. ' + (e?.message || '')); if (opts.throwOnError) throw error; toast(error.message, true); return null; }
+    const reportAtSave = state.report, openAtSave = state.openRequest, selectedAtSave = state.selected, routeAtSave = globalThis.location?.hash;
     if (state.busy || state.decisionPending || state.rechecking || state.aiProposalOperation) { const error = new Error('Another step is still running. No save was started. Wait for it to finish.'); if (opts.throwOnError) throw error; toast(error.message, true); return null; }
     state.busy = true; drawFixes(); updateDownloads();
     if (!opts.quiet) toast('Building the fixed copy with your changes…');
