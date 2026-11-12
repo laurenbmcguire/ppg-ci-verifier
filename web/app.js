@@ -170,8 +170,10 @@
   // To do: everything else. SharePoint and approval status are shown on the row; they do not move a finished report back.
   // Zero possible errors on a current check means the report is done (it moves to the Done list).
   const queueZero = r => { const rv = r.review; return !!rv && rv.status === 'clear'; };
-  const queueDone = r => !!r.review?.sent_at || (queueZero(r) && !r.review.coverage?.truncated && !r.review.coverage?.not_listed && r.review.page?.complete !== false &&
-    !['outdated_checks_require_recheck', 'could_not_load_latest_check'].includes(r.internal_check_status) && r.review.sharepoint?.status !== 'differences');
+  // A finished report stays in Done while a newer version of the checks is run on it in the background; it only
+  // comes back to To do if that recheck actually finds something.
+  const queueDone = r => !!r.review?.sent_at || (queueZero(r) && r.internal_check_status !== 'could_not_load_latest_check' && r.review.sharepoint?.status !== 'differences' &&
+    (r.internal_check_status === 'outdated_checks_require_recheck' || !r.review.coverage?.truncated && !r.review.coverage?.not_listed && r.review.page?.complete !== false));
   const queueNeedsAttention = r => !queueDone(r);
   function queueNewerCopies(r, inventory) {
     if (state.workingCopies) return []; // Parallel graph leaves are independent, never timestamp winners.
@@ -201,7 +203,7 @@
   function queueCheck(r) {
     const rv = r.review, c = rv?.counts || {};
     if (!rv || r.internal_check_status === 'could_not_load_latest_check') return ['Check unavailable', 'check'];
-    if (r.internal_check_status === 'outdated_checks_require_recheck') return ['Needs a recheck', 'check'];
+    if (r.internal_check_status === 'outdated_checks_require_recheck') return queueDone(r) && !rv.sent_at ? ['Completed', 'clear'] : ['Needs a recheck', 'check'];
     if (rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false) return ['Needs a recheck', 'check'];
     if (rv.sent_at) return ['Sent to client', 'clear'];
     if (rv.status === 'clear' && rv.sharepoint?.status === 'differences') return ['Does not match SharePoint', 'check'];

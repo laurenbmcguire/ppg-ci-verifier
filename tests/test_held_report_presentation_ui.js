@@ -31,10 +31,13 @@ test('zero possible errors is Completed and Done, while the SharePoint note and 
 });
 test('incomplete, unavailable or out-of-date checks never become Completed',()=>{
  for(const change of [r=>r.review.coverage.truncated=true,
-  r=>r.internal_check_status='could_not_load_latest_check',r=>r.internal_check_status='outdated_checks_require_recheck',r=>r.review.status='unknown']){
+  r=>r.internal_check_status='could_not_load_latest_check',r=>r.review.status='unknown']){
   const r=clean();delete r.holds;delete r.review.sharepoint.source_verified;change(r);
   assert.equal(ctx.queueFinal(r,[r]),false);assert.notEqual(ctx.queueCheck(r)[1],'clear');assert.equal(ctx.queueNeedsAttention(r),true);
  }
+ // A finished report whose checks are merely being refreshed after a checker update stays Completed and in Done.
+ {const o=clean();delete o.holds;o.internal_check_status='outdated_checks_require_recheck';assert.equal(ctx.queueCheck(o)[0],'Completed');assert.equal(ctx.queueNeedsAttention(o),false);
+  o.review.status='check';assert.equal(ctx.queueCheck(o)[0],'Needs a recheck');assert.equal(ctx.queueNeedsAttention(o),true);}
  const r=clean();r.verification.source_verified=false;r.verification.source_status='error';assert.equal(ctx.queueCheck(r)[0],'Completed');
  assert.equal(ctx.queueSource(r),'Source not verified');
 });
