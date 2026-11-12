@@ -52,3 +52,20 @@ test('filtered historical attention retains newer same-family context without de
  assert.ok(source.includes('queueNewerCopies(r, shown)'));assert.ok(source.includes('Earlier saved copy'));
  assert.ok(source.includes('copies may be parallel branches'));assert.ok(source.includes('saved versions needing attention'));
 });
+
+// An earlier copy of a report that was finished in a later saved copy is not work left to do.
+{
+  const assert = require('node:assert'), vm = require('node:vm'), src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../web/app.js'), 'utf8');
+  const part = src.slice(src.indexOf('  const queueZero = '), src.indexOf('  function queueNewerCopies('));
+  const row = (hash, at, status, job = '2200', day = '2026-11-06') => ({file_hash: hash, received_at: at, internal_check_status: 'findings', assignment: {client_key: 'sl'}, review: {status, job, day, coverage: {}, page: {complete: true}}});
+  const old = row('a', '2026-11-08T02:00:00Z', 'check'), fixed = row('b', '2026-11-12T16:00:00Z', 'clear'), other = row('c', '2026-11-08T02:00:00Z', 'check', '2207');
+  const later = row('d', '2026-11-12T17:00:00Z', 'check', '2169'), earlierDone = row('e', '2026-11-08T02:00:00Z', 'clear', '2169');
+  const ctx = vm.createContext({state: {list: [old, fixed, other, later, earlierDone]}});
+  vm.runInContext(part + '\nglobalThis.out = [queueNeedsAttention, queueSuperseded];', ctx);
+  const [needs] = ctx.out;
+  assert.equal(needs(old), false, 'finished in a later copy');
+  assert.equal(needs(fixed), false);
+  assert.equal(needs(other), true, 'another job stays to do');
+  assert.equal(needs(later), true, 'a later copy with errors stays to do even if an earlier one was clear');
+  console.log('ok - earlier copies of a finished report leave To do');
+}

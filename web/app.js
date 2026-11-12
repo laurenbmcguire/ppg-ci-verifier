@@ -176,7 +176,15 @@
   // comes back to To do if that recheck actually finds something.
   const queueDone = r => !!r.review?.sent_at || (queueZero(r) && r.internal_check_status !== 'could_not_load_latest_check' && r.review.sharepoint?.status !== 'differences' &&
     (r.internal_check_status === 'outdated_checks_require_recheck' || !r.review.coverage?.truncated && !r.review.coverage?.not_listed && r.review.page?.complete !== false));
-  const queueNeedsAttention = r => !queueDone(r);
+  // The same report (client, job and day) saved again later and finished there: the earlier copies are not work left
+  // to do. They stay available under All and from the finished report's saved versions.
+  const queueReportKey = r => r.review?.job && r.review?.day ? JSON.stringify([r.assignment?.client_key || '', r.review.job, r.review.day]) : null;
+  function queueSuperseded(r) {
+    const key = queueReportKey(r), saved = Date.parse(r.received_at || '');
+    if (!key || !Number.isFinite(saved)) return false;
+    return (state.list || []).some(o => o.file_hash !== r.file_hash && Date.parse(o.received_at || '') > saved && queueDone(o) && queueReportKey(o) === key);
+  }
+  const queueNeedsAttention = r => !queueDone(r) && !queueSuperseded(r);
   function queueNewerCopies(r, inventory) {
     if (state.workingCopies) return []; // Parallel graph leaves are independent, never timestamp winners.
     const saved = Date.parse(r.received_at || '');
