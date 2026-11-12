@@ -1354,6 +1354,9 @@ class SpreadsheetInbox:
                         type='existing_version', requested_from=file_hash,
                         expected_check_hash=expected_check_hash, changes=record['changes']))
                 raise ValueError('The corrected content matches an unrelated upload. No version was changed; review the requested changes manually.')
+            if new_item['file_hash'] == file_hash:
+                # A version is never recorded as its own correction: that once made a report's history unreadable.
+                raise ValueError('These changes leave the workbook exactly as it is. Nothing was saved.')
             revision = int(result.get('revision') or 1) + 1
             record = dict(record, fixed_filename=new_item['filename'], revision=revision)
             result.pop('check_hash', None); result.pop('checked_at', None)

@@ -561,7 +561,7 @@
     const bound = Object.freeze({file_hash: r.file_hash, expected_check_hash: r.check_hash});
     const current = () => state.report === r && state.selected === bound.file_hash && state.report?.check_hash === bound.expected_check_hash;
     const message = h('p', {role: 'status'}, 'An admin can review whether this isolated history conflict is safely recoverable.');
-    const button = h('button', {type: 'button', class: 'btn', onclick: async () => {
+    const run = async auto => {
       if (!current() || state.busy || state.rechecking || state.decisionPending) return;
       button.disabled = true;
       try {
@@ -569,18 +569,27 @@
         if (!current()) return;
         const plan = preview.result;
         if (plan?.file_hash !== bound.file_hash || plan?.expected_check_hash !== bound.expected_check_hash || !plan?.recovery_token) throw new Error('Recovery preview did not match this exact saved report.');
-        if (!window.confirm(plan.message + '\n\nRecord this history recovery now?')) return;
+        if (!auto && !window.confirm(plan.message + '\n\nRecord this history recovery now?')) return;
         if (!current()) return;
         message.textContent = 'Saving the audited history recovery…';
         const saved = await api('/api/spreadsheets/history-recovery', {...bound, recovery_token: plan.recovery_token, apply: true, confirm: true});
         if (!saved.applied || saved.result?.file_hash !== bound.file_hash || saved.result?.history_recovery?.from_check !== bound.expected_check_hash) throw new Error('Recovery was not confirmed. Reload the report before retrying.');
         if (current()) {
           await openReport(bound.file_hash, true);
-          toast('Review controls restored. Existing findings and source holds still apply.');
+          toast(auto ? 'This report had a damaged version history. It was repaired and can be worked on again.' : 'Review controls restored. Existing findings and source holds still apply.');
         }
       } catch (error) { message.textContent = error.message + ' Reload the report before retrying an uncertain save.'; }
       finally { if (button.isConnected) button.disabled = false; }
-    }}, 'Review history recovery');
+    };
+    const button = h('button', {type: 'button', class: 'btn', onclick: () => run(false)}, 'Review history recovery');
+    // Working automatically: the server only ever repairs the one safe case (a version recorded as its own fix), so the
+    // admin does not have to find and press this. Tried once per report; the button stays if it cannot be repaired.
+    state.fdAutoRecovered ||= {};
+    if (typeof fdAutoMode === 'function' && fdAutoMode() && !state.fdAutoRecovered[bound.file_hash]) {
+      state.fdAutoRecovered[bound.file_hash] = true;
+      message.textContent = 'Repairing this report\u2019s version history\u2026';
+      globalThis.setTimeout?.(() => run(true), 0);
+    }
     return h('section', {class: 'fd-history-recovery'}, message, button);
   }
   // Only saved evidence is grouped here. Browser drafts, suggestions and AI recommendations
