@@ -1415,7 +1415,17 @@
         if (target) target.replaceChildren(h('p', {role: 'alert'}, `Summary unavailable: ${error.message}. The recorded findings and actions below are unchanged.`));
         else if (owner.isConnected && !stillCurrent()) output.replaceChildren(h('p', {role: 'status'}, 'Report changed; summary discarded. Reopen the current review.'));
       }
-      finally { operation.cancel(); }
+      finally {
+        operation.cancel();
+        // If the panel was redrawn while Dex was writing, its new buttons were drawn greyed out and nothing switched
+        // them back on. Give the three choices the state they have now that the summary is finished.
+        try {
+          const shown = document.querySelector('.fd-report-summary .fd-fixall');
+          const fresh = shown && state.report === report ? fdReportSummary(report).querySelector('.fd-fixall') : null;
+          const now = shown ? [...shown.querySelectorAll('button')] : [], want = fresh ? [...fresh.querySelectorAll('button')] : [];
+          if (want.length && now.length === want.length) now.forEach((node, index) => { node.disabled = want[index].disabled; });
+        } catch (e) { /* the next redraw sets them */ }
+      }
     }}, state.aiOn ? 'Generate AI summary' : 'AI summary unavailable: AI is off');
     if (compact) return h('section', {class: 'fd-review-summary fd-summary-compact', 'aria-label': 'Findings summary'},
       output,
