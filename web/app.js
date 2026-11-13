@@ -25,10 +25,18 @@
   };
   async function api(path, body) {
     if (body !== undefined && gridDirty() && !gridRequestAllowed(path, body)) throw new Error('Preview or discard the spreadsheet draft before another operation. Nothing changed.');
-    const response = await fetch(path, body === undefined ? {headers: {Accept: 'application/json'}} : {
-      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Review-Token': 'same-origin'}, body: JSON.stringify(body)});
-    let data = {};
-    try { data = await response.json(); } catch (e) { /* non-JSON error page */ }
+    // Reading (and asking Dex for suggestions) changes nothing, so when the database is only busy for a moment the
+    // request is quietly asked again instead of showing "Durable storage is unavailable". Saves are never repeated here.
+    const repeatable = body === undefined || /^\/api\/spreadsheets\/(fixes|sheet|cells|ai-proposals|review-summary)$/.test(path);
+    let response, data = {};
+    for (let attempt = 0; ; attempt++) {
+      response = await fetch(path, body === undefined ? {headers: {Accept: 'application/json'}} : {
+        method: 'POST', headers: {'Content-Type': 'application/json', 'X-Review-Token': 'same-origin'}, body: JSON.stringify(body)});
+      data = {};
+      try { data = await response.json(); } catch (e) { /* non-JSON error page */ }
+      if (!(repeatable && attempt < 3 && response.status >= 500 && /storage is unavailable/i.test(typeof data.error === 'string' ? data.error : ''))) break;
+      await new Promise(resolve => (globalThis.setTimeout || (f => f()))(resolve, 3000 * (attempt + 1)));
+    }
     if (response.status === 401 && data.signin) { showSignIn(); const error = new Error('Sign in to continue.'); error.httpStatus = 401; throw error; }
     // A crashed or timed-out server answers with an error object, not a sentence: say something a person can read.
     const said = typeof data.error === 'string' ? data.error : data.error?.message && typeof data.error.message === 'string' ? `The server could not finish this (${data.error.message}). Try again in a moment.` : '';
