@@ -1253,11 +1253,18 @@
         };
         const dropTyped = () => { if (!current()) return; store.set(editsKey(), {}); store.set(decisionsKey(), {}); state.fdItems = null; drawReport(); toast('Your unsaved typed changes were removed. Nothing in the report was changed.'); };
         if (typed) return h('div', {class: 'fd-fixall'},
-          h('p', {class: 'fd-fixall-q'}, `You have ${plural(typed, 'change')} waiting that ${typed === 1 ? 'is' : 'are'} not saved yet. Save ${typed === 1 ? 'it' : 'them'} to finish, or remove ${typed === 1 ? 'it' : 'them'} to start over (for example to use Fix with AI).`),
+          h('p', {class: 'fd-fixall-q'}, `You have ${plural(typed, 'change')} waiting that ${typed === 1 ? 'is' : 'are'} not saved yet. Save ${typed === 1 ? 'it' : 'them'} to finish, or let Dex fix the errors instead.`),
           h('div', {class: 'fd-cardacts'},
             h('button', {type: 'button', class: 'btn primary', id: 'fd-save-typed', disabled: off || null, onclick: saveTyped}, `Save my ${plural(typed, 'change')}`),
             h('button', {type: 'button', class: 'btn', id: 'fd-review-typed', disabled: off || null, onclick: () => { if (current()) fdManualStart(scope); }}, 'Look at them first'),
-            h('button', {type: 'button', class: 'btn', id: 'fd-drop-typed', disabled: off || null, onclick: dropTyped}, 'Remove them')));
+            h('button', {type: 'button', class: 'btn', id: 'fd-typed-ai', disabled: off || null, title: 'Removes your typed values and lets Dex fix these errors instead', onclick: () => {
+              if (!current()) return;
+              store.set(editsKey(), {}); store.set(decisionsKey(), {}); state.fdItems = null; drawReport();
+              const open = fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state));
+              if (open.length) fdAIFixNow(open, {everything: true});
+            }}, 'Fix with AI instead'),
+            h('button', {type: 'button', class: 'btn', id: 'fd-drop-typed', disabled: off || null, onclick: dropTyped}, 'Remove them')),
+          h('p', {class: 'fd-hint'}, 'Fix with AI instead removes your typed values first, then Dex works on these errors.'));
         return h('div', {class: 'fd-fixall'},
           h('p', {class: 'fd-fixall-q'}, some ? `${plural(ticked.length, 'possible error')} selected. What would you like to do?` : `What would you like to do with ${all.length === 1 ? 'this possible error' : `these ${all.length} possible errors`}?`),
           h('div', {class: 'fd-cardacts'},
