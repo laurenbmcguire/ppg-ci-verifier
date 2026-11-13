@@ -1600,10 +1600,21 @@
       box.querySelector('h3').setAttribute('tabindex', '-1'); box.querySelector('h3').focus();
     };
     const act = (scope, action) => {
+      // AI fix and Fix manually work on the errors as they are right now, so a background update of the same saved
+      // version (a recheck or the SharePoint check finishing) never makes these two buttons do nothing.
+      const sameVersion = !!state.report && state.report.file_hash === report.file_hash && (state.selected == null || state.selected === report.file_hash);
+      if (action === 'ai' || (action === 'manual' && fdAutoMode())) {
+        if (!sameVersion) { guard(); return; }
+        if (state.aiProposalOperation || state.decisionPending || state.busy || !discard()) { if (state.busy || state.decisionPending || state.aiProposalOperation) toast('Another step is still finishing. Try again in a moment.'); return; }
+        const keys = new Set(scope.map(it => it.key)), live = fdItems().filter(it => keys.has(it.key));
+        if (!live.length) { toast('Tick at least one error first.'); return; }
+        actionVersion++; dlg.close(); dlg.remove();
+        if (action === 'ai') fdAIFixNow(live); else fdManualStart(live);
+        return;
+      }
       if (!guard() || state.aiProposalOperation || state.decisionPending || state.busy || state.rechecking || !discard()) return;
       actionVersion++; dlg.classList.remove('fd-manual-active'); decision.replaceChildren();
-      if (action === 'ai') { dlg.close(); fdAIFixNow(scope); }
-      else if (action === 'manual') manual(scope);
+      if (action === 'manual') manual(scope);   // the step-by-step manual review kept for the non-automatic mode
       else decisionForm('reject', scope);
     };
     const direct = scope => fdDirectControls(scope, act, true);
