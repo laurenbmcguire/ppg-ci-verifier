@@ -1239,6 +1239,25 @@
         // One place for the three choices: they act on the ticked errors, or on every error when none is ticked.
         const ticked = fdPicked(all), scope = ticked.length ? ticked : all, some = ticked.length > 0;
         const ai = scope.filter(fdCanAI), off = busy || state.fdAIRun?.running;
+        // Values typed earlier and never saved keep their errors "in progress", which is why Fix with AI has nothing
+        // to do. Say so, and offer to save them or drop them, instead of a greyed-out button with no reason.
+        const typed = fdManualList(all) || fdFreeActive() || !Object.keys(store.get(editsKey(), {})).length ? 0 : readyChanges().total;
+        const saveTyped = async () => {
+          if (!current()) return;
+          const c = readyChanges(); if (!c.total) return;
+          const report = state.report, from = revisionOf(report), carried = fdDexLeft();
+          const receipt = await applyFixes(c.accepted, c.dec, c.edits, {download: false, binding: c.binding, returnReceipt: true}), next = receipt?.file_hash;
+          if (next) fdManualSaved({hash: next, done: true, fixed: c.total, tried: c.total, from, version: revisionOf(receipt), reused: receipt.save_outcome?.type === 'existing_version', originalHash: report.file_hash, manual: true, summary: fdAutoMode(), leftAsWritten: 0,
+            items: [...c.accepted.map(f => ({where: `${f.sheet} cell ${f.cell}`, text: '', before: f.before, after: c.dec[f.id]?.after ?? f.after})), ...Object.values(c.edits).map(e => ({where: `${e.sheet} cell ${e.cell}`, text: '', before: e.before, after: e.after}))]}, receipt, carried);
+          if (state.report?.file_hash === next) drawSide();
+        };
+        const dropTyped = () => { if (!current()) return; store.set(editsKey(), {}); store.set(decisionsKey(), {}); state.fdItems = null; drawReport(); toast('Your unsaved typed changes were removed. Nothing in the report was changed.'); };
+        if (typed) return h('div', {class: 'fd-fixall'},
+          h('p', {class: 'fd-fixall-q'}, `You have ${plural(typed, 'change')} waiting that ${typed === 1 ? 'is' : 'are'} not saved yet. Save ${typed === 1 ? 'it' : 'them'} to finish, or remove ${typed === 1 ? 'it' : 'them'} to start over (for example to use Fix with AI).`),
+          h('div', {class: 'fd-cardacts'},
+            h('button', {type: 'button', class: 'btn primary', id: 'fd-save-typed', disabled: off || null, onclick: saveTyped}, `Save my ${plural(typed, 'change')}`),
+            h('button', {type: 'button', class: 'btn', id: 'fd-review-typed', disabled: off || null, onclick: () => { if (current()) fdManualStart(scope); }}, 'Look at them first'),
+            h('button', {type: 'button', class: 'btn', id: 'fd-drop-typed', disabled: off || null, onclick: dropTyped}, 'Remove them')));
         return h('div', {class: 'fd-fixall'},
           h('p', {class: 'fd-fixall-q'}, some ? `${plural(ticked.length, 'possible error')} selected. What would you like to do?` : `What would you like to do with ${all.length === 1 ? 'this possible error' : `these ${all.length} possible errors`}?`),
           h('div', {class: 'fd-cardacts'},
