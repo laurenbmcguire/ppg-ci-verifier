@@ -69,3 +69,17 @@ test('filtered historical attention retains newer same-family context without de
   assert.equal(needs(later), true, 'a later copy with errors stays to do even if an earlier one was clear');
   console.log('ok - earlier copies of a finished report leave To do');
 }
+
+// A finished report whose only shortened findings are information notes is Done; unlisted real findings hold it back.
+{
+  const assert = require('node:assert'), vm = require('node:vm'), src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../web/app.js'), 'utf8');
+  const part = src.slice(src.indexOf('  const queueZero = '), src.indexOf('  function queueNewerCopies('));
+  const row = coverage => ({file_hash: 'x', received_at: '2026-11-13T00:00:00Z', internal_check_status: 'no_findings_in_checks_performed', review: {status: 'clear', coverage, page: {complete: true}}});
+  const ctx = vm.createContext({state: {list: []}});
+  vm.runInContext(part + '\nglobalThis.done = queueDone;', ctx);
+  assert.equal(ctx.done(row({truncated: true, not_listed: 43, not_listed_real: 0})), true);
+  assert.equal(ctx.done(row({truncated: true, not_listed: 43, not_listed_real: 2})), false);
+  assert.equal(ctx.done(row({truncated: true, not_listed: 43})), false, 'older checks without the count stay cautious');
+  assert.equal(ctx.done(row({truncated: false, not_listed: 0})), true);
+  console.log('ok - information-only shortening does not hold a finished report back');
+}

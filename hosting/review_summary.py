@@ -388,6 +388,10 @@ def summarize(result, with_issues=True, use_verdicts=True, source_context=None):
                              findings_listed=len(result.get('findings') or []), truncated=bool(result.get('findings_truncated')) or _found_total(result) > len(result.get('findings') or []),
                              not_listed=max(0, _found_total(result) - len(result.get('findings') or [])),
                              by_code={k: dict(total=v, listed=sum(1 for f in result.get('findings') or [] if f.get('code') == k)) for k, v in (result.get('finding_counts') or {}).items()},
+                             # Findings the check counted but did not list, leaving out information-only notes
+                             # (links, formula notices): only these can hide a real possible error.
+                             not_listed_real=sum(max(0, v - sum(1 for f in result.get('findings') or [] if f.get('code') == k))
+                                                 for k, v in (result.get('finding_counts') or {}).items() if severity(k) != 'info'),
                              shown=len(issues), dismissed=len(dismissed), all_findings=len(all_found)),
                review_state=(result.get('review_request') or {}).get('status'),
                sent_at=next((x.get('at') for x in reversed(result.get('sent') or []) if x.get('sent')), None))

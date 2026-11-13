@@ -180,10 +180,13 @@
   // To do: everything else. SharePoint and approval status are shown on the row; they do not move a finished report back.
   // Zero possible errors on a current check means the report is done (it moves to the Done list).
   const queueZero = r => { const rv = r.review; return !!rv && rv.status === 'clear'; };
+  // Every possible error is listed. Notes that are only information (links, formula notices) may be shortened in
+  // the list without holding a finished report back.
+  const queueListed = r => { const c = r.review?.coverage || {}; return !c.truncated && !c.not_listed || c.not_listed_real === 0; };
   // A finished report stays in Done while a newer version of the checks is run on it in the background; it only
   // comes back to To do if that recheck actually finds something.
   const queueDone = r => !!r.review?.sent_at || (queueZero(r) && r.internal_check_status !== 'could_not_load_latest_check' && r.review.sharepoint?.status !== 'differences' &&
-    (r.internal_check_status === 'outdated_checks_require_recheck' || !r.review.coverage?.truncated && !r.review.coverage?.not_listed && r.review.page?.complete !== false));
+    (r.internal_check_status === 'outdated_checks_require_recheck' || queueListed(r) && r.review.page?.complete !== false));
   // The same report (client, job and day) saved again later and finished there: the earlier copies are not work left
   // to do. They stay available under All and from the finished report's saved versions.
   const queueReportKey = r => r.review?.job && r.review?.day ? JSON.stringify([r.assignment?.client_key || '', r.review.job, r.review.day]) : null;
@@ -223,7 +226,7 @@
     if (!rv || r.internal_check_status === 'could_not_load_latest_check') return ['Check unavailable', 'check'];
     // Out-of-date checks are refreshed by the app itself in the background; the list keeps showing the last result
     // (Completed or the number of possible errors) instead of asking anyone for a recheck.
-    if (rv.coverage?.truncated || rv.coverage?.not_listed || rv.page?.complete === false) return ['Check incomplete', 'check'];
+    if (!queueListed(r) || rv.page?.complete === false) return ['Check incomplete', 'check'];
     if (rv.sent_at) return ['Sent to client', 'clear'];
     if (rv.status === 'clear' && rv.sharepoint?.status === 'differences') return ['Does not match SharePoint', 'check'];
     if (queueZero(r)) return ['Completed', 'clear'];
