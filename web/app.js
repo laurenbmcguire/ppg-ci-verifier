@@ -3636,6 +3636,13 @@
         // Nothing left: the copy with every fix applied is one click away, right at the top.
         open === 0 ? h('a', {class: 'btn primary', id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
         // Change any cell by hand, whether or not it was flagged.
+        // Fix with AI is offered on every report. With nothing open it says so instead of being hidden or greyed out.
+        !versionReadOnly(r) ? h('button', {type: 'button', class: 'btn', id: 'fd-ai-any', disabled: !state.fixes || fdBackgroundBusy() || !!state.fdAIRun?.running || state.busy || null, onclick: () => {
+          const open = fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state));
+          if (!open.length) { toast('Nothing for Dex to fix: this report has no open possible errors.'); return; }
+          if (Object.keys(store.get(editsKey(), {})).length) { toast('You have typed changes that are not saved yet. Save them, or choose Fix with AI instead, in the box on the right.'); document.body.classList.add('fd-panel-open'); return; }
+          fdAIFixNow(open, {everything: true});
+        }}, 'Fix with AI') : null,
         !versionReadOnly(r) ? h('button', {type: 'button', class: 'btn', id: 'fd-edit-any', disabled: !state.fixes || fdBackgroundBusy() || !!state.fdAIRun?.running || null, onclick: () => fdFreeStart()}, 'Edit a cell manually') : null,
         h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors')),
       fdFreeCard(),
