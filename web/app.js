@@ -1276,7 +1276,7 @@
         return h('div', {class: 'fd-fixall'},
           h('p', {class: 'fd-fixall-q'}, some ? `${plural(ticked.length, 'possible error')} selected. What would you like to do?` : `What would you like to do with ${all.length === 1 ? 'this possible error' : `these ${all.length} possible errors`}?`),
           h('div', {class: 'fd-cardacts'},
-            h('button', {type: 'button', class: 'btn primary', id: 'fd-fix-everything', disabled: off || !(ai.length || (store.get('rd-auto-tidy', true) !== false && scope.some(it => it.fp && it.state === 'open'))) || null, onclick: () => { if (current()) fdAIFixNow(scope, {everything: !some}); }}, some ? 'Fix selected with AI' : 'Fix everything with AI'),
+            h('button', {type: 'button', class: 'btn primary', id: 'fd-fix-everything', onclick: () => fdAIStart(some ? scope : null, {everything: !some})}, some ? 'Fix selected with AI' : 'Fix everything with AI'),
             h('button', {type: 'button', class: 'btn', id: 'fd-fix-all-manual', disabled: off || null, onclick: () => { if (current()) fdManualStart(scope); }}, 'Fix manually'),
             h('button', {type: 'button', class: 'btn', id: 'fd-ignore-all', disabled: off || null, onclick: () => { if (current()) fdReviewDialog(scope, 'ignore'); }}, 'Ignore possible errors')),
           h('p', {class: 'fd-hint'}, ai.length ? (some ? 'Untick everything to work on the whole report.' : 'Dex fixes every error it can in one go and saves a new version. To pick only some, tick them in the list below.') : state.aiOn ? 'Dex has no safe fix for these. Fix them manually or ignore them.' : 'AI is off. Fix these manually or ignore them.'));
@@ -1718,7 +1718,7 @@
     return h('div', {class: 'fd-direct-actions'},
       scope.length > 1 && !listed ? fdProblemList(scope) : null,
       h('div', {class: 'fd-cardacts'},
-        h('button', {type: 'button', class: 'btn small', disabled: !ai, onclick: () => run(scope, 'ai')}, 'AI fix'),
+        h('button', {type: 'button', class: 'btn small', disabled: !ai && !(typeof fdAutoMode === 'function' && fdAutoMode()), onclick: () => ai ? run(scope, 'ai') : fdAIStart(scope)}, 'AI fix'),
         h('button', {type: 'button', class: 'btn small', onclick: () => run(scope, 'manual')}, 'Fix manually'),
         h('button', {type: 'button', class: 'btn small', disabled: !ignore, onclick: () => run(scope, 'ignore')}, 'Ignore')),
       !ai && !state.aiOn ? h('p', {class: 'fd-hint'}, 'AI fix is off. Fix manually or ignore.') : null,
@@ -2229,6 +2229,31 @@
   // Serious errors are never set aside automatically: they stay in the list for a person. With the automatic switch off,
   // the result box with its choices is shown instead.
   const fdAutoMode = () => typeof store !== 'undefined' && store.get('rd-auto-tidy', true) !== false;
+  // Fix with AI is always there to click. When it cannot start this second it waits for the report to finish getting
+  // ready, and when there is nothing it can do it says why in plain words, instead of being greyed out or missing.
+  async function fdAIStart(scope, opts = {}) {
+    if (!state.report) return;
+    if (versionReadOnly()) { toast('This saved version is read-only, so Dex cannot change it. Open the latest version of this report to use Fix with AI.'); return; }
+    if (state.fdAIRun?.running) { toast('Dex is already working on this report.'); return; }
+    const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const notReady = () => !state.fixes || fdBackgroundBusy() || state.busy || state.rechecking || state.decisionPending || state.aiProposalOperation;
+    if (notReady()) {
+      toast('Fix with AI starts as soon as this report finishes getting ready…');
+      // An automatic clean-up may save and open a new version meanwhile: Dex then works on that newest version.
+      let steady = 0;
+      for (let i = 0; i < 200 && state.report && steady < 3; i++) { await pause(400); steady = notReady() || state.fdTidying ? 0 : steady + 1; }
+      if (!state.report || versionReadOnly()) return;
+      if (notReady()) { toast('The report is still busy. Try Fix with AI again in a moment.'); return; }
+    }
+    const keys = scope ? new Set(scope.map(it => it.key)) : null;
+    const open = fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state) && (!keys || keys.has(it.key)));
+    if (!open.length) { toast(keys ? 'Dex has nothing to fix here: these errors are already settled.' : 'Nothing for Dex to fix: this report has no open possible errors.'); return; }
+    if (Object.keys(store.get(editsKey(), {})).length) { toast('You have typed changes that are not saved yet. Save them, or choose Fix with AI instead, in the box on the right.'); document.body.classList.add('fd-panel-open'); return; }
+    if (!(open.some(fdCanAI) || fdAutoMode() && open.some(it => it.fp && it.state === 'open'))) {
+      toast(state.aiOn ? `Dex has no change it can make to ${open.length === 1 ? 'this error' : 'these errors'}. Fix manually or ignore.` : 'AI is not switched on for this site, so Dex cannot fix these. Fix manually or ignore.'); return;
+    }
+    fdAIFixNow(open, opts);
+  }
   // What Dex had left as written on the version being edited by hand: the same items are left as written again on
   // the newly saved version, so a manual fix never brings back errors that were already settled.
   const fdDexLeft = () => fdItems().filter(it => it.state === 'kept' && /^Dex had no safe change/.test(String(it.decision?.reason || ''))).map(it => ({key: it.key}));
@@ -3658,12 +3683,7 @@
         open === 0 ? h('a', {class: 'btn primary', id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
         // Change any cell by hand, whether or not it was flagged.
         // Fix with AI is offered on every report. With nothing open it says so instead of being hidden or greyed out.
-        !versionReadOnly(r) ? h('button', {type: 'button', class: 'btn', id: 'fd-ai-any', disabled: !state.fixes || fdBackgroundBusy() || !!state.fdAIRun?.running || state.busy || null, onclick: () => {
-          const open = fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state));
-          if (!open.length) { toast('Nothing for Dex to fix: this report has no open possible errors.'); return; }
-          if (Object.keys(store.get(editsKey(), {})).length) { toast('You have typed changes that are not saved yet. Save them, or choose Fix with AI instead, in the box on the right.'); document.body.classList.add('fd-panel-open'); return; }
-          fdAIFixNow(open, {everything: true});
-        }}, 'Fix with AI') : null,
+        h('button', {type: 'button', class: 'btn', id: 'fd-ai-any', onclick: () => fdAIStart(null, {everything: true})}, 'Fix with AI'),
         !versionReadOnly(r) ? h('button', {type: 'button', class: 'btn', id: 'fd-edit-any', disabled: !state.fixes || fdBackgroundBusy() || !!state.fdAIRun?.running || null, onclick: () => fdFreeStart()}, 'Edit a cell manually') : null,
         h('button', {type: 'button', class: 'btn', id: 'fd-open-review', disabled: state.busy || state.rechecking || !state.fixes, onclick: () => fdReviewDialog()}, 'Review all possible errors')),
       fdFreeCard(),
