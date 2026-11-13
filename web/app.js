@@ -1872,7 +1872,11 @@
     const a = r?.assignment || {}, cands = a.candidates || [];
     const pick = cands.find(c => c.url && a.list_id && c.list_id === a.list_id) || (cands.filter(c => c.url).length === 1 ? cands.find(c => c.url) : null);
     const url = r?.review?.sharepoint?.web_url || a.url || pick?.url || '';
-    return /^https:\/\/[a-z0-9-]+\.sharepoint\.com\//i.test(url) ? url : null;
+    if (!/^https:\/\/[a-z0-9-]+\.sharepoint\.com\//i.test(url)) return null;
+    // Open the list already filtered to this report's day (its Date column), so the same day's scans are on screen.
+    const day = String(r?.review?.day || r?.report_day || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !/\/Lists\/[^/?#]+\/?(?:AllItems\.aspx)?$/i.test(url)) return url;
+    return url.replace(/\/?(?:AllItems\.aspx)?$/i, '') + `/AllItems.aspx?FilterFields1=Date&FilterValues1=${day}%2000%3A00%3A00&FilterTypes1=DateTime`;
   }
   function drawReport() {
     if (versionReadOnly()) { drawReadOnlyReport(state.report); return; }
