@@ -19,8 +19,25 @@ DB_ERRORS = (psycopg.Error, OSError)
 UNAVAILABLE = 'Durable storage is unavailable. No success was confirmed; reload before retrying.'
 
 
-def psycopg_connect(database_url):
-    return psycopg.connect(database_url, autocommit=False, connect_timeout=5)
+_BUSY = ('too many connections', 'max clients reached', 'remaining connection slots')
+
+
+def psycopg_connect(database_url, attempts=5, wait=0.5, sleep=None):
+    """Connect, waiting briefly when the database only says it is full right now.
+
+    A page with many pictures opens several requests at once and the pooler allows a fixed number of connections.
+    "Too many connections" clears within moments, so a short wait and another try turns a failed save into a
+    slightly slower one. Any other failure is reported at once, exactly as before.
+    """
+    import time
+    sleep = sleep or time.sleep
+    for attempt in range(attempts):
+        try:
+            return psycopg.connect(database_url, autocommit=False, connect_timeout=5)
+        except psycopg.OperationalError as exc:
+            if attempt == attempts - 1 or not any(text in str(exc).lower() for text in _BUSY):
+                raise
+            sleep(wait * (attempt + 1))
 
 
 class PostgresWorkspace:

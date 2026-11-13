@@ -64,3 +64,35 @@ def test_a_table_that_cannot_match_its_headers_is_left_out_and_the_cells_stay():
     with zipfile.ZipFile(io.BytesIO(fixed)) as z:
         assert not [n for n in z.namelist() if n.startswith('xl/tables/')]
         assert 'tables/table' not in z.read('[Content_Types].xml').decode()
+
+
+def test_connecting_waits_when_the_database_is_only_full_for_a_moment(monkeypatch):
+    import psycopg
+    import pytest
+    from hosting import postgres_storage as storage
+    calls, naps = [], []
+
+    def busy_then_ok(*a, **k):
+        calls.append(1)
+        if len(calls) < 3:
+            raise psycopg.OperationalError('FATAL:  too many connections for role "x"')
+        return 'connection'
+    monkeypatch.setattr(storage.psycopg, 'connect', busy_then_ok)
+    assert storage.psycopg_connect('url', sleep=naps.append) == 'connection'
+    assert len(calls) == 3 and naps == [0.5, 1.0]
+
+    def refused(*a, **k):
+        calls.append(1)
+        raise psycopg.OperationalError('password authentication failed')
+    calls.clear(); monkeypatch.setattr(storage.psycopg, 'connect', refused)
+    with pytest.raises(psycopg.OperationalError):
+        storage.psycopg_connect('url', sleep=naps.append)
+    assert len(calls) == 1   # anything else is reported at once
+
+    def always_busy(*a, **k):
+        calls.append(1)
+        raise psycopg.OperationalError('(EMAXCONNSESSION) max clients reached in session mode')
+    calls.clear(); monkeypatch.setattr(storage.psycopg, 'connect', always_busy)
+    with pytest.raises(psycopg.OperationalError):
+        storage.psycopg_connect('url', sleep=naps.append)
+    assert len(calls) == 5

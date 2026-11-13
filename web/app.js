@@ -2410,6 +2410,19 @@
   }
   // Fix manually: one error at a time, with its cell highlighted in the spreadsheet. Typed values are kept until
   // "Save my changes", which saves them as a new version (the earlier one is kept).
+  // Pictures load two at a time. Each one is a request to the server; asking for a whole sheet of photos at once used
+  // every database connection the app is allowed and made saves fail with "Durable storage is unavailable".
+  function loadPictures(root) {
+    const waiting = [...root.querySelectorAll('img[data-src]')];
+    const next = () => {
+      const img = waiting.shift(); if (!img) return;
+      if (!img.isConnected) { next(); return; }
+      const done = () => { img.removeEventListener('load', done); img.removeEventListener('error', done); next(); };
+      img.addEventListener('load', done); img.addEventListener('error', done);
+      img.src = img.dataset.src; img.removeAttribute('data-src');
+    };
+    next(); next();
+  }
   function fdManualStart(scope) {
     if (!state.report || !scope.length) return;
     state.fdManual = {binding: JSON.stringify(reviewBinding(state.report)), keys: scope.map(it => it.key), at: 0};
@@ -4560,8 +4573,9 @@
       const td = p.cell && table.querySelector(`td[data-cell="${p.cell}"]`); if (!td || p.missing) continue;
       td.classList.add('has-pic');
       td.append(h('a', {href: mediaUrl(p), target: '_blank', rel: 'noopener', class: 'cell-pic', title: `Picture at ${p.cell}${p.item ? ' · SharePoint item ' + p.item : ''}${p.historical ? ' · reference only' : ''}`},
-        h('img', {src: mediaUrl(p), alt: `Photo at ${sheet} ${p.cell}${p.item ? ', item ' + p.item : ''}`, loading: 'lazy'})));
+        h('img', {'data-src': mediaUrl(p), alt: `Photo at ${sheet} ${p.cell}${p.item ? ', item ' + p.item : ''}`})));
     }
+    loadPictures(table);
     const draft = state.gridDraft;
     if (draft && gridCurrent(draft) && draft.sheet === sheet) {
       const td = [...table.querySelectorAll('td[data-cell]')].find(td => td.dataset.cell === draft.cell);
