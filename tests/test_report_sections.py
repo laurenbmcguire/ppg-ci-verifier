@@ -98,3 +98,13 @@ def test_rows_tell_which_list_they_came_from_only_when_every_row_does():
     assert result['dataset_selection']['source_key_lists'] == [KEY[:-1]]
     result = inspect_adaptive([('2nd Shift', _sheet([row + [KEY + '4403'], row[:3] + ['LOT-2', 48, 0, 48, None]]))], {'limitations': []})
     assert result['dataset_selection']['source_key_lists'] == []
+
+
+def test_a_practice_file_is_not_left_waiting_for_a_client():
+    from hosting import registry
+    a = registry.resolve({}, 'PRACTICE - A typing slips - 2026-11-16.xlsx', None, '2026-11-16', [], [])
+    assert a['status'] == 'source' and a['client_key'] == 'practice' and not a.get('list_id')
+    assert a['status'] not in registry.NEEDS_PERSON
+    # an ordinary file with no job number still needs a person
+    assert registry.resolve({}, 'Daily report.xlsx', None, '2026-11-16', [], [])['status'] == 'unmatched'
+    assert registry.resolve({}, 'Practice notes.xlsx', None, '2026-11-16', [], [])['status'] == 'unmatched'

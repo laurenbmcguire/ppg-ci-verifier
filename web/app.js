@@ -3329,7 +3329,7 @@
     // Never in a loop: one automatic SharePoint check per version in a visit, whatever the result. After that the page stays still; the refresh button remains.
     state.fdAutoSPRuns ||= {}; state.fdAutoSPRedone ||= {};
     const runs = state.fdAutoSPRuns[r.file_hash] || 0;
-    if ((fresh && (!redo || state.fdAutoSPRedone[r.file_hash])) || runs >= 1 || state.fdAutoSP[key] || (r.assignment || {}).needs_person) return false;
+    if ((fresh && (!redo || state.fdAutoSPRedone[r.file_hash])) || runs >= 1 || state.fdAutoSP[key] || (r.assignment || {}).needs_person || (r.assignment || {}).client_key === 'practice') return false;
     if (state.fdAutoSPWaiting) return true;
     state.fdAutoSPWaiting = true; let tries = 0;
     const attempt = async () => {

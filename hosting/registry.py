@@ -120,6 +120,11 @@ def resolve(result, filename, job, day, registry, snapshot, manual=None):
         return dict(out, status='manual', client_key=manual.get('client_key'), client=manual.get('client'), job=manual.get('job') or job,
                     site=manual.get('site'), site_id=manual.get('site_id'), list_id=manual.get('list_id'), source=manual.get('source'),
                     evidence=[f'Assigned by {manual.get("by") or "a reviewer"} on {str(manual.get("at") or "")[:10]}.'], assigned=manual)
+    # A file named "PRACTICE ..." is made-up test data: it belongs to no client and no SharePoint list, and says so
+    # instead of waiting for a person to choose a client.
+    if re.match(r'PRACTICE\b', filename or '') and not job and not (result.get('dataset_selection') or {}).get('source_lists'):
+        return dict(out, status='source', client_key='practice', client='Practice (not a client)', job='Practice', job_number=None, source='practice',
+                    evidence=['The file is named as a practice report: made-up data, not a client report. It is not compared with SharePoint.'])
     sites = sorted({l.get('site') for l in (result.get('dataset_selection') or {}).get('source_lists') or [] if l.get('site')})
     title_hint = (result.get('report_identity') or {}).get('client')
     file_hint = filename_client(filename)
