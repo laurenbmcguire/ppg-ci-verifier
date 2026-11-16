@@ -2271,6 +2271,7 @@
     if (!(open.some(fdCanAI) || fdAutoMode() && open.some(it => it.fp && it.state === 'open'))) {
       toast(state.aiOn ? `Dex has no change it can make to ${open.length === 1 ? 'this error' : 'these errors'}. Fix manually or ignore.` : 'AI is not switched on for this site, so Dex cannot fix these. Fix manually or ignore.'); return;
     }
+    state.fdAIWhole = !keys;   // Fix with AI on the whole report settles everything that is open when it finishes
     fdAIFixNow(open, opts);
   }
   // What Dex had left as written on the version being edited by hand: the same items are left as written again on
@@ -2313,10 +2314,42 @@
       }
       leftAsWritten = Math.max(0, leftAsWritten);
       if (state.report?.file_hash !== run.hash) return;
+      // Fix with AI settles everything it was given. What Dex has no correct value for (a serious error, or a difference
+      // from SharePoint) is left exactly as written and recorded as not checked by anyone, so the report is finished
+      // and the revision summary says plainly which errors were not corrected.
+      const whole = !run.manual && state.fdAIWhole === true;
+      const hardNow = () => fdItems().filter(it => (whole || mine.has(it.key)) && it.fp && (it.state === 'open' || whole && it.state === 'selected'));
+      const unsolved = [];
+      for (let attempt = 0, todo = hardNow(); attempt < 3 && todo.length && todo.length <= 1000; attempt++) {
+        const told = todo.map(it => ({key: it.key, where: [it.issue?.sheet, it.issue?.cell || (it.issue?.row ? 'row ' + it.issue.row : null)].filter(Boolean).join(' ') || 'Whole report', text: String(it.text || it.issue?.text || '').slice(0, 200)}));
+        try {
+          await fdSendDecision({...findingBinding(todo), ids: todo.map(x => x.key), action: 'reject', from: todo[0], batch: true, quiet: true,
+            reason: 'Dex had no safe change to make and no correct value to put in, so this was left exactly as written by Fix with AI. Not corrected.',
+            evidence: ['Not checked by a person. Left as written by Fix with AI: Dex found no correct value for it in the report or in SharePoint.']});
+        } catch (e) { /* they stay in the list */ }
+        const failed = !!state.decisionFailed; state.decisionFailed = null;
+        for (let i = 0; i < 100 && (state.report?.file_hash !== run.hash || !state.fixes || fdActiveBusy()); i++) await pause(400);
+        if (state.report?.file_hash !== run.hash || !state.fixes) break;
+        const rest = hardNow(), still = new Set(rest.map(it => it.key));
+        unsolved.push(...told.filter(x => !still.has(x.key)));
+        if (!failed && rest.length === todo.length) break;
+        todo = rest;
+      }
+      if (state.report?.file_hash !== run.hash) return;
+      // A correction that is only a guess (it belongs to no listed error, or to one just left as written) is not applied
+      // either: it is set aside with the rest, and named in the summary.
+      if (whole) {
+        const guesses = fdItems().filter(it => it.state === 'open' && !it.fp && it.fix), dec = store.get(decisionsKey(), {});
+        for (const it of guesses) {
+          dec[it.fix.id] = {...(dec[it.fix.id] || {}), state: 'rejected'};
+          unsolved.push({key: it.key, where: [it.fix.sheet, it.fix.cell].filter(Boolean).join(' ') || 'Whole report', text: String(it.text || it.fix.reason || 'Suggested correction not applied').slice(0, 200)});
+        }
+        if (guesses.length) { store.set(decisionsKey(), dec); state.fdItems = null; }
+      }
       const left = fdItems().filter(it => openStates.includes(it.state)).length;
-      state.fdAIRun = {...run, leftAsWritten, summary: true}; drawSide();
+      state.fdAIRun = {...run, leftAsWritten, unsolved, summary: true}; drawSide();
       globalThis.setTimeout?.(() => { const side = document.getElementById('side'); if (side) side.scrollTop = 0; }, 0);
-      toast(`${run.manual ? `You changed ${plural(run.fixed, 'cell')}` : run.fixed ? `Dex fixed ${plural(run.fixed, 'cell')}` : 'Dex had nothing to change'}${leftAsWritten ? ` and left ${leftAsWritten} as written` : ''}. ` +
+      toast(`${run.manual ? `You changed ${plural(run.fixed, 'cell')}` : run.fixed ? `Dex fixed ${plural(run.fixed, 'cell')}` : 'Dex had nothing to change'}${leftAsWritten ? ` and left ${leftAsWritten} as written` : ''}${unsolved.length ? `. ${plural(unsolved.length, 'error')} Dex could not correct ${unsolved.length === 1 ? 'was' : 'were'} left exactly as written (see the revision summary)` : ''}. ` +
         (left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you (serious, or different from SharePoint): ${left === 1 ? 'it is' : 'they are'} listed on the right.` : 'No possible errors left.'));   // a result, not a failure: never shown as an error message
     })().finally(() => { state.fdAfterAIPending = false; if (state.fdAIRun?.finishing) { state.fdAIRun = {...state.fdAIRun, finishing: false, summary: true}; if (state.report?.file_hash === state.fdAIRun.hash) drawSide(); } });
   }
@@ -2714,9 +2747,13 @@
         tidied.length ? h('li', {}, h('b', {}, String(tidied.length)), ' formatting clean-ups made when the report opened') : null,
         run.look ? h('li', {}, 'Report colours made consistent (one cream, no yellow patches); no value was changed') : null,
         run.tidy || run.manual ? null : h('li', {}, h('b', {}, String(run.leftAsWritten || 0)), ' left as written'),
+        (run.unsolved || []).length ? h('li', {class: 'fd-revision-open'}, h('b', {}, String(run.unsolved.length)), run.unsolved.length === 1 ? ' error Dex could not correct: left exactly as written, not checked by anyone' : ' errors Dex could not correct: left exactly as written, not checked by anyone') : null,
         h('li', {class: left ? 'fd-revision-open' : ''}, h('b', {}, String(left)), left === 1 ? ' possible error still needs you' : ' possible errors still need you')),
       left === 0 ? h('p', {class: 'fd-hint'}, 'Nothing is left to fix, so the Fix buttons are not shown. Download the fixed report below.') : null,
       run.fixed ? h('p', {class: 'fd-hint'}, `${run.reused ? 'Matches saved version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept unchanged.`) : null,
+      (run.unsolved || []).length ? h('details', {class: 'fd-saved-changes', open: true}, h('summary', {}, `See the ${plural(run.unsolved.length, 'error')} Dex could not correct`),
+        h('ul', {class: 'fd-fixed-list'}, run.unsolved.slice(0, 200).map(x => h('li', {}, h('b', {}, x.where), ' ' + x.text)), run.unsolved.length > 200 ? h('li', {}, `…and ${run.unsolved.length - 200} more (see History).`) : null),
+        h('p', {class: 'fd-hint'}, 'These are still wrong in the report. Open Ignored to bring any of them back and fix it by hand.')) : null,
       list(run.manual ? `See the ${plural(items.length, 'change')} you made` : `See the ${plural(items.length, 'change')} Dex made`, items), list(`See the ${plural(tidied.length, 'formatting clean-up')}`, tidied),
       h('div', {class: 'fd-cardacts'},
         // What is left can be fixed by hand or ignored right here, without looking for the buttons further down.
