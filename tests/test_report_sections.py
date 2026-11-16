@@ -69,3 +69,32 @@ def test_hidden_work_sheet_read_by_the_visible_sheet_is_not_counted_twice():
     # a hidden sheet nothing reads is still pointed out
     result = inspect_adaptive([('2nd Shift', _sheet(shown)), ('_Calc', calc)], {'limitations': []}, hidden=hidden)
     assert 'hidden_sheet_with_data' in _codes(result)
+
+
+def test_the_list_named_in_every_row_settles_the_client_when_two_lists_share_the_job_label():
+    from hosting import registry
+    site = 'SLAlabama_AlexanderCity'
+    cands = [dict(client_key='SLAlabama', client='SL Alabama', site=site, site_id='s', job='2169-SLALAL-SLAL', list_id=KEY[:-1].upper()),
+             dict(client_key='SLAlabama', client='SL Alabama', site=site, site_id='s', job='2169-SLALAL-SLAL #2', list_id='b85d1fdb-d7b3-4f5c-8223-8d8f737e06d5')]
+    real = registry.candidates_for
+    registry.candidates_for = lambda job, reg, snap: cands
+    try:
+        name = 'SL Alabama - SLALAL-SLAL-2169 - 2026-11-14.xlsx'
+        keyed = dict(dataset_selection=dict(source_key_lists=[KEY[:-1]]))
+        a = registry.resolve(keyed, name, 'SLALAL-SLAL-2169', '2026-11-14', [], [])
+        assert a['status'] == 'matched' and a['job'] == '2169-SLALAL-SLAL' and a['list_id'] == KEY[:-1].upper()
+        # nothing in the rows names a list: a person still chooses
+        assert registry.resolve(dict(dataset_selection={}), name, 'SLALAL-SLAL-2169', '2026-11-14', [], [])['status'] == 'ambiguous'
+        # rows from two lists, or a list that is not one of this job's: a person still chooses
+        for lists in ([KEY[:-1], 'b85d1fdb-d7b3-4f5c-8223-8d8f737e06d5'], ['00000000-0000-4000-8000-000000000000']):
+            assert registry.resolve(dict(dataset_selection=dict(source_key_lists=lists)), name, 'SLALAL-SLAL-2169', '2026-11-14', [], [])['status'] == 'ambiguous'
+    finally:
+        registry.candidates_for = real
+
+
+def test_rows_tell_which_list_they_came_from_only_when_every_row_does():
+    row = ['2026-11-14', '2', 'P1', 'LOT-1', 48, 0, 48]
+    result = inspect_adaptive([('2nd Shift', _sheet([row + [KEY + '4403'], row[:3] + ['LOT-2', 48, 0, 48, KEY + '4404']]))], {'limitations': []})
+    assert result['dataset_selection']['source_key_lists'] == [KEY[:-1]]
+    result = inspect_adaptive([('2nd Shift', _sheet([row + [KEY + '4403'], row[:3] + ['LOT-2', 48, 0, 48, None]]))], {'limitations': []})
+    assert result['dataset_selection']['source_key_lists'] == []

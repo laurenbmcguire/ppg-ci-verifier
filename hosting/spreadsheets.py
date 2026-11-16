@@ -20,7 +20,7 @@ MAX_MEMBERS = 4000
 MAX_RATIO = 200
 MAX_FIELD = 32767
 from hosting.limits import MAX_FINDINGS  # every finding is stored (bounded only against hostile files)
-CHECKER_VERSION = '2026-11-16-report-sections-v25'
+CHECKER_VERSION = '2026-11-16-report-sections-v26'
 
 
 class SpreadsheetError(ValueError):

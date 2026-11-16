@@ -29,7 +29,7 @@ SYSTEM_COLUMNS = {'odata etag', 'odata type', 'odata id', 'contenttype', 'conten
                   'file system object type', 'server redirected embed url'}
 RECORD_SHEET_WORDS = ('detail', 'details', 'records', 'inspection', 'data', 'log', 'shift')
 _URL_ITEM = re.compile(r'/sites/([^/]+)/Lists/([^/]+)/(\d+)_\.000', re.I)
-_STABLE_KEY = re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:([1-9][0-9]{0,11})', re.I)
+_STABLE_KEY = re.compile(r'([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):([1-9][0-9]{0,11})', re.I)
 _URL_DISPFORM = re.compile(r'/sites/([^/]+)/Lists/([^/]+)/DispForm\.aspx\?ID=(\d+)', re.I)
 
 
@@ -151,7 +151,7 @@ def attach_identity(sheet_rows, sheets, records, cached=None):
                 if r['sheet'] != sheet['name'] or r['table'] != table['index']:
                     continue
                 row = rows[r['row'] - 1] if r['row'] - 1 < len(rows) else []
-                site = lst = item = None
+                site = lst = item = key_list = None
                 url_identity = None
                 if url_col is not None and url_col < len(row):
                     url_identity = source_url_identity(row[url_col])
@@ -166,8 +166,10 @@ def attach_identity(sheet_rows, sheets, records, cached=None):
                         saved = saved[r['row'] - 1] if r['row'] - 1 < len(saved) else []
                         shown = saved[key_col] if key_col < len(saved) and isinstance(saved[key_col], str) else ''
                     keyed = _STABLE_KEY.fullmatch(shown.strip())
-                    item = keyed.group(1) if keyed else None
+                    item, key_list = (keyed.group(2), keyed.group(1).lower()) if keyed else (None, None)
                 r['source'] = dict(site=site, list=lst, item=item) if item else None
+                if item and key_list:
+                    r['source']['key_list'] = key_list   # the SharePoint list id written in the row's own stable source key
                 if item and url_col is not None and url_col < len(row) and isinstance(row[url_col], str):
                     r['source']['url'] = row[url_col]
                 if item and url_identity:
@@ -298,6 +300,8 @@ def select(sources, sheets, records, finding, cached=None):
         photo_sheets=[s['name'] for s in sheets if s['role'] == 'photos'],
         record_count=len(detail), identified_records=identified,
         source_lists=[dict(site=s, list=l) for s, l in sorted(lists, key=str)],
+        source_key_lists=sorted({r['source']['key_list'] for r in detail if r.get('source') and r['source'].get('key_list')})
+                         if detail and all(r.get('source') and r['source'].get('key_list') for r in detail) else [],
         status='ambiguous' if ambiguous else ('certain' if detail else 'no_records'),
         notes=notes)
 

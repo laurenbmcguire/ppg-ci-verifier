@@ -156,6 +156,14 @@ def resolve(result, filename, job, day, registry, snapshot, manual=None):
             out['evidence'].append(f'Its source record URLs point to the list "{sorted(named_lists)[0]}".')
             return _pick(out, exact[0], job, 'verified' if exact[0].get('verified') else 'matched')
         return dict(out, status='ambiguous', job=job, evidence=out['evidence'] + ['Several lists on that site carry this job label.'])
+    # Every record row carries the id of the SharePoint list it came from (its stable source key). One list id that
+    # is one of this job's lists settles which list it is, also when a "#2" copy carries the same job label.
+    key_lists = (result.get('dataset_selection') or {}).get('source_key_lists') or []
+    keyed = [c for c in cands if len(key_lists) == 1 and str(c.get('list_id') or '').lower() == key_lists[0]]
+    named = [h for h in (title_hint, file_hint) if h]
+    if len(keyed) == 1 and (not named or any(_name_matches(h, keyed[0], snapshot) for h in named)):
+        out['evidence'].append(f'Every record row names the SharePoint list it came from: {keyed[0].get("job") or job} on {keyed[0].get("site")}.')
+        return _pick(out, keyed[0], job, 'verified' if keyed[0].get('verified') else 'matched')
     pool = cands
     for label, hint in (('report title', title_hint), ('filename', file_hint)):
         if not hint:
