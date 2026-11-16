@@ -3687,8 +3687,13 @@
     const rv = r.review, tab = state.sideTab || 'fixes';
     const body = h('div', {class: 'sidebody', id: 'side-body'});
     const open = state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
+    // The number never goes blank while the report refreshes itself (a recheck or the SharePoint check reloads it): the
+    // last count for this report stays, or the count the report list already showed, until the fresh one arrives.
+    if (open != null) state.fdLastCount = {hash: r.file_hash, n: open};
+    const listed = rv?.counts || {}, held = open != null ? null : state.fdLastCount?.hash === r.file_hash ? state.fdLastCount.n
+      : [listed.high, listed.medium, listed.low].every(Number.isFinite) ? listed.high + listed.medium + listed.low : null;
     side.replaceChildren(h('header', {class: 'fd-apphead'},
-        h('p', {class: 'fd-errcount' + (open === 0 ? ' done' : '')}, open == null ? 'Counting possible errors…' : open === 0 ? [icon('ok', 18), ' 0 possible errors'] : plural(open, 'possible error')),
+        h('p', {class: 'fd-errcount' + (open === 0 ? ' done' : ''), title: open == null && held != null ? 'Updating…' : null}, open == null ? (held == null ? 'Counting possible errors…' : plural(held, 'possible error')) : open === 0 ? [icon('ok', 18), ' 0 possible errors'] : plural(open, 'possible error')),
         // Nothing left: the copy with every fix applied is one click away, right at the top.
         open === 0 ? h('a', {class: 'btn primary', id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
         // Change any cell by hand, whether or not it was flagged.
