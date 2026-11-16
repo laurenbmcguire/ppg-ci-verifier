@@ -563,6 +563,14 @@
     }
     return true;
   }
+  // The report list follows the report on screen: once it has no possible errors it moves to Done at once, without
+  // waiting for the list to be loaded again.
+  function queueFollow(data) {
+    const at = (state.list || []).findIndex(x => x.file_hash === data?.file_hash), now = data?.review;
+    if (at < 0 || !now || versionReadOnly(data)) return;
+    const fresh = Object.fromEntries(['status', 'counts', 'coverage', 'sharepoint', 'page', 'sent_at', 'approved'].filter(k => now[k] !== undefined).map(k => [k, now[k]]));
+    state.list[at] = {...state.list[at], internal_check_status: data.internal_check_status ?? state.list[at].internal_check_status, review: {...(state.list[at].review || {}), ...fresh}};
+  }
   function versionReadOnly(r = state.report) {
     return !!r && (r.version_view?.historical || r.version_view?.status !== 'current' && !!r.version_view ||
       !!r.version_view?.read_only_reason || !!r.approval || (r.sent || []).some(x => x.sent) || !!r.sending);
@@ -764,6 +772,7 @@
       state.fdSummaryCache = null; state.fdView = 'review'; state.fdCur = null; state.fdTier = null; state.gridSearch = ''; state.sheetScroll = {}; state.gridOnlyMarked = false; state.gridRow = null;
       const sameVersion = state.report?.file_hash === data.file_hash;   // a refresh of the version on screen keeps manual work open
       state.report = data; state.fixes = null; state.showAll = false; if (!sameVersion) { state.fdManual = null; state.fdFree = null; }
+      if (typeof queueFollow === 'function') { try { queueFollow(data); } catch (e) { /* the list refreshes on its next load */ } }
       settle(); drawReport(); drawQueue();
       if (!versionReadOnly(data)) loadFixes(hash);
       if (!versionReadOnly(data) && state.openSendFor && (state.openSendFor === hash || state.openSendFor === 'next' && data.fixed_from)) { state.openSendFor = null; openSend(); }
@@ -3156,6 +3165,7 @@
     await fillPages(data.report);
     const scoped = state.fdReviewScope?.binding === JSON.stringify(reviewBinding(state.report)) ? state.fdReviewScope : null;
     state.report = {...state.report, ...data.report};    // the one state for header, panel, sheet badges and history
+    if (typeof queueFollow === 'function') { try { queueFollow(state.report); if (typeof drawQueue === 'function') drawQueue(); } catch (e) { /* the list refreshes on its next load */ } }
     if (scoped && state.report.file_hash === hash && JSON.stringify(state.report.review?.run || null) === JSON.stringify(req.expected_run)) {
       const decidedKeys = new Set(data.entry?.ids || []);
       state.fdReviewScope = {binding: JSON.stringify(reviewBinding(state.report)), keys: scoped.keys.filter(key => !decidedKeys.has(key))};
