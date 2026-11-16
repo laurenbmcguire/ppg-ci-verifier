@@ -102,18 +102,22 @@ def run(sources, cached, sheets, detail, finding, hidden=None):
             saved = crows[r - 1][c] if r - 1 < len(crows) and c < len(crows[r - 1]) else None
             return saved not in (None, '', 0)
         return True
+    helpers = {s['name'] for s in sheets if s.get('mapping_status') == 'helper'}
     for title, rows in sources:
         info = hidden.get(title)
         if not info:
             continue
         has_data = any(entered(title, r, c, v) for r, row in enumerate(rows, 1) for c, v in enumerate(row))
-        if info['state'] != 'visible' and has_data:
+        # The report's own work sheet (read by the visible sheets) and its hidden record-key column are how the report
+        # is built, not something a person hid: they are not reported.
+        if info['state'] != 'visible' and has_data and title not in helpers:
             finding('hidden_sheet_with_data', title, message=f'Sheet "{title}" is hidden but contains data. Check it is meant to be part of (or left out of) the report.')
         data_rows = [r for r in sorted(info['rows']) if r - 1 < len(rows) and any(entered(title, r, c, v) for c, v in enumerate(rows[r - 1]))]
         if data_rows:
             listed = ', '.join(map(str, data_rows[:12])) + ('…' if len(data_rows) > 12 else '')
             finding('hidden_rows_with_data', title, data_rows[0], message=f'{len(data_rows)} hidden row(s) contain data (rows {listed}). Hidden rows are still counted in totals and can hide duplicates or errors.')
-        data_cols = [c for c in sorted(info['cols']) if any(c < len(row) and entered(title, r, c, row[c]) for r, row in enumerate(rows, 1))]
+        data_cols = [c for c in sorted(info['cols']) if any(c < len(row) and entered(title, r, c, row[c]) for r, row in enumerate(rows, 1))
+                     and not any(c < len(row) and isinstance(row[c], str) and row[c].strip().lower() == 'stable source key' for row in rows)]
         if data_cols:
             finding('hidden_columns_with_data', title, column=_col(data_cols[0]),
                     message=f'Hidden column(s) {", ".join(_col(c) for c in data_cols[:10])} contain data. Unhide and check them.')

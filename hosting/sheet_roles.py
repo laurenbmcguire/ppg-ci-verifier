@@ -29,6 +29,7 @@ SYSTEM_COLUMNS = {'odata etag', 'odata type', 'odata id', 'contenttype', 'conten
                   'file system object type', 'server redirected embed url'}
 RECORD_SHEET_WORDS = ('detail', 'details', 'records', 'inspection', 'data', 'log', 'shift')
 _URL_ITEM = re.compile(r'/sites/([^/]+)/Lists/([^/]+)/(\d+)_\.000', re.I)
+_STABLE_KEY = re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:([1-9][0-9]{0,11})', re.I)
 _URL_DISPFORM = re.compile(r'/sites/([^/]+)/Lists/([^/]+)/DispForm\.aspx\?ID=(\d+)', re.I)
 
 
@@ -127,7 +128,7 @@ def sheet_role(name, rows, header_row, has_detail):
     return 'records' if has_detail else 'other'
 
 
-def attach_identity(sheet_rows, sheets, records):
+def attach_identity(sheet_rows, sheets, records, cached=None):
     """Give each record a SharePoint identity (site, list, item) when the sheet carries one. Never invents one."""
     for sheet in sheets:
         rows = sheet_rows.get(sheet['name'], [])
@@ -141,6 +142,8 @@ def attach_identity(sheet_rows, sheets, records):
             id_col = next((i for i, h in enumerate(heads) if h in ('source item id', 'sharepoint item id', 'list item id', 'item id', 'source id')), None)
             if id_col is None and sheet.get('role') == 'source_export':
                 id_col = next((i for i, h in enumerate(heads) if h == 'id'), None)
+            # "Stable source key" is "<SharePoint list id>:<item id>" on reports built from the list.
+            key_col = next((i for i, h in enumerate(heads) if h == 'stable source key'), None)
             ver_col = next((i for i, h in enumerate(heads) if h in ('ui version string', 'version', 'item version')), None)
             mod_col = next((i for i, h in enumerate(heads) if h == 'modified'), None)
             table['identity_columns'] = dict(url=url_col, item=id_col, version=ver_col, modified=mod_col)
@@ -156,6 +159,14 @@ def attach_identity(sheet_rows, sheets, records):
                         site, lst, item = (url_identity[k] for k in ('site','list','item'))
                 if id_col is not None and id_col < len(row):
                     item = _item_id(row[id_col]) or item
+                if not item and key_col is not None and key_col < len(row) and isinstance(row[key_col], str):
+                    shown = row[key_col]
+                    if shown.startswith('='):   # the value Excel saved for a cell that reads the key from the work sheet
+                        saved = list((cached or {}).get(sheet['name'], []))
+                        saved = saved[r['row'] - 1] if r['row'] - 1 < len(saved) else []
+                        shown = saved[key_col] if key_col < len(saved) and isinstance(saved[key_col], str) else ''
+                    keyed = _STABLE_KEY.fullmatch(shown.strip())
+                    item = keyed.group(1) if keyed else None
                 r['source'] = dict(site=site, list=lst, item=item) if item else None
                 if item and url_col is not None and url_col < len(row) and isinstance(row[url_col], str):
                     r['source']['url'] = row[url_col]
@@ -177,7 +188,7 @@ def _item_key(r):
     return s['item'] if s else None
 
 
-def select(sources, sheets, records, finding):
+def select(sources, sheets, records, finding, cached=None):
     """Assign roles, choose the authoritative record set and compare the other presentations with it.
     Records outside the authoritative set get table_kind 'summary', 'source_copy' or 'photo' so nothing
     downstream counts them. Returns the dataset_selection dict stored on the result."""
@@ -198,7 +209,7 @@ def select(sources, sheets, records, finding):
             heads = set(_headers(sheet_rows.get(sheet['name'], []), sheet['tables'][0]['header_row'] if sheet['tables'] else None))
             if len(heads & SYSTEM_COLUMNS) >= 2 or _norm(sheet['name']) in SOURCE_SHEET_NAMES:
                 sheet['role'] = 'source_export'
-    attach_identity(sheet_rows, sheets, records)
+    attach_identity(sheet_rows, sheets, records, cached)
     for sheet in sheets:
         if sheet['role'] == 'source_export' and not by_sheet.get(sheet['name']) and export_like.get(sheet['name']):
             by_sheet[sheet['name']] = export_like[sheet['name']]

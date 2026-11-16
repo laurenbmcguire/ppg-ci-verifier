@@ -276,6 +276,35 @@ def _is_total_row(row, mapping):
     return False
 
 
+def _section_title(row):
+    """A section heading such as "2ND SHIFT RESULTS" or "BILLING": the only filled cell in its row, first column, capitals."""
+    filled = [v for v in row if v not in (None, '')]
+    if len(filled) != 1 or not row or row[0] != filled[0] or not isinstance(filled[0], str):
+        return False
+    text = filled[0].strip()
+    return bool(text) and len(text) <= 80 and not text.startswith('=') and text == text.upper() and sum(c.isalpha() for c in text) >= 3
+
+
+def _helper_sheets(sources, hidden):
+    """Hidden work sheets the visible sheets read by formula (the report's own "_Calc" sheet). Their rows are the same
+    records shown on the visible sheets, so they are not a second set of records."""
+    hidden = hidden or {}
+    names = [title for title, _ in sources if (hidden.get(title) or {}).get('state') in ('hidden', 'veryHidden')]
+    if not names:
+        return set()
+    used = set()
+    for title, rows in sources:
+        if title in names:
+            continue
+        for row in rows:
+            for value in row:
+                if isinstance(value, str) and value.startswith('='):
+                    for name in names:
+                        if name not in used and (name + '!' in value or "'" + name.replace("'", "''") + "'!" in value):
+                            used.add(name)
+    return used
+
+
 def _row_label(row, mapping, labels):
     used = set(mapping.values()) | set(labels.values())
     for index, value in enumerate(row):
@@ -329,9 +358,11 @@ def scan(sources, cached=None, layout_specs=None):
             sheet['layout_source'] = 'ai'
         table = None
         active = None
+        closed = False   # a later section heading ended the table: the rows under it are not inspection rows
 
         def start(r, m, lab):
-            nonlocal table, active
+            nonlocal table, active, closed
+            closed = False
             heads = rows[r - 1]
             active = spec_at.get(r)
             is_totals_block = active['kind'] == 'totals' if active else all(norm(heads[i]).startswith('total') for i in m.values())
@@ -339,6 +370,7 @@ def scan(sources, cached=None, layout_specs=None):
                          columns={f: dict(column=column_letter(i), header=str(heads[i]).strip()) for f, i in m.items()},
                          labels={k: dict(column=column_letter(i), header=str(heads[i]).strip()) for k, i in lab.items()},
                          mapping=m, label_map=lab, data_row_count=0, total_rows=[],
+                         titled=not active and r >= 2 and _section_title(rows[r - 2]),
                          condition_cols=([lab['condition']] if active and 'condition' in lab else
                                          [i for i, h in enumerate(heads) if label_for_header(h) == 'condition']))
             sheet['tables'].append(table)
@@ -367,6 +399,13 @@ def scan(sources, cached=None, layout_specs=None):
             if m and not looks_like_data and _text_cells(row) >= 2 and len(m) >= max(1, len(table['mapping'])) \
                     and not any(number_state(row[i], cget(i))[1] in KNOWN and not isinstance(row[i], str) for i in m.values() if i < len(row)):
                 start(r, m, lab)
+                continue
+            # A sheet laid out in headed sections ("INSPECTION RECORDS", then "2ND SHIFT RESULTS", "BILLING", ...): the
+            # table that started under a heading ends at the next heading. Results, billing and traceability lines are
+            # not inspection rows and are not checked as if they were.
+            if not specs and table['titled'] and _section_title(row):
+                closed = True
+            if closed:
                 continue
             mapping, labmap = table['mapping'], table['label_map']
             cells = {f: number_state(row[i], cget(i)) if i < len(row) else (None, 'blank') for f, i in mapping.items()}
@@ -459,6 +498,12 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None, *
         a_sheets, a_records, a_stats = scan(unit_sources, cached, layout_specs=specs)
         if _detail_count(a_records) > _detail_count(records):
             sheets, records, stats, layout = a_sheets, a_records, a_stats, dict(found, tables=specs)
+    helpers = _helper_sheets(sources, hidden)
+    if helpers and any(r['sheet'] not in helpers for r in records):
+        records = [r for r in records if r['sheet'] not in helpers]
+        for sheet in sheets:
+            if sheet['name'] in helpers:
+                sheet.update(tables=[], data_row_count=0, mapping_status='helper')
     if not any(s['mapping_status'] == 'adaptive' for s in sheets):
         return None
     result = dict(base, template_id=TEMPLATE_ID, mapping_mode='adaptive', template_mapping_status='matched',
@@ -485,10 +530,12 @@ def inspect_adaptive(sources, base, cached=None, report_day=None, hidden=None, *
             result['limitations'].append('AI layout detection was not requested. Only locally recognized tables were checked; unrecognized rows remain unverified.')
     finding = Checker(result)
     from hosting import sheet_roles
-    result['dataset_selection'] = sheet_roles.select(sources, sheets, records, finding)
+    result['dataset_selection'] = sheet_roles.select(sources, sheets, records, finding, cached)
 
     for sheet in sheets:
         if sheet.get('role') == 'photos':
+            continue
+        if sheet['mapping_status'] == 'helper':
             continue
         if sheet['mapping_status'] != 'adaptive':
             finding('no_quantity_columns_detected', sheet['name'], message='No Inspected / Certified / Rejected style headers on this sheet, so it was not quantity-checked.')
