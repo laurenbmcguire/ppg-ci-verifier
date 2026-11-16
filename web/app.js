@@ -1810,9 +1810,12 @@
       const short = [serious ? `${plural(serious, 'serious error')} must be fixed or ignored first` : '', holds.length ? 'the SharePoint check is not finished (open SharePoint check details on the right)' : ''].filter(Boolean).join('; ');
       const why = [serious ? `${plural(serious, 'serious error')} must be fixed or ignored first` : '', ...holds].filter(Boolean).join('. ');
       // Only a SharePoint check note and no serious error: say what is left to do, not "Blocked". The note stays in the hover text.
-      if (!serious && left) return {tone: 'amber', icon: st.icon, text: `${plural(left, 'possible error')} to fix or ignore`, why};
+      // One number everywhere: the same count of possible errors the report list shows, with the serious ones named
+      // beside it instead of replacing it.
+      if (left) return {...(serious ? st : {tone: 'amber', icon: st.icon}), text: `${plural(left, 'possible error')} to fix or ignore${serious ? ` (${serious} serious)` : ''}`, why};
       return {...st, text: serious ? `${plural(serious, 'serious error')} to fix or ignore` : short || st.text, why};
     }
+    if (st.next === 'review' && left) return {...st, text: `${plural(left, 'possible error')} to fix or ignore`};
     if (st.next === 'review') return {...st, text: 'Review needed' + (st.text && !/to review$/.test(st.text) ? ': ' + st.text : '')};
     return st;
   }
