@@ -217,6 +217,7 @@
   }
   function queueSource(r) {
     const sp = r.review?.sharepoint || {}, verification = reportVerification(r);
+    if (r.assignment?.client_key === 'practice') return 'Practice data: not compared with SharePoint';
     if (sp.status === 'match' && !verification.sourceVerified) return 'Source not verified';
     return ({match: 'Source comparison matched', differences: 'Source differences', incomplete: 'Source coverage incomplete', stale: 'Source check out of date',
       day_level: 'Source compared by day totals only', unverified: 'Source not verified', not_found: 'Source not found', not_configured: 'Source not connected', error: 'Source check failed'})[sp.status] || 'Source not checked';
@@ -237,7 +238,7 @@
   function queueTitle(r) {
     const rv = r.review || {}, day = queueDay(r), d = day ? new Date(day + 'T12:00:00') : null;
     const date = d && !isNaN(d) ? d.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'}) : 'No date';
-    return `${date} · ${queueClient(r)} · ${rv.job ? 'Job ' + rv.job : 'Job not found'}`;
+    return `${date} · ${queueClient(r)} · ${rv.job ? 'Job ' + rv.job : r.assignment?.client_key === 'practice' ? 'made-up test data' : 'Job not found'}`;
   }
   const queueVersion = value => Number.isInteger(value) && value > 0 ? String(value) : 'unknown';
   const queueSearch = r => [r.filename, r.review?.job, queueDay(r), queueClient(r), r.assignment?.status, r.review?.sharepoint?.source,
