@@ -6,3 +6,5 @@ outputs/
 .vercel/
 .env*
 .DS_Store
+
+.tmp/

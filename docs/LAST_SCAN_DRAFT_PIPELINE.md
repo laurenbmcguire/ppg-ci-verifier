@@ -74,3 +74,78 @@ QuantityNOK,PictureLabel,PictureDefect. Date0 equaled Created in both examples.
 This is NOT proof Date0 represents physical scan time or offline/backfill behavior.
 Only a two-row bounded sample was read; no complete-capture/current-job claim.
 Background app credentials and actual-scan semantics remain unverified.
+
+## Durable runner (branch `claude/durable-report-runner-20261118`)
+
+Status: local code and tests only. Not deployed, not scheduled, not connected to any live source. Off by default.
+
+### What was added
+
+| File | Purpose |
+|---|---|
+| `hosting/last_scan_store.py` | One durable store interface over SQLite (local) and PostgreSQL (hosted): `atomic(keys)` commits several records in one transaction; content-addressed blobs; leases with a fence number. PostgreSQL tables are created only by an explicit `install()`. |
+| `hosting/last_scan_service.py` | `ScheduledWorker` rewritten on that store (same constructor and helper names). |
+| `hosting/last_scan_runner.py` | `run_once(...)`: bounded, off-by-default pass over explicitly verified assignments that also match the verified job registry. |
+| `scripts/last_scan_synthetic_demo.py` | Runnable synthetic end-to-end example. |
+| `scripts/last-scan-pg-test.sh` | Starts a throwaway PostgreSQL inside `.tmp/pg` (unix socket only), runs the real-database tests, deletes it. |
+
+### Guarantees and where they are enforced
+
+- **Lease and current operation are fenced in the same transaction as the outbox insert.** `_finish` takes a fresh
+  capture, then in ONE `fenced(...)` transaction locks the lease, state and outbox rows, checks the lease token and
+  fence, re-observes, records the render receipt and inserts the outbox entry only if the rendered operation is
+  still current. A replaced or expired worker raises `LeaseLost` and commits nothing.
+- **Unknown render outcomes are reconciled, not repeated.** A due operation is marked `uncertain` before rendering.
+  After a crash the publisher is asked by operation ID (`lookup`). Rendering the same operation again happens only
+  when the publisher declares `lookup_is_authoritative` and reports nothing written.
+- **Delivery outcome is stored.** `dispatch_test` writes `delivery_status='uncertain'` before the attempt and keeps
+  it (with the error type) when the sender fails, also when the entry was superseded mid-attempt. Such an entry is
+  never re-queued automatically.
+- **State rows stay small.** Photo bytes and the captured snapshot are blobs addressed by SHA-256; the state row
+  keeps `{captured_at, ref, rows, ...}` only. Identical photos are stored once.
+- **No guessed mappings.** An assignment needs `verified`, `active`, `timestamp_semantics_verified`, client, job,
+  site id, list id, timezone, actual-scan field, shift field and recorded shifts, and must match a verified registry
+  entry on site id + list id + job. `Date`, `Created`, `Modified` and their Graph names are refused as scan fields.
+  Anything else is reported in the run receipt under `issues` and skipped.
+- **Bounded and polite.** Time budget, maximum scopes per pass, rotating start point, per-scope failure isolation,
+  provider cooldown held per site across runs (default 15 minutes when the provider gives no time).
+- **Run receipts** (`run:<hash of run_id>`) are internal records. The same `run_id` is replayed without any read.
+
+### Timing rules (unchanged, now tested end to end)
+
+The hour restarts when scanning resumes and when a late row, edit, delete or photo for this shift is first seen.
+A quiet hour is never called shift end or lunch end: the draft says `provisional_quiet_window_schedule_unknown`,
+`day_completion: not_established`, `client_release: held`. When a verified scheduled end (`not_before`) is supplied
+the draft waits for it and says `verified_schedule`. Without one, a provisional draft is still produced.
+
+### How to run
+
+```sh
+export PY=/path/to/test-venv/bin/python PYTHONPATH=.:tests TMPDIR=$PWD/.tmp
+$PY -m pytest -q tests/test_last_scan_drafts.py tests/test_last_scan_local.py tests/test_last_scan_service.py \
+    tests/test_last_scan_durable.py tests/test_last_scan_runner.py
+PY=$PY sh scripts/last-scan-pg-test.sh          # real PostgreSQL, disposable, removed afterwards
+$PY scripts/last_scan_synthetic_demo.py $PWD/.tmp/demo
+```
+
+`tests/test_last_scan_store_pg.py` is SKIPPED unless that script provides the disposable server. A skip means hosted
+concurrency is unverified, not passed.
+
+### Not done here: blockers before any activation
+
+1. No route, cron or scheduled task exists. A host entry point needs authentication, a unique `run_id` per firing,
+   and a budget below the host's time limit.
+2. `PostgresStore.install()` has not been run anywhere. Creating the two tables in the hosted schema is a migration
+   that needs approval; the role's connection limit also matters (each record transaction opens one connection).
+3. Proven on local PostgreSQL 17 only, not on the hosted database or through its connection pooler.
+4. No live assignment exists. Each client list needs a person-verified actual-scan field, shift field, timezone
+   and recorded shift values. The registry seed entries carry site names, not Graph site ids, so they do not match
+   until a verified entry with the site id is saved.
+5. An existing, separately scheduled reporting task already builds reports for a fixed list of jobs. Until that is
+   migrated, give those jobs `externally_built: true` here (they are skipped and reported) so nothing is built
+   twice. Drafts made outside this runner are unknown to its operation IDs.
+6. The 5-minute capture age limit (`MAX_AGE`) can be shorter than a large capture with many photos.
+7. The base commit still contains the Fix-with-AI regression in `web/app.js`; the audit branch fix is separate.
+8. `NativeDraftPublisher` writes to a local folder. A hosted publisher must store drafts in private storage and
+   provide `lookup`. Old blobs, receipts and outbox entries are never pruned yet.
+9. `dispatch_test` is a test transport. No sender exists and none should be added without approval.

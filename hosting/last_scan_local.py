@@ -4,35 +4,29 @@ Uses exact configured captures and the pinned native template. No source writes,
 client communication, automatic evidence correction, or approval.
 """
 import base64
-from contextlib import contextmanager, closing
 from copy import deepcopy
 import json
 from pathlib import Path
-import sqlite3
 from hosting import source_first as sf, source_first_workbook as wb
+from hosting.last_scan_store import SqliteStore
 
-class StateStore:
-    def __init__(self,path):
-        self.path=str(path)
-        with closing(sqlite3.connect(self.path)) as db, db:
-            db.execute('CREATE TABLE IF NOT EXISTS scan_draft_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
-    @contextmanager
-    def transaction(self,key):
-        with closing(sqlite3.connect(self.path,timeout=30)) as db, db:
-            db.execute('BEGIN IMMEDIATE')
-            raw=db.execute('SELECT value FROM scan_draft_state WHERE key=?',(key,)).fetchone()
-            state=json.loads(raw[0]) if raw else {}
-            yield state
-            db.execute('INSERT INTO scan_draft_state VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,sf.canonical(state).decode()))
+class StateStore(SqliteStore):
+    """Local SQLite store. Same interface as the hosted store (hosting.last_scan_store): ``transaction(key)`` for one
+    record, ``atomic(keys)`` for several records committed together, and content-addressed blobs."""
 
 class NativeDraftPublisher:
     def __init__(self, output, mapping, header):
         self.output=Path(output);self.mapping=deepcopy(mapping);self.header=deepcopy(header)
     def render_version(self):
         return sf.digest(dict(mapping=self.mapping,header=self.header,contract=wb.contract(),generator=wb.generator_hash()))
+    # On this single local filesystem an absent operation folder means nothing was written, so the same operation
+    # may be rendered again. A folder without its receipt is an interrupted write: that stays for a person.
+    lookup_is_authoritative=True
     def lookup(self,op):
         path=self.output/op/'receipt.json'
-        if not path.is_file():return None
+        if not path.is_file():
+            if path.parent.exists():raise ValueError('Interrupted artifact write; reconcile by hand, never overwrite.')
+            return None
         receipt=json.loads(path.read_text())
         for filename,key in [('draft.xlsx','workbook_sha256'),('checklist.json','checklist_sha256')]:
             if sf.digest((path.parent/filename).read_bytes())!=receipt[key]:raise ValueError('Published bytes changed.')
