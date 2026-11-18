@@ -121,6 +121,26 @@ class WhatWasNotPerformedIsSaid(Base):
         self.assertEqual(self.report(['bad'])['proof']['sample_evidence'], 'rejected_malformed')
 
 
+class IncompleteSamplesAreNotCalledClean(Base):
+    def test_invalid_only_or_null_scan_is_performed_incomplete(self):
+        cases = dict(invalid_created_only=[valid_scan(r, Created='invalid') for r in ROWS],
+                     naive_created_only=[valid_scan(r, Created='2026-11-10T21:00:00') for r in ROWS],
+                     null_scan=[dict(r, ActualScan=None) for r in ROWS],
+                     null_scan_with_created=[dict(r, ActualScan=None, Created='2026-11-10T21:00:00Z') for r in ROWS],
+                     naive_scan=[dict(r, ActualScan='2026-11-10T15:00:00') for r in ROWS],
+                     one_bad_scan=[dict(ROWS[0], ActualScan='n/a')] + ROWS[1:],
+                     unrecorded_shift=[dict(ROWS[0], Shift='Night')] + ROWS[1:])
+        for name, rows in cases.items():
+            report = self.report(rows)
+            self.assertFalse(report['ready_for_dry_run'], name)
+            self.assertEqual(report['proof']['sample_evidence'], 'performed_incomplete', name)
+            self.assertIn('Sample evidence: PERFORMED INCOMPLETE', readiness.report_text(report))
+
+    def test_red_flag_wins_over_incomplete_and_clean_stays_clean(self):
+        self.assertEqual(self.report([equal(ROWS[0]), valid_scan(ROWS[1], Created='invalid')])['proof']['sample_evidence'], 'performed_red_flag_found')
+        self.assertEqual(self.report(ROWS)['proof']['sample_evidence'], 'performed_no_red_flag_found')
+
+
 class ReadinessIsNotRuntimeProof(Base):
     def test_ready_report_claims_only_schema_dry_run_readiness(self):
         later = lambda r: (at(r) + timedelta(minutes=3)).isoformat().replace('+00:00', 'Z')

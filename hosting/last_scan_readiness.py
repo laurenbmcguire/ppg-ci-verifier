@@ -195,6 +195,12 @@ def inventory(schema):
                 note='Discovered metadata only. Nothing here says what a column means or that a mapping is right.')
 
 
+def snapshot_identity(schema):
+    """Hash of the snapshot exactly as supplied, capture time and every unmapped column included. Two snapshots that
+    differ in anything at all have different identities."""
+    return _digest(dict(shape=type(schema).__name__, snapshot=schema))
+
+
 def schema_digest(schema):
     """Hash of the schema's identity and every column's full definition."""
     s = _dict(schema)
@@ -477,7 +483,9 @@ def validate(assignment, schema, registry_entries, sample_rows=None):
         not_performed.append(dict(check='scan_compared_with_arrival_metadata',
                                   reason='No row carried both a scan value and a Created/Modified value, so the scan field was not compared with arrival metadata. This is not a pass.'))
     if sample_state == 'performed':
-        sample_state = 'performed_red_flag_found' if red_flag else 'performed_no_red_flag_found'
+        # a sample whose own checks failed or could not be completed is never described as "no red flag found"
+        failed_sample_checks = any(not c['ok'] and c['check'].startswith('sample_') for c in checks)
+        sample_state = 'performed_red_flag_found' if red_flag else 'performed_incomplete' if failed_sample_checks else 'performed_no_red_flag_found'
     proof = dict(
         schema_dry_run_readiness='blocked' if blocked else 'ready',
         sample_evidence=sample_state,
