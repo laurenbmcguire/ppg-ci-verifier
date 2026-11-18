@@ -79,7 +79,9 @@ MODES = ('dry_run', 'dispatch')
 SCOPE = ('client_id', 'job', 'site_id', 'list_id', 'business_date', 'shift')
 ARTIFACT = ('operation_id', 'workbook_sha256', 'checklist_sha256', 'render_version')
 FIELDS = set(SCOPE) | set(ARTIFACT) | {'dispatch_id', 'mode', 'timestamp', 'nonce', 'recipient'}
-GRANT_SECONDS = 60                      # placeholder bound on how long an unused transport grant stays valid
+GRANT_SECONDS = 60                      # placeholder: how long an unused transport grant stays valid, and how long, on the host
+                                        # clock, a whole dispatch may take up to the moment the sender is called. The limit
+                                        # itself is already too late: 59.999 s passes, 60 s does not
 INTENT = 'dispatch:intent:'
 RACE = ('not_closed: the source can change between the schema probe, the re-read, the claim and the provider '
         'receiving the message, and an approval can be withdrawn after the last re-check')
@@ -361,7 +363,7 @@ def handle(method, headers, body, deps):
         return snapshot
 
     def send(*, idempotency_key, attempt_id, audience, payload):
-        if hosted.time_gate(base, started, bounds):                          # pure: no authority is asked at this point
+        if hosted.time_gate(base, started, bounds, GRANT_SECONDS):           # pure: no authority is asked. Same limit as every other gate
             seen['refusal'] = 'validity_passed_or_clock_went_back_before_the_send'
             raise Revoked(seen['refusal'])                                   # the sender is NOT called; the attempt is recorded as returned in error
         receipt = payload.get('receipt') if isinstance(payload, dict) else None

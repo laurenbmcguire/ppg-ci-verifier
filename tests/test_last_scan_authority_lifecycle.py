@@ -828,6 +828,86 @@ class HostedFinalGateAfterCallbacks(Hosted):
         self.assertEqual(self.go()[1]['status'], 'ran'); self.assertTrue(self.reads)
 
 
+class SendTimeLimit(Dispatch):
+    """QA of 543af84: the limit on how long a dispatch may take applies at the final gate before the send too."""
+    def after_the_claim(self, seconds):
+        gate = ScheduledWorker._gate
+        def late(*a, **kw):
+            out = gate(*a, **kw)                                                 # the claim's own gate first...
+            self.r.clock.advance(seconds=seconds)                                # ...then time passes before the sender would be called
+            return out
+        with mock.patch.object(ScheduledWorker, '_gate', staticmethod(late)):
+            return self.go()
+
+    def test_qa_repro_61_seconds_after_the_claim_the_sender_is_not_called(self):
+        code, body = self.after_the_claim(61)
+        self.assertEqual((code, body['status'], body['sender_calls'], self.r.lauren.calls), (202, 'uncertain', 0, 0), body)
+        self.assertEqual(body['refusal'], 'validity_passed_or_clock_went_back_before_the_send')
+
+    def test_the_limit_to_the_millisecond_and_no_blind_retry(self):
+        self.assertEqual(dispatch.GRANT_SECONDS, 60)
+        for seconds, sent in ((59.999, True), (60, False), (60.001, False), (61, False), (3600, False)):
+            with self.subTest(seconds):
+                self.setUp()
+                code, body = self.after_the_claim(seconds)
+                if sent:
+                    self.assertEqual((code, body['status'], body['sender_calls'], self.r.lauren.calls), (200, 'sent', 1, 1), body)
+                    continue
+                self.assertEqual((code, body['status'], body['sender_calls'], self.r.lauren.calls), (202, 'uncertain', 0, 0), body)
+                attempt = self.entry()['attempts'][0]
+                self.assertEqual((attempt['state'], attempt['error_type'], self.entry()['status']), ('returned_error', 'Revoked', 'uncertain'))
+                for _ in range(2):                                               # asked again, also after a restart: never sent
+                    self.r.restart()
+                    code, body = self.go()
+                    self.assertEqual((code, body['status'], body['sources_read'], body['sender_calls']), (409, 'not_pending', 0, 0))
+                self.assertEqual((self.r.lauren.calls, len(self.entry()['attempts'])), (0, 1))
+
+    def test_the_same_limit_at_every_gate_of_a_dispatch(self):
+        for where, reads in (('probe', 0), ('fetch', 1)):                        # the limit reached during the probe, and during the item read
+            for seconds, stopped in ((59.999, False), (60, True)):
+                with self.subTest(where=where, seconds=seconds):
+                    self.setUp()
+                    advance = lambda: self.r.clock.advance(seconds=seconds)
+                    class Probe(rh.AdapterProbe):
+                        def current(s, site_id, list_id):
+                            answer = super().current(site_id, list_id)
+                            if where == 'probe': advance()
+                            return answer
+                    def fetch(scope, settings):
+                        if where == 'fetch': advance()
+                        return self.r.fetch(scope, settings)
+                    code, body = self.go(deps=self.r.dispatch_deps(schema_probe=Probe(self.r.tenants, self.r.clock), fetch=fetch))
+                    if stopped:
+                        self.assertEqual((body['status'], body['refusal'], body['sources_read'], body['sender_calls']), ('held', 'call_took_too_long', reads, 0), body)
+                    else:
+                        self.assertEqual(body['sender_calls'], 1 if body['status'] == 'sent' else 0)
+                        self.assertNotEqual(body.get('refusal'), 'call_took_too_long')
+
+
+class PollTimeLimit(Hosted):
+    """The same audit for the hosted poll: one run may not go on reading for REQUEST_WINDOW_SECONDS or more on the host clock."""
+    def run_with_a_slow_first_read(self, seconds):
+        self.config = dict(enabled=True, assignments=[assignment(recorded_shifts=['1', '2'])])
+        self.approve(self.config)
+        def fetch(scope, settings):
+            out = self.fetch(scope, settings)
+            if len(self.reads) == 1:
+                self.now = iso(timedelta(seconds=seconds))                       # the first read took this long on the host clock
+            return out
+        return self.go(self.deps(fetch=fetch, quota=hosted.Quota(500)))
+
+    def test_a_run_stops_reading_at_the_limit(self):
+        self.assertEqual(hosted.REQUEST_WINDOW_SECONDS, 300)
+        code, body = self.run_with_a_slow_first_read(299.999)
+        self.assertEqual((code, body['status']), (200, 'ran')); self.assertGreater(len(self.reads), 1, body['summary']['results'])   # it went on reading
+        for seconds in (300, 301):
+            self.reads.clear(); self.now = NOW
+            self.path = Path(self.folder.name) / ('limit%d.db' % seconds); self.store = StateStore(self.path)
+            code, body = self.run_with_a_slow_first_read(seconds)
+            self.assertEqual((code, body['status'], len(self.reads)), (200, 'ran', 1), seconds)
+            self.assertIn('AuthorityWithdrawn', [r.get('error_type') for r in body['summary']['results']])
+
+
 class RehearsalPoll(Dispatch):
     def test_the_hourly_poll_stops_when_its_approval_is_revoked_and_resumes_only_on_a_new_record(self):
         run = next(k for k in self.r.approvals.records if k != self.approved)

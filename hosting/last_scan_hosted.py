@@ -67,7 +67,8 @@ MAX_BUDGET_SECONDS, MAX_SCOPES = 45, 50
 MAX_SCHEMA_CAPTURE_AGE_SECONDS = 24 * 3600   # an approved snapshot older than this no longer counts
 SCHEMA_FUTURE_SKEW_SECONDS = 300             # a capture or probe time further in the future than this is refused
 MAX_SCHEMA_PROBE_AGE_SECONDS = 60            # a live probe result must have been observed within this window
-REQUEST_WINDOW_SECONDS = 300            # a request older or newer than this is refused
+REQUEST_WINDOW_SECONDS = 300            # a request older or newer than this is refused; also the longest, on the host clock,
+                                        # that one run may go on reading (its work budget is MAX_BUDGET_SECONDS, on another clock)
 MODES = ('dry_run', 'run')
 FIELDS = {'run_id', 'mode', 'budget_seconds', 'max_scopes', 'timestamp', 'nonce'}
 
@@ -216,7 +217,8 @@ def time_gate(deps, started, bounds, max_seconds=None):
             return 'host_clock_is_behind_the_last_seen_time'
         if not bounds or any(now >= instant(b) for b in bounds):
             return 'a_validity_bound_of_this_call_has_passed'
-        if max_seconds is not None and (now - begun).total_seconds() > max_seconds:
+        # Like a validity bound, the limit itself is already too late: a call may take LESS than max_seconds.
+        if max_seconds is not None and (now - begun).total_seconds() >= max_seconds:
             return 'call_took_too_long'
     except Exception as error:
         return 'time_gate_failed:' + type(error).__name__
@@ -655,7 +657,7 @@ def handle(method, headers, body, deps):
     # validity bounds of the approval and of every receipt this run was authorized under.
     bounds = [approval['expires_at']] + [m['capture']['expires_at'] for m in mapping]
     guard = _DriftGuard(deps, mapping, recheck=lambda scope: still_authorized(deps, principal, digest, approval, mapping, started, scope),
-                        gate=lambda: time_gate(deps, started, bounds))
+                        gate=lambda: time_gate(deps, started, bounds, REQUEST_WINDOW_SECONDS))
     drift = guard.check_all()
     if guard.withdrawn:                                                      # noticed around a run-start probe: nothing else is asked of any source
         return _respond(409, status='authority_withdrawn', reason=guard.withdrawn, sources_read=0, schema_probes=guard.count,
