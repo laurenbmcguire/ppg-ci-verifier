@@ -25,6 +25,7 @@ from unittest import mock
 
 from openpyxl import load_workbook
 
+import authority_fixture as af
 import demo_client_fixture as demo
 import readiness_fixture as rf
 from hosting import last_scan_dispatch as hosted_dispatch
@@ -155,7 +156,7 @@ class RecordedCaptures(CaptureAuthority):
     """TEST ONLY stand-in for a capture authority: remembers what it was asked to record. Not origin proof."""
     def __init__(self): self.records = {}
     def record(self, candidate):
-        self.records[candidate['snapshot_identity']] = {k: v for k, v in candidate.items() if k != 'status'}
+        self.records[candidate['snapshot_identity']] = af.receipt({k: v for k, v in candidate.items() if k != 'status'})
     def receipt(self, identity): return deepcopy(self.records.get(identity))
 
 
@@ -223,8 +224,7 @@ class Rehearsal:
         code, dry = self.call(mode='dry_run')
         assert code == 200 and dry['ready_to_run'] is False and [c['check'] for c in dry['preflight'] if not c['ok']] == ['approval_attested_for_this_snapshot_and_principal'], dry['preflight']
         self.dry_run = dry
-        self.approvals.records[dry['snapshot_digest']] = dict(snapshot_digest=dry['snapshot_digest'], approved_by='rehearsal fake approver',
-                                                              approved_at=DAY, principals=['alice'])
+        self.approvals.records[dry['snapshot_digest']] = af.approval(dry['snapshot_digest'])
 
     # ---- wiring
     def fetch(self, scope, settings):
@@ -234,7 +234,7 @@ class Rehearsal:
     def deps(self, **kw):
         base = dict(authorizer=FakeAuthorizer(), approvals=self.approvals, quota=Quota(10000), config=self.config, entries=self.entries,
                     schemas=self.schemas, captures=self.captures, collectors=(COLLECTOR,), schema_probe=AdapterProbe(self.tenants, self.clock),
-                    store=self.store, artifacts=BlobArtifacts(self.store), fetch=self.fetch, clock=self.clock)
+                    store=self.store, artifacts=BlobArtifacts(self.store), fetch=self.fetch, clock=self.clock, issuers=af.ISSUERS)
         base.update(kw)
         return Deps(**base)
 
@@ -308,7 +308,7 @@ class Rehearsal:
     def dispatch_deps(self, **kw):
         base = dict(authorizer=FakeAuthorizer(), approvals=self.approvals, quota=Quota(10000), config=self.config, entries=self.entries,
                     schemas=self.schemas, captures=self.captures, collectors=(COLLECTOR,), schema_probe=AdapterProbe(self.tenants, self.clock),
-                    store=self.store, artifacts=BlobArtifacts(self.store), fetch=self.fetch, clock=self.clock,
+                    store=self.store, artifacts=BlobArtifacts(self.store), fetch=self.fetch, clock=self.clock, issuers=af.ISSUERS,
                     provider_contract=FAKE_CONTRACT, recipients={t.spec['client_id']: 'Lauren' for t in self.tenants.values()},
                     sender=self.lauren.send, dispatch_quota=Quota(10000))
         base.update(kw)
@@ -333,8 +333,7 @@ class Rehearsal:
         client, tenant = next(iter(self.tenants.items()))
         code, dry = self.hosted_dispatch(client, tenant.spec['shifts'][0], deps=deps, mode='dry_run')
         assert code == 200 and dry['dispatch_digest'], dry
-        self.approvals.records[dry['dispatch_digest']] = dict(dict(snapshot_digest=dry['dispatch_digest'], action=hosted_dispatch.ACTION,
-                                                                    approved_by='rehearsal fake approver', approved_at=DAY, principals=list(principals)), **record)
+        self.approvals.records[dry['dispatch_digest']] = af.approval(dry['dispatch_digest'], principals, action=hosted_dispatch.ACTION, **record)
         return dry['dispatch_digest']
 
 

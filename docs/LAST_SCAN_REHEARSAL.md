@@ -103,12 +103,49 @@ What the rehearsal does not cover or fix, stated here and in the harness:
 |---|---|---|---|---|
 | Scan-time meaning | Validator refuses Created/Modified/date columns, computed, read-only and defaulted columns; requires a named attestation bound to the exact column | `last_scan_readiness.validate`, assignment `scan_field` + `attestations['scan_time_meaning']` | Evidence, from the floor, of which real column records the actual scan and how the tablet fills it in. None identified on any real list | PPG operations + root |
 | Graph compatibility | Capture adapter and existing data capture, both tested against mocked answers only | `last_scan_schema_capture.capture_schema(fetch=…)`, `source_first_capture.graph_fetch` | One real read-only capture: whether next links use `$skiptoken` literally, whether `parentReference.siteId` is returned, which column properties real lists carry, list-id casing | Root |
-| Trusted collector and capture authority | Interfaces and a frozen, approval-bound accepted-collector list | `last_scan_hosted.CaptureAuthority`, `Deps.collectors`, `SchemaProbe` | A real authority that records receipts outside the runner's reach; a real collector identity; a real read-only probe; owner decision on the 24 h / 5 min / 60 s bounds | Root + security review |
-| Identity and approval | Interfaces only | `last_scan_hosted.Authorizer`, `ApprovalAuthority`, `Quota` | A real identity system and a separately protected approval record; who may approve | Root |
+| Trusted collector and capture authority | Interfaces, a frozen approval-bound accepted-collector list, and the version 1 receipt contract below | `last_scan_hosted.CaptureAuthority`, `Deps.collectors`, `Deps.issuers`, `SchemaProbe`, `last_scan_authority` | A real authority that records receipts outside the runner's reach and answers in exactly the contract's shape; a real collector identity; a real read-only probe; owner decision on the 24 h / 5 min / 60 s bounds | Root + security review |
+| Identity and approval | Interfaces, and the version 1 approval contract below | `last_scan_hosted.Authorizer`, `ApprovalAuthority`, `Quota`, `Deps.issuers`, `last_scan_authority` | A real identity system and a separately protected approval record that answers in exactly the contract's shape; who may approve; owner decision on the 7 day maximum validity | Root |
+| Host clock | Validity is judged only on the host's clock; a clock more than 5 min behind the last time the store saw is refused | `last_scan_hosted.clock_problem`, `Deps.clock` | A host whose clock is synchronised and monitored. A clock that runs fast, or slow by less than the skew, is not detected | Root |
 | Scheduler host | One bounded, replay-safe call per firing; nonce, quota and receipts | `last_scan_hosted.handle` (no route, no schedule reaches it) | A reviewed route and schedule; the store migration; a decision on firing interval. The existing twice-daily reporting task is untouched and unrelated | Root |
 | Durable store | SQLite and PostgreSQL stores; PostgreSQL proven on a disposable cluster by the reviewer | `last_scan_store.PostgresStore.install()` | An approved migration on the hosted database; the pending connection-limit decision | Root |
 | Verified delivery contract | Registry of verified provider contracts, empty; uncertain outcomes never retried without one | `last_scan_transport.VERIFIED_CONTRACTS`, `deliver` | A real provider whose behaviour (at most once per key, terminal status per attempt) is evidenced and reviewed. The hosted entry point has no dispatch step at all; one would have to be designed and reviewed | Root + provider |
 | Client release | Held everywhere; drafts go to an internal audience only | checklist `client_release: held` | Unchanged by this work; release stays a separate human decision | Lauren |
+
+## Authority adapter contract (version 1)
+
+An adapter for a real approval or capture authority must return **exactly** this plain JSON, or nothing. The code
+that judges it is `hosting/last_scan_authority.py`; it implements no authority. Any missing field, unknown field,
+unsupported version, issuer the host does not accept, status other than `active`, set revocation field, or time
+that is missing, malformed, without an offset, not yet valid or expired is refused. Nothing is defaulted and nothing
+is ignored, so an adapter that marks a withdrawn record with a field of its own (`revoked: true`, `expires: …`) is
+refused instead of being read as valid.
+
+| Field | Approval (`contract: last_scan.approval`) | Capture receipt (`contract: last_scan.capture_receipt`) |
+|---|---|---|
+| `version` | integer `1` | integer `1` |
+| `record_id` | the authority's own id for this record; a renewal is a new id | same |
+| `issuer` | which authority wrote it; must be in the host's accepted list for approvals | same, for capture authorities |
+| `status` | exactly `active` | exactly `active` |
+| what it covers | `snapshot_digest`, `principals`, and `action: last_scan.dispatch` on a dispatch approval only | `snapshot_identity`, `site_id`, `list_id`, `schema_digest`, `collector` |
+| who and when | `approved_by`, `approved_at` | `captured_at` |
+| validity | `not_before`, `expires_at`, at most 7 days apart | `expires_at`, at most 24 h after `captured_at` |
+| withdrawal | optional `revoked_at`, `revoked_by`, `revocation_reason`; any of them set means revoked | same |
+
+What the runner does with it, and what follows for whoever operates the authority:
+
+- **One record per check.** Each check reads the authority once and judges that one record whole.
+- **Host clock.** `expires_at` and `not_before` are compared with the host's clock, to the second. The end instant
+  itself is already expired.
+- **Re-asked before every source read** in a poll, and before the read, after the read and (clock only) before the
+  send in a dispatch. The record must be the *same* record as when the call was authorized.
+- **Renewal is a new authorization.** A renewed capture receipt changes the run snapshot, so the run needs a new
+  approval. A renewed run approval needs a new dispatch approval. Extending a record in place counts as a renewal.
+- **Dispatch needs time left.** An approval or receipt that expires within 60 seconds is refused up front, and a
+  dispatch that takes longer than 60 seconds stops.
+- **Placeholders, pending an owner's decision:** 7 days, 24 hours, 5 minutes of clock skew, 60 seconds.
+
+Not provided by this contract: any proof that a record is genuine. Signing, transport security and who may write to
+the authority belong to the real authority and its adapter, and none exists.
 
 ## Exact next step for a real read-only proof (root-owned)
 

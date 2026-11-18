@@ -43,6 +43,14 @@ A repeated dispatch_id from the same caller returns the recorded outcome without
 one is reported as interrupted and never repeated here: the outbox entry is the record, and an uncertain delivery is
 never retried (hosting.last_scan_transport). Another caller's dispatch_id is a different record.
 
+Every approval and capture receipt must meet the record contract in hosting.last_scan_authority: versioned plain
+data, an accepted issuer, status active, no revocation field set, and validity bounds judged on the HOST clock. The
+dispatch approval covers the run approval RECORD (its id and validity), so a renewed run approval needs a new
+dispatch approval, and the intent and grant name both records. Before the source is read, again after it, the same
+records are asked for and must be the same records, still valid; an approval or receipt that would expire within
+GRANT_SECONDS is refused up front; a call that takes longer than GRANT_SECONDS, or sees the host clock go backwards,
+stops; and the sender is not called once any of the three validity bounds has passed.
+
 NOT CLOSED, and not claimed: the source can change between the schema probe and the read, between the read and the
 claim, and between the claim and the provider receiving the message; an approval can be withdrawn after the last
 re-check. Those windows are narrowed and the next poll detects a changed source, nothing more. No exactly-once
@@ -57,7 +65,6 @@ from uuid import uuid4
 
 from hosting import source_first as sf
 from hosting import last_scan_hosted as hosted
-from hosting import last_scan_readiness as readiness
 from hosting import last_scan_transport as transport
 from hosting.last_scan_drafts import instant
 from hosting.last_scan_service import ScheduledWorker, binding, site_hold
@@ -105,24 +112,18 @@ def _run_deps(deps):
     return hosted.Deps(**dict({f.name: getattr(deps, f.name) for f in fields(hosted.Deps)}, provider_contract=None))
 
 
-def dispatch_digest(snapshot, recipients, contract):
-    """What a dispatch approval covers: the action, the exact approved run snapshot, the recipient policy and the
-    provider contract. Any change to one of them is a different digest, so the approval stops counting."""
-    return sf.digest(dict(action=ACTION, snapshot_digest=snapshot, recipients=[list(pair) for pair in recipients],
+def dispatch_digest(snapshot, recipients, contract, run_approval):
+    """What a dispatch approval covers: the action, the exact approved run snapshot, the exact run approval RECORD
+    (so a renewed run approval needs a new dispatch approval), the recipient policy and the provider contract. Any
+    change to one of them is a different digest, so the approval stops counting."""
+    return sf.digest(dict(action=ACTION, snapshot_digest=snapshot, run_approval=run_approval, recipients=[list(pair) for pair in recipients],
                           provider_contract=contract.digest()))
 
 
 def _approved(base, digest, principal):
-    """ONE record from the authority, read once, judged whole: digest, approver, caller and action all on that record."""
-    record, why = hosted._attestation(base, digest)
-    if why:
-        return False, why
-    ok, why = hosted._judge(record, digest, principal)
-    if not ok:
-        return False, why
-    if record.get('action') != ACTION:
-        return False, 'The approval is not for the dispatch action.'
-    return True, ''
+    """(ok, why, record summary). ONE record from the authority, read once, judged whole under the record contract:
+    digest, approver, caller, action, issuer, status and validity (with enough of it left to send) all on that record."""
+    return hosted._approval(base, digest, principal, action=ACTION, margin=GRANT_SECONDS)
 
 
 def _draft(deps, item, body):
@@ -182,9 +183,10 @@ def _reserve(deps, principal, digest, body, item, intent, contract):
     hour = instant(now).strftime('%Y-%m-%dT%H')
     quota_key = 'auth:dispatch_quota:' + sf.digest(dict(principal=principal.id, dispatch=digest, hour=hour))
     grant_key = transport.grant_key(item['scope'], op)
-    with deps.store.atomic([nonce_key, quota_key, intent_key, grant_key]) as records:
+    with deps.store.atomic([nonce_key, quota_key, intent_key, grant_key, hosted.CLOCK]) as records:
         if records[nonce_key]:
             return 'replayed_request', None
+        hosted.mark_clock(records[hosted.CLOCK], now)
         if records[intent_key]:
             return 'dispatch_in_progress_or_interrupted', None
         grant = records[grant_key]
@@ -216,11 +218,12 @@ def handle(method, headers, body, deps):
         return _respond(401, status='unauthorized')
     # Own every policy and input before any dependency callback can change the originals.
     recipients, collectors = _freeze_recipients(deps.recipients), hosted._freeze_collectors(deps.collectors)
+    issuers = hosted.authority.freeze_issuers(deps.issuers)
     try:
         body = deepcopy(body)
         headers = dict(headers)
         deps = replace(deps, config=deepcopy(deps.config), entries=deepcopy(deps.entries), schemas=deepcopy(deps.schemas),
-                       collectors=collectors, recipients=recipients)
+                       collectors=collectors, recipients=recipients, issuers=issuers)
         body_digest = sf.digest(body)
     except Exception:
         return _respond(400, status='bad_request', detail='The body must be plain JSON with finite numbers.')
@@ -252,7 +255,8 @@ def handle(method, headers, body, deps):
 
     # ---- authorization: the whole hosted run preflight again, then what only a dispatch needs. No source is read.
     try:
-        checks, scopes, issues, digest, router, mapping = hosted.preflight(base, principal)
+        started = deps.clock()
+        checks, scopes, issues, digest, router, mapping, run_approval = hosted.preflight(base, principal)
     except Exception as error:
         return _respond(409, status='not_authorized', sources_read=0, sender_calls=0, detail='Preflight failed: ' + type(error).__name__)
     def check(name, ok, detail=''):
@@ -270,17 +274,24 @@ def handle(method, headers, body, deps):
     allowed = dict(recipients or ()).get(body['client_id'])
     check('recipient_is_the_approved_one_for_this_client', allowed == body['recipient'] == RECIPIENT,
           'The recipient is not the one the server-side policy names for this client, or is not the internal audience.')
-    approval = dispatch_digest(digest, recipients, contract) if digest and recipients is not None and trusted else None
-    ok, why = _approved(base, approval, principal) if approval else (False, 'There is nothing complete enough to approve for dispatch.')
+    approval = dispatch_digest(digest, recipients, contract, run_approval['identity']) if digest and recipients is not None and trusted and run_approval else None
+    ok, why, dispatch_approval = _approved(base, approval, principal) if approval else (False, 'There is nothing complete enough to approve for dispatch.', None)
     check('dispatch_approved_for_this_snapshot_recipients_contract_and_principal', ok, why)
+    row = next((m for m in mapping if item and all(m[k] == item['scope'][k] for k in ('client_id', 'job', 'site_id', 'list_id'))), None)
+    bounds = [x['expires_at'] for x in (run_approval, dispatch_approval, (row or {}).get('capture')) if x]
+    check('authorizations_stay_valid_long_enough_to_send', len(bounds) < 3 or all(           # a missing one already failed its own check above
+              (instant(b) - instant(started)).total_seconds() > GRANT_SECONDS for b in bounds),
+          'The run approval, the dispatch approval or the capture receipt is missing or expires within %d seconds.' % GRANT_SECONDS)
     authorized = all(c['ok'] for c in checks)
     report = dict(mode=mode, dispatch_id=body['dispatch_id'], principal=principal.id, snapshot_digest=digest, dispatch_digest=approval,
-                  checks=checks, authorized=authorized, issues=issues, scope={k: body[k] for k in SCOPE}, operation_id=op,
+                  checks=checks, authorized=authorized, issues=issues, run_approval=run_approval and {k: v for k, v in run_approval.items() if k != 'identity'},
+                  dispatch_approval=dispatch_approval and {k: v for k, v in dispatch_approval.items() if k != 'identity'}, scope={k: body[k] for k in SCOPE}, operation_id=op,
                   audience=RECIPIENT, client_release='held', source_send_race=RACE)
     if not authorized:
         return _respond(200 if mode == 'dry_run' else 409, status='dry_run' if mode == 'dry_run' else 'not_authorized',
                         sources_read=0, sender_calls=0, **report)
-    intent = sf.digest(dict(principal=principal.id, dispatch=approval, scope=item['key'], recipient=body['recipient'],
+    intent = sf.digest(dict(principal=principal.id, dispatch=approval, run_approval=run_approval['identity'],
+                            dispatch_approval=dispatch_approval['identity'], scope=item['key'], recipient=body['recipient'],
                             artifact={k: body[k] for k in ARTIFACT}))
     if mode == 'dispatch':
         earlier = _recorded(deps, principal, body, intent)
@@ -301,33 +312,49 @@ def handle(method, headers, body, deps):
         return _respond(429 if refused == 'quota_exceeded' else 409, status=refused, sources_read=0, sender_calls=0, **report)
 
     # ---- under the scope's lease: live schema, source re-read, authorities re-asked; then the fenced claim; then send
-    guard, seen = hosted._DriftGuard(base, mapping), dict(reads=0, sends=0, refusal=None)
-    row = next(m for m in mapping if all(m[k] == item['scope'][k] for k in ('client_id', 'job', 'site_id', 'list_id')))
-    schema = next(s for s in base.schemas if readiness.snapshot_identity(s) == row['schema_snapshot'])
+    guard, seen = hosted._DriftGuard(base, mapping), dict(reads=0, sends=0, refusal=None, detail=None)
+
+    def withdrawn():
+        """None, or why this dispatch may not go on. Asks the authorities; never the source. Each approval is ONE record
+        judged whole and must be the SAME record as at authorization; the capture receipt must be the SAME receipt
+        (collector, capture instant, origin, record id, issuer, validity; site, list, schema and snapshot are checked
+        against the frozen row), not merely one that is valid now."""
+        why = hosted.still_authorized(base, principal, digest, run_approval, mapping, started, item['scope'])
+        if why:
+            return why
+        still, reason, now_ = _approved(base, approval, principal)
+        if not still:
+            return 'dispatch_approval_withdrawn: ' + reason
+        if now_['identity'] != dispatch_approval['identity']:
+            return 'dispatch_approval_is_another_record_than_the_one_this_call_was_authorized_under'
+        if (instant(deps.clock()) - instant(started)).total_seconds() > GRANT_SECONDS:
+            return 'dispatch_took_too_long'
+        return None
+
+    def stop(why):
+        seen['refusal'], seen['detail'] = why.split(': ', 1)[0], why
+        raise Revoked(why)
 
     def fetch(scope, settings):
+        why = withdrawn()                                                    # immediately before the source is touched
+        if why:
+            stop(why)
         problem = guard.problem(scope.get('site_id'), scope.get('list_id'))
         if problem:
             seen['refusal'] = 'schema:' + problem
             raise hosted.SchemaDrift(problem)                                # the source is not read
         seen['reads'] += 1
         snapshot = base.fetch(scope, settings)
-        for name, (still, reason) in (('run_approval', hosted._attested(base, digest, principal)),
-                                      ('dispatch_approval', _approved(base, approval, principal))):
-            if not still:
-                seen['refusal'] = name + '_withdrawn'
-                raise Revoked(reason)
-        # The receipt must be the SAME one the approval covered (collector, capture instant, origin; its site, list,
-        # schema and snapshot are checked against the frozen row), not merely one that is valid now.
-        reasons, capture = hosted.capture_problems(base, schema, row)
-        if not reasons and capture != row['capture']:
-            reasons = ['identity_changed_since_approval']
-        if reasons:
-            seen['refusal'] = 'capture_receipt:' + ','.join(reasons)
-            raise Revoked(seen['refusal'])
+        why = withdrawn()                                                    # and again after the read, before the claim
+        if why:
+            stop(why)
         return snapshot
 
     def send(*, idempotency_key, attempt_id, audience, payload):
+        at = instant(deps.clock())                                           # clock only; no authority is asked at this point
+        if at < instant(started) or any(at >= instant(b) for b in bounds):
+            seen['refusal'] = 'validity_passed_or_clock_went_back_before_the_send'
+            raise Revoked(seen['refusal'])                                   # the sender is NOT called; the attempt is recorded as returned in error
         receipt = payload.get('receipt') if isinstance(payload, dict) else None
         if audience != body['recipient'] or idempotency_key != op or not isinstance(receipt, dict) or any(receipt.get(k) != body[k] for k in ARTIFACT):
             raise Revoked('The claimed entry is not the authorized artifact for the authorized recipient.')
@@ -339,7 +366,7 @@ def handle(method, headers, body, deps):
     outcome = transport.deliver(worker, item['scope'], op, send, item['settings'], grant=dict(id=grant_id))
     status = outcome.get('status')
     code = 200 if status == 'sent' else 202 if status == 'uncertain' else 409
-    result = dict(status=status, outcome=outcome, refusal=seen['refusal'], sources_read=seen['reads'], schema_probes=guard.count,
+    result = dict(status=status, outcome=outcome, refusal=seen['refusal'], refusal_detail=seen['detail'], sources_read=seen['reads'], schema_probes=guard.count,
                   sender_calls=seen['sends'])
     with deps.store.transaction(_keys(principal, body)[1]) as record:
         record.update(status='finished', code=code, response=result, finished_at=deps.clock())

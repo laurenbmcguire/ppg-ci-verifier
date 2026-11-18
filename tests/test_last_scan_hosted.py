@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from unittest import mock
+import authority_fixture as af
 from hosting import source_first as sf
 from hosting import last_scan_hosted as hosted
 from hosting.last_scan_hosted import ApprovalAuthority, Authorizer, CaptureAuthority, Deps, Principal, Quota, SchemaProbe
@@ -52,8 +53,8 @@ class FakeCaptures(CaptureAuthority):
                 self.add(s, collector)
     def add(self, schema, collector=COLLECTOR, **override):
         identity = readiness.snapshot_identity(schema)
-        self.records[identity] = dict(dict(snapshot_identity=identity, site_id=schema.get('site_id'), list_id=schema.get('list_id'),
-                                           schema_digest=readiness.schema_digest(schema), collector=collector, captured_at=schema.get('captured_at')), **override)
+        self.records[identity] = af.receipt(dict(snapshot_identity=identity, site_id=schema.get('site_id'), list_id=schema.get('list_id'),
+                                                 schema_digest=readiness.schema_digest(schema), collector=collector, captured_at=schema.get('captured_at')), **override)
         return identity
     def receipt(self, snapshot_identity): return deepcopy(self.records.get(snapshot_identity))
 
@@ -121,6 +122,7 @@ class Hosted(unittest.TestCase):
         base.setdefault('schemas', schemas_for(base['config']))
         base.setdefault('captures', FakeCaptures(base['schemas']))
         base.setdefault('collectors', (COLLECTOR,))
+        base.setdefault('issuers', af.ISSUERS)
         base.setdefault('schema_probe', FakeProbe(base['schemas'], base['clock']))
         return Deps(**base)
 
@@ -133,7 +135,7 @@ class Hosted(unittest.TestCase):
 
     def approve(self, config, principals=('alice',), entries=None):
         digest = self.call(self.deps(config=config, entries=[ENTRY] if entries is None else entries))[1]['snapshot_digest']
-        self.approvals.records[digest] = dict(snapshot_digest=digest, approved_by='synthetic approver', approved_at='2026-11-10', principals=list(principals))
+        self.approvals.records[digest] = af.approval(digest, principals)
         return digest
 
     def rows(self):
@@ -256,13 +258,13 @@ class AttestedApproval(Hosted):
 
     def test_approval_authority_missing_wrong_or_unreadable_rejects(self):
         class Duck:
-            def attestation(self, d): return dict(snapshot_digest=d, approved_by='x', approved_at='y', principals=['alice'])
+            def attestation(self, d): return af.approval(d)
         class Down(ApprovalAuthority):
             def attestation(self, d): raise ConnectionError('approval system down')
         class Says(ApprovalAuthority):
             def __init__(self, make): self.make = make
             def attestation(self, d): return self.make(d)
-        good = lambda d: dict(snapshot_digest=d, approved_by='approver', approved_at='2026-11-10', principals=['alice'])
+        good = lambda d: af.approval(d)
         bad = [None, True, Duck(), Down(), Says(lambda d: None), Says(lambda d: True), Says(lambda d: d),
                Says(lambda d: dict(good(d), snapshot_digest='0' * 64)), Says(lambda d: dict(good(d), approved_by='')),
                Says(lambda d: dict(good(d), approved_at=None)), Says(lambda d: dict(good(d), principals=['bob'])),

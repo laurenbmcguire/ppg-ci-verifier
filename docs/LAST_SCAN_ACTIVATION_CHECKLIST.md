@@ -36,7 +36,9 @@ Each step below needs its own approval. Stop at the first step that cannot be co
    - `Authorizer`: verifies the caller and returns a `Principal`. It is given the hash of the exact request body
      so a signature can cover the timestamp and nonce. A shared static token is not accepted anywhere.
    - `ApprovalAuthority`: stored where the runner and the configuration editor cannot write. It answers for one
-     `snapshot_digest` with `{snapshot_digest, approved_by, approved_at, principals}`.
+     `snapshot_digest` with exactly one version 1 record (issuer, record id, status, validity bounds, optional
+     revocation fields): see "Authority adapter contract" in `docs/LAST_SCAN_REHEARSAL.md`. The host also supplies
+     the accepted issuer identities (`Deps.issuers`); without them every record is refused.
    - `Quota`: runs per hour for one principal and one approved snapshot.
 7. **Dry run.** Call the entry point with `mode: "dry_run"` (the default). It reads no source and writes nothing.
    It returns `snapshot_digest`: one hash over the configuration, each routed assignment's renderer version

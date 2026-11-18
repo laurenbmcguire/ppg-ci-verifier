@@ -6,6 +6,7 @@ import unittest
 from copy import deepcopy
 from unittest import mock
 import readiness_fixture as rf
+import authority_fixture as af
 from hosting import last_scan_hosted as hosted, last_scan_readiness as readiness
 from hosting.last_scan_hosted import ApprovalAuthority, Authorizer, Deps, Principal, Quota
 from test_last_scan_hosted import ALICE, BOB, ENTRY, FakeApprovals, Hosted, SCOPE, assignment, bare_assignment, schemas_for
@@ -181,7 +182,7 @@ class ApprovalBindsTheExactSnapshot(Base):
         code, body = self.go(self.deps(approvals=approvals, schemas=schemas))
         self.assertEqual((code, body['status']), (200, 'ran'))                           # ran on the private copy that was hashed and approved
         self.assertEqual(body['mapping_readiness'][0]['schema_snapshot'], readiness.snapshot_identity(self.schema))
-        self.assertEqual(len(schemas), 2)                                                # the caller's object did change...
+        self.assertGreaterEqual(len(schemas), 2)                                         # the caller's object did change (once per approval read)...
         reads = list(self.reads)
         code, body = self.go(self.deps(schemas=schemas))                                 # ...and the NEXT request sees it and is blocked
         self.assertEqual((code, body['snapshot_digest'], self.reads), (409, None, reads)); self.assertIn(MAPPING, self.failed(body))
@@ -212,8 +213,7 @@ class ApprovalBindsTheExactSnapshot(Base):
         code, body = self.go(self.deps(config=config, schemas=[changed]))                # re-pinned and re-attested, not re-approved
         self.assertEqual((code, self.failed(body)), (409, [APPROVAL]))
         self.assertEqual(self.reads, [])
-        self.approvals.records[body['snapshot_digest']] = dict(snapshot_digest=body['snapshot_digest'], approved_by='synthetic approver',
-                                                               approved_at='2026-11-11', principals=['alice'])
+        self.approvals.records[body['snapshot_digest']] = af.approval(body['snapshot_digest'])
         self.assertEqual(self.go(self.deps(config=config, schemas=[changed]))[0], 200)
         self.assertTrue(self.reads and set(self.reads) == {'1'})                         # only now is the source read again
 
@@ -289,7 +289,7 @@ class CachedReceiptsAndIsolation(Base):
         self.go(run_id='shared'); reads = list(self.reads)
         later = dict(self.schema, captured_at='2026-11-10T21:20:00+00:00')              # same columns, a different capture
         digest = self.call(self.deps(schemas=[later]))[1]['snapshot_digest']
-        self.approvals.records[digest] = dict(snapshot_digest=digest, approved_by='synthetic approver', approved_at='2026-11-11', principals=['alice'])
+        self.approvals.records[digest] = af.approval(digest)
         code, body = self.go(self.deps(schemas=[later]), run_id='shared')
         self.assertEqual((code, body['status']), (200, 'ran'))
         self.assertNotIn('replayed', body['summary']); self.assertGreater(len(self.reads), len(reads))   # its own receipt, its own read

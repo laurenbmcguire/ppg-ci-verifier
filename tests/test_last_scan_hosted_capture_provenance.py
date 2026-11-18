@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 import readiness_fixture as rf
+import authority_fixture as af
 from hosting import last_scan_hosted as hosted, last_scan_readiness as readiness
 from hosting.last_scan_hosted import ApprovalAuthority, Authorizer, CaptureAuthority, Deps, Quota, SchemaDrift, SchemaProbe
 from test_last_scan_hosted import (ALICE, COLLECTOR, ENTRY, FakeApprovals, FakeCaptures, FakeProbe, Hosted, NOW, ROOT, SCOPE,
@@ -23,7 +24,7 @@ def iso(delta=timedelta(0)):
 class ApprovesAnything(ApprovalAuthority):
     """TEST ONLY: an approval authority that says yes to every digest, to show the other gates do not lean on approval."""
     def attestation(self, digest):
-        return dict(snapshot_digest=digest, approved_by='synthetic approver', approved_at='2026-11-10', principals=['alice', 'bob'])
+        return af.approval(digest, ['alice', 'bob'])
 
 
 class Base(Hosted):
@@ -80,7 +81,9 @@ class CaptureAge(Base):
     def test_bounds_are_exact(self):
         day, skew = hosted.MAX_SCHEMA_CAPTURE_AGE_SECONDS, hosted.SCHEMA_FUTURE_SKEW_SECONDS
         self.assertEqual((day, skew), (86400, 300))
-        self.ran(self.at(iso(-timedelta(seconds=day))))
+        self.ran(self.at(iso(-timedelta(seconds=day - 1))))
+        # Exactly at the bound the receipt's own validity (captured_at + one day) has run out: refused, conservatively.
+        self.refused(self.at(iso(-timedelta(seconds=day))), 'capture_receipt_contract:expired')
         self.refused(self.at(iso(-timedelta(seconds=day + 1))), 'capture_too_old')
         self.ran(self.at(iso(timedelta(seconds=skew))))
         self.refused(self.at(iso(timedelta(seconds=skew + 1))), 'capture_time_in_the_future')
@@ -188,7 +191,8 @@ class ReceiptsCannotBeForged(Base):
 
     def test_collector_and_capture_time_are_part_of_what_is_approved(self):
         base = self.call()[1]
-        self.assertEqual(base['mapping_readiness'][0]['capture'], dict(collector=COLLECTOR, captured_at='2026-11-10T21:00:00+00:00', origin='reported_by_capture_authority'))
+        self.assertEqual(base['mapping_readiness'][0]['capture'], dict(collector=COLLECTOR, captured_at='2026-11-10T21:00:00+00:00', origin='reported_by_capture_authority',
+                              record_id=base['mapping_readiness'][0]['capture']['record_id'], issuer=af.CAPTURE_ISSUER, expires_at='2026-11-11T21:00:00+00:00'))
         second = FakeCaptures([self.schema], collector='second-collector')
         code, body = self.go(self.deps(captures=second, collectors=(COLLECTOR, 'second-collector')))          # accepted collector, but not the approved one
         self.assertEqual((code, self.failed(body)), (409, [APPROVAL])); self.assertNotEqual(body['snapshot_digest'], base['snapshot_digest'])

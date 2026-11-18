@@ -76,7 +76,9 @@ adapter itself never sees a token. Expect about six requests for a typical list.
 2. That the answers came from the real tenant.
 3. A receipt recorded by a real capture authority. `receipt_candidate(artifact, '<collector identity>')` returns
    only the content such an authority would be asked to record; it is unsigned and is not a receipt. The hosted
-   entry point reads receipts only from the authority, never from the artifact.
+   entry point reads receipts only from the authority, never from the artifact. The authority adds the lifecycle
+   fields itself (`contract`, `version`, `record_id`, `issuer`, `status`, `expires_at`); the exact shape is the
+   "Authority adapter contract" in `docs/LAST_SCAN_REHEARSAL.md`.
 4. Which column, if any, is the actual scan time, and what every mapped column means. Named people must attest.
 5. Whether each unrecognised column property matters.
 6. Anything about rows. None were read.

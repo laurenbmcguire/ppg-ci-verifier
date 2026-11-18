@@ -20,6 +20,11 @@ The accepted-collector policy (``Deps.collectors``) is copied into a private imm
 used unchanged for the whole request, and included in the approved snapshot digest. Handing these objects in is a
 wiring boundary, not cryptographic authenticity: nothing here proves that an authority, a collector or a policy is
 genuine, only that the request was judged against exactly what the host supplied when it arrived.
+Records from the two authorities must meet the versioned record contract in hosting.last_scan_authority, from an
+issuer the host accepts (``Deps.issuers``, frozen like the collector policy and part of the approved digest), and
+their validity is judged on the host clock: before a run, and again before EVERY source read, where the approval and
+the capture receipt must also be the same records as when the run was authorized. A host clock more than the allowed
+skew behind the last time the store saw is refused. A clock that is simply wrong is not detected.
 None of these exists for production. The only implementations are TEST-ONLY fakes in the test suite. A receipt from
 a CaptureAuthority is reported as "reported by capture authority"; this module cannot verify the authority itself
 and never calls a snapshot trusted on its own account.
@@ -40,7 +45,6 @@ inputs to that check; they are never the approval (that is the ApprovalAuthority
                                                        single-use nonce is reserved and the quota allows it
 A run builds DRAFTS only. Delivery transport stays disabled (hosting.last_scan_transport has no verified provider).
 """
-import json
 import math
 from copy import deepcopy
 import time
@@ -49,6 +53,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
 from hosting import source_first as sf
+from hosting import last_scan_authority as authority
 from hosting import last_scan_readiness as readiness
 from hosting import last_scan_runner as runner
 from hosting import last_scan_transport as transport
@@ -82,16 +87,20 @@ class Authorizer:
 
 class ApprovalAuthority:
     """Answers, from a place the runner cannot write to, whether one exact snapshot was approved.
-    ``attestation(snapshot_digest)`` returns None, or
-    {snapshot_digest, approved_by, approved_at, principals: [ids allowed to run it]}."""
+    ``attestation(snapshot_digest)`` returns None, or exactly ONE version 1 approval record as plain data
+    (hosting.last_scan_authority): contract, version, record_id, issuer, status "active", snapshot_digest, approved_by,
+    approved_at, principals, not_before, expires_at, and optionally revoked_at / revoked_by / revocation_reason.
+    A withdrawn approval is either no record, or a record that says so; it is never a record with a field of the
+    authority's own invention, because unknown fields are refused."""
     def attestation(self, snapshot_digest):
         raise NotImplementedError
 
 
 class CaptureAuthority:
     """Answers, from a place neither the runner nor the configuration can write to, where a schema snapshot came from.
-    ``receipt(snapshot_identity)`` returns None, or
-    {snapshot_identity, site_id, list_id, schema_digest, collector, captured_at}."""
+    ``receipt(snapshot_identity)`` returns None, or exactly ONE version 1 capture receipt as plain data
+    (hosting.last_scan_authority): contract, version, record_id, issuer, status "active", snapshot_identity, site_id,
+    list_id, schema_digest, collector, captured_at, expires_at, and optionally the revocation fields."""
     def receipt(self, snapshot_identity):
         raise NotImplementedError
 
@@ -101,6 +110,10 @@ class SchemaProbe:
     shape as a captured snapshot, with ``captured_at`` set to when it was observed. It must read metadata only."""
     def current(self, site_id, list_id):
         raise NotImplementedError
+
+
+class AuthorityWithdrawn(Exception):
+    """Raised in place of a source read when an approval or capture receipt no longer counts, or the host clock went back."""
 
 
 class SchemaDrift(Exception):
@@ -123,6 +136,7 @@ class Deps:
     schemas: Any = None                  # captured schema snapshots (a list), SUPPLIED by the host; never fetched here
     captures: Any = None                 # CaptureAuthority: where each supplied snapshot came from
     collectors: Any = None               # collector identities the host accepts (server-side; never from config or request)
+    issuers: Any = None                  # {'approval': [...], 'capture': [...]}: authority identities the host accepts (server-side)
     schema_probe: Any = None             # SchemaProbe: read-only live column definitions, checked before each source read
     store: Any = None                    # hosting.last_scan_store store, tables already installed
     artifacts: Any = None                # ArtifactStore for drafts; renderers are BUILT HERE from the configuration
@@ -162,6 +176,31 @@ def _collectors(deps):
     return _freeze_collectors(deps.collectors)
 
 
+def _issuers(deps):
+    return authority.freeze_issuers(deps.issuers)
+
+
+CLOCK = 'auth:clock'                    # the latest host-clock reading a reservation in this store was made at
+
+
+def clock_problem(deps):
+    """Read-only. The host clock is the only clock validity is judged on, so a clock that has gone back by more than
+    the allowed skew since this store last saw it is refused: it could bring an expired record back to life."""
+    try:
+        with deps.store.transaction(CLOCK) as seen:
+            high = seen.get('high_water')
+        if high and (instant(high) - instant(deps.clock())).total_seconds() > SCHEMA_FUTURE_SKEW_SECONDS:
+            return 'The host clock is behind the last time this store saw (' + high + ').'
+    except Exception as error:
+        return 'The clock record could not be read: ' + type(error).__name__
+    return None
+
+
+def mark_clock(record, now):
+    if not record.get('high_water') or instant(now) > instant(record['high_water']):
+        record['high_water'] = instant(now).isoformat()
+
+
 def capture_problems(deps, schema, row):
     """(reasons, capture). Whether the capture authority vouches for exactly this snapshot, from an accepted collector,
     for this site and list, at a valid time within bounds. Nothing inside the snapshot itself is consulted as proof."""
@@ -172,12 +211,13 @@ def capture_problems(deps, schema, row):
         return ['no_accepted_collectors_configured'], None
     identity = readiness.snapshot_identity(schema)
     try:
-        record = deepcopy(deps.captures.receipt(identity))
+        record = authority.plain(deps.captures.receipt(identity))           # ONE read, one private copy of plain data
     except Exception:
         return ['capture_authority_unreadable'], None
     if not isinstance(record, dict) or record.get('snapshot_identity') != identity:
         return ['no_capture_receipt_for_this_exact_snapshot'], None
-    reasons = []
+    # Lifecycle under the record contract: active, from an accepted issuer, within its stated validity on the HOST clock.
+    reasons = ['capture_receipt_contract:' + r for r in authority.problems(record, 'capture', _issuers(deps), deps.clock())]
     if record.get('site_id') != row['site_id'] or record.get('list_id') != row['list_id']:
         reasons.append('capture_receipt_is_for_another_site_or_list')
     if record.get('schema_digest') != readiness.schema_digest(schema):
@@ -200,16 +240,20 @@ def capture_problems(deps, schema, row):
         reasons.append('capture_too_old')
     if age < -SCHEMA_FUTURE_SKEW_SECONDS:
         reasons.append('capture_time_in_the_future')
-    capture = dict(collector=collector, captured_at=at.isoformat(), origin='reported_by_capture_authority')
-    return reasons, (None if reasons else capture)
+    if reasons:
+        return reasons, None
+    # What an approval covers of this receipt. A renewed receipt (new record_id or validity) is another receipt.
+    capture = dict(collector=collector, captured_at=at.isoformat(), origin='reported_by_capture_authority',
+                   record_id=record['record_id'], issuer=record['issuer'], expires_at=instant(record['expires_at']).isoformat())
+    return reasons, capture
 
 
 class _DriftGuard:
     """Confirms, read-only, that each list's live column definitions are still the approved ones. Used once for every
     list before a run starts and again immediately before every source read. Anything short of a fresh, well-formed,
     matching answer is drift. There remains an unavoidable gap between this look and the read that follows it."""
-    def __init__(self, deps, mapping):
-        self.deps, self.count, self.skipped_held = deps, 0, []
+    def __init__(self, deps, mapping, recheck=None):
+        self.deps, self.count, self.skipped_held, self.recheck = deps, 0, [], recheck
         self.approved = {(m['site_id'], m['list_id']): m['schema_digest'] for m in mapping}
 
     def held(self, site_id):
@@ -255,6 +299,9 @@ class _DriftGuard:
         return out
 
     def fetch(self, scope, settings):
+        withdrawn = self.recheck(scope) if self.recheck else None            # asks the authorities, never the source
+        if withdrawn:
+            raise AuthorityWithdrawn(withdrawn)                              # the source is not probed and not read
         problem = self.problem(scope.get('site_id'), scope.get('list_id'))
         if problem:
             raise SchemaDrift(problem)                                       # the source is not read
@@ -299,7 +346,7 @@ def mapping_readiness(config, entries, schemas, capture_check=None):
     return out
 
 
-def snapshot_digest(config, entries, router, schemas=None, mapping=None, collectors=None):
+def snapshot_digest(config, entries, router, schemas=None, mapping=None, collectors=None, issuers=None):
     """One hash over everything an approval must cover: the configuration, the renderer version of every routed
     assignment (mapping, header, pinned template, generator code, binding), the job registry as supplied, the
     identity of every supplied schema snapshot, and per assignment the snapshot and mapping contract it was checked
@@ -314,6 +361,7 @@ def snapshot_digest(config, entries, router, schemas=None, mapping=None, collect
     return sf.digest(dict(config={k: v for k, v in (config or {}).items() if k != 'activation'},
                           render_versions=renders, registry=registry,
                           accepted_collectors=sorted(collectors) if isinstance(collectors, frozenset) else None,
+                          accepted_issuers=[[k, list(v)] for k, v in issuers] if isinstance(issuers, tuple) else None,
                           schema_snapshots=sorted(readiness.snapshot_identity(s) for s in schemas) if isinstance(schemas, list) else None,
                           mapping_readiness=[{k: m[k] for k in ('assignment', 'client_id', 'job', 'site_id', 'list_id', 'ready', 'blocked_reasons',
                                                                 'schema_snapshot', 'schema_digest', 'mapping_contract', 'capture')} for m in mapping or []]))
@@ -326,15 +374,14 @@ def _attestation(deps, digest):
     if not isinstance(deps.approvals, ApprovalAuthority):
         return None, 'No approval authority is configured.'
     try:
-        answer = deps.approvals.attestation(digest)
-        record = json.loads(sf.canonical(answer)) if isinstance(answer, dict) else None
+        record = authority.plain(deps.approvals.attestation(digest))
     except Exception as error:
         return None, 'The approval authority could not be read: ' + type(error).__name__
     return record, ''
 
 
-def _judge(record, digest, principal):
-    """Whether this one record approves exactly this digest for this caller."""
+def _judge(deps, record, digest, principal, action=None, margin=0):
+    """Whether this one record approves exactly this digest and action for this caller, now, on the host clock."""
     if not isinstance(record, dict) or record.get('snapshot_digest') != digest:
         return False, 'No approval exists for exactly this configuration, renderers and job registry.'
     if not all(isinstance(record.get(k), str) and record[k].strip() for k in ('approved_by', 'approved_at')):
@@ -342,12 +389,50 @@ def _judge(record, digest, principal):
     allowed = record.get('principals')
     if not isinstance(allowed, (list, tuple)) or principal.id not in allowed:
         return False, 'This caller is not named in the approval.'
+    lifecycle = authority.problems(record, 'approval', _issuers(deps), deps.clock(), margin)
+    if lifecycle:
+        return False, 'The approval record does not count under the record contract: ' + ', '.join(lifecycle) + '.'
+    if record.get('action') != action:
+        return False, 'The approval is for another action.'
     return True, ''
 
 
-def _attested(deps, digest, principal):
+def _approval(deps, digest, principal, action=None, margin=0):
+    """(ok, why, what was approved). ONE read, ONE record, judged whole. ``identity`` covers the whole record, so a
+    renewal (a new record_id or new validity bounds) is a different approval and has to be authorized afresh."""
     record, why = _attestation(deps, digest)
-    return (False, why) if why else _judge(record, digest, principal)
+    if why:
+        return False, why, None
+    ok, why = _judge(deps, record, digest, principal, action, margin)
+    if not ok:
+        return False, why, None
+    return True, '', dict(identity=authority.identity(record, 'approval'), record_id=record['record_id'], issuer=record['issuer'],
+                          not_before=instant(record['not_before']).isoformat(), expires_at=instant(record['expires_at']).isoformat())
+
+
+def _attested(deps, digest, principal):
+    return _approval(deps, digest, principal)[:2]
+
+
+def still_authorized(deps, principal, digest, approval, mapping, started, scope):
+    """None, or why a run authorized at ``started`` may no longer read this scope. Asks the authorities again, each as
+    ONE record judged whole, and requires the SAME approval record and the SAME capture receipt as when it started."""
+    if instant(deps.clock()) < instant(started):
+        return 'host_clock_went_backwards_during_the_call'
+    ok, why, now_ = _approval(deps, digest, principal)
+    if not ok:
+        return 'run_approval_withdrawn: ' + why
+    if now_['identity'] != approval['identity']:
+        return 'run_approval_is_another_record_than_the_one_this_call_was_authorized_under'
+    row = next((m for m in mapping if m['site_id'] == scope.get('site_id') and m['list_id'] == scope.get('list_id')
+                and m['client_id'] == scope.get('client_id') and m['job'] == scope.get('job')), None)
+    schema = next((s for s in deps.schemas or [] if row and readiness.snapshot_identity(s) == row['schema_snapshot']), None)
+    if schema is None:
+        return 'capture_receipt:no_approved_schema_for_this_scope'
+    reasons, capture = capture_problems(deps, schema, row)
+    if not reasons and capture != row['capture']:
+        reasons = ['identity_changed_since_approval']
+    return 'capture_receipt:' + ','.join(reasons) if reasons else None
 
 
 def preflight(deps, principal):
@@ -364,6 +449,8 @@ def preflight(deps, principal):
     check('capture_authority_configured', isinstance(deps.captures, CaptureAuthority),
           'No capture authority is configured, so no snapshot can be shown to come from a collector.')
     check('accepted_collectors_configured', _collectors(deps) is not None, 'No accepted collector identities are configured on the server side.')
+    check('accepted_authority_issuers_configured', _issuers(deps) is not None,
+          'No accepted approval and capture authority identities are configured on the server side.')
     check('live_schema_probe_configured', isinstance(deps.schema_probe, SchemaProbe),
           'No read-only schema probe is configured, so the approved schema cannot be confirmed live before a read.')
     mapping = mapping_readiness(config, deps.entries if isinstance(deps.entries, list) else None, deps.schemas,
@@ -391,6 +478,8 @@ def preflight(deps, principal):
         except Exception as error:
             detail = 'The store could not be checked: ' + type(error).__name__
     check('durable_store_ready', store_ok, detail)
+    behind = clock_problem(deps) if store_ok else None
+    check('host_clock_not_behind_the_last_seen_time', not behind, behind or '')
     scopes, issues = [], []
     if router is not None and isinstance(deps.entries, list):
         try:
@@ -400,14 +489,15 @@ def preflight(deps, principal):
     blocking = [i for i in issues if i.get('code') != 'built_by_external_process']
     check('at_least_one_runnable_scope', bool(scopes), 'No assignment is complete, verified, in the registry and routed.')
     check('no_assignment_issues', not blocking, ', '.join(sorted({i['code'] for i in blocking})))
-    digest = snapshot_digest(config, deps.entries if isinstance(deps.entries, list) else [], router, deps.schemas, mapping, _collectors(deps)) if router is not None else None
-    ok, why = _attested(deps, digest, principal) if digest else (False, 'There is nothing complete enough to approve.')
+    digest = snapshot_digest(config, deps.entries if isinstance(deps.entries, list) else [], router, deps.schemas, mapping,
+                             _collectors(deps), _issuers(deps)) if router is not None else None
+    ok, why, approval = _approval(deps, digest, principal) if digest else (False, 'There is nothing complete enough to approve.', None)
     check('approval_attested_for_this_snapshot_and_principal', ok, why)
     check('quota_configured', isinstance(deps.quota, Quota) and isinstance(deps.quota.runs_per_hour, int)
           and not isinstance(deps.quota.runs_per_hour, bool) and deps.quota.runs_per_hour > 0, 'No run quota is configured.')
     check('delivery_transport_disabled', not transport.verified(deps.provider_contract),
           'This entry point builds drafts only. A provider contract must not be attached here.')
-    return checks, scopes, issues, digest, router, mapping
+    return checks, scopes, issues, digest, router, mapping, approval
 
 
 def _number(value, cap, whole):
@@ -425,9 +515,10 @@ def _reserve(deps, principal, digest, nonce, run_id):
     hour = instant(now).strftime('%Y-%m-%dT%H')
     nonce_key = 'auth:nonce:' + sf.digest(dict(principal=principal.id, nonce=nonce))
     quota_key = 'auth:quota:' + sf.digest(dict(principal=principal.id, snapshot=digest, hour=hour))
-    with deps.store.atomic([nonce_key, quota_key]) as records:
+    with deps.store.atomic([nonce_key, quota_key, CLOCK]) as records:
         if records[nonce_key]:
             return 'replayed_request'
+        mark_clock(records[CLOCK], now)
         used = int(records[quota_key].get('runs') or 0)
         if used >= deps.quota.runs_per_hour:
             return 'quota_exceeded'
@@ -449,11 +540,12 @@ def handle(method, headers, body, deps):
     # Own the authorization inputs before any dependency callback can mutate their originals.
     # The same private snapshot is used for hashing, planning, approval and execution.
     # The accepted-collector policy is frozen here too, first, so no callback can widen or narrow it mid-request.
-    policy = _freeze_collectors(deps.collectors)
+    policy, issuers = _freeze_collectors(deps.collectors), authority.freeze_issuers(deps.issuers)
     try:
         body = deepcopy(body)
         headers = dict(headers)
-        deps = replace(deps, config=deepcopy(deps.config), entries=deepcopy(deps.entries), schemas=deepcopy(deps.schemas), collectors=policy)
+        deps = replace(deps, config=deepcopy(deps.config), entries=deepcopy(deps.entries), schemas=deepcopy(deps.schemas), collectors=policy,
+                       issuers=issuers)
         body_digest = sf.digest(body)             # refuses NaN / infinity / non-JSON values anywhere in the body
     except Exception:
         return _respond(400, status='bad_request', detail='The body must be plain JSON with finite numbers.')
@@ -484,7 +576,8 @@ def handle(method, headers, body, deps):
     if mode == 'run' and (not isinstance(nonce, str) or not 16 <= len(nonce) <= 200):
         return _respond(400, status='bad_request', detail='A run needs a single-use nonce of 16 to 200 characters.')
     try:
-        checks, scopes, issues, digest, router, mapping = preflight(deps, principal)
+        started = deps.clock()
+        checks, scopes, issues, digest, router, mapping, approval = preflight(deps, principal)
     except Exception as error:
         return _respond(409, status='not_activated', sources_read=0, records_written=0, detail='Preflight failed: ' + type(error).__name__)
     ready = all(c['ok'] for c in checks)
@@ -494,6 +587,7 @@ def handle(method, headers, body, deps):
                                 business_date=x['scope']['business_date'], shift=x['scope']['shift']) for x in scopes],
                   issues=issues, limits=limits, transport='disabled', client_release='held',
                   mapping_readiness=mapping, proof=dict(NO_PROOF), accepted_collectors=sorted(policy) if policy is not None else None,
+                  approval={k: approval[k] for k in ('record_id', 'issuer', 'not_before', 'expires_at')} if approval else None,
                   live_schema_drift_check='not_performed_in_dry_run' if mode == 'dry_run' else 'not_performed')
     if mode == 'dry_run':
         return _respond(200, status='dry_run', sources_read=0, records_written=0, **report)
@@ -503,7 +597,8 @@ def handle(method, headers, body, deps):
     if refused:
         return _respond(409 if refused == 'replayed_request' else 429, status=refused, sources_read=0, **report)
     # Live schema confirmation, read-only: every list once now, then again immediately before each source read.
-    guard = _DriftGuard(deps, mapping)
+    # Before EVERY source read the approval and the capture receipt are asked for again: same records, still valid.
+    guard = _DriftGuard(deps, mapping, recheck=lambda scope: still_authorized(deps, principal, digest, approval, mapping, started, scope))
     drift = guard.check_all()
     if drift:
         return _respond(409, status='schema_drift', sources_read=0, schema_probes=guard.count, drift=drift,

@@ -5,6 +5,7 @@ import threading
 import unittest
 import unittest.mock
 from concurrent.futures import ThreadPoolExecutor
+import authority_fixture as af
 from hosting import last_scan_hosted as hosted
 from hosting.last_scan_hosted import Authorizer, Principal, Quota
 from test_last_scan_hosted import COLLECTOR, FakeApprovals, FakeAuthorizer, FakeCaptures, FakeProbe, Hosted, schemas_for
@@ -90,8 +91,7 @@ class AddingCannotPermitADeniedRequest(Base):
         self.denied(self.mutating(policy, lambda p: p.append(COLLECTOR), 'authorizer'))
         body = self.denied(self.deps(collectors=policy))                         # now [OTHER, COLLECTOR]: mapping is ready...
         self.assertEqual((self.failed(body), body['accepted_collectors']), ([APPROVAL], sorted([OTHER, COLLECTOR])))   # ...but this policy was never approved
-        self.approvals.records[body['snapshot_digest']] = dict(snapshot_digest=body['snapshot_digest'], approved_by='synthetic approver',
-                                                               approved_at='2026-11-10', principals=['alice'])
+        self.approvals.records[body['snapshot_digest']] = af.approval(body['snapshot_digest'])
         code, body = self.go(self.deps(collectors=policy))
         self.assertEqual((code, body['status']), (200, 'ran'))
 

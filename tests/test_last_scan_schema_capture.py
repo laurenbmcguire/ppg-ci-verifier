@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import quote
 import demo_client_fixture as demo
 import readiness_fixture as rf
+import authority_fixture as af
 from hosting import last_scan_hosted as hosted, last_scan_readiness as readiness, last_scan_schema_capture as cap
 from hosting.last_scan_schema_capture import SchemaCaptureFailure, capture_schema, receipt_candidate
 from test_last_scan_hosted import COLLECTOR, FakeCaptures, Hosted, NOW, bare_assignment
@@ -407,10 +408,11 @@ class ReceiptHandoff(Hosted):
         self.assertFalse(body['mapping_readiness'][0]['ready'])
         self.assertEqual(self.reasons(captures=None)['blocked_reasons'][-1], 'no_capture_authority_configured')
         authority = FakeCaptures()                                               # TEST ONLY: a fake authority recording the candidate after "its own checks"
-        authority.records[candidate['snapshot_identity']] = {k: v for k, v in candidate.items() if k != 'status'}
+        authority.records[candidate['snapshot_identity']] = af.receipt({k: v for k, v in candidate.items() if k != 'status'})
         row = self.reasons(captures=authority)
         self.assertEqual((row['ready'], row['blocked_reasons']), (True, []))
-        self.assertEqual(row['capture'], dict(collector=COLLECTOR, captured_at='2026-11-10T21:30:00+00:00', origin='reported_by_capture_authority'))
+        self.assertEqual(row['capture'], dict(collector=COLLECTOR, captured_at='2026-11-10T21:30:00+00:00', origin='reported_by_capture_authority',
+                                              record_id=row['capture']['record_id'], issuer=af.CAPTURE_ISSUER, expires_at='2026-11-11T21:30:00+00:00'))
         self.assertEqual(self.reasons(captures=authority, collectors=('another-collector',))['ready'], False)
 
     def test_nothing_wires_the_adapter_in(self):

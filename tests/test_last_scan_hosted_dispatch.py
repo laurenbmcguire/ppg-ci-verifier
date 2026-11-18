@@ -14,6 +14,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+import authority_fixture as af
 import readiness_fixture as rf
 import rehearsal_harness as rh
 from hosting import last_scan_dispatch as dispatch, last_scan_hosted as hosted, last_scan_transport as transport, source_first as sf
@@ -66,12 +67,19 @@ class Dispatch(Base):
         self.assertEqual(self.entry()['status'], 'pending')
         return body
 
+    def for_both(self):
+        """The FAKE approver names alice and bob in the run approval. That is a changed run approval RECORD, so the
+        earlier dispatch approval no longer covers it and a new one is issued for both."""
+        run = next(k for k in self.r.approvals.records if k != self.approved)
+        self.r.approvals.records[run]['principals'] = ['alice', 'bob']
+        self.assertEqual(self.go()[1]['status'], 'not_authorized')              # the old dispatch approval covered the old record
+        self.approved = self.r.approve_dispatch(('alice', 'bob'))
+
     def reapprove(self, principals=('alice',), **kw):
         """The FAKE approver approves a changed configuration or policy (run snapshot and dispatch digest)."""
         code, dry = self.r.call(mode='dry_run', deps=self.r.deps(**{k: v for k, v in kw.items() if k in ('config', 'collectors')}))
         self.assertEqual(code, 200, dry)
-        self.r.approvals.records[dry['snapshot_digest']] = dict(snapshot_digest=dry['snapshot_digest'], approved_by='rehearsal fake approver',
-                                                                approved_at=DAY, principals=list(principals))
+        self.r.approvals.records[dry['snapshot_digest']] = af.approval(dry['snapshot_digest'], principals)
         return self.r.approve_dispatch(principals, deps=self.r.dispatch_deps(**kw))
 
 
@@ -141,14 +149,16 @@ class DefaultDeny(Dispatch):
         self.assertEqual(self.failed(body), ['dispatch_approved_for_this_snapshot_recipients_contract_and_principal'])
         run_record = self.r.approvals.records[body['snapshot_digest']]
         self.r.approvals.records[self.approved] = dict(run_record, snapshot_digest=self.approved)        # a run-shaped record under the dispatch digest
-        self.assertIn('not for the dispatch action', self.refused(self.go())['checks'][-1]['detail'])
+        body = self.refused(self.go(), 'dispatch_approved_for_this_snapshot_recipients_contract_and_principal')
+        self.assertIn('for another action', next(c['detail'] for c in body['checks'] if c['check'].startswith('dispatch_approved')))
 
     def test_the_caller_must_be_named_in_both_approvals(self):
         self.refused(self.go(headers=BOB), 'approval_attested_for_this_snapshot_and_principal',
                      'dispatch_approved_for_this_snapshot_recipients_contract_and_principal')
         self.r.approvals.records[self.approved]['principals'] = ['alice', 'bob']                  # dispatch only: still not allowed to run
         body = self.refused(self.go(headers=BOB), 'approval_attested_for_this_snapshot_and_principal')
-        self.assertEqual(self.failed(body), ['approval_attested_for_this_snapshot_and_principal'])
+        # with no run approval for this caller there is no run approval record for a dispatch approval to cover
+        self.assertEqual(self.failed(body), ['approval_attested_for_this_snapshot_and_principal', 'dispatch_approved_for_this_snapshot_recipients_contract_and_principal'])
 
     def test_nothing_in_the_call_or_the_configuration_can_approve_itself(self):
         for extra in (dict(approved=True), dict(principals=['alice']), dict(grant='x'), dict(provider_contract='x'), dict(sender='x')):
@@ -431,8 +441,7 @@ class ReplayQuotaAndReceipts(Dispatch):
             self.assertEqual(self.go('bravo', '2', deps=self.r.dispatch_deps(dispatch_quota=bad))[1]['status'], 'not_authorized')
 
     def test_one_callers_recorded_outcome_is_not_served_to_another(self):
-        for record in self.r.approvals.records.values():
-            record['principals'] = ['alice', 'bob']
+        self.for_both()
         first = self.r.dispatch_request('alpha', '1')
         self.assertEqual(dispatch.handle('POST', rh.ALICE, first, self.r.dispatch_deps())[1]['status'], 'sent')
         code, body = dispatch.handle('POST', BOB, first, self.r.dispatch_deps())                  # same dispatch_id, same nonce, another caller
@@ -474,7 +483,7 @@ class OneRecordPerCheck(Dispatch):
     def test_one_read_of_each_approval_per_check(self):
         counting = self.authority((self.r.approvals.records[self.approved],))
         self.assertEqual(self.go(deps=self.r.dispatch_deps(approvals=counting))[1]['status'], 'sent')
-        self.assertEqual((counting.asked, counting.total), (2, 4))              # run + dispatch before the reservation, and again after the re-read
+        self.assertEqual((counting.asked, counting.total), (3, 6))              # run + dispatch: before the reservation, before the re-read, after it
 
     def test_a_record_that_answers_differently_each_time_it_is_asked_is_taken_once_as_plain_data(self):
         good = self.r.approvals.records[self.approved]
@@ -499,8 +508,10 @@ class OneRecordPerCheck(Dispatch):
     def test_valid_before_the_read_and_split_after_it_stops_the_claim(self):
         good = self.r.approvals.records[self.approved]
         for later in (dict(good, action='not_dispatch'), dict(good, principals=['bob'])):
-            code, body = self.go(deps=self.r.dispatch_deps(approvals=self.authority((good, later), cycle=False)))
-            self.assertEqual((code, body['status'], body['refusal'], body['sources_read'], body['sender_calls']), (409, 'held', 'dispatch_approval_withdrawn', 1, 0))
+            for answers, reads in (((good, later), 0), ((good, good, later), 1)):      # split before the re-read, and after it
+                code, body = self.go(deps=self.r.dispatch_deps(approvals=self.authority(answers, cycle=False)))
+                self.assertEqual((code, body['status'], body['refusal'], body['sources_read'], body['sender_calls']),
+                                 (409, 'held', 'dispatch_approval_withdrawn', reads, 0))
         self.assertEqual(self.r.lauren.calls, 0)
 
 
@@ -582,8 +593,7 @@ class Concurrent(Dispatch):
         self.assertEqual((self.r.lauren.calls, len(self.r.lauren.messages), len(self.entry()['attempts'])), (1, 1, 1))
 
     def test_two_callers_at_once_send_once(self):
-        for record in self.r.approvals.records.values():
-            record['principals'] = ['alice', 'bob']
+        self.for_both()
         with ThreadPoolExecutor(4) as pool:
             out = list(pool.map(lambda i: self.go(headers=(rh.ALICE, BOB)[i % 2])[1]['status'], range(8)))
         self.assertEqual(out.count('sent'), 1, out)
