@@ -465,7 +465,7 @@ class DispatchLifecycle(Dispatch):
         self.assertIn('expired', body['refusal_detail'])
         self.restore()
         code, body = self.during_the_read(lambda: self.r.clock.advance(seconds=dispatch.GRANT_SECONDS + 1))
-        self.assertEqual((code, body['status'], body['refusal'], body['sender_calls']), (409, 'held', 'dispatch_took_too_long', 0))
+        self.assertEqual((code, body['status'], body['refusal'], body['sender_calls']), (409, 'held', 'call_took_too_long', 0))
         self.assertEqual(self.r.lauren.calls, 0)
 
     def test_the_host_clock_going_backwards(self):
@@ -705,6 +705,127 @@ class Jumping:
 def transport_grant_key(test):
     from hosting import last_scan_transport as transport
     return transport.grant_key(test.r.item('alpha', '1')['scope'], test.op)
+
+
+class FinalGateAfterCallbacks(Dispatch):
+    """QA of 646dbdb: whatever happens DURING the last authority callback before source IO must still be caught, by a
+    check that asks no authority: host clock, store watermark and the validity bounds already on record."""
+    def acting_approvals(self, act, on):
+        records, test = self.r.approvals.records, self
+        class Acts(FakeApprovals):
+            def __init__(s): s.records, s.n = records, 0
+            def attestation(s, digest):
+                s.n += 1
+                if s.n == on:
+                    act()                                                        # inside the authority callback, before it answers
+                return deepcopy(records.get(digest))
+        return Acts()
+
+    def acts(self):
+        return dict(watermark_ahead=lambda: ahead(self.r.store, self.r.clock),
+                    expired=lambda: self.r.clock.advance(days=3),
+                    clock_back=lambda: setattr(self.r.clock, 'at', self.r.clock.at - timedelta(seconds=1)),
+                    too_long=lambda: self.r.clock.advance(seconds=dispatch.GRANT_SECONDS + 1))
+
+    def test_qa_repro_n6_watermark_moved_during_the_last_recheck_before_the_item_read(self):
+        approvals = self.acting_approvals(lambda: ahead(self.r.store, self.r.clock), on=6)
+        code, body = self.go(deps=self.r.dispatch_deps(approvals=approvals))
+        self.assertEqual((code, body['status'], body['sources_read'], body['sender_calls'], self.item_reads('alpha'), self.r.lauren.calls),
+                         (409, 'held', 0, 0, self.reads, 0), (body.get('refusal'), approvals.n))
+        self.assertEqual((body['refusal'], approvals.n), ('host_clock_is_behind_the_last_seen_time', 6))
+
+    def test_anything_during_any_authority_callback_before_the_read_means_no_item_read(self):
+        for name in self.acts():
+            for on in range(1, 9):                                               # 1-2 authorization, 3-4 before the probe, 5-6 after it, 7-8 after the read
+                with self.subTest(name=name, callback=on):
+                    self.setUp()
+                    approvals = self.acting_approvals(self.acts()[name], on)
+                    code, body = self.go(deps=self.r.dispatch_deps(approvals=approvals))
+                    self.assertEqual((body['sender_calls'], self.r.lauren.calls), (0, 0), body.get('status'))
+                    self.assertNotEqual(body['status'], 'sent')
+                    if on <= 6:
+                        self.assertEqual((body['sources_read'], self.item_reads('alpha')), (0, self.reads), (body.get('status'), body.get('refusal')))
+                    else:
+                        self.assertEqual(body['sources_read'], 1)                # too late to prevent the read; never too late to prevent the send
+
+    def test_the_capture_authority_is_a_callback_too(self):
+        for name in self.acts():
+            for on in range(1, 7):
+                with self.subTest(name=name, callback=on):
+                    self.setUp()
+                    act, inner, test = self.acts()[name], self.r.captures, self
+                    class Acts(rh.RecordedCaptures):
+                        def __init__(s): s.records, s.n = inner.records, 0
+                        def receipt(s, identity):
+                            s.n += 1
+                            if s.n == on:
+                                act()
+                            return super().receipt(identity)
+                    captures = Acts()
+                    code, body = self.go(deps=self.r.dispatch_deps(captures=captures))
+                    if captures.n < on:
+                        continue                                                 # this call never reached that callback
+                    self.assertEqual((body['sender_calls'], self.r.lauren.calls), (0, 0))
+                    if on <= 4:                             # 2 at authorization (two lists), then one before the probe, one after
+                        self.assertEqual((body['sources_read'], self.item_reads('alpha')), (0, self.reads), (body.get('status'), body.get('refusal'), captures.n))
+
+
+class HostedFinalGateAfterCallbacks(Hosted):
+    def setUp(self):
+        super().setUp()
+        self.digest = next(iter(self.approvals.records))
+        self.schemas = schemas_for(self.config)
+
+    def acts(self):
+        return dict(watermark_ahead=lambda: ahead(self.store, lambda: self.now),
+                    expired=lambda: setattr(self, 'now', '2026-11-13T00:00:00+00:00'),
+                    receipt_expired=lambda: setattr(self, 'now', '2026-11-11T21:00:00+00:00'),
+                    clock_back=lambda: setattr(self, 'now', iso(-timedelta(seconds=1))))
+
+    def fresh(self, name):
+        self.now = NOW
+        self.path = Path(self.folder.name) / (name + '.db'); self.store = StateStore(self.path)
+        self.reads.clear()
+
+    def test_anything_during_any_approval_callback_means_no_item_read(self):
+        for name in self.acts():
+            for on in range(1, 6):                                               # preflight; before and after the run-start probe; before and after the read's probe
+                with self.subTest(name=name, callback=on):
+                    self.fresh('%s-a%d' % (name, on))
+                    act, test = self.acts()[name], self
+                    class Acts(FakeApprovals):
+                        def __init__(s): s.n = 0
+                        def attestation(s, digest):
+                            s.n += 1
+                            if s.n == on:
+                                act()
+                            return deepcopy(test.approvals.records.get(digest))
+                    approvals = Acts()
+                    code, body = self.go(self.deps(approvals=approvals, quota=hosted.Quota(500)))
+                    self.assertGreaterEqual(approvals.n, on)
+                    self.assertEqual(self.reads, [], (body.get('status'), approvals.n))
+        self.now = NOW
+
+    def test_anything_during_any_capture_callback_means_no_item_read(self):
+        for name in self.acts():
+            for on in range(1, 6):
+                with self.subTest(name=name, callback=on):
+                    self.fresh('%s-c%d' % (name, on))
+                    act = self.acts()[name]
+                    class Acts(FakeCaptures):
+                        def receipt(s, identity):
+                            s.n = getattr(s, 'n', 0) + 1
+                            if s.n == on:
+                                act()
+                            return super().receipt(identity)
+                    captures = Acts(self.schemas)
+                    code, body = self.go(self.deps(captures=captures, quota=hosted.Quota(500)))
+                    self.assertGreaterEqual(captures.n, on)
+                    self.assertEqual(self.reads, [], (body.get('status'), captures.n))
+        self.now = NOW
+
+    def test_a_clean_run_still_reads(self):
+        self.assertEqual(self.go()[1]['status'], 'ran'); self.assertTrue(self.reads)
 
 
 class RehearsalPoll(Dispatch):

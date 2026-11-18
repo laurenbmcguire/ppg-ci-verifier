@@ -200,6 +200,29 @@ def clock_behind(high, now):
     return bool(high) and (instant(high) - instant(now)).total_seconds() > SCHEMA_FUTURE_SKEW_SECONDS
 
 
+def time_gate(deps, started, bounds, max_seconds=None):
+    """None, or why no source may be touched and nothing sent NOW. PURE: it asks no authority. It reads the store's
+    last-seen time and then the host clock, once, and compares them with what is already on record for this call:
+    when it started and the validity bounds of the records it was authorized under. It is the LAST thing before any
+    source IO, after every authority callback, because a callback can take time or run while the clock, the
+    watermark or a validity bound moves."""
+    try:
+        with deps.store.transaction(CLOCK) as seen:
+            high = seen.get('high_water')
+        now, begun = instant(deps.clock()), instant(started)
+        if now < begun:
+            return 'host_clock_went_backwards_during_the_call'
+        if clock_behind(high, now.isoformat()):
+            return 'host_clock_is_behind_the_last_seen_time'
+        if not bounds or any(now >= instant(b) for b in bounds):
+            return 'a_validity_bound_of_this_call_has_passed'
+        if max_seconds is not None and (now - begun).total_seconds() > max_seconds:
+            return 'call_took_too_long'
+    except Exception as error:
+        return 'time_gate_failed:' + type(error).__name__
+    return None
+
+
 def mark_clock(record, now):
     if not record.get('high_water') or instant(now) > instant(record['high_water']):
         record['high_water'] = instant(now).isoformat()
@@ -256,9 +279,14 @@ class _DriftGuard:
     """Confirms, read-only, that each list's live column definitions are still the approved ones. Used once for every
     list before a run starts and again immediately before every source read. Anything short of a fresh, well-formed,
     matching answer is drift. There remains an unavoidable gap between this look and the read that follows it."""
-    def __init__(self, deps, mapping, recheck=None):
-        self.deps, self.count, self.skipped_held, self.recheck, self.withdrawn = deps, 0, [], recheck, None
+    def __init__(self, deps, mapping, recheck=None, gate=None):
+        self.deps, self.count, self.skipped_held, self.recheck, self.gate, self.withdrawn = deps, 0, [], recheck, gate, None
         self.approved = {(m['site_id'], m['list_id']): m['schema_digest'] for m in mapping}
+
+    def stop(self, scope):
+        """None, or why the source must not be touched. Two phases, in this order: first the authority callbacks
+        (``recheck``), which can block; then the pure time gate, which asks nobody and is the last thing before IO."""
+        return (self.recheck(scope) if self.recheck else None) or (self.gate() if self.gate else None)
 
     def held(self, site_id):
         """The site's stored wait, if one is in force. A held site is asked NOTHING: no metadata, no columns, no items."""
@@ -299,11 +327,11 @@ class _DriftGuard:
                 continue
             # A probe can take time. The authorities and the clock are asked before it and again after it, and the
             # first refusal ends the round: no further probe is made and no item is ever read.
-            self.withdrawn = self.recheck(dict(site_id=site_id, list_id=list_id)) if self.recheck else None
+            self.withdrawn = self.stop(dict(site_id=site_id, list_id=list_id))
             if self.withdrawn:
                 break
             problem = self.problem(site_id, list_id)
-            self.withdrawn = self.recheck(dict(site_id=site_id, list_id=list_id)) if self.recheck else None
+            self.withdrawn = self.stop(dict(site_id=site_id, list_id=list_id))
             if self.withdrawn:
                 break
             if problem:
@@ -311,13 +339,13 @@ class _DriftGuard:
         return out
 
     def fetch(self, scope, settings):
-        withdrawn = self.recheck(scope) if self.recheck else None            # asks the authorities, never the source
+        withdrawn = self.stop(scope)                                         # authorities, then the pure time gate; never the source
         if withdrawn:
             raise AuthorityWithdrawn(withdrawn)                              # the source is not probed and not read
         problem = self.problem(scope.get('site_id'), scope.get('list_id'))
         if problem:
             raise SchemaDrift(problem)                                       # the source is not read
-        withdrawn = self.recheck(scope) if self.recheck else None            # again: the probe just made may have taken time
+        withdrawn = self.stop(scope)                                         # again: the probe just made may have taken time
         if withdrawn:
             raise AuthorityWithdrawn(withdrawn)                              # no item is read
         return self.deps.fetch(scope, settings)
@@ -623,7 +651,11 @@ def handle(method, headers, body, deps):
         return _respond(429 if refused == 'quota_exceeded' else 409, status=refused, sources_read=0, **report)
     # Live schema confirmation, read-only: every list once now, then again immediately before each source read.
     # Before EVERY source read the approval and the capture receipt are asked for again: same records, still valid.
-    guard = _DriftGuard(deps, mapping, recheck=lambda scope: still_authorized(deps, principal, digest, approval, mapping, started, scope))
+    # The pure time gate runs after those callbacks, last before any probe or read: host clock, watermark, and the
+    # validity bounds of the approval and of every receipt this run was authorized under.
+    bounds = [approval['expires_at']] + [m['capture']['expires_at'] for m in mapping]
+    guard = _DriftGuard(deps, mapping, recheck=lambda scope: still_authorized(deps, principal, digest, approval, mapping, started, scope),
+                        gate=lambda: time_gate(deps, started, bounds))
     drift = guard.check_all()
     if guard.withdrawn:                                                      # noticed around a run-start probe: nothing else is asked of any source
         return _respond(409, status='authority_withdrawn', reason=guard.withdrawn, sources_read=0, schema_probes=guard.count,

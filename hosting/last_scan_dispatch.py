@@ -50,7 +50,10 @@ dispatch approval, and the intent and grant name both records. Before the schema
 is read, and again after the read, the same records are asked for and must be the same records, still valid, and the
 host clock must not be behind the latest time the store has seen (checked inside the reservation transaction too); an approval or receipt that would expire within
 GRANT_SECONDS is refused up front; a call that takes longer than GRANT_SECONDS, or sees the host clock go backwards,
-stops; and the sender is not called once any of the three validity bounds has passed.
+stops; and the sender is not called once any of the three validity bounds has passed. Each of those re-checks is two
+phases in a fixed order: the authority callbacks first, then a pure gate (hosted.time_gate) that asks nobody and only
+compares the host clock and the store's last-seen time with the bounds already on record. The gate is the last thing
+before the probe, before the item read, before the claim and before the send.
 
 NOT CLOSED, and not claimed: the source can change between the schema probe and the read, between the read and the
 claim, and between the claim and the provider receiving the message; an approval can be withdrawn after the last
@@ -331,9 +334,9 @@ def handle(method, headers, body, deps):
             return 'dispatch_approval_withdrawn: ' + reason
         if now_['identity'] != dispatch_approval['identity']:
             return 'dispatch_approval_is_another_record_than_the_one_this_call_was_authorized_under'
-        if (instant(deps.clock()) - instant(started)).total_seconds() > GRANT_SECONDS:
-            return 'dispatch_took_too_long'
-        return None
+        # Every authority callback is done. LAST, and asking nobody: host clock, store watermark, the validity bounds
+        # of the three records this call was authorized under, and how long the call has taken.
+        return hosted.time_gate(base, started, bounds, GRANT_SECONDS)
 
     def stop(why):
         seen['refusal'], seen['detail'] = why.split(': ', 1)[0], why
@@ -358,8 +361,7 @@ def handle(method, headers, body, deps):
         return snapshot
 
     def send(*, idempotency_key, attempt_id, audience, payload):
-        at = instant(deps.clock())                                           # clock only; no authority is asked at this point
-        if at < instant(started) or any(at >= instant(b) for b in bounds) or hosted.clock_problem(base):
+        if hosted.time_gate(base, started, bounds):                          # pure: no authority is asked at this point
             seen['refusal'] = 'validity_passed_or_clock_went_back_before_the_send'
             raise Revoked(seen['refusal'])                                   # the sender is NOT called; the attempt is recorded as returned in error
         receipt = payload.get('receipt') if isinstance(payload, dict) else None
