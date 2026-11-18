@@ -12,6 +12,14 @@ this code does not own:
                           which principals. An approval written into the configuration itself counts for nothing.
   * ``Quota``             how many runs a principal may start for an approved snapshot per hour.
 
+Source-mapping readiness is a MANDATORY preflight check with no switch to skip it. For every configured assignment
+exactly one captured schema snapshot must be SUPPLIED through ``Deps.schemas`` (this module looks nothing up), and
+``hosting.last_scan_readiness.validate`` must find the mapping ready against it. The identity of each snapshot and
+the mapping contract checked against it are part of the approved snapshot digest, so an approval covers one exact
+schema and one exact contract and stops counting when either changes. When it is blocked no renderer is built, no
+scope is planned and there is nothing to approve. Attestations and ``verified`` flags inside the configuration are
+inputs to that check; they are never the approval (that is the ApprovalAuthority) and never runtime proof.
+
 ``handle`` is one bounded call:
   * no authorizer / principal not verified          -> 503 / 401, nothing read, nothing written
   * mode "dry_run" (the default)                    -> the plan and the preflight; reads no source, writes nothing
@@ -28,6 +36,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
 from hosting import source_first as sf
+from hosting import last_scan_readiness as readiness
 from hosting import last_scan_runner as runner
 from hosting import last_scan_transport as transport
 from hosting.last_scan_drafts import instant
@@ -75,6 +84,7 @@ class Deps:
     quota: Any = None                    # Quota
     config: Any = None                   # the stored configuration (see SETTING_KEY), or None
     entries: Any = None                  # verified job registry entries (runner.registry_entries), or None
+    schemas: Any = None                  # captured schema snapshots (a list), SUPPLIED by the host; never fetched here
     store: Any = None                    # hosting.last_scan_store store, tables already installed
     artifacts: Any = None                # ArtifactStore for drafts; renderers are BUILT HERE from the configuration
     fetch: Optional[Callable] = None     # source adapter: fetch(scope, settings) -> snapshot
@@ -91,9 +101,44 @@ def _router(deps):
     return StoredDraftRouter(deps.artifacts, config['assignments'])
 
 
-def snapshot_digest(config, entries, router):
+NO_PROOF = dict(runtime_source_proof='not_established', scan_time_semantics='not_established_by_this_tool', sample_evidence='not_performed',
+                statement='Mapping readiness compares the configuration with a captured schema snapshot. It reads no source, examines no '
+                          'sample rows here, and establishes nothing about what the live source returns or what the scan field means. '
+                          'Attestations in the configuration are inputs, not the approval.')
+
+
+def mapping_readiness(config, entries, schemas):
+    """Per configured assignment: exactly one supplied snapshot for its site and list, validated offline. Pure."""
+    assignments = config.get('assignments') if isinstance(config, dict) else None
+    supplied = schemas if isinstance(schemas, list) else None
+    out = []
+    for index, a in enumerate(assignments if isinstance(assignments, list) else []):
+        d = a if isinstance(a, dict) else {}
+        row = dict(assignment=index, client_id=d.get('client_id'), job=d.get('job'), site_id=d.get('site_id'), list_id=d.get('list_id'),
+                   ready=False, blocked_reasons=[], schema_snapshot=None, schema_digest=None, mapping_contract=None, not_performed=[], proof=dict(NO_PROOF))
+        matches = [s for s in supplied or [] if isinstance(s, dict) and isinstance(d.get('site_id'), str) and isinstance(d.get('list_id'), str)
+                   and s.get('site_id') == d['site_id'] and s.get('list_id') == d['list_id']]
+        if supplied is None:
+            row['blocked_reasons'] = ['no_schema_snapshots_supplied']
+        elif not matches:
+            row['blocked_reasons'] = ['no_schema_snapshot_for_this_site_and_list']
+        elif len(matches) > 1:
+            row['blocked_reasons'] = ['more_than_one_schema_snapshot_for_this_site_and_list']
+        else:
+            report = readiness.validate(a, matches[0], entries)              # offline; no sample rows are examined here
+            row.update(ready=report['ready_for_dry_run'] is True, blocked_reasons=list(report['blocked_reasons']),
+                       schema_snapshot=readiness.snapshot_identity(matches[0]), schema_digest=report['schema_digest'],
+                       mapping_contract=report['attestation_bindings'], not_performed=[n['check'] for n in report['not_performed']],
+                       proof=dict(NO_PROOF, schema_dry_run_readiness=report['proof']['schema_dry_run_readiness'], sample_evidence=report['proof']['sample_evidence']))
+        out.append(row)
+    return out
+
+
+def snapshot_digest(config, entries, router, schemas=None, mapping=None):
     """One hash over everything an approval must cover: the configuration, the renderer version of every routed
-    assignment (mapping, header, pinned template, generator code, binding) and the job registry as supplied."""
+    assignment (mapping, header, pinned template, generator code, binding), the job registry as supplied, the
+    identity of every supplied schema snapshot, and per assignment the snapshot and mapping contract it was checked
+    against together with the outcome."""
     renders = {}
     for a in (config or {}).get('assignments') or []:
         try:
@@ -102,7 +147,10 @@ def snapshot_digest(config, entries, router):
             continue
     registry = sorted(sf.digest(e) for e in entries or [])
     return sf.digest(dict(config={k: v for k, v in (config or {}).items() if k != 'activation'},
-                          render_versions=renders, registry=registry))
+                          render_versions=renders, registry=registry,
+                          schema_snapshots=sorted(readiness.snapshot_identity(s) for s in schemas) if isinstance(schemas, list) else None,
+                          mapping_readiness=[{k: m[k] for k in ('assignment', 'client_id', 'job', 'site_id', 'list_id', 'ready', 'blocked_reasons',
+                                                                'schema_snapshot', 'schema_digest', 'mapping_contract')} for m in mapping or []]))
 
 
 def _attested(deps, digest, principal):
@@ -131,13 +179,23 @@ def preflight(deps, principal):
     config = config if isinstance(config, dict) else {}
     check('enabled_is_exactly_true', config.get('enabled') is True, 'The runner is off unless enabled is exactly true.')
     check('job_registry_available', isinstance(deps.entries, list), 'The verified job registry was not supplied.')
+    check('schema_snapshots_supplied', isinstance(deps.schemas, list) and bool(deps.schemas),
+          'No captured schema snapshot was supplied. This entry point looks none up.')
+    mapping = mapping_readiness(config, deps.entries if isinstance(deps.entries, list) else None, deps.schemas)
+    mapping_ok = bool(mapping) and all(m['ready'] for m in mapping)
+    check('source_mapping_ready_for_every_assignment', mapping_ok,
+          'No assignment is configured.' if not mapping else '; '.join(
+              f"assignment {m['assignment']} ({m['client_id']} / {m['job']}): {', '.join(m['blocked_reasons'])}" for m in mapping if not m['ready']))
     router = None
-    try:
-        router = _router(deps)
-    except Exception as error:
-        check('renderers_built_from_configuration', False, 'Renderers could not be built: ' + type(error).__name__)
+    if not mapping_ok:
+        check('renderers_built_from_configuration', False, 'Not built: source-mapping readiness is blocked, so no renderer is touched.')
     else:
-        check('renderers_built_from_configuration', router is not None, 'Draft storage or assignments are missing.')
+        try:
+            router = _router(deps)
+        except Exception as error:
+            check('renderers_built_from_configuration', False, 'Renderers could not be built: ' + type(error).__name__)
+        else:
+            check('renderers_built_from_configuration', router is not None, 'Draft storage or assignments are missing.')
     check('source_adapter_configured', callable(deps.fetch), 'No source adapter was supplied; nothing can be read.')
     store_ok, detail = False, 'No durable store was supplied.'
     if deps.store is not None and all(hasattr(deps.store, n) for n in ('atomic', 'put_blob', 'ready')):
@@ -156,14 +214,14 @@ def preflight(deps, principal):
     blocking = [i for i in issues if i.get('code') != 'built_by_external_process']
     check('at_least_one_runnable_scope', bool(scopes), 'No assignment is complete, verified, in the registry and routed.')
     check('no_assignment_issues', not blocking, ', '.join(sorted({i['code'] for i in blocking})))
-    digest = snapshot_digest(config, deps.entries if isinstance(deps.entries, list) else [], router) if router is not None else None
+    digest = snapshot_digest(config, deps.entries if isinstance(deps.entries, list) else [], router, deps.schemas, mapping) if router is not None else None
     ok, why = _attested(deps, digest, principal) if digest else (False, 'There is nothing complete enough to approve.')
     check('approval_attested_for_this_snapshot_and_principal', ok, why)
     check('quota_configured', isinstance(deps.quota, Quota) and isinstance(deps.quota.runs_per_hour, int)
           and not isinstance(deps.quota.runs_per_hour, bool) and deps.quota.runs_per_hour > 0, 'No run quota is configured.')
     check('delivery_transport_disabled', not transport.verified(deps.provider_contract),
           'This entry point builds drafts only. A provider contract must not be attached here.')
-    return checks, scopes, issues, digest, router
+    return checks, scopes, issues, digest, router, mapping
 
 
 def _number(value, cap, whole):
@@ -207,7 +265,7 @@ def handle(method, headers, body, deps):
     try:
         body = deepcopy(body)
         headers = dict(headers)
-        deps = replace(deps, config=deepcopy(deps.config), entries=deepcopy(deps.entries))
+        deps = replace(deps, config=deepcopy(deps.config), entries=deepcopy(deps.entries), schemas=deepcopy(deps.schemas))
         body_digest = sf.digest(body)             # refuses NaN / infinity / non-JSON values anywhere in the body
     except Exception:
         return _respond(400, status='bad_request', detail='The body must be plain JSON with finite numbers.')
@@ -238,7 +296,7 @@ def handle(method, headers, body, deps):
     if mode == 'run' and (not isinstance(nonce, str) or not 16 <= len(nonce) <= 200):
         return _respond(400, status='bad_request', detail='A run needs a single-use nonce of 16 to 200 characters.')
     try:
-        checks, scopes, issues, digest, router = preflight(deps, principal)
+        checks, scopes, issues, digest, router, mapping = preflight(deps, principal)
     except Exception as error:
         return _respond(409, status='not_activated', sources_read=0, records_written=0, detail='Preflight failed: ' + type(error).__name__)
     ready = all(c['ok'] for c in checks)
@@ -246,7 +304,8 @@ def handle(method, headers, body, deps):
                   planned_scopes=len(scopes),
                   planned=[dict(scope=x['key'], job=x['scope']['job'], client_id=x['scope']['client_id'],
                                 business_date=x['scope']['business_date'], shift=x['scope']['shift']) for x in scopes],
-                  issues=issues, limits=limits, transport='disabled', client_release='held')
+                  issues=issues, limits=limits, transport='disabled', client_release='held',
+                  mapping_readiness=mapping, proof=dict(NO_PROOF))
     if mode == 'dry_run':
         return _respond(200, status='dry_run', sources_read=0, records_written=0, **report)
     if not ready:

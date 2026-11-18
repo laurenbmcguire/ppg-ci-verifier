@@ -116,3 +116,17 @@ Reusing a run ID with a different principal or approved snapshot never returns a
 Existing unscoped local receipts are not reused by hosted calls; source operation idempotency remains intact.
 These boundaries are regression-tested with synthetic identity/approval systems only. They do not configure
 an actual identity provider, approval authority, delivery provider, route or schedule.
+
+## Source-mapping readiness (mandatory preflight, added 2026-11-18)
+
+The hosted entry point refuses every request unless, for each configured assignment, exactly one captured schema
+snapshot is supplied and the offline readiness check passes against it
+(see `docs/LAST_SCAN_SOURCE_MAPPING_READINESS.md`). Before activation, still open:
+
+- [ ] Who captures schema snapshots read-only, and how a snapshot is shown to come from the real list. Today the
+      entry point trusts whatever the host supplies; it has only been exercised with synthetic snapshots.
+- [ ] How old a snapshot may be. No maximum age is enforced.
+- [ ] Named people to attest each business meaning per list, and the approver's review of those attestations.
+      An approval covers the exact snapshot and contract by hash; it does not show the approver examined them.
+- [ ] Runtime source proof. Readiness says the configuration and a captured schema agree. It does not show what
+      the live source returns, and nothing here establishes what the scan field means.

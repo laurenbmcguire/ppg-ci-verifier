@@ -65,7 +65,8 @@ as different, so it cannot erase a match.
 Every report carries a `proof` block:
 
 - `schema_dry_run_readiness`: `ready` or `blocked`. Configuration, captured schema and attestations agree. Nothing more.
-- `sample_evidence`: `not_performed`, `rejected_malformed`, `performed_red_flag_found` or `performed_no_red_flag_found`.
+- `sample_evidence`: `not_performed`, `rejected_malformed`, `performed_red_flag_found`, `performed_incomplete` (a sample
+  check failed or could not be completed, with no red flag) or `performed_no_red_flag_found`.
 - `runtime_source_proof`: always `not_established`. This tool never sees what the live source returns.
 - `scan_time_semantics`: always `not_established_by_this_tool`.
 
@@ -78,6 +79,21 @@ value). They are not gates, and their absence is never reported as a pass.
 digest to attest against), every check with its basis, and `status` of `blocked` or `ready_for_dry_run_only`.
 `report_text(report)` renders it for a reviewer.
 
+## As a hosted preflight check
+
+- `schema_snapshots_supplied` and `source_mapping_ready_for_every_assignment` must both pass. There is no request
+  field, configuration key or dependency that skips them.
+- Each assignment needs exactly one supplied snapshot for its site and list. None, or more than one, blocks. One
+  blocked assignment blocks the whole request.
+- When blocked: no renderer is built, no scope is planned, no snapshot digest is produced (so there is nothing to
+  approve), no nonce or quota is spent, and no source is read.
+- The approved snapshot digest covers the identity of every supplied snapshot (capture time and unmapped columns
+  included) and, per assignment, the snapshot and mapping contract it was checked against. Any change needs a
+  new approval; receipts are namespaced by that digest, so a cached receipt is not reused across snapshots.
+- Snapshots are deep-copied before any identity or approval callback runs, like the configuration and registry.
+- Attestations and `verified` flags in the configuration are inputs to the check. Approval still comes only from
+  the ApprovalAuthority. Sample rows are not examined in preflight and are reported as not performed.
+
 ## Errors
 
 Malformed input never raises. There is no catch-all: a bug in the validator or the registry rule, or a broken
@@ -89,7 +105,8 @@ pinned template, raises instead of being reported as a blocked reason.
   capture may be blocked by a property not on the list; that is the safe direction, and the list then needs review.
 
 - Exercised on synthetic schemas and rows only. No real list has been checked.
-- It is a standalone check. The runner and hosted entry point do not call it yet; their existing gates
-  (off by default, exact registry binding, `verified` flags, scan-field refusal) are unchanged.
+- The hosted entry point (`hosting/last_scan_hosted.py`, still not connected to any route or schedule) runs it as a
+  mandatory preflight check against snapshots supplied through `Deps.schemas`. The runner itself does not call
+  it; calling `run_once` directly remains a test-only path.
 - "Ready for a dry run" is not production readiness and authorises no read, run, send or deployment.
 - An attestation is a record that a person vouched; the tool cannot check that the person was right.

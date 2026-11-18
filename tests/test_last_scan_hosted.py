@@ -16,6 +16,7 @@ from hosting.last_scan_local import StateStore, StoredDraftRouter, StoredDraftPu
 from hosting.last_scan_service import source_adapter
 from hosting.last_scan_store import SqliteStore
 from source_first_fixture import capture, MAP, SCOPE
+import readiness_fixture as rf
 
 ENTRY = dict(client_key='synthetic', site_id=SCOPE['site_id'], list_id=SCOPE['list_id'], job=SCOPE['job'], verified=True)
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,10 +42,28 @@ class FakeApprovals(ApprovalAuthority):
 ALICE, BOB = {'x-test-principal-proof': 'proof-alice'}, {'x-test-principal-proof': 'proof-bob'}
 
 
-def assignment(**kw):
+def bare_assignment(**kw):
     return dict(dict(verified=True, active=True, timestamp_semantics_verified=True, client_id='synthetic', job=SCOPE['job'],
                      site_id=SCOPE['site_id'], list_id=SCOPE['list_id'], zone='America/Chicago', scan_field='ActualScan',
                      shift_field='Shift', recorded_shifts=['1'], business_dates=['2026-11-10'], mapping=MAP, header=HEADER), **kw)
+
+
+def assignment(**kw):
+    """TEST ONLY: pinned and attested by the synthetic fixture reviewer against the synthetic schema below."""
+    return rf.attested(bare_assignment(**kw))[0]
+
+
+def schemas_for(config):
+    """TEST ONLY: one synthetic captured snapshot per distinct site + list in the configuration."""
+    out, seen = [], set()
+    for a in (config.get('assignments') or []) if isinstance(config, dict) and isinstance(config.get('assignments'), list) else []:
+        if isinstance(a, dict) and isinstance(a.get('mapping'), dict) and isinstance(a['mapping'].get('fields'), dict) and (a.get('site_id'), a.get('list_id')) not in seen:
+            try:
+                out.append(rf.schema_for(a))
+            except (KeyError, TypeError):
+                continue
+            seen.add((a.get('site_id'), a.get('list_id')))
+    return out
 
 
 class Hosted(unittest.TestCase):
@@ -68,6 +87,7 @@ class Hosted(unittest.TestCase):
         base = dict(authorizer=FakeAuthorizer(), approvals=self.approvals, quota=Quota(5), config=self.config, entries=[ENTRY],
                     store=self.store, artifacts=BlobArtifacts(self.store), fetch=self.fetch, clock=lambda: self.now)
         base.update(kw)
+        base.setdefault('schemas', schemas_for(base['config']))
         return Deps(**base)
 
     def body(self, **kw):
@@ -382,8 +402,7 @@ class SnapshotIsolation(Hosted):
 
     def test_same_run_id_does_not_reuse_another_approved_snapshots_receipt(self):
         self.go(run_id='shared')
-        changed = deepcopy(self.config)
-        changed['assignments'][0]['recorded_shifts'] = ['2']
+        changed = dict(enabled=True, assignments=[assignment(recorded_shifts=['2'])])    # re-pinned and re-attested, then approved
         self.approve(changed)
         code, report = self.go(self.deps(config=changed), run_id='shared')
         self.assertEqual(code, 200)
@@ -446,18 +465,18 @@ class SnapshotIsolation(Hosted):
 
 class HostedCursorIsolation(Hosted):
     def test_one_principals_runs_do_not_move_anothers_starting_point(self):
-        config = dict(enabled=True, assignments=[assignment(recorded_shifts=['1', '2', '3', '4'])])
+        config = dict(enabled=True, assignments=[assignment(recorded_shifts=['1', '2', '3'])])    # every recorded shift maps to a template shift
         self.approve(config, principals=('alice', 'bob'))
         deps = lambda: self.deps(config=config, quota=Quota(50))
         shift = lambda headers: self.go(deps(), headers=headers, max_scopes=1)[1]['summary']['results'][0]['shift']
-        alone = [shift(BOB) for _ in range(4)]
+        alone = [shift(BOB) for _ in range(3)]
         self.store = StateStore(Path(self.folder.name) / 'second.db')       # a clean store, same configuration
         mixed = []
-        for _ in range(4):
+        for _ in range(3):
             mixed.append(shift(BOB))
             for _ in range(3):
                 shift(ALICE)
-        self.assertEqual((sorted(alone), mixed), (['1', '2', '3', '4'], alone))
+        self.assertEqual((sorted(alone), mixed), (['1', '2', '3'], alone))
 
 
 class NotConnected(unittest.TestCase):

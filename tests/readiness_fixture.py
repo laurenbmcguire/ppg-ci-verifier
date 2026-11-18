@@ -15,7 +15,8 @@ def schema_for(assignment, extra_columns=(), choices=None):
     names = list(dict.fromkeys(list(fields.values()) + [assignment.get('scan_field') or 'ActualScan', 'DefectPhoto'] + list(extra_columns)))
     columns = {}
     for i, name in enumerate(n for n in names if isinstance(n, str) and n):
-        col = {'name': name, 'displayName': name, 'id': 'dddddddd-0000-4000-8000-%012d' % (i + 1), 'text': {}}
+        h = sf.digest(dict(site=assignment['site_id'], list=assignment['list_id'], column=name))      # column IDs are specific to the list
+        col = {'name': name, 'displayName': name, 'id': '%s-%s-4%s-8%s-%s' % (h[:8], h[8:12], h[12:15], h[15:18], h[18:30]), 'text': {}}
         columns[name] = col
     def facet(name, key, value):
         if name in columns:
