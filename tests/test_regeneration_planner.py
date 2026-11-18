@@ -306,6 +306,190 @@ class ProposedDraft(unittest.TestCase):
         self.assertFalse(out.exists())
 
 
+class ProposedWorkbookCells(unittest.TestCase):
+    """What is actually inside the proposed workbook, cell by cell: 40 rows on shift 1, 2 on shift 2, 8 with an
+    unapproved shift "B" that must be in no sheet, and a NOK value on two records only."""
+    @classmethod
+    def setUpClass(cls):
+        from openpyxl import load_workbook
+        cls.out = Path(tempfile.mkdtemp()).resolve()
+        cls.rows = late_rows()[:40] + [record(n, 81, shift='B') for n in range(41, 49)] + [record(49, 81, shift='2'), record(50, 89, shift='2')]
+        cls.assignments = [assignment(recorded_shifts=['1', '2'])]
+        cls.cap = sealed(cls.rows)
+        cls.plan = rp.plan(cls.assignments, PLAN_SCOPE, cls.cap)
+        cls.written = rp.propose(cls.plan, cls.assignments, PLAN_SCOPE, cls.cap, cls.out)
+        cls.raw = (Path(cls.written['written']['folder']) / 'draft.xlsx').read_bytes()
+        cls.book = load_workbook(io.BytesIO(cls.raw))
+
+    def detail(self, sheet):
+        ws, out = self.book[sheet], []
+        self.assertEqual([c.value for c in ws[15]][:13], ['Date', 'Shift', 'Location', 'Part Number', 'Identifier', 'Inspected For', 'Quantity Inspected',
+                                                           'Condition', 'Reject Reason', 'Reject Quantity', 'Quantity Certified', 'Comments', 'Defect Photo'])
+        for row in ws.iter_rows(min_row=16):
+            if isinstance(row[4].value, str) and row[4].value.startswith('SYN'):
+                out.append(row)
+        return out
+
+    def test_each_recorded_shift_has_its_own_rows_and_no_other(self):
+        first, second, third = self.detail('1st Shift'), self.detail('2nd Shift'), self.detail('3rd Shift')
+        self.assertEqual([r[4].value for r in first], [f'SYN{n:07d}' for n in range(1, 41)])
+        self.assertEqual([r[4].value for r in second], ['SYN0000049', 'SYN0000050'])
+        self.assertEqual(third, [])
+        self.assertEqual({r[1].value for r in first}, {'1'}); self.assertEqual({r[1].value for r in second}, {'2'})    # the shift as recorded
+        self.assertEqual(self.book['1st Shift']['E10'].value, '1st'); self.assertEqual(self.book['2nd Shift']['E10'].value, '2nd')
+
+    def test_rows_with_an_unapproved_shift_are_in_no_sheet_at_all(self):
+        everything = ' '.join(str(c.value) for ws in self.book for row in ws.iter_rows() for c in row if c.value is not None)
+        for n in range(41, 49):
+            self.assertNotIn(f'SYN{n:07d}', everything)
+        self.assertNotIn('"B"', everything)
+        checklist = json.loads((Path(self.written['written']['folder']) / 'checklist.json').read_text())
+        self.assertEqual(checklist['unassigned_shifts'], {'B': 8})                                    # they are named in the checklist instead
+        self.assertEqual(self.plan['rows']['unassigned_source_ids'], [str(n) for n in range(41, 49)])
+
+    def test_quantities_are_the_source_values_and_a_missing_nok_is_an_empty_cell(self):
+        rows = self.detail('1st Shift') + self.detail('2nd Shift')
+        source = {r['raw']['Identifier']: r['raw'] for r in self.rows}
+        for row in rows:
+            raw = source[row[4].value]
+            self.assertEqual((row[6].value, row[10].value), (raw['Inspected'], raw['Certified']), row[4].value)
+            self.assertEqual(row[9].value, raw['Rejected'], row[4].value)                             # 2, 4, or nothing at all
+            self.assertIsNot(row[9].value, 0)
+        self.assertEqual(sum(1 for r in rows if r[9].value is None), 40); self.assertEqual(sorted(r[9].value for r in rows if r[9].value is not None), [2, 4])
+
+    def test_totals_that_need_an_unknown_value_are_withheld_and_known_ones_are_shown(self):
+        s = self.book['Summary']
+        self.assertEqual(s['B5'].value, 'DRAFT · UNKNOWN QUANTITIES')
+        self.assertEqual((s['B9'].value, s['D9'].value, s['G9'].value), (42, 1963, 1957))             # records, inspected, certified
+        self.assertIsNone(s['J9'].value)                                                              # parts rejected: withheld, not 0 and not 6
+        self.assertIn(s['M9'].value, (None, ''))                                                      # defect rate: withheld
+        self.assertEqual((s['F21'].value, s['G21'].value, s['I21'].value, s['K21'].value), (40, 1793, 1787, None))
+        self.assertEqual((s['F22'].value, s['G22'].value, s['I22'].value, s['K22'].value), (2, 170, 170, None))
+        self.assertEqual((s['D21'].value, s['D22'].value, s['D23'].value), ('Recorded', 'Recorded', 'No recorded rows'))
+        self.assertEqual((s['F24'].value, s['G24'].value, s['I24'].value, s['K24'].value), (42, 1963, 1957, None))
+        self.assertIn('UNKNOWN, not zero', s['B25'].value)
+        first = self.book['1st Shift']
+        totals = next(r for r in first.iter_rows(min_row=16) if r[0].value == 'Records inspected')[0].row + 1
+        self.assertEqual((first.cell(totals, 1).value, first.cell(totals, 3).value, first.cell(totals, 5).value, first.cell(totals, 7).value), (40, 1793, 1787, None))
+        self.assertEqual((self.plan['quantities']['inspected']['known_sum'], self.plan['quantities']['certified']['known_sum']), (1963, 1957))
+        self.assertEqual((self.plan['quantities']['rejected']['known_sum'], self.plan['quantities']['rejected']['unknown_rows']), (6, 40))
+        formulas = [c.coordinate for ws in self.book for row in ws.iter_rows() for c in row if isinstance(c.value, str) and c.value.startswith('=')]
+        self.assertEqual(formulas, [])                                                                # nothing left for Excel to turn an unknown into 0
+
+    def test_every_row_is_tied_to_its_source_record_version_and_capture(self):
+        src = self.book['_Source']
+        self.assertEqual(src.sheet_state, 'hidden')
+        head = [c.value for c in src[1]]
+        self.assertEqual(head[:4], ['source_record_id', 'source_version', 'source_record_hash', 'snapshot_hash'])
+        rows = [dict(zip(head, [c.value for c in r])) for r in src.iter_rows(min_row=2) if r[0].value is not None]
+        self.assertEqual(sorted(r['source_record_id'] for r in rows), sorted(self.plan['rows']['source_ids']))
+        self.assertEqual(len(rows), 42)
+        records = {r['id']: r for r in self.cap['records']}
+        for r in rows:
+            self.assertEqual(r['source_version'], records[r['source_record_id']]['version'])
+            self.assertEqual(r['source_record_hash'], sf.digest(records[r['source_record_id']]))
+            self.assertEqual(r['snapshot_hash'], self.written['source']['draft_view_snapshot_hash'])
+        unknown = [r for r in rows if r['rejected_original_type'] in ('null', 'absent')]
+        self.assertEqual(len(unknown), 40)
+        self.assertTrue(all(r['rejected_approved_value'] in (None, '') for r in unknown))             # the ledger keeps it missing too
+        rejects = self.book['Rejects & Photos']
+        self.assertEqual(rejects['I7'].value, 'Source record ID')
+        self.assertEqual(sorted(str(rejects.cell(r, 9).value) for r in (8, 9)), ['1', '34'])          # the two known rejects, by source ID
+        self.assertIn(self.written['source']['draft_view_snapshot_hash'][:16], self.book['Summary']['B33'].value)
+
+    def test_no_source_link_is_invented_when_the_capture_has_none(self):
+        import re
+        everything = ' '.join(str(c.value) for ws in self.book for row in ws.iter_rows() for c in row if c.value is not None)
+        self.assertEqual(re.findall(r'https?://', everything), [])
+        self.assertEqual(self.plan['source']['record_links'], 'not_in_capture')
+
+    def test_template_sheets_logo_and_chart_parts_are_the_selected_templates(self):
+        from hosting import source_first_workbook as wb
+        contract = wb.contract()
+        self.assertEqual(self.book.sheetnames, ['Summary', '1st Shift', '2nd Shift', '3rd Shift', 'Rejects & Photos', '_Calc', '_Source'])
+        self.assertEqual(self.book['_Calc'].sheet_state, 'hidden')
+        with zipfile.ZipFile(io.BytesIO(self.raw)) as draft, zipfile.ZipFile(wb.ASSETS / contract['clean_filename']) as clean:
+            media = {n: hashlib.sha256(draft.read(n)).hexdigest() for n in draft.namelist() if n.startswith('xl/media/')}
+            self.assertEqual(sorted(media.values()), sorted(contract['preserve_media_sha256']))       # the logos, byte for byte, and no sample photo
+            for image in contract['branding_images']:
+                self.assertEqual(media[image['part']], image['sha256'])
+            for part in ('xl/charts/chart1.xml', 'xl/theme/theme1.xml'):
+                if part in clean.namelist():
+                    self.assertIn(part, draft.namelist())
+            self.assertEqual(draft.read('xl/theme/theme1.xml'), clean.read('xl/theme/theme1.xml'))
+        self.assertEqual(self.written['template']['selected_sha256'], contract['selected_sha256'])
+
+    @unittest.skipUnless(__import__('os').environ.get('PPG_TEMPLATE_DIR'), 'set PPG_TEMPLATE_DIR to the folder holding the selected Daily template (read only)')
+    def test_against_the_selected_daily_template_file_itself(self):
+        """Read-only check against the real template on this machine: the pinned template is that file, and the draft
+        carries its logos and its sheets. The file is never written to and is not in the repository."""
+        import os
+        from openpyxl import load_workbook
+        from hosting import source_first_workbook as wb
+        path = Path(os.environ['PPG_TEMPLATE_DIR']) / 'PPG-Quality-Daily-End-of-Shift-Report-No-Start-Here.xlsx'
+        raw = path.read_bytes(); digest = hashlib.sha256(raw).hexdigest()
+        self.assertEqual(wb.contract()['selected_sha256'], digest)
+        with zipfile.ZipFile(io.BytesIO(raw)) as real, zipfile.ZipFile(io.BytesIO(self.raw)) as draft:
+            real_media = {hashlib.sha256(real.read(n)).hexdigest() for n in real.namelist() if n.startswith('xl/media/')}
+            draft_media = {hashlib.sha256(draft.read(n)).hexdigest() for n in draft.namelist() if n.startswith('xl/media/')}
+        self.assertTrue(draft_media and draft_media <= real_media)                                    # only the template's own images, none added
+        self.assertEqual(len(real_media - draft_media), 11)                                           # its sample defect photos are not carried over
+        self.assertEqual([s for s in self.book.sheetnames if s != '_Source'], load_workbook(io.BytesIO(raw), read_only=True).sheetnames)
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest)
+
+
+class InputsThatChangeTheReport(unittest.TestCase):
+    def test_another_header_or_template_is_another_report_input_and_an_old_plan_cannot_be_written(self):
+        from unittest import mock
+        from hosting import source_first_workbook as wb
+        out = Path(tempfile.mkdtemp()).resolve() / 'proposed'
+        cap = sealed(late_rows()); args = ([assignment()], PLAN_SCOPE, cap)
+        plan = rp.plan(*args)
+        header = dict(paying_client='Synthetic Fixture Co', evidence='Stated by the made-up coordinator')
+        with_header = rp.plan(*args, header=header)
+        self.assertNotEqual(with_header['report_input_hash'], plan['report_input_hash'])
+        self.assertNotEqual(with_header['proposal']['operation_id'], plan['proposal']['operation_id'])
+        with self.assertRaises(rp.PlanError):
+            rp.propose(plan, *args, out, header=header)                                               # a plan made without that header
+        real = wb.contract()
+        for change in (dict(clean_sha256='0' * 64), dict(selected_sha256='1' * 64), dict(version='another-contract')):
+            with self.subTest(change=list(change)[0]), mock.patch.object(wb, 'contract', return_value=dict(real, **change)):
+                other = rp.plan(*args)
+                self.assertNotEqual(other['report_input_hash'], plan['report_input_hash'])
+                with self.assertRaises(rp.PlanError):
+                    rp.propose(plan, *args, out)                                                      # a plan made for the other template
+        with mock.patch.object(wb, 'generator_hash', return_value='2' * 64):
+            self.assertNotEqual(rp.plan(*args)['report_input_hash'], plan['report_input_hash'])       # another version of the writer
+        self.assertFalse(out.exists())
+        draft = dict(file_hash='d' * 64, kind='draft', report_input_hash=plan['report_input_hash'], source_snapshot_hash=cap['snapshot_hash'], **PLAN_SCOPE)
+        stale = rp.plan(*args, existing=[draft], header=header)
+        self.assertEqual((stale['status'], stale['reason'], stale['existing_versions'][0]['relation']), ('draft_proposed', 'stale_draft', 'same_source_other_settings'))
+
+    def test_the_same_capture_twice_writes_once_and_protected_files_are_untouched(self):
+        root = Path(tempfile.mkdtemp()).resolve()
+        protected = {}
+        for kind in ('original', 'corrected', 'approved', 'sent'):
+            f = root / 'reports' / f'synthetic-day-{kind}.xlsx'; f.parent.mkdir(exist_ok=True); f.write_bytes(('saved ' + kind).encode())
+            protected[f] = (hashlib.sha256(f.read_bytes()).hexdigest(), f.stat().st_mtime_ns)
+        existing = [dict(file_hash=h, kind=f.stem.rsplit('-', 1)[1], rows=33, **PLAN_SCOPE) for f, (h, _) in protected.items()]
+        cap = sealed(late_rows()); args = ([assignment()], PLAN_SCOPE, cap)
+        plan = rp.plan(*args, existing=existing)
+        first = rp.propose(plan, *args, root / 'proposed', existing=existing)
+        folder = Path(first['written']['folder'])
+        before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in folder.iterdir()}
+        same_again = sealed(late_rows())                                                              # the same source read a second time
+        again = rp.plan([assignment()], PLAN_SCOPE, same_again, existing=existing)
+        self.assertEqual(again['proposal']['operation_id'], plan['proposal']['operation_id'])
+        with self.assertRaises(rp.PlanError):
+            rp.propose(again, [assignment()], PLAN_SCOPE, same_again, root / 'proposed', existing=existing)
+        self.assertEqual({p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in folder.iterdir()}, before)
+        self.assertEqual([p.name for p in (root / 'proposed').iterdir()], [folder.name])
+        for f, (digest, stamp) in protected.items():
+            self.assertEqual((hashlib.sha256(f.read_bytes()).hexdigest(), f.stat().st_mtime_ns), (digest, stamp), f.name)
+        self.assertEqual(sorted(p.name for p in (root / 'reports').iterdir()), sorted(f.name for f in protected))
+        self.assertEqual([(v['kind'], v['action']) for v in first['existing_versions']], [(k, 'keep_unchanged') for k in ('original', 'corrected', 'approved', 'sent')])
+
+
 class Isolation(unittest.TestCase):
     def test_nothing_reaches_the_planner_and_it_reaches_no_network(self):
         import re

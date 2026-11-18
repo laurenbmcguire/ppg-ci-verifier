@@ -267,7 +267,9 @@ def plan(assignments, scope, capture, existing=(), previous_capture=None, header
                 automated_completion='blocked_by_unassigned_shift' if unassigned else 'not_claimed',
                 day_completion='not_established', client_release='held',
                 source=dict(snapshot_hash=capture['snapshot_hash'], envelope_hash=capture['envelope_hash'], captured_at=capture['captured_at'],
-                            records=len(capture['records']), date_evidence=evidence, draft_view_snapshot_hash=view['snapshot_hash']),
+                            records=len(capture['records']), date_evidence=evidence, draft_view_snapshot_hash=view['snapshot_hash'],
+                            # A link to each source item is written only if the capture carries one. None is made up.
+                            record_links='in_capture' if all(isinstance(r.get('url'), str) and r['url'] for r in capture['records']) and capture['records'] else 'not_in_capture'),
                 report_input_hash=input_hash, binding=binding, template=dict(sha256=contract['clean_sha256'], selected_sha256=contract.get('selected_sha256'), report_type=contract.get('report_type')),
                 changes=changes, rows=dict(in_capture=len(rows), in_draft=len(assigned), unassigned=len(unassigned), unassigned_shifts=unassigned_shifts,
                                            source_ids=selected, unassigned_source_ids=sorted(r['id'] for r in unassigned)),
