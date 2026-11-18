@@ -339,10 +339,10 @@ def summarize(result, with_issues=True, use_verdicts=True, source_context=None):
                                   verdict_reason=f'Changed in v{fix.get("revision") or "?"} from {fix.get("before") or "(blank)"} to {fix.get("after") or "(blank)"}; that version is checked again on its own.'))
         elif hit:
             set_aside.append(dict(x, dismissed_by='person_legacy', by_person=True, legacy_record=hit, verdict='not_an_issue', verdict_reason=str(hit.get('reason') or '')))
-        elif v and v.get('verdict') == 'not_an_issue' and x['severity'] != 'high':
+        elif v and v.get('verdict') == 'not_an_issue' and x['severity'] != 'high' and not x.get('ai_fallback_not_review'):
             set_aside.append(dict(x, dismissed_by='claude_verify', verdict_reason=v.get('reason'),
                                   claude=dict(kind='double_check', reason=v.get('reason'), at=verify.get('at') or verify.get('finished_at'), model=verify.get('model'))))
-        elif x['severity'] != 'high' and (a := _claude_fine(x)):
+        elif x['severity'] != 'high' and not x.get('ai_fallback_not_review') and (a := _claude_fine(x)):
             set_aside.append(dict(x, dismissed_by='claude_fix', verdict='not_an_issue', verdict_reason='Claude checked: ' + str(a.get('reason') or ''),
                                   claude=dict(kind='ai_fix', reason=a.get('reason'), at=a.get('at'))))
         else:
@@ -358,8 +358,15 @@ def summarize(result, with_issues=True, use_verdicts=True, source_context=None):
     reconcile = dict(total=len(all_found), open=sum(1 for x in issues if x['severity'] != 'info' and (x.get('decision') or {}).get('action') in (None, 'reopen')),
                      informational=len(info), kept_by_person=len(rejected), kept_earlier_record=by('person_legacy'),
                      set_aside_by_claude=by('claude_verify') + by('claude_fix'), deferred=decision_counts['deferred'], confirmed=decision_counts['confirmed'],
-                     corrected=by('corrected'), ambiguous_earlier_records=sum(1 for x in issues if x.get('legacy_note')))
-    reconcile['adds_up'] = reconcile['total'] == sum(reconcile[k] for k in ('open', 'informational', 'kept_by_person', 'kept_earlier_record', 'set_aside_by_claude', 'deferred', 'confirmed', 'corrected'))
+                     corrected=by('corrected'), ambiguous_earlier_records=sum(1 for x in issues if x.get('legacy_note')),
+                     # already inside the numbers above (open, deferred or confirmed): findings whose saved "reject" was the
+                     # automatic Fix with AI fallback and therefore settles nothing
+                     ai_fallback_unresolved=sum(1 for x in issues if x.get('ai_fallback_not_review')),
+                     # inside kept_by_person: saved rejects that partly match the fallback wording. Kept as saved; origin unknown.
+                     fallback_wording_review_needed=decision_counts.get('fallback_wording_review_needed', 0))
+    reconcile['historical_fallback_records'] = sum(1 for x in rejected if x.get('historical_fallback'))
+    reconcile['kept_by_person'] -= reconcile['historical_fallback_records']
+    reconcile['adds_up'] = reconcile['total'] == sum(reconcile[k] for k in ('open', 'informational', 'kept_by_person', 'kept_earlier_record', 'set_aside_by_claude', 'deferred', 'confirmed', 'corrected', 'historical_fallback_records'))
     issues.sort(key=lambda x: RANK.get(x['severity'], 1))
     counts = {k: sum(1 for x in issues if x['severity'] == k) for k in RANK}
     status = 'hold' if counts['high'] else 'check' if counts['medium'] or counts['low'] else 'clear'
@@ -395,6 +402,18 @@ def summarize(result, with_issues=True, use_verdicts=True, source_context=None):
                              shown=len(issues), dismissed=len(dismissed), all_findings=len(all_found)),
                review_state=(result.get('review_request') or {}).get('status'),
                sent_at=next((x.get('at') for x in reversed(result.get('sent') or []) if x.get('sent')), None))
+    # Preserve protected snapshot status/counts; expose a separate non-mutating integrity assessment.
+    # Never imply that a saved approval/delivery is undone, nor that old automatic rejects are human review.
+    historical = [x for x in rejected if x.get('historical_fallback')]
+    if historical:
+        out['historical_integrity'] = dict(
+            status='review_required', snapshot_preserved=True,
+            label='Sent/approved or pending snapshot · integrity review required',
+            unresolved_count=sum(x.get('severity') != 'info' for x in historical),
+            message='This protected snapshot contains automatic fallback records that did not correct or verify findings. '
+                    'Its original approval, delivery records, decisions and historical counts are preserved. '
+                    'These findings require an independent review; this warning does not revoke or reopen the snapshot.',
+            findings=[dict(key=x['key'], severity=x.get('severity'), code=x.get('code'), where=x.get('where'), text=x.get('text')) for x in historical])
     if with_issues:
         out['issues'] = issues
         out['dismissed'] = dismissed

@@ -14,7 +14,8 @@ from hosting.spreadsheet_inbox import SpreadsheetInbox
 
 ID = r'([0-9a-f]{64})'
 MAX_UPLOAD = 4 * 1024 * 1024 + 16384
-ISSUE_FIELDS = ('key', 'code', 'fix', 'source_support', 'severity', 'source', 'text', 'where', 'sheet', 'cell', 'row', 'why', 'check', 'verdict', 'verdict_reason')
+ISSUE_FIELDS = ('key', 'code', 'fix', 'source_support', 'severity', 'source', 'text', 'where', 'sheet', 'cell', 'row', 'why', 'check', 'verdict', 'verdict_reason',
+                'ai_fallback_not_review')
 STATUS_LABEL = {'hold': 'Hold: must be fixed', 'check': 'Check: items to look at', 'clear': 'Clear: nothing flagged'}
 
 ENDPOINTS = [
@@ -56,6 +57,7 @@ def report_row(row):
     rv = row.get('review') or {}
     return dict(id=row['file_hash'], filename=row['filename'], version=row.get('version'), uploaded_at=row.get('received_at'),
                 job=rv.get('job'), day=rv.get('day'), status=rv.get('status'), counts=rv.get('counts'),
+                historical_integrity=rv.get('historical_integrity'), status_label=(rv.get('historical_integrity') or {}).get('label') or STATUS_LABEL.get(rv.get('status')),
                 approved_by=rv.get('approved'), sent_at=rv.get('sent_at'), corrected_from=rv.get('fixed_from'))
 
 
@@ -64,11 +66,20 @@ def report(item, *, inbox=None):
     applied = (item.get('fixes_applied') or [])[-1:] or [None]
     return dict(
         id=item['file_hash'], check_hash=item.get('check_hash'), run=rv['run'], filename=item['filename'], version=item.get('version'), uploaded_at=item.get('received_at'),
-        job=rv['job'], day=rv['day'], status=rv['status'], status_label=STATUS_LABEL.get(rv['status']), counts=rv['counts'],
+        job=rv['job'], day=rv['day'], status=rv['status'], status_label=(rv.get('historical_integrity') or {}).get('label') or STATUS_LABEL.get(rv['status']), counts=rv['counts'],
         numbers=dict(scans=rv.get('scans'), inspected=rv.get('inspected'), rejected=rv.get('rejected'), certified=rv.get('certified'),
                      rejected_unit=rv.get('rejected_unit')),
         issues=[{k: i[k] for k in ISSUE_FIELDS if i.get(k) not in (None, '')} for i in rv['issues']],
+        # Legacy name is retained for compatibility; it never proved AI authorship.
         dismissed_by_ai=len(rv.get('dismissed') or []),
+        dismissed_total=len(rv.get('dismissed') or []),
+        # open findings whose saved "reject" was the automatic Fix with AI fallback (they are unresolved), and saved rejects
+        # that only partly match that wording (kept as saved, origin unknown, a person should look)
+        ai_fallback_unresolved=(rv.get('reconcile') or {}).get('ai_fallback_unresolved', 0),
+        fallback_wording_review_needed=[dict(key=d.get('key'), where=d.get('where'), text=d.get('text'), note=d.get('fallback_wording_note'))
+                                        for d in rv.get('dismissed') or [] if d.get('fallback_wording_review_needed')],
+        dismissed_attribution='Legacy dismissed_by_ai is a total of all set-aside findings, not verified AI attribution.',
+        historical_integrity=rv.get('historical_integrity'),
         sharepoint=rv['sharepoint'], usual_day=rv['usual'], ai_review=rv['ai'],
         approval=item.get('approval'), sent=item.get('sent') or [],
         corrected_copy=applied[0] and dict(id=applied[0]['fixed_file_hash'], filename=applied[0]['fixed_filename']),

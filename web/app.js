@@ -24,7 +24,7 @@
     set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* per-browser convenience only */ } },
   };
   async function api(path, body) {
-    if (body !== undefined && gridDirty() && !gridRequestAllowed(path, body)) throw new Error('Preview or discard the spreadsheet draft before another operation. Nothing changed.');
+    if (body !== undefined && gridDirty() && !gridRequestAllowed(path, body)) { const error = new Error('Preview or discard the spreadsheet draft before another operation. Nothing changed.'); error.notSent = true; throw error; }
     // Reading (and asking Dex for suggestions) changes nothing, so when the database is only busy for a moment the
     // request is quietly asked again instead of showing "Durable storage is unavailable". Saves are never repeated here.
     const repeatable = body === undefined || /^\/api\/spreadsheets\/(fixes|sheet|cells|ai-proposals|review-summary)$/.test(path);
@@ -179,7 +179,7 @@
   // Two lists. Done: sent to the client, or checked with the current checks and no possible errors left.
   // To do: everything else. SharePoint and approval status are shown on the row; they do not move a finished report back.
   // Zero possible errors on a current check means the report is done (it moves to the Done list).
-  const queueZero = r => { const rv = r.review; return !!rv && rv.status === 'clear'; };
+  const queueZero = r => { const rv = r.review; return !!rv && rv.status === 'clear' && !['high', 'medium', 'low'].some(k => Number(rv.counts?.[k] || 0) > 0) && !(rv.issues || []).some(it => it.severity !== 'info'); };
   // Every possible error is listed. Notes that are only information (links, formula notices) may be shortened in
   // the list without holding a finished report back.
   const queueListed = r => { const c = r.review?.coverage || {}; return !c.truncated && !c.not_listed || c.not_listed_real === 0; };
@@ -224,6 +224,7 @@
   }
   function queueCheck(r) {
     const rv = r.review, c = rv?.counts || {};
+    if (rv?.historical_integrity) return [rv.historical_integrity.label + ` (${rv.historical_integrity.unresolved_count})`, 'check'];
     if (!rv || r.internal_check_status === 'could_not_load_latest_check') return ['Check unavailable', 'check'];
     // Out-of-date checks are refreshed by the app itself in the background; the list keeps showing the last result
     // (Completed or the number of possible errors) instead of asking anyone for a recheck.
@@ -859,8 +860,12 @@
       h('span', {}, 'These results were made by an earlier version of the checker. Nothing changes until you apply the new checks.'),
       h('button', {type: 'button', class: 'btn small', onclick: async e => {
         e.target.disabled = true;
+        // Answers are about r. Once another report or version is on screen it is not reloaded over it, and notices name r.
+        const selected = state.selected, same = () => state.selected === selected && state.report?.file_hash === r.file_hash;
+        const about = msg => same() ? msg : `${r.filename || 'The earlier report'}: ${msg}`;
         try {
           const {proposal: p} = await api('/api/spreadsheets/recheck', {file_hash: r.file_hash});
+          if (!same()) return;
           const show = v => v == null ? 'not recorded' : Array.isArray(v) ? v.join(', ') : String(v);
           const NAMES = {record_count: 'Records', inspected: 'Inspected', certified: 'OK', rejected: 'Rejected', finding_count: 'Issues', job: 'Job', day: 'Business date',
                          client: 'Client', assignment: 'Client → Job → Date', assignment_status: 'How the client was decided', authoritative: 'Counted sheet', compared: 'Compared, not counted'};
@@ -870,10 +875,14 @@
             : h('p', {}, 'The new checks give the same numbers and client.'),
             h('button', {type: 'button', class: 'btn primary', onclick: async ev => {
               ev.target.disabled = true;
-              try { await api('/api/spreadsheets/recheck', {file_hash: r.file_hash, apply: true, by: myName() || null}); await openReport(r.file_hash, true); await loadList(); toast('New checks applied. The original file and earlier results are kept.'); }
-              catch (err) { toast(err.message, true); ev.target.disabled = false; } }}, 'Apply the new checks')));
+              try { await api('/api/spreadsheets/recheck', {file_hash: r.file_hash, apply: true, by: myName() || null}); }
+              catch (err) { toast(about(err.message), true); ev.target.disabled = false; return; }
+              const applied = 'New checks applied. The original file and earlier results are kept.';
+              if (!same()) { toast(`${r.filename || 'The earlier report'}: ${applied} The report on screen was not changed.`); loadList(); return; }
+              try { await openReport(r.file_hash, true); await loadList(); toast(applied); }
+              catch (err) { toast(same() ? applied + ' This page could not be refreshed: reload the report to see its current state.' : about(applied), true); } }}, 'Apply the new checks')));
           e.target.remove();
-        } catch (err) { toast(err.message, true); e.target.disabled = false; } }}, 'Preview the new checks'));
+        } catch (err) { toast(about(err.message), true); e.target.disabled = false; } }}, 'Preview the new checks'));
     return box;
   }
   // Why the report stays on hold beyond its issues (client not settled, record set unclear, SharePoint coverage or differences).
@@ -1081,6 +1090,7 @@
   // one truthful status for the whole report, and the one next step when it is not ready
   function fdStatus(r) {
     const rv = r.review || {}, sp = rv.sharepoint || {}, a = r.assignment || {}, c = fdCounts();
+    if (rv.historical_integrity) return {tone: 'amber', icon: 'warn', text: rv.historical_integrity.label, next: null, why: rv.historical_integrity.message};
     if (!r.review || r.internal_check_status === 'could_not_load_latest_check') return {tone: 'amber', icon: 'warn', text: 'Check unavailable', next: 'review', why: 'Reopen the report to load its current check.'};
     if (outdated(r)) return {tone: 'amber', icon: 'warn', text: 'Checks out of date', next: 'recheck', why: `Checked with an older version of the checks (${r.recheck?.checked_with || 'earlier'}). Nothing is trusted until it is checked again.`};
     if ((r.sent || []).some(x => x.sent)) return {tone: 'green', icon: 'ok', text: 'Sent to client', next: null};
@@ -1803,6 +1813,7 @@
   // The header says what is going on in plain words: a report with no possible errors left is Completed, and a blocked
   // one says what is blocking it.
   function fdShown(st) {
+    if (state.report?.review?.historical_integrity) return st;
     const r = state.report, left = r && state.fixes ? (state.fdItems?.length ? state.fdItems : fdItems()).filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
     // Zero possible errors is Completed, also when a SharePoint check note remains: those notes stay readable in the
     // hover text and under "SharePoint check notes", they are no longer shown as a block.
@@ -2032,6 +2043,10 @@
     }
   }
   function fdCheckedCopy(r) {
+    const integrity = r.review?.historical_integrity;
+    if (integrity) return h('section', {id: 'fd-checked-copy', class: 'fd-checked-copy pending', role: 'alert'},
+      h('b', {}, integrity.label), h('p', {}, integrity.message),
+      h('p', {}, `${integrity.unresolved_count} unresolved findings in the independent integrity assessment; historical snapshot counts are unchanged.`));
     const status = fdCheckedState(r), p = r.checked_copy;
     // Nothing left to fix or decide: say Completed. What the SharePoint check could not confirm stays one click away.
     const ignored = p?.set_aside_unresolved || 0;
@@ -2272,12 +2287,11 @@
     if (!(open.some(fdCanAI) || fdAutoMode() && open.some(it => it.fp && it.state === 'open'))) {
       toast(state.aiOn ? `Dex has no change it can make to ${open.length === 1 ? 'this error' : 'these errors'}. Fix manually or ignore.` : 'AI is not switched on for this site, so Dex cannot fix these. Fix manually or ignore.'); return;
     }
-    state.fdAIWhole = !keys;   // Fix with AI on the whole report settles everything that is open when it finishes
     fdAIFixNow(open, opts);
   }
   // What Dex had left as written on the version being edited by hand: the same items are left as written again on
   // the newly saved version, so a manual fix never brings back errors that were already settled.
-  const fdDexLeft = () => fdItems().filter(it => it.state === 'kept' && /^Dex had no safe change/.test(String(it.decision?.reason || ''))).map(it => ({key: it.key}));
+  const fdDexLeft = () => [];   // nothing is carried as "left as written by Dex" any more: such findings are open
   function fdManualSaved(run, receipt, carried) {
     if (carried.length && fdAutoMode()) fdAfterAI({...run, unfixed: carried}, receipt); else state.fdAIRun = run;
   }
@@ -2290,63 +2304,15 @@
       for (let i = 0; i < 200 && (state.report?.file_hash !== run.hash || !state.fixes || fdActiveBusy() || state.aiProposalOperation); i++) await pause(400);
       if (state.report?.file_hash !== run.hash || !state.fixes || versionReadOnly(state.report)) return;
       const mine = new Set((run.unfixed || []).map(x => x.key));
-      // A difference from SharePoint is never set aside automatically either.
-      // A value that is only written in a different pattern is always left as written, also when SharePoint holds the
-      // very same value (that confirms it, it is not a difference).
-      const soft = fdItems().filter(it => mine.has(it.key) && it.fp && it.state === 'open' && (/_format_differs$/.test(it.issue?.code || '') ||
-        it.tier !== 'blocker' && it.issue?.severity !== 'high' && it.source == null && !/^SharePoint/i.test(String(it.issue?.source || ''))));
-      let leftAsWritten = 0;
-      // Dex's own follow-up never shows an error: if the report was updated in the meantime (its SharePoint check
-      // finished, for example) the step is simply done again on the updated report.
-      const softNow = () => fdItems().filter(it => mine.has(it.key) && it.fp && it.state === 'open' && (/_format_differs$/.test(it.issue?.code || '') ||
-        it.tier !== 'blocker' && it.issue?.severity !== 'high' && it.source == null && !/^SharePoint/i.test(String(it.issue?.source || ''))));
-      for (let attempt = 0, todo = soft; attempt < 3 && todo.length && todo.length <= 1000; attempt++) {
-        try {
-          await fdSendDecision({...findingBinding(todo), ids: todo.map(x => x.key), action: 'reject', from: todo[0], batch: true, quiet: true,
-            reason: 'Dex had no safe change to make, so this was left as written by Fix with AI.'});
-        } catch (e) { /* they stay in the list */ }
-        const failed = !!state.decisionFailed; state.decisionFailed = null;
-        for (let i = 0; i < 100 && (state.report?.file_hash !== run.hash || !state.fixes || fdActiveBusy()); i++) await pause(400);
-        if (state.report?.file_hash !== run.hash || !state.fixes) break;
-        const rest = softNow();
-        leftAsWritten += todo.length - rest.length;
-        if (!failed && rest.length === todo.length) break;   // nothing moved and nothing failed: leave them listed
-        todo = rest;
-      }
-      leftAsWritten = Math.max(0, leftAsWritten);
-      if (state.report?.file_hash !== run.hash) return;
-      // Fix with AI settles everything it was given. What Dex has no correct value for (a serious error, or a difference
-      // from SharePoint) is left exactly as written and recorded as not checked by anyone, so the report is finished
-      // and the revision summary says plainly which errors were not corrected.
-      const whole = !run.manual && state.fdAIWhole === true;
-      const hardNow = () => fdItems().filter(it => (whole || mine.has(it.key)) && it.fp && (it.state === 'open' || whole && it.state === 'selected'));
-      const unsolved = [];
-      for (let attempt = 0, todo = hardNow(); attempt < 3 && todo.length && todo.length <= 1000; attempt++) {
-        const told = todo.map(it => ({key: it.key, where: [it.issue?.sheet, it.issue?.cell || (it.issue?.row ? 'row ' + it.issue.row : null)].filter(Boolean).join(' ') || 'Whole report', text: String(it.text || it.issue?.text || '').slice(0, 200)}));
-        try {
-          await fdSendDecision({...findingBinding(todo), ids: todo.map(x => x.key), action: 'reject', from: todo[0], batch: true, quiet: true,
-            reason: 'Dex had no safe change to make and no correct value to put in, so this was left exactly as written by Fix with AI. Not corrected.',
-            evidence: ['Not checked by a person. Left as written by Fix with AI: Dex found no correct value for it in the report or in SharePoint.']});
-        } catch (e) { /* they stay in the list */ }
-        const failed = !!state.decisionFailed; state.decisionFailed = null;
-        for (let i = 0; i < 100 && (state.report?.file_hash !== run.hash || !state.fixes || fdActiveBusy()); i++) await pause(400);
-        if (state.report?.file_hash !== run.hash || !state.fixes) break;
-        const rest = hardNow(), still = new Set(rest.map(it => it.key));
-        unsolved.push(...told.filter(x => !still.has(x.key)));
-        if (!failed && rest.length === todo.length) break;
-        todo = rest;
-      }
-      if (state.report?.file_hash !== run.hash) return;
-      // A correction that is only a guess (it belongs to no listed error, or to one just left as written) is not applied
-      // either: it is set aside with the rest, and named in the summary.
-      if (whole) {
-        const guesses = fdItems().filter(it => it.state === 'open' && !it.fp && it.fix), dec = store.get(decisionsKey(), {});
-        for (const it of guesses) {
-          dec[it.fix.id] = {...(dec[it.fix.id] || {}), state: 'rejected'};
-          unsolved.push({key: it.key, where: [it.fix.sheet, it.fix.cell].filter(Boolean).join(' ') || 'Whole report', text: String(it.text || it.fix.reason || 'Suggested correction not applied').slice(0, 200)});
-        }
-        if (guesses.length) { store.set(decisionsKey(), dec); state.fdItems = null; }
-      }
+      // Nothing is set aside here. Having no correction is not a judgement that nothing is wrong, whatever the kind of
+      // finding: every one Dex did not correct stays open until a person fixes it or decides it with a reason.
+      const leftAsWritten = 0;
+      // Uncorrected serious/source findings and unapplied proposals remain open.
+      // Missing evidence is not a reviewer decision and must never manufacture a clean report.
+      const unsolved = fdItems().filter(it => mine.has(it.key) && openStates.includes(it.state)).map(it => ({
+        key: it.key, where: [it.issue?.sheet || it.fix?.sheet, it.issue?.cell || it.fix?.cell].filter(Boolean).join(' ') || 'Whole report',
+        text: String(it.text || it.issue?.text || it.fix?.reason || 'Not corrected').slice(0, 200)
+      }));
       const left = fdItems().filter(it => openStates.includes(it.state)).length;
       state.fdAIRun = {...run, leftAsWritten, unsolved, summary: true}; drawSide();
       globalThis.setTimeout?.(() => { const side = document.getElementById('side'); if (side) side.scrollTop = 0; }, 0);
@@ -2735,26 +2701,30 @@
   }
   // What changed in this run, shown on the report itself (no extra window): fixed, left as written, still open.
   function fdRevisionSummary(run, left, dismiss) {
+    if (state.report?.review?.historical_integrity) return fdCheckedCopy(state.report);
     const r = state.report, items = run.items || [];
     // Formatting the app cleaned up by itself when the report opened is part of this version too.
     const tidied = !items.length && r?.fixed_from?.changes?.length ? r.fixed_from.changes.map(c => ({where: `${c.sheet} cell ${c.cell}`, before: c.before ?? '', after: c.after ?? ''})) : [];
     const show = v => v === '' || v == null ? 'blank' : '“' + String(v).slice(0, 80) + '”';
     const list = (title, rows) => rows.length ? h('details', {class: 'fd-saved-changes'}, h('summary', {}, title),
       h('ul', {class: 'fd-fixed-list'}, rows.slice(0, 200).map(x => h('li', {}, h('b', {}, x.where), ` ${show(x.before)} → ${show(x.after)}`)), rows.length > 200 ? h('li', {}, `…and ${rows.length - 200} more (see History).`) : null)) : null;
+    // The summary can never say fewer errors need a person than it lists as not corrected and still open.
+    const openNow = new Set(fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).map(it => it.key));
+    left = Math.max(left || 0, (run.unsolved || []).filter(x => openNow.has(x.key)).length);
     return h('div', {class: 'fd-airun fd-revision ' + (left ? '' : 'good'), role: 'status'},
       h('h3', {}, 'Revision summary'),
       h('ul', {class: 'fd-revision-counts'},
         run.tidy ? null : h('li', {}, h('b', {}, String(run.fixed || 0)), run.manual ? (run.fixed === 1 ? ' cell changed by you' : ' cells changed by you') : run.fixed === 1 ? ' cell fixed by Dex' : ' cells fixed by Dex'),
         tidied.length ? h('li', {}, h('b', {}, String(tidied.length)), ' formatting clean-ups made when the report opened') : null,
         run.look ? h('li', {}, 'Report colours made consistent (one cream, no yellow patches); no value was changed') : null,
-        run.tidy || run.manual ? null : h('li', {}, h('b', {}, String(run.leftAsWritten || 0)), ' left as written'),
-        (run.unsolved || []).length ? h('li', {class: 'fd-revision-open'}, h('b', {}, String(run.unsolved.length)), run.unsolved.length === 1 ? ' error Dex could not correct: left exactly as written, not checked by anyone' : ' errors Dex could not correct: left exactly as written, not checked by anyone') : null,
+        run.leftAsWritten ? h('li', {}, h('b', {}, String(run.leftAsWritten)), ' left as written') : null,
+        (run.unsolved || []).length ? h('li', {class: 'fd-revision-open'}, h('b', {}, String(run.unsolved.length)), run.unsolved.length === 1 ? ' error Dex could not correct: still needs review' : ' errors Dex could not correct: still need review') : null,
         h('li', {class: left ? 'fd-revision-open' : ''}, h('b', {}, String(left)), left === 1 ? ' possible error still needs you' : ' possible errors still need you')),
       left === 0 ? h('p', {class: 'fd-hint'}, 'Nothing is left to fix, so the Fix buttons are not shown. Download the fixed report below.') : null,
       run.fixed ? h('p', {class: 'fd-hint'}, `${run.reused ? 'Matches saved version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept unchanged.`) : null,
       (run.unsolved || []).length ? h('details', {class: 'fd-saved-changes', open: true}, h('summary', {}, `See the ${plural(run.unsolved.length, 'error')} Dex could not correct`),
         h('ul', {class: 'fd-fixed-list'}, run.unsolved.slice(0, 200).map(x => h('li', {}, h('b', {}, x.where), ' ' + x.text)), run.unsolved.length > 200 ? h('li', {}, `…and ${run.unsolved.length - 200} more (see History).`) : null),
-        h('p', {class: 'fd-hint'}, 'These are still wrong in the report. Open Ignored to bring any of them back and fix it by hand.')) : null,
+        h('p', {class: 'fd-hint'}, 'These remain unresolved. Review the evidence, fix them manually, or explicitly choose Ignore with a reason.')) : null,
       list(run.manual ? `See the ${plural(items.length, 'change')} you made` : `See the ${plural(items.length, 'change')} Dex made`, items), list(`See the ${plural(tidied.length, 'formatting clean-up')}`, tidied),
       h('div', {class: 'fd-cardacts'},
         // What is left can be fixed by hand or ignored right here, without looking for the buttons further down.
@@ -2892,6 +2862,7 @@
     return null;
   }
   function fdClean(r, st) {
+    if (r.review?.historical_integrity) return fdCheckedCopy(r);
     const rv = r.review, sp = rv.sharepoint || {}, a = r.assignment || {}, sel = r.dataset_selection || {};
     if (r.checked_copy) return h('p', {class: 'fd-hint'}, fdCheckedState(r).ready ? 'Download the checked copy above. No approval or sending is required.' : 'Nothing left to fix on this report.');
     if (st.next !== 'approve' && st.next !== 'send') return h('div', {class: 'fd-clean muted'}, h('p', {}, 'No corrections to make. The report is not ready for approval until the step above is done.'));
@@ -2925,7 +2896,7 @@
       none: ['No source value', 'Nothing supports a change, so the value stays as recorded and the issue stays open.']}[it.evidence];
     const where = [it.sheet, it.cell || (it.row ? 'row ' + it.row : null), it.item ? 'SharePoint item ' + it.item : null].filter(Boolean).join(' · ');
     const dd = it.decision, by = dd ? ` by ${dd.by || 'a reviewer'} ${when2(dd.at) || ''}` : it.decidedBy ? ' by ' + it.decidedBy : '';
-    const decided = it.state === 'kept' ? `Kept as recorded${by}${it.report === '' ? ' (blank stays blank: not recorded, not zero)' : ''}`
+    const decided = it.issue?.historical_fallback ? 'Historical fallback record preserved, not verified human review. Independent integrity review is required.' : it.state === 'kept' ? `Kept as recorded${by}${it.report === '' ? ' (blank stays blank: not recorded, not zero)' : ''}`
       : it.state === 'deferred' ? `Waiting for ${dd.owner || 'the source owner'}${by}. The finding stays open and the report stays on hold.`
       : it.state === 'confirmed' ? `Confirmed: needs a correction${by}`
       : it.state === 'claude' ? `Set aside by Dex${it.issue?.claude?.at ? ' ' + when2(it.issue.claude.at) : ''}. This is Dex's recommendation, not a person's decision: “${it.issue?.claude?.reason || it.issue?.verdict_reason || 'no reason given'}”`
@@ -2943,7 +2914,11 @@
       it.fix && !it.fp ? h('p', {class: 'fd-hint'}, 'Unselected suggestions stay unchanged. Only selected changes are included in your preview.') : null,
       h('p', {class: 'fd-conf ' + it.evidence}, h('b', {}, conf[0]), ' ', conf[1]),
       it.legacyNote ? h('p', {class: 'fd-coverage'}, icon('warn', 14), ' ', it.legacyNote) : null,
-      it.previous ? h('p', {class: 'fd-coverage'}, icon('warn', 14), ` ${it.previous.note} (Earlier: ${it.previous.action} by ${it.previous.by || 'a reviewer'}${it.previous.reason ? ', “' + it.previous.reason + '”' : ''}.)`) : null,
+      // A record left by the automatic Fix with AI fallback was saved under the signed-in name; that is not said to be that person's decision.
+      it.previous ? h('p', {class: 'fd-coverage'}, icon('warn', 14), it.issue?.ai_fallback_not_review
+        ? ` ${it.previous.note} (Saved record: ${it.previous.action}${it.previous.by ? ', under the name ' + it.previous.by : ''}${it.previous.reason ? ', “' + it.previous.reason + '”' : ''}.)`
+        : ` ${it.previous.note} (Earlier: ${it.previous.action} by ${it.previous.by || 'a reviewer'}${it.previous.reason ? ', “' + it.previous.reason + '”' : ''}.)`) : null,
+      it.issue?.fallback_wording_review_needed ? h('p', {class: 'fd-coverage fd-review-needed'}, icon('warn', 14), ' Review needed: ' + (it.issue.fallback_wording_note || '')) : null,
       decided ? h('div', {class: 'fd-decided'}, h('p', {}, icon('ok', 14), ' ', decided),
         it.note ? h('p', {}, `Reason: “${it.note}”`) : null,
         dd && (dd.evidence || []).length ? h('p', {}, 'Evidence: ' + dd.evidence.join('; ')) : null,
@@ -3178,6 +3153,11 @@
     const body = {file_hash: hash, ids: req.ids || [], action: req.action, reason: req.reason || '', owner: req.owner || '', evidence: req.evidence || [],
       request_id: req.request_id, expected_rev: req.expected_rev, expected_run: req.expected_run, expected_fps: req.expected_fps, undo_of: req.undo_of || null, by: myName()};
     state.decisionPending = true; state.decisionFailed = null; drawSide();
+    // The reviewer may open another report, or reload this one, while the request is on its way. Every step after an
+    // await checks that the report this decision was made on is still the one on screen: the same selection and the very
+    // same loaded report. A saved decision is never drawn into another report, and navigation is never undone.
+    const shown = state.report, here = () => state.selected === hash && state.report === shown;
+    const sameReport = () => state.selected === hash;   // still this report, possibly reloaded meanwhile
     let response = null, data = {};
     try {
       response = await fetch('/api/spreadsheets/decide', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Review-Token': 'same-origin'}, body: JSON.stringify(body)});
@@ -3188,19 +3168,37 @@
       let known = null;
       try { known = await api('/api/spreadsheets/decision-status', {file_hash: hash, request_id: req.request_id}); } catch (e) { known = null; }
       state.decisionPending = false;
-      if (known && known.saved) { toast('Your decision was saved (the first answer was lost on the way).'); state.fdForm = null; state.fdBatch = null; await openReport(hash, true); return; }
+      if (known && known.saved) {
+        toast('Your decision was saved (the first answer was lost on the way).');
+        if (sameReport()) { state.fdForm = null; state.fdBatch = null; await openReport(hash, true); }   // elsewhere now: that report shows it when it is opened
+        return;
+      }
+      if (!sameReport()) { toast(known ? 'A decision on the report you left was not saved: the server did not answer.' : 'It is not known yet whether a decision on the report you left was saved. Open that report to check.', true); return; }
       state.decisionFailed = {message: known ? 'Not saved: the server did not answer. Nothing was changed.' : 'Could not reach the server, so it is not known yet whether this was saved. Try again: it will not be recorded twice.', retry: req};
       drawSide(); return;
     }
     state.decisionPending = false;
     if (!response.ok) {   // refused (409 stale / unknown findings, 400 missing reason, 403 not allowed): nothing was saved
-      state.decisionFailed = {message: 'Not saved: ' + (data.error || `the server answered ${response.status}.`), retry: null};
-      if (response.status === 409) { if (!req.quiet) toast('Not saved. The report changed; showing its current state.', true); await openReport(hash, true); state.decisionFailed = {message: 'Not saved: ' + (data.error || 'the report changed.'), retry: null}; drawSide(); }
-      else drawSide();
+      if (!sameReport()) { if (!req.quiet) toast('A decision on the report you left was not saved: ' + (data.error || `the server answered ${response.status}.`), true); return; }
+      if (response.status === 409) {
+        if (!req.quiet) toast('Not saved. The report changed; showing its current state.', true);
+        await openReport(hash, true);
+        if (sameReport()) { state.decisionFailed = {message: 'Not saved: ' + (data.error || 'the report changed.'), retry: null}; drawSide(); }
+      }
+      else { state.decisionFailed = {message: 'Not saved: ' + (data.error || `the server answered ${response.status}.`), retry: null}; drawSide(); }
       return;
     }
-    if (state.selected !== hash) return;
-    await fillPages(data.report);
+    if (!sameReport()) { if (!req.quiet) toast('Your decision on the report you left was saved.'); return; }
+    if (!here()) { await openReport(hash, true); return; }   // this report was reloaded meanwhile: show its saved state, merge nothing
+    let filled = true;
+    try { await fillPages(data.report); } catch (e) { filled = false; }
+    if (!sameReport()) { if (!req.quiet) toast('Your decision on the report you left was saved.'); return; }
+    if (!here()) { await openReport(hash, true); return; }
+    if (!filled) {   // saved, but the rest of the list could not be loaded: say exactly that, and do not draw a partial list as if complete
+      state.fdForm = null; state.fdBatch = null;
+      state.decisionFailed = {message: 'Saved, but this page could not be refreshed. Reload the report to see its current state.', retry: null};
+      drawSide(); return;
+    }
     const scoped = state.fdReviewScope?.binding === JSON.stringify(reviewBinding(state.report)) ? state.fdReviewScope : null;
     state.report = {...state.report, ...data.report};    // the one state for header, panel, sheet badges and history
     if (typeof queueFollow === 'function') { try { queueFollow(state.report); if (typeof drawQueue === 'function') drawQueue(); } catch (e) { /* the list refreshes on its next load */ } }
@@ -3250,21 +3248,27 @@
   async function fdEvidence(it) {
     const slot = $('fd-evidence'); if (!slot) return;
     const sp = state.report.review.sharepoint || {};
-    const close = h('button', {type: 'button', class: 'fd-iconbtn', 'aria-label': 'Close source evidence', onclick: () => slot.replaceChildren()}, icon('x', 16));
+    // The row is read for this version and this drawer only. A slow answer is dropped once another drawer was opened,
+    // this one was closed, or another report or version is on screen: it is never drawn into a drawer it was not asked for.
+    const hash = state.report.file_hash, selected = state.selected, request = state.fdEvidenceRequest = (state.fdEvidenceRequest || 0) + 1;
+    const close = h('button', {type: 'button', class: 'fd-iconbtn', 'aria-label': 'Close source evidence', onclick: () => { if (state.fdEvidenceRequest === request) state.fdEvidenceRequest = request + 1; slot.replaceChildren(); }}, icon('x', 16));
+    const rowcells = h('div', {id: 'fd-rowcells'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Reading the row…'));
     const box = h('section', {class: 'fd-drawer', 'aria-label': 'Source evidence', tabindex: '-1'},
       h('div', {class: 'fd-drawerhead'}, h('b', {}, icon('db', 16), ` ${it.item ? 'SharePoint item ' + it.item : it.sheet ? `${it.sheet} row ${it.row || '?'}` : 'Whole report'} · source evidence`), close),
       h('dl', {}, h('dt', {}, 'Report'), h('dd', {}, it.report == null ? '—' : showWs(it.report)), h('dt', {}, 'SharePoint'), h('dd', {}, it.source == null ? 'No value for this field' : showWs(it.source)),
         h('dt', {}, 'Snapshot'), h('dd', {}, sp.snapshot_id ? `${String(sp.snapshot_id).slice(0, 12)} · ${when2(sp.captured_at) || ''}` : 'None for this version'),
         h('dt', {}, 'List'), h('dd', {}, sp.source || '—')),
       it.url || sp.web_url ? h('a', {href: it.url || sp.web_url, target: '_blank', rel: 'noopener'}, 'Open on SharePoint (read only)') : null,
-      h('div', {id: 'fd-rowcells'}, h('p', {class: 'note'}, h('span', {class: 'spin'}), ' Reading the row…')));
+      rowcells);
     slot.replaceChildren(box); box.focus();
-    if (!it.sheet || !it.row) { $('fd-rowcells').replaceChildren(); return; }
+    if (!it.sheet || !it.row) { rowcells.replaceChildren(); return; }
+    const current = () => state.fdEvidenceRequest === request && state.selected === selected && state.report?.file_hash === hash && box.isConnected !== false;
     try {
-      const row = await api('/api/spreadsheets/cells', {file_hash: state.report.file_hash, sheet: it.sheet, row: it.row});
-      $('fd-rowcells')?.replaceChildren(h('table', {class: 'fd-rowtable'}, h('tbody', {}, (row.cells || []).filter(c => c.header || c.value !== '').slice(0, 24).map(c =>
+      const row = await api('/api/spreadsheets/cells', {file_hash: hash, sheet: it.sheet, row: it.row});
+      if (!current()) return;
+      rowcells.replaceChildren(h('table', {class: 'fd-rowtable'}, h('tbody', {}, (row.cells || []).filter(c => c.header || c.value !== '').slice(0, 24).map(c =>
         h('tr', {class: c.cell === it.cell ? 'cur' : ''}, h('th', {}, c.header || c.cell), h('td', {}, c.value === '' || c.value == null ? '(blank)' : String(c.value)))))));
-    } catch (e) { $('fd-rowcells')?.replaceChildren(h('p', {class: 'note'}, e.message)); }
+    } catch (e) { if (current()) rowcells.replaceChildren(h('p', {class: 'note'}, e.message)); }
   }
 
   // ---------- preview, then a new version, then the checks run again on it
@@ -3325,12 +3329,40 @@
     const name = ($('fd-approver')?.value || '').trim(), btn = $('fd-approve-btn');
     if (!name) { toast('Type your name to approve the report.', true); $('fd-approver')?.focus(); return; }
     if (btn) { btn.disabled = true; btn.textContent = 'Approving…'; }
+    // The answer belongs to the report that was approved. "On screen" means the reviewer has not navigated elsewhere; it
+    // does not depend on whether that report is loaded at this instant. A report opened meanwhile is never reloaded,
+    // and every notice names the report the answer is about.
+    const shown = state.report, selected = state.selected, label = shown?.filename || 'the earlier report';
+    const onScreen = () => state.selected === selected;
+    let out;
     try {
       store.set('rd-approver', name);
-      const out = await api('/api/spreadsheets/approve', {...binding, approver: name, note: ''});
-      toast('Internally approved. Nothing was sent; sending is paused.');
-      await openReport(out.item.file_hash, true); loadList();
-    } catch (e) { toast(e.message, true); if (btn) { btn.disabled = false; btn.textContent = 'Approve internally'; } }
+      out = await api('/api/spreadsheets/approve', {...binding, approver: name, note: ''});
+    } catch (e) {
+      // Only an explicit refusal (or a request that was never sent) means "not approved".
+      const refused = e.notSent === true || (e.httpStatus >= 400 && e.httpStatus < 500);
+      if (e.saveCommitted === true) out = {item: {file_hash: shown?.file_hash}};   // the server itself states the save was committed
+      else if (refused) {
+        toast(onScreen() ? e.message : `${label} was not approved: ${e.message}`, true);
+        if (btn) { btn.disabled = false; btn.textContent = 'Approve internally'; }
+        return;
+      } else {
+        // A lost answer, a timeout or a server error: nothing is known about this request, and it may still be recorded
+        // later. Nothing on the page is read as proof either way (an approval shown there may be an earlier one, or for
+        // other checks). So the outcome is reported as unknown, nothing is sent again, and no retry is suggested or offered.
+        if (btn) btn.textContent = 'Outcome not confirmed';
+        toast(onScreen() ? 'The approval could not be confirmed. It may or may not have been recorded. Nothing was sent. Reload this report and check its approval status.'
+          : `The approval of ${label} could not be confirmed. It may or may not have been recorded. Nothing was sent. Reopen ${label} and check its approval status. The report on screen was not changed.`, true);
+        return;
+      }
+    }
+    if (!onScreen()) { toast(`${label} was internally approved. Nothing was sent; sending is paused. The report on screen was not changed.`); loadList(); return; }
+    toast('Internally approved. Nothing was sent; sending is paused.');
+    // openReport reports a failed load on the page itself and returns normally, leaving no report loaded.
+    let refreshed = false;
+    try { await openReport(out.item.file_hash, true); refreshed = !!state.report; } catch (e) { /* said below */ }
+    if (!refreshed && onScreen()) toast('Internally approved, but this page could not be refreshed. Reload the report to see its current state.', true);
+    loadList();
   }
   async function fdRecheck() {
     if (state.gridDraft && gridDirty()) { toast('Preview or discard the spreadsheet draft before re-checking. Nothing changed.', true); return; }
@@ -3734,14 +3766,15 @@
     if (state.sideTab === 'facts') state.sideTab = 'fixes';
     const rv = r.review, tab = state.sideTab || 'fixes';
     const body = h('div', {class: 'sidebody', id: 'side-body'});
+    const integrity = r.review?.historical_integrity;
     const open = state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
     // The number never goes blank while the report refreshes itself (a recheck or the SharePoint check reloads it): the
     // last count for this report stays, or the count the report list already showed, until the fresh one arrives.
     if (open != null) state.fdLastCount = {hash: r.file_hash, n: open};
     const listed = rv?.counts || {}, held = open != null ? null : state.fdLastCount?.hash === r.file_hash ? state.fdLastCount.n
       : [listed.high, listed.medium, listed.low].every(Number.isFinite) ? listed.high + listed.medium + listed.low : null;
-    side.replaceChildren(h('header', {class: 'fd-apphead'},
-        h('p', {class: 'fd-errcount' + (open === 0 ? ' done' : ''), title: open == null && held != null ? 'Updating…' : null}, open == null ? (held == null ? 'Counting possible errors…' : plural(held, 'possible error')) : open === 0 ? [icon('ok', 18), ' 0 possible errors'] : plural(open, 'possible error')),
+    side.replaceChildren(integrity ? fdCheckedCopy(r) : null, h('header', {class: 'fd-apphead'},
+        h('p', {class: 'fd-errcount' + (!integrity && open === 0 ? ' done' : ''), title: open == null && held != null ? 'Updating…' : null}, integrity ? `${integrity.unresolved_count} findings need independent integrity review` : open == null ? (held == null ? 'Counting possible errors…' : plural(held, 'possible error')) : open === 0 ? [icon('ok', 18), ' 0 possible errors'] : plural(open, 'possible error')),
         // Nothing left: the copy with every fix applied is one click away, right at the top.
         open === 0 ? h('a', {class: 'btn primary', id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
         // Change any cell by hand, whether or not it was flagged.
@@ -3763,7 +3796,7 @@
       body.append(h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'sources'; drawReport(); }}, 'Source evidence and coverage'));
       body.append(h('label', {class: 'fd-autotidy'}, h('input', {type: 'checkbox', 'data-selection': 'true', checked: store.get('rd-auto-tidy', true) !== false || null,
         onchange: e => { store.set('rd-auto-tidy', e.target.checked); if (e.target.checked && state.report) { delete (state.fdAutoTidied || {})[state.report.file_hash]; fdAutoTidy(state.report); } }}),
-        ' Work automatically: fix formatting when a report opens, and after an AI fix leave what Dex cannot change as written without asking'));
+        ' Work automatically: fix formatting when a report opens. Findings Dex cannot correct remain unresolved'));
       const sc = shiftCard(rv); if (sc) body.append(h('div', {id: 'shiftfix'}, sc));
     } else {
       body.append(h('div', {id: 'chat', class: 'chat embedded', 'aria-label': 'Ask Dex'}));
@@ -5972,13 +6005,19 @@
     if (['ai-review', 'ai-verify', 'ai-fixes'].includes(kind)) { fdReviewDialog(); return; }
     if (state.busy || !state.report) return;
     state.busy = true; toast(message);
+    // The check is about the report it was started on. If another report or version is on screen when it finishes,
+    // that one is not reloaded and is not given this report's result.
+    const hash = state.report.file_hash, selected = state.selected, label = state.report.filename || 'The earlier report';
+    const same = () => state.selected === selected && state.report?.file_hash === hash;
     try {
-      await api('/api/spreadsheets/' + kind, {file_hash: state.report.file_hash});
-      await openReport(state.report.file_hash, true); await loadList();
+      await api('/api/spreadsheets/' + kind, {file_hash: hash});
+      if (!same()) { toast(`${label}: the check finished. Open that report to see the result.`); loadList(); return; }
+      await openReport(hash, true); await loadList();
+      if (!same()) return;
       const rv = state.report.review;
       toast(kind === 'sharepoint' ? (rv.sharepoint.status === 'match' ? 'Matches SharePoint.' : rv.sharepoint.message || 'SharePoint check finished.')
         : kind === 'baseline' ? rv.usual.message || 'Compared.' : rv.ai.status === 'done' ? 'AI review finished.' : rv.ai.message || 'AI review finished.', rv.ai.status === 'error' && kind === 'ai-review');
-    } catch (e) { toast(e.message, true); }
+    } catch (e) { toast(same() ? e.message : `${label}: ${e.message}`, true); }
     finally { state.busy = false; }
   }
 

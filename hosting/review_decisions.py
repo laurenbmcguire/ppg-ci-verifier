@@ -120,11 +120,62 @@ def _clean(text, n):
     return ' '.join(str(text or '').split())[:n]
 
 
+# The name saved on such a record is the signed-in session's, which is not proof a person reviewed anything; who or what
+# produced it is treated as unknown. What is known is the wording, and that wording says no correction and no check.
+FALLBACK_NOTE = ('Recorded with the exact wording of the automatic Fix with AI fallback (no correction was made and it says nobody checked it). '
+                 'That is not a review, so this finding is unresolved. Correct it, or decide it yourself with a reason.')
+REVIEW_NEEDED_NOTE = ('This saved decision partly matches the wording of the automatic Fix with AI fallback. Whether it was made by a person or by '
+                      'that step cannot be told from the record. It is kept exactly as saved; check it and decide again if it is not yours.')
+# The only two payloads the page ever sent by itself (every published revision of the page was searched): a reason with
+# no evidence, and a reason with one fixed evidence sentence. Exact text, spacing aside.
+FALLBACK_SOFT_REASON = 'Dex had no safe change to make, so this was left as written by Fix with AI.'
+FALLBACK_HARD_REASON = ('Dex had no safe change to make and no correct value to put in, so this was left exactly as written by Fix with AI. '
+                        'Not corrected.')
+FALLBACK_HARD_EVIDENCE = 'Not checked by a person. Left as written by Fix with AI: Dex found no correct value for it in the report or in SharePoint.'
+
+
+def fallback_class(decision):
+    """'fallback' when a saved reject is exactly one of the two payloads the older page sent by itself; 'review_needed'
+    when it carries one of those exact sentences but not the whole payload (so its origin cannot be told); otherwise None.
+    Words that merely begin the same way, or mention the same phrases, make a decision neither: it is a person's."""
+    if not isinstance(decision, dict) or decision.get('action') != 'reject':
+        return None
+    reason = ' '.join(str(decision.get('reason') or '').split())
+    evidence = decision.get('evidence') or []
+    if isinstance(evidence, str):
+        evidence = [evidence]
+    evidence = [e for e in (' '.join(str(x or '').split()) for x in evidence) if e]
+    if (reason == FALLBACK_SOFT_REASON and not evidence) or (reason == FALLBACK_HARD_REASON and evidence == [FALLBACK_HARD_EVIDENCE]):
+        return 'fallback'
+    if reason in (FALLBACK_SOFT_REASON, FALLBACK_HARD_REASON) or FALLBACK_HARD_EVIDENCE in evidence:
+        return 'review_needed'
+    return None
+
+
+def automated_fallback(decision):
+    """True only for the exact automatic payload (see fallback_class). Having no correction is not a judgement that
+    nothing is wrong, so such a record never settles a finding: newly sent, already stored, or carried to a later version."""
+    return fallback_class(decision) == 'fallback'
+
+
+def stale_page_request(reason, evidence):
+    """For NEW decisions only: what an older page still open in a browser might send. Deliberately wider than
+    fallback_class, because refusing a write saves nothing and a person can simply say it in their own words, while a
+    saved decision is never reinterpreted on a mere resemblance."""
+    return str(reason or '').strip().lower().startswith('dex had no safe change') or any(
+        'not checked by a person' in str(e).lower() or 'left as written by fix with ai' in str(e).lower() for e in evidence or [])
+
+
+def protected_snapshot(result):
+    """Raw approval/delivery presence protects historical semantics, even when stale or pending."""
+    return any(result.get(k) is not None for k in ('approval', 'send_pending', 'send_in_progress')) or bool(result.get('sent'))
+
+
 def apply(issues, result):
     """Split issues by the decisions on this version. Returns (open, rejected, stale_decisions, counts).
     open keeps deferred and confirmed findings (with their decision attached): they are unresolved."""
     decisions = result.get('finding_decisions') or {}
-    open_, rejected, stale = [], [], []
+    open_, rejected, stale, fallback, unclear = [], [], [], 0, 0
     for x in issues:
         d = decisions.get(x['key'])
         why = None
@@ -133,12 +184,22 @@ def apply(issues, result):
         elif d and d.get('carried_from') and (not x.get('record_key') or d.get('record_key') != x.get('record_key')):
             # across versions a decision only follows a verified record (its SharePoint item), never a sheet coordinate
             why = 'This decision was made on an earlier version and this finding is not tied to the same verified record, so it is not applied. Decide again.'
+        if d and not why and automated_fallback(d) and not protected_snapshot(result):
+            why = FALLBACK_NOTE          # read-only: the record stays in the history exactly as saved, it just settles nothing
+            x['ai_fallback_not_review'] = True
+            fallback += 1
         if why:
             stale.append(dict(key=x['key'], decision=d, now=x.get('text'), why=why))
             x['previous_decision'] = dict(d, note=why)
             d = None
         if d and d.get('action') == 'reject':
-            rejected.append(dict(x, decision=d, verdict='not_an_issue', verdict_reason=f'Kept as recorded: {d.get("reason")}'.strip()))
+            kept = dict(x, decision=d, verdict='not_an_issue', verdict_reason=f'Kept as recorded: {d.get("reason")}'.strip())
+            if automated_fallback(d) and protected_snapshot(result):
+                kept.update(historical_fallback=True)
+            if fallback_class(d) == 'review_needed':
+                kept.update(fallback_wording_review_needed=True, fallback_wording_note=REVIEW_NEEDED_NOTE)
+                unclear += 1
+            rejected.append(kept)
             continue
         if d:
             x['decision'] = d
@@ -146,7 +207,8 @@ def apply(issues, result):
     counts = dict(rejected=len(rejected), reopened=sum(1 for x in open_ if (x.get('decision') or {}).get('action') == 'reopen'),
                   deferred=sum(1 for x in open_ if (x.get('decision') or {}).get('action') == 'defer'),
                   confirmed=sum(1 for x in open_ if (x.get('decision') or {}).get('action') == 'confirm'),
-                  undecided=sum(1 for x in open_ if not x.get('decision')), stale=len(stale))
+                  undecided=sum(1 for x in open_ if not x.get('decision')), stale=len(stale), ai_fallback_not_applied=fallback,
+                  fallback_wording_review_needed=unclear)
     return open_, rejected, stale, counts
 
 
@@ -216,6 +278,11 @@ def decide(result, current, *, ids, action, reason='', by='', owner='', evidence
         if action in REQUIRE_REASON and not reason:
             raise DecisionError('Say why (the reason is kept with the decision).' if action == 'reject' else 'Say what is being waited for and why.')
         if action == 'reject':
+            # Older cached pages sent this machine-generated fallback through the reviewer's session. Having no correction
+            # is not a judgement that nothing is wrong, for any kind of finding, so it is refused outright.
+            if stale_page_request(reason, evidence):
+                raise DecisionError('AI could not verify or correct these findings. They remain open; '
+                                    'review the evidence, correct them, or make an explicit reviewer decision.')
             high = [k for k in ids if current[k].get('severity') == 'high']
             if high and not evidence:
                 raise DecisionError(f'{len(high)} of these {"is a blocker" if len(high) == 1 else "are blockers"}. A blocker can only be kept as '
