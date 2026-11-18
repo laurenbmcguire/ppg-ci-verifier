@@ -11,7 +11,7 @@
 set -euo pipefail
 DIR=${PGTEST_DIR:-/var/tmp/pgtest}
 PORT=${PGTEST_PORT:-55432}
-BIN=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1)
+BIN=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1 || true)   # "|| true": on macOS the folder does not exist, and pipefail would end the script before the fallback below
 [[ -x "$BIN/initdb" ]] || BIN=$(dirname "$(command -v initdb)")
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 as_pg() { if [[ $(id -u) == 0 ]]; then su postgres -s /bin/bash -c "$*"; else bash -c "$*"; fi; }   # initdb refuses to run as root
