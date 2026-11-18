@@ -254,7 +254,10 @@ class ProposedDraft(unittest.TestCase):
         written = rp.propose(plan, *args, out / 'proposed', existing=existing)
         folder = Path(written['written']['folder'])
         self.assertEqual(folder.parent, out / 'proposed'); self.assertEqual(folder.name, plan['proposal']['operation_id'])
-        self.assertEqual(sorted(p.name for p in folder.iterdir()), ['checklist.json', 'checklist.txt', 'draft.xlsx', 'receipt.json', 'regeneration-plan.json'])
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ['REVIEW-FIRST.txt', 'checklist.json', 'checklist.txt', 'draft.xlsx', 'receipt.json', 'regeneration-plan.json'])
+        self.assertEqual(sorted(written['written']['files']), sorted(p.name for p in folder.iterdir()))
+        review = (folder / 'REVIEW-FIRST.txt').read_text()
+        self.assertIn('10 row(s) of this day have a recorded shift with no approved mapping', review); self.assertIn('unknown', review)
         checklist = json.loads((folder / 'checklist.json').read_text())
         self.assertEqual((checklist['status'], checklist['client_release'], checklist['day_completion']), ('DRAFT', 'held', 'not_established'))
         self.assertEqual(checklist['source_snapshot_hash'], cap['snapshot_hash']); self.assertEqual(checklist['captured_at'], cap['captured_at'])
@@ -488,6 +491,317 @@ class InputsThatChangeTheReport(unittest.TestCase):
             self.assertEqual((hashlib.sha256(f.read_bytes()).hexdigest(), f.stat().st_mtime_ns), (digest, stamp), f.name)
         self.assertEqual(sorted(p.name for p in (root / 'reports').iterdir()), sorted(f.name for f in protected))
         self.assertEqual([(v['kind'], v['action']) for v in first['existing_versions']], [(k, 'keep_unchanged') for k in ('original', 'corrected', 'approved', 'sent')])
+
+
+class QaBlockers(unittest.TestCase):
+    def test_a_changed_writer_or_checklist_format_is_another_input_and_a_stale_plan_is_refused(self):
+        """QA 1: patching NativeDraftPublisher.renderer_hash left report_input_hash unchanged."""
+        from unittest import mock
+        from hosting.last_scan_local import NativeDraftPublisher
+        out = Path(tempfile.mkdtemp()).resolve() / 'proposed'
+        cap = sealed(late_rows()); args = ([assignment()], PLAN_SCOPE, cap)
+        plan = rp.plan(*args)
+        self.assertEqual(plan['render_version'], NativeDraftPublisher('.', MAP, {}, binding={k: PLAN_SCOPE[k] for k in ('client_id', 'site_id', 'list_id', 'job')}).render_version())
+        for target, value in ((mock.patch.object(NativeDraftPublisher, 'renderer_hash', staticmethod(lambda: 'f' * 64)), None),
+                              (mock.patch.object(NativeDraftPublisher, 'FORMAT', 'draft-checklist-v99'), None)):
+            with self.subTest(change=str(target.attribute)), target:
+                other = rp.plan(*args)
+                self.assertNotEqual(other['render_version'], plan['render_version'])
+                self.assertNotEqual(other['report_input_hash'], plan['report_input_hash'])
+                self.assertNotEqual(other['proposal']['operation_id'], plan['proposal']['operation_id'])
+                with self.assertRaises(rp.PlanError):
+                    rp.propose(plan, *args, out)                                # the plan was made for the earlier writer
+        self.assertFalse(out.exists())
+        draft = dict(file_hash='d' * 64, kind='draft', report_input_hash=plan['report_input_hash'], source_snapshot_hash=cap['snapshot_hash'], **PLAN_SCOPE)
+        with mock.patch.object(NativeDraftPublisher, 'renderer_hash', staticmethod(lambda: 'f' * 64)):
+            later = rp.plan(*args, existing=[draft])
+        self.assertEqual((later['status'], later['reason']), ('draft_proposed', 'stale_draft'))   # a draft by the older writer is not "current"
+
+    def test_the_earlier_capture_must_really_be_earlier(self):
+        """QA 2: a capture taken a day later was accepted as the earlier one."""
+        cap = sealed(late_rows())
+        def codes(previous):
+            plan = rp.plan([assignment()], PLAN_SCOPE, cap, previous_capture=previous)
+            self.assertEqual((plan['status'], plan['proposal']['allowed']), ('blocked', False)); self.assertNotIn('changes', plan)
+            return [b['code'] for b in plan['blockers']]
+        self.assertEqual(codes(sealed(early_rows(), taken=TAKEN + timedelta(days=1))), ['earlier_capture_not_earlier'])
+        self.assertEqual(codes(sealed(early_rows(), taken=TAKEN)), ['earlier_capture_not_earlier'])                    # the same instant is not earlier
+        self.assertEqual(codes(sealed(early_rows(), taken=TAKEN + timedelta(seconds=1))), ['earlier_capture_not_earlier'])
+        unstated = {k: v for k, v in sealed(early_rows(), taken=TAKEN - timedelta(hours=1)).items() if k not in ('snapshot_hash', 'envelope_hash')}
+        for when in ('2026-11-10T09:00:00', 'yesterday', None, ''):                                                    # no offset, or not a time
+            with self.subTest(captured_at=when):
+                self.assertEqual(codes(sf.seal(dict(unstated, captured_at=when))), ['earlier_capture_time_unknown'])
+        ok = rp.plan([assignment()], PLAN_SCOPE, cap, previous_capture=sealed(early_rows(), taken=TAKEN - timedelta(seconds=1)))
+        self.assertEqual((ok['changes']['basis'], ok['changes']['counts']['added'], ok['changes']['seconds_between_captures']), ('earlier_sealed_capture', 17, 1))
+        none = rp.plan([assignment()], PLAN_SCOPE, cap)
+        self.assertEqual(none['changes']['basis'], 'not_determined'); self.assertNotIn('added', none['changes'])      # unknown is said, not guessed
+
+    def test_active_must_be_exactly_true(self):
+        """QA 3: active None, "false" and 0 were accepted."""
+        cap = sealed(late_rows())
+        for value in (None, 'false', 'true', 0, 1, '', 'yes', [], False):
+            with self.subTest(active=value):
+                plan = rp.plan([assignment(active=value)], PLAN_SCOPE, cap)
+                self.assertEqual((plan['status'], [b['code'] for b in plan['blockers']]), ('blocked', ['assignment_not_active']))
+        missing = assignment(); del missing['active']
+        self.assertEqual([b['code'] for b in rp.plan([missing], PLAN_SCOPE, cap)['blockers']], ['assignment_not_active'])
+        self.assertEqual(rp.plan([assignment(active=True)], PLAN_SCOPE, cap)['status'], 'draft_proposed')
+        for value in (None, 'true', 1, 'yes'):
+            with self.subTest(verified=value):
+                self.assertEqual([b['code'] for b in rp.plan([assignment(verified=value)], PLAN_SCOPE, cap)['blockers']], ['assignment_not_verified'])
+
+
+def png(colour):
+    from PIL import Image
+    out = io.BytesIO(); Image.new('RGB', (4, 3), colour).save(out, format='PNG')
+    return out.getvalue()
+
+
+def with_photos(rows, photos, **kw):
+    """A sealed capture whose records carry captured defect photos: {record id: image bytes}."""
+    c = {k: v for k, v in sealed(rows, **kw).items() if k not in ('snapshot_hash', 'envelope_hash')}
+    by_id = {r['id']: r for r in c['records']}
+    c['photos'] = [dict(record_id=i, record_hash=sf.digest(by_id[i]), field='DefectPhoto', status='supported', sha256=hashlib.sha256(b).hexdigest(), title='Defect', bytes=len(b))
+                   for i, b in photos.items()]
+    return sf.seal(c)
+
+
+class CapturedPhotos(unittest.TestCase):
+    """QA 4: propose always passed no photo bytes, so a genuinely captured photo could never be placed."""
+    def setUp(self):
+        self.red, self.blue = png((180, 0, 30)), png((0, 40, 200))
+        self.sha = hashlib.sha256(self.red).hexdigest()
+        self.cap = with_photos(late_rows(), {'1': self.red, '34': self.blue})
+        self.header = dict(photo_choices={'1': self.sha})                       # one photo explicitly selected for record 1
+        self.args = ([assignment()], PLAN_SCOPE, self.cap)
+        self.out = Path(tempfile.mkdtemp()).resolve() / 'proposed'
+
+    def test_the_selected_captured_photo_is_placed_with_its_exact_bytes(self):
+        from openpyxl import load_workbook
+        plan = rp.plan(*self.args, header=self.header)
+        written = rp.propose(plan, *self.args, self.out, header=self.header, photo_bytes={self.sha: self.red})
+        folder = Path(written['written']['folder'])
+        self.assertEqual(written['written']['photos_embedded'], [self.sha])
+        raw = (folder / 'draft.xlsx').read_bytes()
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            media = {hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist() if n.startswith('xl/media/')}
+        self.assertIn(self.sha, media)                                          # the original bytes, not a re-encoded copy
+        self.assertNotIn(hashlib.sha256(self.blue).hexdigest(), media)          # the photo that was not selected is not embedded
+        book = load_workbook(io.BytesIO(raw))
+        photos = book['Rejects & Photos']
+        text = ' '.join(str(c.value) for row in photos.iter_rows() for c in row if c.value is not None)
+        self.assertIn('Record 1', text); self.assertIn('ID SYN0000001', text); self.assertIn('Original source photo · ' + self.sha[:12], text)
+        self.assertEqual(len(photos._images), 2)                                # the logo and the one selected photo
+        checklist = json.loads((folder / 'checklist.json').read_text())
+        self.assertEqual([(p['record_id'], p['sha256']) for p in checklist['verification']['photo_provenance']], [('1', self.sha)])
+        self.assertEqual(sorted(p['sha256'] for p in checklist['photo_evidence']), sorted([self.sha, hashlib.sha256(self.blue).hexdigest()]))
+
+    def test_missing_wrong_or_unbound_bytes_write_nothing(self):
+        plan = rp.plan(*self.args, header=self.header)
+        other = hashlib.sha256(self.blue).hexdigest()
+        for label, supplied in (('missing', None), ('missing', {}), ('wrong bytes under the right name', {self.sha: self.blue}),
+                                ('truncated', {self.sha: self.red[:-1]}), ('a photo that was not selected', {self.sha: self.red, other: self.blue}),
+                                ('bytes of nothing in this capture', {self.sha: self.red, 'e' * 64: b'x'}), ('not bytes', {self.sha: 'text'}), ('not a mapping', [self.red])):
+            with self.subTest(case=label), self.assertRaises(rp.PlanError):
+                rp.propose(plan, *self.args, self.out, header=self.header, photo_bytes=supplied)
+        self.assertFalse(self.out.exists())
+
+    def test_a_selection_must_name_a_captured_photo_of_a_record_in_the_draft(self):
+        with self.assertRaises(sf.ReviewError):
+            rp.plan(*self.args, header=dict(photo_choices={'1': 'e' * 64}))     # not a captured photo
+        with self.assertRaises(sf.ReviewError):
+            rp.plan(*self.args, header=dict(photo_choices={'2': self.sha}))     # that photo belongs to another record
+        rows = [record(1, 37, rejected=2, shift='B')] + late_rows()[1:]
+        cap = with_photos(rows, {'1': self.red})
+        with self.assertRaises(sf.ReviewError):                                 # its record is not in the draft (unapproved shift)
+            rp.plan([assignment()], PLAN_SCOPE, cap, header=self.header)
+
+    def test_a_draft_without_a_selection_needs_and_takes_no_bytes(self):
+        plan = rp.plan(*self.args)
+        with self.assertRaises(rp.PlanError):
+            rp.propose(plan, *self.args, self.out, photo_bytes={self.sha: self.red})   # nothing selected: bytes are not accepted
+        written = rp.propose(plan, *self.args, self.out)
+        self.assertEqual(written['written']['photos_embedded'], [])
+        self.assertNotEqual(plan['report_input_hash'], rp.plan(*self.args, header=self.header)['report_input_hash'])
+
+
+class SourceLinks(unittest.TestCase):
+    def linked(self, links):
+        c = {k: v for k, v in sealed(late_rows()).items() if k not in ('snapshot_hash', 'envelope_hash')}
+        for r in c['records']:
+            if r['id'] in links:
+                r.update(links[r['id']])
+        return sf.seal(c)
+
+    def test_links_in_the_capture_are_kept_exactly_and_none_is_made_up(self):
+        url = lambda n: f'https://example.sharepoint.com/sites/Synthetic/Lists/Scans/DispForm.aspx?ID={n}'
+        every = self.linked({str(n): {'web_url': url(n)} for n in range(1, 51)})
+        plan = rp.plan([assignment()], PLAN_SCOPE, every)
+        self.assertEqual(plan['source']['record_links'], 'in_capture')
+        self.assertEqual(plan['source']['links'], {str(n): url(n) for n in range(1, 51)})
+        some = rp.plan([assignment()], PLAN_SCOPE, self.linked({'1': {'web_url': url(1)}, '2': {'url': url(2)}}))
+        self.assertEqual((some['source']['record_links'], some['source']['links']), ('partly_in_capture', {'1': url(1), '2': url(2)}))
+        none = rp.plan([assignment()], PLAN_SCOPE, sealed(late_rows()))
+        self.assertEqual((none['source']['record_links'], none['source']['links']), ('not_in_capture', {}))
+        self.assertNotIn('https://', json.dumps({k: v for k, v in none.items() if k != 'notices'}))
+
+    def test_anything_that_is_not_a_plain_https_link_is_left_out(self):
+        bad = {'1': {'web_url': 'http://example.sharepoint.com/x'}, '2': {'web_url': 'javascript:alert(1)'}, '3': {'web_url': 'https://a b'},
+               '4': {'web_url': 17}, '5': {'web_url': ''}, '6': {'web_url': 'https://ok.example/item/6\n'}, '7': {'link': 'https://ok.example/item/7'}}
+        plan = rp.plan([assignment()], PLAN_SCOPE, self.linked(bad))
+        self.assertEqual((plan['source']['record_links'], plan['source']['links']), ('not_in_capture', {}))
+
+    def test_a_link_is_part_of_the_sealed_capture_and_is_written_with_the_proposal(self):
+        url = 'https://example.sharepoint.com/sites/Synthetic/Lists/Scans/DispForm.aspx?ID=1'
+        cap = self.linked({'1': {'web_url': url}})
+        self.assertNotEqual(cap['snapshot_hash'], sealed(late_rows())['snapshot_hash'])     # changing a link changes the capture
+        tampered = copy.deepcopy(cap); tampered['records'][0]['web_url'] = url.replace('ID=1', 'ID=2')
+        self.assertEqual([b['code'] for b in rp.plan([assignment()], PLAN_SCOPE, tampered)['blockers']], ['capture_not_sealed'])
+        out = Path(tempfile.mkdtemp()).resolve() / 'proposed'
+        plan = rp.plan([assignment()], PLAN_SCOPE, cap)
+        written = rp.propose(plan, [assignment()], PLAN_SCOPE, cap, out)
+        saved = json.loads((Path(written['written']['folder']) / 'regeneration-plan.json').read_text())
+        self.assertEqual(saved['source']['links'], {'1': url})
+
+
+class ReportOnlyCorrections(unittest.TestCase):
+    """A person corrected a part number in an earlier report. The source still has it blank. Regenerating from the source
+    would quietly put the blank back. That must stop for review, and the corrected value must not be trusted blindly."""
+    FIXED = 'c' * 64
+
+    def setUp(self):
+        rows = late_rows()
+        rows[4]['raw']['Part'] = None                                           # record 5: no part number at the source
+        self.cap = sealed(rows)
+        self.existing = [dict(file_hash='a' * 64, kind='original', rows=33, **PLAN_SCOPE), dict(file_hash=self.FIXED, kind='corrected', rows=33, **PLAN_SCOPE)]
+        self.args = ([assignment()], PLAN_SCOPE, self.cap)
+        self.out = Path(tempfile.mkdtemp()).resolve() / 'proposed'
+
+    def correction(self, **over):
+        return dict(dict(report_file_hash=self.FIXED, record_id='5', field='part', report_value='00009900', documented_by='Made-up Reviewer',
+                         reason='Part number read from the label on the made-up photo',
+                         evidence=[dict(kind='report_cell', file_hash=self.FIXED, sheet='1st Shift', cell='D20'), dict(kind='source_item', record_id='5')]), **over)
+
+    def ack(self, plan, **over):
+        return dict(dict(correction_id=plan['corrections'][0]['correction_id'], reviewed_by='Made-up Supervisor', decision=rp.ACKNOWLEDGE,
+                         note='Compared the report cell, the item and the photo; keep both on file'), **over)
+
+    def test_a_blank_source_does_not_silently_replace_a_documented_correction(self):
+        plan = rp.plan(*self.args, existing=self.existing, corrections=[self.correction()])
+        self.assertEqual((plan['status'], plan['reason'], plan['proposal']['allowed']), ('review_required', 'report_only_correction_not_reviewed', False))
+        self.assertEqual(plan['automated_completion'], 'blocked_by_report_only_correction')
+        c = plan['corrections'][0]
+        self.assertEqual((c['outcome'], c['source_value_now'], c['report_value']), ('conflict_source_blank', {'type': 'null'}, '00009900'))
+        self.assertEqual((c['value_trusted'], c['carried_into_draft'], c['evidence_status'], c['acknowledged']), (False, False, 'exact_report_and_item_named', None))
+        self.assertEqual(plan['corrections_needing_review'], [c['correction_id']])
+        hold = next(h for h in plan['holds'] if h['code'] == 'report_only_correction_conflict')
+        self.assertIn('record 5 part', hold['text']); self.assertIn('not copied in', hold['text'])
+        with self.assertRaises(rp.PlanError):
+            rp.propose(plan, *self.args, self.out, existing=self.existing, corrections=[self.correction()])
+        self.assertFalse(self.out.exists())
+        self.assertEqual([(v['kind'], v['action']) for v in plan['existing_versions']], [('original', 'keep_unchanged'), ('corrected', 'keep_unchanged')])
+
+    def test_after_a_named_review_the_draft_shows_the_source_value_and_lists_the_conflict(self):
+        from openpyxl import load_workbook
+        rows = late_rows(); rows[4]['raw']['Part'] = '00001111'                                         # the source says something else
+        args = ([assignment()], PLAN_SCOPE, sealed(rows))
+        corrections = [self.correction()]
+        first = rp.plan(*args, existing=self.existing, corrections=corrections)
+        self.assertEqual((first['status'], first['corrections'][0]['outcome']), ('review_required', 'conflict_source_differs'))
+        acks = [self.ack(first)]
+        plan = rp.plan(*args, existing=self.existing, corrections=corrections, acknowledged=acks)
+        self.assertEqual((plan['status'], plan['proposal']['allowed'], plan['corrections_needing_review']), ('draft_proposed', True, []))
+        self.assertEqual(plan['automated_completion'], 'blocked_by_report_only_correction')             # reviewed is not the same as complete
+        self.assertNotEqual(plan['report_input_hash'], first['report_input_hash'])
+        with self.assertRaises(rp.PlanError):
+            rp.propose(first, *args, self.out, existing=self.existing, corrections=corrections, acknowledged=acks)   # the unreviewed plan
+        with self.assertRaises(rp.PlanError):
+            rp.propose(plan, *args, self.out, existing=self.existing, corrections=corrections)                       # the review left out
+        self.assertFalse(self.out.exists())
+        written = rp.propose(plan, *args, self.out, existing=self.existing, corrections=corrections, acknowledged=acks)
+        folder = Path(written['written']['folder'])
+        book = load_workbook(io.BytesIO((folder / 'draft.xlsx').read_bytes()))
+        row = next(r for r in book['1st Shift'].iter_rows(min_row=16) if r[4].value == 'SYN0000005')
+        self.assertEqual(row[3].value, '00001111')                                                      # the source value. The correction is NOT copied in
+        everything = ' '.join(str(c.value) for ws in book for r in ws.iter_rows() for c in r if c.value is not None)
+        self.assertEqual(everything.count('00001111') > 0, True)
+        review = (folder / 'REVIEW-FIRST.txt').read_text()
+        self.assertIn('Record 5, part', review); self.assertIn('says "00009900"', review); self.assertIn('The source now says "00001111".', review)
+        self.assertIn('This draft shows the source value. The earlier report is unchanged.', review); self.assertIn('Reviewed by Made-up Supervisor', review)
+        saved = json.loads((folder / 'regeneration-plan.json').read_text())
+        self.assertEqual((saved['corrections'][0]['carried_into_draft'], saved['corrections'][0]['value_trusted'], saved['corrections'][0]['acknowledged']['reviewed_by']),
+                         (False, False, 'Made-up Supervisor'))
+
+    def test_a_blank_part_number_the_writer_cannot_lay_out_fails_closed_after_review(self):
+        """Found while testing: the selected-template writer cannot lay out a day in which one record has no part number
+        and others do. The planner says so and leaves nothing behind; it does not fill the blank to get a draft."""
+        corrections = [self.correction()]
+        first = rp.plan(*self.args, existing=self.existing, corrections=corrections)
+        acks = [self.ack(first)]
+        plan = rp.plan(*self.args, existing=self.existing, corrections=corrections, acknowledged=acks)
+        self.assertEqual(plan['status'], 'draft_proposed')
+        with self.assertRaises(rp.PlanError) as failure:
+            rp.propose(plan, *self.args, self.out, existing=self.existing, corrections=corrections, acknowledged=acks)
+        self.assertIn('could not render these source rows', str(failure.exception)); self.assertIn('Nothing was written', str(failure.exception))
+        self.assertFalse(self.out.exists())
+
+    def test_each_outcome_is_named_for_what_it_is(self):
+        rows = late_rows(); rows[4]['raw']['Part'] = '00001111'
+        differs = rp.plan([assignment()], PLAN_SCOPE, sealed(rows), existing=self.existing, corrections=[self.correction()])
+        self.assertEqual((differs['status'], differs['corrections'][0]['outcome'], differs['corrections'][0]['source_value_now']['value']), ('review_required', 'conflict_source_differs', '00001111'))
+        agrees = rp.plan([assignment()], PLAN_SCOPE, sealed(late_rows()), existing=self.existing, corrections=[self.correction()])
+        self.assertEqual((agrees['status'], agrees['corrections'][0]['outcome'], agrees['corrections_needing_review']), ('draft_proposed', 'source_agrees', []))
+        self.assertFalse(any(h['code'] == 'report_only_correction_conflict' for h in agrees['holds']))
+        self.assertEqual(agrees['automated_completion'], 'not_claimed')
+        gone = rp.plan(*self.args, existing=self.existing, corrections=[self.correction(record_id='999', evidence=[dict(kind='report_cell', file_hash=self.FIXED, sheet='1st Shift', cell='D20'), dict(kind='source_item', record_id='999')])])
+        self.assertEqual((gone['status'], gone['corrections'][0]['outcome'], gone['corrections'][0]['source_value_now']), ('review_required', 'record_not_in_capture', None))
+        absent = late_rows(); del absent[4]['raw']['Part']
+        self.assertEqual(rp.plan([assignment()], PLAN_SCOPE, sealed(absent), existing=self.existing, corrections=[self.correction()])['corrections'][0]['source_value_now'], {'type': 'absent'})
+        blank = late_rows(); blank[4]['raw']['Part'] = '   '
+        self.assertEqual(rp.plan([assignment()], PLAN_SCOPE, sealed(blank), existing=self.existing, corrections=[self.correction()])['corrections'][0]['outcome'], 'conflict_source_blank')
+
+    def test_a_correction_without_exact_evidence_still_stops_the_plan_and_is_marked_not_established(self):
+        cases = {'the report version it names is not among the existing versions of this scope': self.correction(report_file_hash='9' * 64, evidence=[dict(kind='report_cell', file_hash='9' * 64, sheet='1st Shift', cell='D20'), dict(kind='source_item', record_id='5')]),
+                 'no exact report cell is named': self.correction(evidence=[dict(kind='source_item', record_id='5')]),
+                 'no source item is named': self.correction(evidence=[dict(kind='report_cell', file_hash=self.FIXED, sheet='1st Shift', cell='D20')]),
+                 'a photo it names is not a captured photo of this record': self.correction(evidence=self.correction()['evidence'] + [dict(kind='photo', sha256='e' * 64)])}
+        for gap, correction in cases.items():
+            with self.subTest(gap=gap):
+                plan = rp.plan(*self.args, existing=self.existing, corrections=[correction])
+                c = plan['corrections'][0]
+                self.assertEqual((plan['status'], c['evidence_status'], c['value_trusted'], c['carried_into_draft']), ('review_required', 'not_established', False, False))
+                self.assertIn(gap, c['evidence_gaps'])
+        empty = rp.plan(*self.args, existing=self.existing, corrections=[self.correction(evidence=[])])
+        self.assertEqual(len(empty['corrections'][0]['evidence_gaps']), 2)
+
+    def test_a_photo_named_as_evidence_must_be_a_captured_photo_of_that_record(self):
+        image = png((10, 120, 10)); sha = hashlib.sha256(image).hexdigest()
+        rows = late_rows(); rows[4]['raw']['Part'] = None
+        cap = with_photos(rows, {'5': image})
+        good = self.correction(evidence=self.correction()['evidence'] + [dict(kind='photo', sha256=sha)])
+        plan = rp.plan([assignment()], PLAN_SCOPE, cap, existing=self.existing, corrections=[good])
+        self.assertEqual((plan['corrections'][0]['evidence_status'], plan['status'], plan['corrections'][0]['value_trusted']), ('exact_report_and_item_named', 'review_required', False))
+
+    def test_an_acknowledgement_must_be_complete_named_and_about_an_open_conflict(self):
+        corrections = [self.correction()]
+        first = rp.plan(*self.args, existing=self.existing, corrections=corrections)
+        for bad in (self.ack(first, reviewed_by=''), self.ack(first, note='ok'), self.ack(first, decision='use_report_value'), self.ack(first, decision='approve'),
+                    self.ack(first, correction_id='corr-' + '0' * 24), {k: v for k, v in self.ack(first).items() if k != 'note'}, dict(self.ack(first), extra=1), 'yes'):
+            with self.subTest(ack=str(bad)[:60]), self.assertRaises(rp.PlanError):
+                rp.plan(*self.args, existing=self.existing, corrections=corrections, acknowledged=[bad])
+        for bad in (dict(self.correction(), field='labor'), {k: v for k, v in self.correction().items() if k != 'reason'}, dict(self.correction(), report_value=9900),
+                    dict(self.correction(), evidence=[dict(kind='hearsay')]), dict(self.correction(), extra=True), 'part 5 was fixed'):
+            with self.subTest(correction=str(bad)[:60]), self.assertRaises(rp.PlanError):
+                rp.plan(*self.args, existing=self.existing, corrections=[bad])
+        two = [self.correction(), self.correction(record_id='6', evidence=[dict(kind='report_cell', file_hash=self.FIXED, sheet='1st Shift', cell='D21'), dict(kind='source_item', record_id='6')], report_value='00007777')]
+        both = rp.plan(*self.args, existing=self.existing, corrections=two)
+        self.assertEqual(len(both['corrections_needing_review']), 2)
+        one = rp.plan(*self.args, existing=self.existing, corrections=two, acknowledged=[self.ack(both)])
+        self.assertEqual((one['status'], len(one['corrections_needing_review'])), ('review_required', 1))            # one of two reviewed is not enough
+
+    def test_no_corrections_supplied_is_said_not_assumed(self):
+        plan = rp.plan(*self.args, existing=self.existing)
+        self.assertEqual((plan['corrections'], plan['corrections_needing_review'], plan['status']), ([], [], 'draft_proposed'))
 
 
 class Isolation(unittest.TestCase):

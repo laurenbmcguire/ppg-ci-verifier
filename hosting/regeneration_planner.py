@@ -21,6 +21,11 @@ What it will not do
     capture was taken; it is judged against the capture, never against a later clock.
   * It does not prove when a part was actually scanned. "Added since the earlier capture" is the only timing it states.
   * It refuses any Pratt & Whitney scope outright. That reporting is done elsewhere.
+  * It does not let a regenerated draft silently replace a documented correction that exists only in a report. If an
+    earlier report version carries a correction (a part number typed in by a person, say) and the source is blank or
+    different, the plan stops for review. It never copies the corrected value into the draft either: a value from an
+    old report is a claim until a person has checked it against the exact report, source item and photo.
+  * It does not make up a link to a source record. A link is kept only if the sealed capture carries it.
 
 ``propose`` writes a proposed draft and its checklist into a LOCAL folder the caller names, using the selected native
 template (hosting.last_scan_local.NativeDraftPublisher). It writes only inside a new folder for that exact input and
@@ -97,8 +102,8 @@ def _assignment(assignments, scope, blockers):
     if a.get('verified') is not True:
         block('assignment_not_verified', 'The site / list / job mapping for this scope is not verified.')
         return None
-    if a.get('active') is False:
-        block('assignment_not_active', 'This assignment is not active.')
+    if a.get('active') is not True:   # stated, and exactly true: a missing, empty, 0 or text value is not "active"
+        block('assignment_not_active', 'This assignment is not stated to be active.')
         return None
     if not _exact(a.get('zone')):
         block('zone_missing', 'The assignment does not state the timezone of the business date.')
@@ -164,7 +169,117 @@ def _existing(existing, scope, input_hash, snapshot_hash):
     return out
 
 
-def plan(assignments, scope, capture, existing=(), previous_capture=None, header=None):
+LINK_KEYS = ('web_url', 'url')
+CORRECTION_KEYS = {'report_file_hash', 'record_id', 'field', 'report_value', 'documented_by', 'reason', 'evidence'}
+EVIDENCE_KINDS = ('report_cell', 'source_item', 'photo')
+ACKNOWLEDGE = 'propose_with_source_value_and_list_conflict'
+
+
+def _links(capture, ids):
+    """({record id: link exactly as captured}, state). A link is whatever the sealed capture carries for the record under
+    web_url or url, if it is a plain https address. Nothing is built from a site, list or item number."""
+    out = {}
+    for r in capture['records']:
+        if r['id'] not in ids:
+            continue
+        for key in LINK_KEYS:
+            v = r.get(key)
+            if isinstance(v, str) and re.fullmatch(r'https://[^\s<>"\x00-\x1f]{1,2000}', v):
+                out[r['id']] = v
+                break
+    state = 'not_in_capture' if not out else 'in_capture' if len(out) == len(ids) else 'partly_in_capture'
+    return out, state
+
+
+def _corrections(corrections, acknowledged, capture, mapping, versions):
+    """Documented report-only corrections, each judged against this capture. Nothing here trusts the corrected value.
+
+    -> (records, unresolved): every correction with what the source says now, and the ones that still need a person."""
+    if not isinstance(corrections, (list, tuple)) or not isinstance(acknowledged, (list, tuple)):
+        raise PlanError('Corrections and acknowledgements are lists.')
+    acks = {}
+    for a in acknowledged:
+        if (not isinstance(a, dict) or set(a) != {'correction_id', 'reviewed_by', 'decision', 'note'} or a['decision'] != ACKNOWLEDGE
+                or not _exact(a.get('reviewed_by')) or not isinstance(a.get('note'), str) or len(a['note'].strip()) < 5 or not _exact(a.get('correction_id'))):
+            raise PlanError('An acknowledgement names the correction, who reviewed it, a note, and the decision "%s".' % ACKNOWLEDGE)
+        acks[a['correction_id']] = a
+    by_id = {r['id']: r for r in capture['records']}
+    known_versions = {v['file_hash']: v for v in versions}
+    out, seen = [], set()
+    for c in corrections:
+        if not isinstance(c, dict) or set(c) != CORRECTION_KEYS or c.get('field') not in sf.FIELDS:
+            raise PlanError('A correction names its report version, source record, report field, the value in the report, who documented it, why, and its evidence.')
+        if any(not _exact(c.get(k)) for k in ('report_file_hash', 'record_id', 'documented_by')) or not isinstance(c.get('report_value'), str) \
+                or not isinstance(c.get('reason'), str) or not isinstance(c.get('evidence'), list) \
+                or any(not isinstance(e, dict) or e.get('kind') not in EVIDENCE_KINDS for e in c['evidence']):
+            raise PlanError('A correction is not complete, or names evidence of an unknown kind.')
+        cid = 'corr-' + sf.digest(c)[:24]
+        if cid in seen:
+            continue
+        seen.add(cid)
+        record, version = by_id.get(c['record_id']), known_versions.get(c['report_file_hash'])
+        photos = {p.get('sha256') for p in capture.get('photos', []) if p.get('record_id') == c['record_id'] and p.get('status') == 'supported'}
+        gaps = []
+        if version is None:
+            gaps.append('the report version it names is not among the existing versions of this scope')
+        if not any(e['kind'] == 'report_cell' and e.get('file_hash') == c['report_file_hash'] and _exact(e.get('sheet')) and _exact(e.get('cell')) for e in c['evidence']):
+            gaps.append('no exact report cell is named')
+        if not any(e['kind'] == 'source_item' and e.get('record_id') == c['record_id'] for e in c['evidence']):
+            gaps.append('no source item is named')
+        for e in c['evidence']:
+            if e['kind'] == 'photo' and e.get('sha256') not in photos:
+                gaps.append('a photo it names is not a captured photo of this record')
+        if record is None:
+            now, outcome = None, 'record_not_in_capture'
+        else:
+            now = sf.typed(record['raw'], mapping['fields'][c['field']])
+            outcome = ('conflict_source_blank' if sf.missing(now) else
+                       'source_agrees' if str(now.get('value')) == c['report_value'] else 'conflict_source_differs')
+        conflict = outcome != 'source_agrees'
+        ack = acks.get(cid) if conflict else None
+        out.append(dict(correction_id=cid, report_file_hash=c['report_file_hash'], record_id=c['record_id'], field=c['field'],
+                        report_value=c['report_value'], source_value_now=now, outcome=outcome, documented_by=c['documented_by'], reason=c['reason'],
+                        evidence=deepcopy(c['evidence']), evidence_status='exact_report_and_item_named' if not gaps else 'not_established',
+                        evidence_gaps=gaps, value_trusted=False, carried_into_draft=False,
+                        acknowledged=dict(reviewed_by=ack['reviewed_by'], note=ack['note'].strip(), decision=ack['decision']) if ack else None))
+    unknown = sorted(set(acks) - {c['correction_id'] for c in out if c['outcome'] != 'source_agrees'})
+    if unknown:
+        raise PlanError('An acknowledgement names no open conflict of this plan: ' + ', '.join(unknown))
+    return out, [c for c in out if c['outcome'] != 'source_agrees' and not c['acknowledged']]
+
+
+def _earlier(previous, capture, blockers):
+    """The changes since an earlier sealed capture of the same scope, or None with the reason added to ``blockers``.
+    "Earlier" is checked, not assumed: a capture taken at the same time or later is refused."""
+    try:
+        sf.verify_seal(previous)
+        if previous['scope'] != capture['scope']:
+            raise sf.ReviewError('other scope')
+    except Exception:
+        blockers.append(_reason('earlier_capture_not_usable', 'The earlier capture is not sealed or is for another scope, so it cannot be compared.'))
+        return None
+    then, now = _instant(previous.get('captured_at')), _instant(capture.get('captured_at'))
+    if then is None or now is None:
+        blockers.append(_reason('earlier_capture_time_unknown', 'When the earlier capture was taken is not stated with an offset, so which capture is the earlier one is unknown.'))
+        return None
+    if not then < now:
+        blockers.append(_reason('earlier_capture_not_earlier', 'The capture given as the earlier one was taken at the same time as, or after, this capture. Nothing is compared backwards.'))
+        return None
+    delta = sf.changes(previous, capture)
+    return dict(basis='earlier_sealed_capture', earlier_snapshot_hash=previous['snapshot_hash'], earlier_captured_at=previous.get('captured_at'),
+                seconds_between_captures=int((now - then).total_seconds()),
+                added=delta['added'], changed=delta['changed'], removed=delta['deleted'],
+                counts=dict(added=len(delta['added']), changed=len(delta['changed']), removed=len(delta['deleted'])),
+                meaning='Compared with the earlier capture only. "Added" means not in the earlier capture; it is not a scan time.')
+
+
+def _publisher(output, assignment, scope, header):
+    from hosting.last_scan_local import NativeDraftPublisher
+    bound = {k: scope[k] for k in ('client_id', 'site_id', 'list_id', 'job')}
+    return NativeDraftPublisher(output, assignment['mapping'], header if header is not None else (assignment.get('header') or {}), binding=bound), bound
+
+
+def plan(assignments, scope, capture, existing=(), previous_capture=None, header=None, corrections=(), acknowledged=()):
     """A description of what regenerating this scope from this capture would mean. Writes nothing, calls nothing."""
     from hosting import source_first_workbook as wb
     blockers = []
@@ -219,22 +334,20 @@ def plan(assignments, scope, capture, existing=(), previous_capture=None, header
     head = wb.header(header if header is not None else (assignment.get('header') or {}), view)
     contract = wb.contract()
     binding = sf.binding(view, mapping, [], head, contract['clean_sha256'], sf.digest(contract), wb.generator_hash())
+    # The writer itself is part of the input: its mapping, header, template contract, cell generator, binding, checklist
+    # format and its own code. A plan made before any of that changed is a plan for another report.
+    render_version = _publisher(Path('.'), assignment, scope, header)[0].render_version()
+    listed = _existing(existing, scope, None, capture['snapshot_hash'])
+    corrected, unresolved = _corrections(corrections, acknowledged, capture, mapping, listed)
+    links, link_state = _links(capture, set(selected))
     input_hash = sf.digest(dict(binding=binding, scope={k: scope[k] for k in SCOPE_KEYS}, source_snapshot_hash=capture['snapshot_hash'],
-                                source_ids=selected, unassigned_shifts=unassigned_shifts, plan_version=VERSION))
+                                source_ids=selected, unassigned_shifts=unassigned_shifts, plan_version=VERSION, render_version=render_version,
+                                corrections=[{k: c[k] for k in ('correction_id', 'outcome', 'acknowledged')} for c in corrected]))
     versions = _existing(existing, scope, input_hash, capture['snapshot_hash'])
     same = [v for v in versions if v['relation'] == 'same_input']
     if previous_capture is not None:
-        try:
-            sf.verify_seal(previous_capture)
-            if previous_capture['scope'] != capture['scope']:
-                raise sf.ReviewError('other scope')
-            delta = sf.changes(previous_capture, capture)
-            changes = dict(basis='earlier_sealed_capture', earlier_snapshot_hash=previous_capture['snapshot_hash'], earlier_captured_at=previous_capture.get('captured_at'),
-                           added=delta['added'], changed=delta['changed'], removed=delta['deleted'],
-                           counts=dict(added=len(delta['added']), changed=len(delta['changed']), removed=len(delta['deleted'])),
-                           meaning='Compared with the earlier capture only. "Added" means not in the earlier capture; it is not a scan time.')
-        except Exception:
-            blockers.append(_reason('earlier_capture_not_usable', 'The earlier capture is not sealed or is for another scope, so it cannot be compared.'))
+        changes = _earlier(previous_capture, capture, blockers)
+        if changes is None:
             return blocked()
     else:
         changes = dict(basis='not_determined', meaning='No earlier sealed capture was supplied, so added, changed and removed records are not stated.')
@@ -258,18 +371,26 @@ def plan(assignments, scope, capture, existing=(), previous_capture=None, header
                           'A shift is never worked out from a time. A person decides how they are reported.'))
     if any(not q['complete'] for q in quantities.values()):
         holds.append(_reason('unknown_quantities', 'Some quantities are missing at the source. They are shown as unknown; no total that needs them is complete.'))
+    conflicts = [c for c in corrected if c['outcome'] != 'source_agrees']
+    if conflicts:
+        holds.append(_reason('report_only_correction_conflict', f'{len(conflicts)} documented correction(s) exist only in an earlier report: the source is blank or '
+                             'different for ' + ', '.join(f'record {c["record_id"]} {c["field"]}' for c in conflicts) + '. A regenerated draft shows the SOURCE value. '
+                             'The corrected value is not copied in and is not treated as verified. A person must compare the exact report, source item and photo.'))
     if not assigned:
         blockers.append(_reason('nothing_to_draft', 'No record of this day has an approved shift, so there is nothing a draft could hold.'
                              if rows else 'No source record was found for this day. An empty capture is not a completed day.'))
         return dict(blocked(), holds=holds, rows=dict(in_capture=len(rows), in_draft=0, unassigned=len(unassigned), unassigned_shifts=unassigned_shifts))
     operation = 'regen-' + input_hash[:32]
+    if unresolved and status == 'draft_proposed':   # nothing is proposed over an unreviewed correction
+        status, reason = 'review_required', 'report_only_correction_not_reviewed'
     return dict(base, status=status, reason=reason, blockers=[], holds=holds,
-                automated_completion='blocked_by_unassigned_shift' if unassigned else 'not_claimed',
+                corrections=corrected, corrections_needing_review=[c['correction_id'] for c in unresolved], render_version=render_version,
+                automated_completion=('blocked_by_report_only_correction' if conflicts else 'blocked_by_unassigned_shift' if unassigned else 'not_claimed'),
                 day_completion='not_established', client_release='held',
                 source=dict(snapshot_hash=capture['snapshot_hash'], envelope_hash=capture['envelope_hash'], captured_at=capture['captured_at'],
                             records=len(capture['records']), date_evidence=evidence, draft_view_snapshot_hash=view['snapshot_hash'],
-                            # A link to each source item is written only if the capture carries one. None is made up.
-                            record_links='in_capture' if all(isinstance(r.get('url'), str) and r['url'] for r in capture['records']) and capture['records'] else 'not_in_capture'),
+                            # A link to a source record is kept only if the sealed capture carries it. None is made up.
+                            record_links=link_state, links=links),
                 report_input_hash=input_hash, binding=binding, template=dict(sha256=contract['clean_sha256'], selected_sha256=contract.get('selected_sha256'), report_type=contract.get('report_type')),
                 changes=changes, rows=dict(in_capture=len(rows), in_draft=len(assigned), unassigned=len(unassigned), unassigned_shifts=unassigned_shifts,
                                            source_ids=selected, unassigned_source_ids=sorted(r['id'] for r in unassigned)),
@@ -287,16 +408,47 @@ def _count(values):
     return out
 
 
-def propose(result, assignments, scope, capture, output, existing=(), previous_capture=None, header=None):
+def _photo_blobs(capture, source_ids, head, photo_bytes):
+    """{sha256: base64} for exactly the photos the header selects, from local bytes the caller supplies.
+
+    Every selected photo must be a captured, supported photo of a record in the draft, and its bytes must be supplied
+    and hash to exactly that photo. Bytes for anything else are refused: nothing unbound to this capture is embedded."""
+    import base64
+    import hashlib
+    if photo_bytes is None:
+        photo_bytes = {}
+    if not isinstance(photo_bytes, dict) or any(not isinstance(k, str) or not isinstance(v, (bytes, bytearray)) for k, v in photo_bytes.items()):
+        raise PlanError('Photo bytes are given as {sha256: bytes}.')
+    captured = {(p['record_id'], p.get('sha256')): p for p in capture.get('photos', []) if p.get('status') == 'supported' and p['record_id'] in source_ids}
+    wanted = {}
+    for item, sha in (head.get('photo_choices') or {}).items():
+        photo = captured.get((item, sha))
+        if photo is None:
+            raise PlanError(f'The selected photo for record {item} is not a captured, supported photo of a record in this draft.')
+        wanted[sha] = photo
+    for sha, blob in photo_bytes.items():
+        if sha not in wanted:
+            raise PlanError('Photo bytes were supplied that no selected photo of this capture names. Nothing was written.')
+        if hashlib.sha256(bytes(blob)).hexdigest() != sha or (isinstance(wanted[sha].get('bytes'), int) and wanted[sha]['bytes'] != len(blob)):
+            raise PlanError('Supplied photo bytes are not the captured photo (hash or size differs). Nothing was written.')
+    missing = sorted(set(wanted) - set(photo_bytes))
+    if missing:
+        raise PlanError(f'The bytes of {len(missing)} selected photo(s) were not supplied. Nothing was written.')
+    return {sha: base64.b64encode(bytes(photo_bytes[sha])).decode() for sha in wanted}
+
+
+def propose(result, assignments, scope, capture, output, existing=(), previous_capture=None, header=None, corrections=(), acknowledged=(), photo_bytes=None):
     """Write the proposed draft, its checklist and this plan into ``output/<operation>/``. LOCAL files only.
 
     The plan is worked out again from the same inputs and must be the same plan: a plan made for another capture,
-    mapping, template or set of rows is refused. A folder that already exists is never written into."""
-    from hosting.last_scan_local import NativeDraftPublisher
-    again = plan(assignments, scope, capture, existing, previous_capture, header)
+    mapping, header, template, writer version, set of rows or set of reviewed corrections is refused. A folder that
+    already exists is never written into. ``photo_bytes`` are local bytes for the photos the header selects."""
+    from hosting import source_first_workbook as wb
+    again = plan(assignments, scope, capture, existing, previous_capture, header, corrections, acknowledged)
     if again.get('status') != 'draft_proposed' or not (again.get('proposal') or {}).get('allowed'):
-        raise PlanError('This plan proposes no draft: ' + '; '.join(b['text'] for b in again.get('blockers') or []) if again.get('blockers') else 'This plan proposes no draft.')
-    if not isinstance(result, dict) or result.get('report_input_hash') != again['report_input_hash'] or result.get('proposal', {}).get('operation_id') != again['proposal']['operation_id']:
+        raise PlanError('This plan proposes no draft' + (': ' + '; '.join(b['text'] for b in again['blockers']) if again.get('blockers') else
+                        ': documented report-only corrections have not been reviewed.' if again.get('status') == 'review_required' else '.'))
+    if not isinstance(result, dict) or result.get('report_input_hash') != again['report_input_hash'] or (result.get('proposal') or {}).get('operation_id') != again['proposal']['operation_id']:
         raise PlanError('The plan does not belong to these inputs. Plan again; nothing was written.')
     out = Path(output)
     if not out.is_absolute():
@@ -306,12 +458,40 @@ def propose(result, assignments, scope, capture, output, existing=(), previous_c
     target = out / op
     if target.exists():
         raise PlanError('A proposal for exactly these inputs was already written there. Nothing is overwritten.')
-    bound = {k: scope[k] for k in ('client_id', 'site_id', 'list_id', 'job')}
-    publisher = NativeDraftPublisher(out, assignment['mapping'], header if header is not None else (assignment.get('header') or {}), binding=bound)
+    publisher, bound = _publisher(out, assignment, scope, header)
+    if publisher.render_version() != again['render_version']:
+        raise PlanError('The draft writer changed since this plan was made. Plan again; nothing was written.')
+    view = deepcopy(capture)
+    view['records'] = [r for r in capture['records'] if r['id'] in set(again['rows']['source_ids'])]
+    view['photos'] = [p for p in capture.get('photos', []) if p['record_id'] in set(again['rows']['source_ids'])]
+    head = wb.header(header if header is not None else (assignment.get('header') or {}), view)
+    blobs = _photo_blobs(capture, set(again['rows']['source_ids']), head, photo_bytes)
     snapshot = dict(scope=dict(bound, business_date=scope['business_date']), source_capture=capture,
-                    rows=[dict(id=i) for i in again['rows']['source_ids']], photo_blobs={}, unassigned_shifts=again['rows']['unassigned_shifts'])
+                    rows=[dict(id=i) for i in again['rows']['source_ids']], photo_blobs=blobs, unassigned_shifts=again['rows']['unassigned_shifts'])
+    try:
+        files, _ = publisher.build(snapshot, op)   # pure: worked out in full before anything is written
+    except PlanError:
+        raise
+    except Exception as e:
+        # The selected-template writer could not lay this day out. That is said as it is; no partial draft is left.
+        raise PlanError('The draft writer could not render these source rows (%s: %s). Nothing was written.' % (type(e).__name__, str(e)[:200])) from e
     receipt = publisher(snapshot, op)
-    record = dict(again, written=dict(folder=str(target), files=sorted(p.name for p in target.iterdir()) + ['regeneration-plan.json'],
-                                      workbook_sha256=receipt['workbook_sha256'], checklist_sha256=receipt['checklist_sha256']))
+    extra = ['regeneration-plan.json'] + (['REVIEW-FIRST.txt'] if again['holds'] else [])
+    record = dict(again, written=dict(folder=str(target), files=sorted([p.name for p in target.iterdir()] + extra),
+                                      workbook_sha256=receipt['workbook_sha256'], checklist_sha256=receipt['checklist_sha256'],
+                                      photos_embedded=sorted(blobs)))
     (target / 'regeneration-plan.json').write_bytes(json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False).encode())
+    if again['holds']:
+        lines = ['REVIEW FIRST. This proposed draft is held. A person decides; nothing here was approved or sent.', '']
+        lines += [h['text'] for h in again['holds']]
+        for c in again['corrections']:
+            if c['outcome'] != 'source_agrees':
+                now = c['source_value_now']
+                lines += ['', f'Record {c["record_id"]}, {c["field"]}: an earlier report ({c["report_file_hash"][:12]}) says "{c["report_value"]}" '
+                              f'(documented by {c["documented_by"]}: {c["reason"]}).',
+                          '  The source now ' + ('has no such record.' if now is None else 'is blank.' if sf.missing(now) else f'says "{now.get("value")}".'),
+                          '  This draft shows the source value. The earlier report is unchanged. Evidence: ' +
+                          ('exact report cell and source item named' if c['evidence_status'] != 'not_established' else 'NOT established (' + '; '.join(c['evidence_gaps']) + ')') + '.',
+                          '  Reviewed by ' + c['acknowledged']['reviewed_by'] + ': ' + c['acknowledged']['note'] if c['acknowledged'] else '  Not reviewed.']
+        (target / 'REVIEW-FIRST.txt').write_text('\n'.join(lines))
     return record
