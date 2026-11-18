@@ -526,7 +526,8 @@ class NotConnected(unittest.TestCase):
                    'last_scan_dispatch.py',                     # hosted dispatch boundary: prepared, imported only by the reconcile boundary
                    'last_scan_reconcile.py',                    # hosted reconciliation boundary: prepared, imported by nothing
                    'last_scan_store.py', 'last_scan_local.py', 'last_scan_drafts.py',
-                   'last_scan_readiness.py'}                    # offline validator: reuses the runner's exact registry rule, runs nothing
+                   'last_scan_readiness.py',                    # offline validator: reuses the runner's exact registry rule, runs nothing
+                   'regeneration_planner.py'}                   # offline planner: writes a local proposed draft with the local publisher; imported by nothing
         for path in (ROOT / 'hosting').glob('*.py'):
             if path.name not in allowed:
                 self.assertIsNone(names.search(path.read_text(errors='ignore')), str(path))
