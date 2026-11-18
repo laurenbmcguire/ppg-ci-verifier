@@ -2,6 +2,7 @@
 No scheduling installation or delivery transport is implicitly enabled.
 """
 import base64
+import json
 from copy import deepcopy
 from datetime import timedelta
 from uuid import uuid4
@@ -178,20 +179,36 @@ class ScheduledWorker:
             if status=='draft_ready':            # same content as a finished draft: exact retry, only make sure it is queued
                 receipt=deepcopy(current['receipts'][op]['receipt'])
                 self._queue(records[box_key],op,receipt,now,held['fence'])
-                return dict(status='draft_ready',operation_id=op,receipt=receipt)
+                return self._ready(op,receipt,built=False,observed_at=now)
         if status in ('waiting','no_scans'):
             return public
         if status=='uncertain':
-            receipt=self._reconcile(op,full)
+            receipt,built=self._reconcile(op,full)
             if receipt is None:
                 return dict(status='uncertain',operation_id=op,reconcile='render_outcome_unknown')
         else:
             try:
-                receipt=self._checked(self.render(full,op),op)
+                receipt,built=self._obtain(full,op)
             except Exception as error:
                 self._health(key,error,op)
                 return dict(status='uncertain',operation_id=op,error_type=type(error).__name__)
-        return self._finish(s,key,settings,held,op,receipt)
+        return self._finish(s,key,settings,held,op,receipt,built)
+
+    def _obtain(self,full,op):
+        """(receipt, built). ``built`` is True only when the artifact did not exist and was rendered just now."""
+        lookup=getattr(self.render,'lookup',None)
+        existing=lookup(op) if lookup is not None else None
+        if existing:return self._checked(existing,op),False
+        return self._checked(self.render(full,op),op),True
+
+    @staticmethod
+    def _ready(op,receipt,built,observed_at):
+        """How a ready draft is reported. A draft is an immutable record of ONE capture. When it is reused for a
+        later, content-identical observation it is reported as historical: never as regenerated, current or freshly
+        verified. ``evidence_as_of`` is the capture it was built from; ``observed_at`` is this observation."""
+        return dict(status='draft_ready',operation_id=op,receipt=receipt,
+                    artifact_state='built_this_run' if built else 'historical_reused',
+                    evidence_as_of=receipt.get('evidence_as_of'),observed_at=observed_at)
 
     def _checked(self,receipt,op):
         if not isinstance(receipt,dict) or receipt.get('operation_id')!=op or not receipt.get('workbook_sha256') or not receipt.get('checklist_sha256'):
@@ -206,14 +223,14 @@ class ScheduledWorker:
     def _reconcile(self,op,full):
         """The earlier render of this operation has no recorded outcome. Ask the publisher; never just run it again."""
         lookup=getattr(self.render,'lookup',None)
-        if lookup is None:return None
+        if lookup is None:return None,False
         found=lookup(op)                          # raises on an interrupted or altered artifact: stays uncertain
-        if found:return self._checked(found,op)
+        if found:return self._checked(found,op),False
         if getattr(self.render,'lookup_is_authoritative',False) is True:
-            return self._checked(self.render(full,op),op)   # the publisher vouches that nothing was written
-        return None
+            return self._checked(self.render(full,op),op),True   # the publisher vouches that nothing was written
+        return None,False
 
-    def _finish(self,s,key,settings,held,op,receipt):
+    def _finish(self,s,key,settings,held,op,receipt,built=True):
         """Recheck the source, then commit receipt + outbox only if this operation is still current and the lease is ours."""
         state_key,box_key=key,'outbox:'+key
         slim,_,ref=self._capture(s,settings)      # edits, deletions and late uploads supersede a rendered draft
@@ -233,7 +250,49 @@ class ScheduledWorker:
             if not ready:
                 return {k:v for k,v in checked.items() if k not in ('receipts','snapshot')}
             self._queue(box,op,receipt,now,held['fence'])
-            return dict(status='draft_ready',operation_id=op,receipt=receipt)
+            return self._ready(op,receipt,built,now)
+
+    def provenance(self,scope,op):
+        """Read-only. What a stored draft is, as against what was most recently observed. Changes nothing.
+
+        The draft is always described as HISTORICAL: it reflects the source as captured at ``evidence_as_of`` and
+        nothing later. ``latest_observation`` is the newest capture this worker has seen for the scope, and
+        ``photo_evidence_differences`` lists where the two disagree about a photo (for example the draft recorded
+        HTTP 403 and the latest capture saw 404). A difference is information, not a correction: the stored
+        draft and checklist are never rewritten."""
+        s=scope_key(scope);key=sf.digest(s)
+        with self.transaction(key) as record:
+            state=deepcopy(record.get('state') or {})
+        held=(state.get('receipts') or {}).get(op)
+        if not held or held.get('state')!='draft_ready':
+            return dict(status='no_such_draft',operation_id=op)
+        receipt=held['receipt'];latest=state.get('snapshot') or {};current=state.get('operation_id')
+        built_photos=latest_photos=None
+        reader=getattr(self.render,'read',None)
+        if reader is not None:
+            try:built_photos=json.loads(reader(op,'checklist.json')).get('photo_evidence')
+            except Exception:built_photos=None
+        if latest.get('ref'):
+            try:
+                slim=json.loads(self.store.get_blob(latest['ref']))
+                ids={r['id'] for r in slim.get('rows') or []}
+                latest_photos=[p for p in (slim.get('source_capture') or {}).get('photos') or [] if p.get('record_id') in ids]
+            except Exception:latest_photos=None
+        differences=None
+        if built_photos is not None and latest_photos is not None:
+            shown=('status','http_status','reason','sha256')
+            index=lambda photos:{(p.get('record_id'),p.get('field')):{k:p.get(k) for k in shown} for p in photos}
+            was,now_=index(built_photos),index(latest_photos)
+            differences=[dict(record_id=k[0],field=k[1],in_this_draft=was.get(k),latest_observation=now_.get(k))
+                         for k in sorted(set(was)|set(now_),key=str) if was.get(k)!=now_.get(k)]
+        return dict(status='ok',label='HISTORICAL',freshly_verified=False,regenerated=False,
+                    artifact=dict(operation_id=op,evidence_as_of=receipt.get('evidence_as_of'),recorded_ready_at=held.get('finished_at'),
+                                  workbook_sha256=receipt.get('workbook_sha256'),checklist_sha256=receipt.get('checklist_sha256'),
+                                  reflects='The source exactly as captured at evidence_as_of. Nothing observed later is in it.'),
+                    latest_observation=dict(captured_at=latest.get('captured_at'),operation_id=current,scope_status=state.get('status')),
+                    relation='same_content_reused' if current==op else 'superseded_by_newer_content',
+                    photo_comparison='compared' if differences is not None else 'unavailable',
+                    photo_evidence_differences=differences,generated_at=self.clock())
 
     @staticmethod
     def _queue(box,op,receipt,now=None,fence=None):

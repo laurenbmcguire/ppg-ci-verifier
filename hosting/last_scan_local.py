@@ -21,8 +21,9 @@ class NativeDraftPublisher:
     def __init__(self, output, mapping, header, binding=None):
         self.output=Path(output);self.mapping=deepcopy(mapping);self.header=deepcopy(header)
         self.binding=exact_binding(binding) if binding is not None else None
+    FORMAT='draft-checklist-v2'      # v2: the checklist and receipt say which capture they are a record of
     def render_version(self):
-        return sf.digest(dict(mapping=self.mapping,header=self.header,contract=wb.contract(),generator=wb.generator_hash(),binding=self.binding))
+        return sf.digest(dict(mapping=self.mapping,header=self.header,contract=wb.contract(),generator=wb.generator_hash(),binding=self.binding,format=self.FORMAT))
     def _own(self,scope):
         if self.binding is not None and exact_binding(scope or {})!=self.binding:
             raise ValueError('This publisher is bound to another client/site/list/job.')
@@ -55,7 +56,11 @@ class NativeDraftPublisher:
         bind=sf.binding(view,self.mapping,[],head,contract['clean_sha256'],sf.digest(contract),wb.generator_hash())
         blobs={k:base64.b64decode(v,validate=True) for k,v in snapshot.get('photo_blobs',{}).items()}
         raw,verification=wb.build(rows,head,view,bind,blobs)
-        checklist=dict(operation_id=op,scope=snapshot['scope'],binding=self.binding,render_version=self.render_version(),source_snapshot_hash=cap['snapshot_hash'],
+        as_of=cap['captured_at']
+        notice=('HISTORICAL RECORD. This draft and checklist describe the source exactly as captured at '+str(as_of)+
+                '. They are never updated. Anything observed later, including a different result for a photo download, is not reflected here.')
+        checklist=dict(operation_id=op,scope=snapshot['scope'],binding=self.binding,render_version=self.render_version(),
+                       format=self.FORMAT,evidence_as_of=as_of,historical_notice=notice,source_snapshot_hash=cap['snapshot_hash'],
                        scoped_snapshot_hash=view['snapshot_hash'],captured_at=cap['captured_at'],
                        workbook_sha256=sf.digest(raw),source_ids=sorted(selected),findings=findings,
                        layout_findings=wb.scope_findings(rows,head,view,contract),verification=verification,
@@ -63,13 +68,14 @@ class NativeDraftPublisher:
                        timing_note='One-hour quiet-window draft; not proof of final scan or complete shift.',
                        photo_evidence=view['photos'])
         body=sf.canonical(checklist)
-        notes=['PPG DRAFT — not approved for client release','Workbook SHA-256: '+sf.digest(raw),
+        notes=['PPG DRAFT — not approved for client release',notice,'Workbook SHA-256: '+sf.digest(raw),
                'Shift/day completion is not established.','Source IDs: '+', '.join(sorted(selected)),
                'Verification issues (%d). Nothing below was corrected, filled in or hidden:'%len(findings+checklist['layout_findings'])]
         notes+=[('Record '+str(f['record_id'])+': ' if f.get('record_id') else '')+f.get('text','')+' ['+str(f.get('code'))+']' for f in findings+checklist['layout_findings']]
         notes+=['Photos named at the source but not captured:']+[f"Record {p['record_id']}: {p.get('reason')}" for p in view['photos'] if p.get('status')!='supported'] if any(p.get('status')!='supported' for p in view['photos']) else []
         receipt=dict(operation_id=op,workbook_sha256=sf.digest(raw),checklist_sha256=sf.digest(body),
-                     render_version=self.render_version(),binding=self.binding,status='draft_ready',client_release='held')
+                     render_version=self.render_version(),binding=self.binding,status='draft_ready',client_release='held',
+                     format=self.FORMAT,evidence_as_of=as_of)
         return {'draft.xlsx':raw,'checklist.json':body,'checklist.txt':'\n'.join(notes).encode()},receipt
     def __call__(self,snapshot,op):
         self._own(snapshot.get('scope'))
@@ -130,6 +136,16 @@ class StoredDraftPublisher(NativeDraftPublisher):
     def read(self,op,name):
         """Draft access for Lauren, whatever happened to delivery."""
         return self.artifacts.read(self.key(op),name)
+    def export(self,op):
+        """Everything stored for one draft, byte for byte, plus a label saying what it is a record of. The label is
+        made at access time and is not stored; the files themselves are never altered."""
+        receipt=self.lookup(op)
+        if receipt is None:raise LookupError('No stored draft for this operation.')
+        files={name:self.artifacts.read(self.key(op),name) for name in ('draft.xlsx','checklist.json','checklist.txt')}
+        return dict(files=files,provenance=dict(label='HISTORICAL',freshly_verified=False,regenerated=False,operation_id=op,
+                    evidence_as_of=receipt.get('evidence_as_of'),workbook_sha256=receipt['workbook_sha256'],
+                    checklist_sha256=receipt['checklist_sha256'],binding=receipt.get('binding'),client_release='held',
+                    note='Stored files are returned unchanged. They reflect the source as captured at evidence_as_of only.'))
     def __call__(self,snapshot,op):
         self._own(snapshot.get('scope'))
         found=self.lookup(op)

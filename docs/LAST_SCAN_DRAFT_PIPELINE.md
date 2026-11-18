@@ -147,6 +147,12 @@ Status: local code and tests only. Not deployed, not scheduled, not connected to
   per attempt, (3) honour `attempt_closed`. A transport that cannot do (2) and (3) never gets a second attempt.
   Not closed: the source can change after the recapture and before the provider receives the message, and the
   claim and the send are not one transaction. Those cases end as `readiness_revoked_at` or `uncertain`.
+- **A stored draft is a historical record.** The checklist and receipt carry `evidence_as_of` (the capture they
+  were built from) and a `HISTORICAL RECORD` notice. When the same draft is reused for a later, content-identical
+  observation the result says `artifact_state: historical_reused` with the original `evidence_as_of` and the new
+  `observed_at`; only the run that rendered it says `built_this_run`. `worker.provenance(scope, op)` compares the
+  draft with the latest observation (for example photo status 403 in the draft, 404 now) without changing either,
+  and `StoredDraftPublisher.export(op)` returns the stored bytes with a historical label. Nothing is rewritten.
 - **A cached draft never shortens the hour.** If content returns to an earlier version, the hour restarts like any
   other change. The earlier receipt and outbox entry are used again only when the renewed hour is over. `Date`, `Created`, `Modified` and their Graph names are refused as scan fields.
   Anything else is reported in the run receipt under `issues` and skipped.

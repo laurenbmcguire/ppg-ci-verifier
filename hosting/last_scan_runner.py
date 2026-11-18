@@ -181,7 +181,7 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
                 hold.update(not_before=until, recorded_at=clock(), provider_stated=bool(cool.get('known')))
             out = dict(out, cooldown_until=until)
         results.append(dict(row, **{k: out[k] for k in ('status', 'operation_id', 'error_type', 'reconcile', 'superseded_by',
-                                                         'due_at', 'timing_basis', 'cooldown_until') if k in out}))
+                                                         'due_at', 'timing_basis', 'cooldown_until', 'artifact_state', 'evidence_as_of', 'observed_at') if k in out}))
         last = item['key']
     if last is not None:
         with store.transaction(cursor_key) as cursor:
