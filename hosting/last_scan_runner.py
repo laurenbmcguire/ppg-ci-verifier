@@ -19,11 +19,11 @@ from zoneinfo import ZoneInfo
 
 from hosting import source_first as sf
 from hosting import registry as job_registry
-from hosting.last_scan_drafts import DEFAULT_COOLDOWN, FORBIDDEN_SCAN_FIELDS, MAX_COOLDOWN, MIN_COOLDOWN, hold_until, instant, scope_key
-from hosting.last_scan_service import ScheduledWorker
+from hosting.last_scan_drafts import ATTENTION_COOLDOWN, DEFAULT_COOLDOWN, FORBIDDEN_SCAN_FIELDS, MIN_COOLDOWN, instant, scope_key
+from hosting.last_scan_service import HOLD, ScheduledWorker, record_site_hold, site_hold
 
 REQUIRED = ('client_id', 'job', 'site_id', 'list_id', 'zone', 'scan_field', 'shift_field')
-CURSOR, HOLD, RUN = 'runner:cursor', 'runner:hold:', 'run:'
+CURSOR, RUN = 'runner:cursor', 'run:'
 
 
 def registry_entries(inbox):
@@ -155,11 +155,11 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
             break
         s = item['scope']
         row = dict(scope=item['key'], job=s['job'], business_date=s['business_date'], shift=s['shift'])
-        hold_key = HOLD + sf.digest(s['site_id'])
-        with store.transaction(hold_key) as hold:
-            held_until = hold.get('not_before')
-        if held_until and instant(clock()) < instant(held_until):
-            results.append(dict(row, status='cooldown', not_before=held_until)); last = item['key']
+        waiting = site_hold(store, s['site_id'], clock())
+        if waiting:                                # the site asked to be left alone: not read, by this or any other reader
+            results.append(dict(row, status='cooldown', not_before=waiting.get('not_before'),
+                                **({'manual_release_required': True} if waiting.get('manual_release_required') is True else {})))
+            last = item['key']
             continue
         try:
             worker = ScheduledWorker(store, guarded, item['render'], clock=clock, enabled=True,
@@ -169,15 +169,12 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
             out = dict(status='error', error_type=type(error).__name__)
         seen = seen_cooldown.pop(s['site_id'], None)
         if seen:
-            wait = hold_until(seen['cool'], seen['observed'])
-            until = wait['until'].isoformat()
-            with store.transaction(hold_key) as hold:
-                hold.update(not_before=until, recorded_at=clock(), observed_at=seen['observed'].isoformat(), basis=wait['basis'],
-                            provider_stated=wait['basis'] != 'default', stated_seconds=wait['stated_seconds'],
-                            capped_at_maximum=wait['capped_at_maximum'])
-            out = dict(out, cooldown_until=until)
+            # The worker already recorded this when it saw the answer; recording again keeps whichever hold is stricter.
+            held = record_site_hold(store, s['site_id'], seen['cool'], seen['observed'], clock())
+            out = dict(out, cooldown_until=held.get('not_before'),
+                       **({'manual_release_required': True} if held.get('manual_release_required') is True else {}))
         results.append(dict(row, **{k: out[k] for k in ('status', 'operation_id', 'error_type', 'reconcile', 'superseded_by',
-                                                         'due_at', 'timing_basis', 'cooldown_until', 'artifact_state', 'evidence_as_of', 'observed_at', 'unassigned_shifts') if k in out}))
+                                                         'due_at', 'timing_basis', 'cooldown_until', 'not_before', 'manual_release_required', 'artifact_state', 'evidence_as_of', 'observed_at', 'unassigned_shifts') if k in out}))
         last = item['key']
     if last is not None:
         with store.transaction(cursor_key) as cursor:

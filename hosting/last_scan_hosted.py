@@ -53,7 +53,7 @@ from hosting import last_scan_runner as runner
 from hosting import last_scan_transport as transport
 from hosting.last_scan_drafts import instant
 from hosting.last_scan_local import ArtifactStore, StoredDraftRouter
-from hosting.last_scan_service import binding
+from hosting.last_scan_service import binding, record_site_hold, site_hold
 
 SETTING_KEY = 'last_scan_runner'        # where a host would keep the configuration; absent means disabled
 MAX_BUDGET_SECONDS, MAX_SCOPES = 45, 50
@@ -208,17 +208,27 @@ class _DriftGuard:
     list before a run starts and again immediately before every source read. Anything short of a fresh, well-formed,
     matching answer is drift. There remains an unavoidable gap between this look and the read that follows it."""
     def __init__(self, deps, mapping):
-        self.deps, self.count = deps, 0
+        self.deps, self.count, self.skipped_held = deps, 0, []
         self.approved = {(m['site_id'], m['list_id']): m['schema_digest'] for m in mapping}
 
+    def held(self, site_id):
+        """The site's stored wait, if one is in force. A held site is asked NOTHING: no metadata, no columns, no items."""
+        return site_hold(self.deps.store, site_id, self.deps.clock()) if isinstance(site_id, str) else None
+
     def problem(self, site_id, list_id):
-        self.count += 1
         approved = self.approved.get((site_id, list_id))
         if not isinstance(approved, str) or not isinstance(self.deps.schema_probe, SchemaProbe):
             return 'no_approved_schema_or_probe_for_this_list'
+        if self.held(site_id):
+            return 'site_is_on_a_provider_wait'                              # not probed; the read that follows is refused too
+        self.count += 1
         try:
             live = deepcopy(self.deps.schema_probe.current(site_id, list_id))
         except Exception as error:
+            evidence = getattr(error, 'evidence', None)
+            cool = evidence.get('cooldown') if isinstance(evidence, dict) else None
+            if isinstance(cool, dict):                                       # the probe itself was told to wait: the whole site waits
+                record_site_hold(self.deps.store, site_id, cool, instant(self.deps.clock()), self.deps.clock())
             return 'schema_probe_failed:' + type(error).__name__
         if not isinstance(live, dict) or live.get('site_id') != site_id or live.get('list_id') != list_id:
             return 'schema_probe_answer_is_malformed_or_for_another_list'
@@ -235,6 +245,9 @@ class _DriftGuard:
     def check_all(self):
         out = []
         for site_id, list_id in sorted(self.approved, key=str):
+            if self.held(site_id):                                           # nothing is asked of a held site, and it is not drift:
+                self.skipped_held.append(dict(site_id=site_id, list_id=list_id))   # the runner reports its scopes as cooldown, unread
+                continue
             problem = self.problem(site_id, list_id)
             if problem:
                 out.append(dict(site_id=site_id, list_id=list_id, problem=problem))
@@ -479,8 +492,9 @@ def handle(method, headers, body, deps):
     drift = guard.check_all()
     if drift:
         return _respond(409, status='schema_drift', sources_read=0, schema_probes=guard.count, drift=drift,
-                        **dict(report, live_schema_drift_check='failed_before_any_read'))
+                        sites_on_provider_wait=guard.skipped_held, **dict(report, live_schema_drift_check='failed_before_any_read'))
     report['live_schema_drift_check'] = 'performed_before_each_read'
+    report['sites_on_provider_wait'] = guard.skipped_held                    # not probed and not read in this run
     try:
         summary = runner.run_once(deps.store, deps.config, fetch=guard.fetch, render=router, run_id=run_id,
                                   receipt_namespace=sf.digest(dict(principal=principal.id, snapshot=digest)),

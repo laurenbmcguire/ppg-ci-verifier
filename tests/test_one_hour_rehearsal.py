@@ -192,8 +192,9 @@ class SourceOutage(Base):
         self.at('19:10'); out = self.poll()                                     # still inside the wait the source asked for
         self.assertEqual({v['status'] for k, v in out.items() if k[0] == 'alpha'}, {'cooldown'})
         self.assertEqual(self.item_reads('alpha'), reads)                       # not one more item request
-        held = self.r.dispatch('alpha', '1', op=ready['operation_id'])          # a ready draft is not sent on stale knowledge
-        self.assertEqual((held['status'], held['reason']), ('held', 'recapture_failed'))
+        held = self.r.dispatch('alpha', '1', op=ready['operation_id'])          # a ready draft is not sent on stale knowledge,
+        self.assertEqual((held['status'], held['reason']), ('held', 'site_cooldown'))   # and the held site is not even asked
+        self.assertEqual(self.item_reads('alpha'), reads)
         self.assertEqual(self.r.lauren.calls, 0)
         self.r.tenants['alpha'].down = None
         self.at('19:21'); out = self.poll()

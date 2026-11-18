@@ -59,20 +59,22 @@ Clock mismatch found through the rehearsal and fixed afterwards: a relative `Ret
 a time using the wall clock inside the capture code and then compared with the runner's own clock. With the capture
 clock two minutes behind, a 60-second wait had already "expired" and all three shifts of the same site were read in
 one poll. The runner now counts a relative wait on its own clock from the moment it saw the answer
-(`last_scan_drafts.hold_until`), keeps an absolute date as stated, waits 15 minutes when nothing usable was stated,
-never less than 60 seconds and never more than 7 days (a longer stated wait is held at 7 days and flagged). Those
-three figures are policy awaiting an owner's decision. See `tests/test_last_scan_cooldown_clock.py`.
+(`last_scan_drafts.hold_until`), keeps an absolute date as stated, waits 15 minutes when nothing usable was stated
+and never less than 60 seconds. The provider's wait is never shortened: any wait that can be written as a time is
+kept in full, however long (one over 7 days is also flagged for a person). A wait that cannot be written as a time
+at all is held with no end, and only a named manual release clears it. The hold is one record per site, merged so
+that a later answer can only extend it, and it is honoured before any request to that site: polls, the hosted
+schema probes, and dispatch re-reads, across workers and restarts. See `tests/test_last_scan_cooldown_clock.py`.
 
-Three things the rehearsal does not cover or fix, stated here and in the harness:
+What the rehearsal does not cover or fix, stated here and in the harness:
 
 - **Dispatch bypasses the hosted checks.** `Rehearsal.dispatch` goes through the worker and the one delivery door,
   not through the hosted entry point, so no identity, approval, capture-receipt or live schema probe check runs
   there. A test pins this as a known gap. The hosted entry point has no dispatch step.
 - **A restart reopens only the durable store.** The fake source, approval and capture records, outbox and clock
   stand for outside systems and are not reset.
-- **A throttled re-read at dispatch sets no site hold.** If the source answers 429/503 while a dispatch re-reads it,
-  the outbox entry is held, but the runner's per-site wait is not recorded, so another dispatch could ask again at
-  once. Not changed here; it belongs with the design of a hosted dispatch step.
+- **Dispatch is still not a production path.** It now shares the per-site wait, but it still runs none of the
+  hosted identity, approval, capture-receipt or schema-drift checks. That remains an unreleased blocker.
 
 ## Activation gap matrix
 

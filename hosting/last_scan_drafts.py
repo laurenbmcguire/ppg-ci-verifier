@@ -13,40 +13,42 @@ MAX_AGE = timedelta(minutes=5)
 # How long a source is left alone after it asks for a wait (HTTP 429/503). Policy, pending an owner's decision:
 DEFAULT_COOLDOWN = timedelta(minutes=15)    # nothing usable was stated (absent, malformed, negative, not a whole number)
 MIN_COOLDOWN = timedelta(seconds=60)        # never sooner than this, whatever was stated (0, a tiny number, a date already past)
-MAX_COOLDOWN = timedelta(days=7)            # never later than this; a longer stated wait is held here and flagged for a person
+ATTENTION_COOLDOWN = timedelta(days=7)      # a stated wait longer than this is honoured IN FULL and also flagged for a person
 
 
-def hold_until(cool, observed, *, default=DEFAULT_COOLDOWN, minimum=MIN_COOLDOWN, maximum=MAX_COOLDOWN):
+def hold_until(cool, observed, *, default=DEFAULT_COOLDOWN, minimum=MIN_COOLDOWN):
     """When a source that asked for a wait may be read again. Pure: uses only ``observed``, the caller's own clock
     reading at the moment it saw the answer, so it cannot disagree with the clock the caller later compares with.
 
-    A relative wait is ``observed`` plus the stated seconds. An absolute date is kept as stated. Anything unusable
-    waits the default. The result is never before ``observed + minimum`` and never after ``observed + maximum``; an
-    excessive or unrepresentable stated wait is held at the maximum and flagged, never shortened to the default."""
+    The provider's wait is never shortened. A relative wait is ``observed`` plus the stated seconds; an absolute date
+    is kept as stated; both however far away. A stated wait that cannot be represented as a time at all (a number of
+    seconds beyond the calendar, or too many digits to be a number) returns ``until=None`` with
+    ``manual_release_required=True``: the source is not read again until a person releases it. Nothing usable stated
+    (absent, malformed, negative) waits the default. The result is never before ``observed + minimum``."""
     c = cool if isinstance(cool, dict) else {}
-    until, basis, capped, seconds = None, 'default', False, c.get('seconds')
+    until, basis, manual, seconds = None, 'default', False, c.get('seconds')
     if c.get('basis') == 'relative_seconds':
         if isinstance(seconds, int) and not isinstance(seconds, bool) and seconds >= 0:
             basis = 'relative_seconds'
-            if seconds > maximum.total_seconds():
-                until, capped = observed + maximum, True
-            else:
+            try:
                 until = observed + timedelta(seconds=seconds)
+            except OverflowError:
+                manual = True
         elif c.get('unrepresentable') is True:
-            until, basis, capped = observed + maximum, 'relative_seconds', True
+            basis, manual = 'relative_seconds', True
     elif c.get('known') is True and c.get('not_before'):
         try:
             until, basis = instant(c['not_before']), 'http_date'
         except (ValueError, OverflowError):
             until = None
-    if until is None:
-        until, basis = observed + default, 'default'
-    if until > observed + maximum:
-        until, capped = observed + maximum, True
-    if until < observed + minimum:
-        until = observed + minimum
-    return dict(until=until, basis=basis, capped_at_maximum=capped,
-                stated_seconds=seconds if basis == 'relative_seconds' and isinstance(seconds, int) and seconds < 10 ** 12 else None)
+    if not manual:
+        if until is None:
+            until, basis = observed + default, 'default'
+        if until < observed + minimum:
+            until = observed + minimum
+    return dict(until=None if manual else until, basis=basis, manual_release_required=manual,
+                needs_attention=manual or until - observed > ATTENTION_COOLDOWN,
+                stated_seconds=seconds if basis == 'relative_seconds' and isinstance(seconds, int) and not isinstance(seconds, bool) and seconds < 10 ** 15 else None)
 
 
 def instant(value):

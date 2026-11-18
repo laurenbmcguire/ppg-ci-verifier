@@ -8,7 +8,7 @@ from datetime import timedelta
 from uuid import uuid4
 from hosting import source_first as sf, source_first_capture as capture
 from hosting import last_scan_transport as transport
-from hosting.last_scan_drafts import capture_adapter, instant, observe, scope_key
+from hosting.last_scan_drafts import capture_adapter, hold_until, instant, observe, scope_key
 from hosting.last_scan_store import LeaseLost, claim, fenced, release
 
 def discover(config, *, fetch=capture.graph_fetch):
@@ -48,6 +48,54 @@ def source_adapter(scope,settings,*,capture_fn=capture.capture):
         recorded_shifts=settings.get('recorded_shifts'),capture_fn=capture_fn,not_before=settings.get('not_before',{}).get(scope['business_date']+'|'+scope['shift']))
 
 BINDING=('client_id','site_id','list_id','job')
+
+# ---- the per-site wait a source asked for (HTTP 429/503). One record per site, shared by every reader of that
+# site: polls, dispatch re-reads, other jobs on the same site, other workers, and across restarts.
+HOLD='runner:hold:'
+
+class SiteCooldown(Exception):
+    """Raised INSTEAD of reading a site that asked to be left alone. Carries the stored hold."""
+    def __init__(self,hold):
+        super().__init__('The source asked for a wait; it was not read.');self.hold=dict(hold)
+
+def site_hold(store,site_id,now):
+    """The hold in force for this site at ``now``, or None. A hold that needs a manual release never lapses."""
+    with store.transaction(HOLD+sf.digest(site_id)) as hold:h=deepcopy(dict(hold))
+    if h.get('manual_release_required') is True:return h
+    until=h.get('not_before')
+    if until and instant(now)<instant(until):return h
+    return None
+
+def record_site_hold(store,site_id,cool,observed,now):
+    """Record the wait a source asked for, counted on the caller's clock from when it saw the answer (``observed``).
+    Never loosens an existing hold: a later time or a manual-release hold already stored is kept."""
+    wait=hold_until(cool,observed)
+    with store.transaction(HOLD+sf.digest(site_id)) as hold:
+        stricter=hold.get('manual_release_required') is True or (
+            not wait['manual_release_required'] and hold.get('not_before') and instant(hold['not_before'])>=wait['until'])
+        if not stricter:
+            for k in ('released_at','released_by','release_reason'):hold.pop(k,None)
+            hold.update(not_before=None if wait['manual_release_required'] else wait['until'].isoformat(),
+                        manual_release_required=wait['manual_release_required'],needs_attention=wait['needs_attention'],
+                        recorded_at=now,observed_at=observed.isoformat(),basis=wait['basis'],
+                        provider_stated=wait['basis']!='default',stated_seconds=wait['stated_seconds'],
+                        retry_after=(cool or {}).get('retry_after') if isinstance(cool,dict) else None)
+        return deepcopy(dict(hold))
+
+def release_site_hold(store,site_id,*,released_by,reason,now):
+    """MANUAL escalation only: a named person clears a hold that could not be given an end time. Nothing in the
+    runner, the worker or the hosted entry point calls this."""
+    if not all(isinstance(v,str) and v.strip() for v in (released_by,reason)):
+        raise ValueError('A manual release needs who released it and why.')
+    with store.transaction(HOLD+sf.digest(site_id)) as hold:
+        previous=deepcopy(dict(hold))
+        hold.update(not_before=None,manual_release_required=False,needs_attention=False,released_at=now,
+                    released_by=released_by,release_reason=reason,released_hold=previous)
+        return deepcopy(dict(hold))
+
+def _cooldown_of(error):
+    evidence=getattr(error,'evidence',None)
+    return evidence.get('cooldown') if isinstance(evidence,dict) and isinstance(evidence.get('cooldown'),dict) else None
 
 def binding(value):
     """The exact client / site / list / job a renderer is allowed to serve. No normalising, no partial match."""
@@ -123,6 +171,9 @@ class ScheduledWorker:
             return dict(out,unassigned_shifts=deepcopy(unassigned)) if unassigned else out
         except LeaseLost:
             return dict(status='lease_lost')     # nothing of ours was committed; the current holder carries on
+        except SiteCooldown as waiting:          # the site asked to be left alone: it was not read
+            return dict(status='cooldown',not_before=waiting.hold.get('not_before'),
+                        manual_release_required=waiting.hold.get('manual_release_required') is True)
         except Exception as error:
             self._health(key,error)
             return dict(status='error',error_type=type(error).__name__)
@@ -131,8 +182,20 @@ class ScheduledWorker:
             except Exception:pass                # the lease simply runs out
 
     def _capture(self,s,settings):
-        """One source capture -> (slim snapshot for state, full snapshot for rendering, blob address of the slim one)."""
-        full=dict(self.fetch(s,settings))
+        """One source capture -> (slim snapshot for state, full snapshot for rendering, blob address of the slim one).
+
+        EVERY read of a site by this worker (a poll, the recheck before the outbox, the re-read before a dispatch)
+        goes through here, so every one of them first honours the site's stored wait and, if the source asks for a
+        wait, records it on this worker's clock at the moment the answer was seen."""
+        waiting=site_hold(self.store,s['site_id'],self.clock())
+        if waiting:raise SiteCooldown(waiting)
+        try:
+            full=dict(self.fetch(s,settings))
+        except Exception as error:
+            cool=_cooldown_of(error)
+            if cool is not None:
+                record_site_hold(self.store,s['site_id'],cool,instant(self.clock()),self.clock())
+            raise
         if hasattr(self.render,'render_version'):full['render_version']=self.render.render_version()
         slim={k:v for k,v in full.items() if k!='photo_blobs'}
         refs={}
@@ -406,11 +469,18 @@ class ScheduledWorker:
                             outcome=dict(status='not_pending')
             except LeaseLost:
                 return dict(status='lease_lost')                    # another worker owns the scope now; nothing sent
+            except SiteCooldown as waiting:                         # the site asked to be left alone: not read, nothing sent
+                return dict(status='held',reason='site_cooldown',not_before=waiting.hold.get('not_before'),
+                            manual_release_required=waiting.hold.get('manual_release_required') is True)
             except Exception as error:
                 self._health(key,error,op)
                 try:self._hold(key,held,op,'recapture_failed',error)
                 except LeaseLost:return dict(status='lease_lost')
-                return dict(status='held',reason='recapture_failed',error_type=type(error).__name__)
+                out=dict(status='held',reason='recapture_failed',error_type=type(error).__name__)
+                if _cooldown_of(error) is not None:                 # the wait was recorded for the whole site in _capture
+                    now_held=site_hold(self.store,s['site_id'],self.clock()) or {}
+                    out.update(cooldown_until=now_held.get('not_before'),manual_release_required=now_held.get('manual_release_required') is True)
+                return out
         finally:
             try:release(self.store,key,held,self.clock())
             except Exception:pass

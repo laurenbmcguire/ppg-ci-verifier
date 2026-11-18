@@ -137,7 +137,8 @@ def _wait(clock, cool):
         wait = hold_until(cool, instant(clock()))
     except (ValueError, OverflowError):
         return dict(wait_until=None, wait_basis='host_clock_unusable')
-    return dict(wait_until=wait['until'].isoformat(), wait_basis=wait['basis'], wait_capped_at_maximum=wait['capped_at_maximum'])
+    return dict(wait_until=None if wait['until'] is None else wait['until'].isoformat(), wait_basis=wait['basis'],
+                manual_release_required=wait['manual_release_required'], wait_needs_attention=wait['needs_attention'])
 
 
 def _list_metadata(fetch, base, site_id, list_id, stage, clock):
