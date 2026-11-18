@@ -32,6 +32,17 @@ def _retry_after_values(headers):
     return out
 
 
+def retry_after_header(headers):
+    """The Retry-After of an HTTP error, as ``{'Retry-After': value}`` for ``cooldown``: None when there is none, the
+    value when there is one, and a LIST of every value when the header is repeated on the wire (in any casing).
+    ``headers.get`` returns only the first occurrence, which could be the shortest; nothing may be dropped here."""
+    if hasattr(headers, 'get_all'):                         # email.message.Message / http.client.HTTPMessage: case-insensitive
+        values = [v for v in (headers.get_all('Retry-After') or []) if v is not None]
+    else:
+        values = _retry_after_values(headers)
+    return {'Retry-After': None if not values else values[0] if len(values) == 1 else list(values)}
+
+
 def _retry_after(value):
     """One stated Retry-After value, kept apart from any clock."""
     if isinstance(value, (bytes, bytearray)):
@@ -107,7 +118,7 @@ def graph_fetch(url):
             if len(raw) > MAX_CAPTURE_BYTES: raise sf.ReviewError('Source page exceeds the capture byte limit.')
             return response.status, json.loads(raw), {}
     except urllib.error.HTTPError as exc:
-        return exc.code, None, {'Retry-After': exc.headers.get('Retry-After')}
+        return exc.code, None, retry_after_header(exc.headers)
     except (OSError, ValueError):
         return 0, None, {}
 
@@ -173,7 +184,7 @@ def regional_capture(site_id, list_id, columns):
         except urllib.error.HTTPError as exc:
             if exc.code in (429,503):
                 failures.append(dict(status=exc.code,failed_request=request.full_url,
-                                     cooldown=cooldown({'Retry-After':exc.headers.get('Retry-After')}),
+                                     cooldown=cooldown(retry_after_header(exc.headers)),
                                      remaining_cursor=request.full_url, pages=[], raw_pages=[]))
             raise
     contract=capture_contract(site_id,list_id,columns,opener=observe)
@@ -195,7 +206,7 @@ def photo_download(url):
             raw = response.read(MAX_PHOTO_BYTES + 1)
             return response.status, raw, {}
     except urllib.error.HTTPError as exc:
-        return exc.code, b'', {'Retry-After':exc.headers.get('Retry-After')}
+        return exc.code, b'', retry_after_header(exc.headers)
     except (OSError, RuntimeError):
         return 0, b'', {}
 
