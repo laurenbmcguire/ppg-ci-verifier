@@ -160,10 +160,15 @@ JSON (`hosting/last_scan_transport.judge_outcome`); anything else is recorded as
 
 | `state` | Means | Recorded as |
 |---|---|---|
-| `delivered` (terminal) | the provider states this attempt of this operation reached this recipient with this artifact | sent |
-| `accepted` (not terminal) | taken by the provider, not yet delivered | uncertain; never sent again |
+| `delivered` (terminal, attempt closed) | the provider states this attempt of this operation reached this recipient with this artifact | sent |
+| `accepted` (not terminal, attempt open) | taken by the provider, not yet delivered | uncertain; never sent again |
 | `not_delivered` (terminal, attempt closed) | the provider's final statement that this attempt was not delivered | uncertain, with the proof kept on the attempt; never sent again by this path |
 | `unknown`, any other state, any mismatch, any unknown field, no answer, an exception | nothing is established | uncertain; never sent again |
+
+`observed_at` must fall between the host clock just before the sender was called and when it returned, give or
+take 5 minutes (a placeholder skew, pending an owner's decision). An answer dated outside that window is recorded
+as unknown. What is acknowledged is built from the judged record id and time; the answer itself is kept whole only
+up to 4000 bytes and as its hash beyond that.
 
 Evidence a real provider would have to supply before a `ProviderContract` could be reviewed and listed, none of
 which exists today:

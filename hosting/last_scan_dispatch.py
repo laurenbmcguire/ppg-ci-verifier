@@ -401,7 +401,8 @@ def handle(method, headers, body, deps):
         expected = dict(operation_id=op, attempt_id=attempt_id, idempotency_key=idempotency_key, recipient=audience,
                         workbook_sha256=body['workbook_sha256'], checklist_sha256=body['checklist_sha256'])
         seen['sends'] += 1
-        seen['attempt'], begun = attempt_id, instant(deps.clock())
+        seen['attempt'], sent_at = attempt_id, deps.clock()
+        begun = instant(sent_at)
         seen['provider'] = dict(outcome='no_answer', reasons=['the_sender_did_not_return'], deadline_breach=False, evidence=None)
         try:
             # The adapter is told the reviewed request deadline and must enforce it itself. Nothing here can cancel a
@@ -411,11 +412,11 @@ def handle(method, headers, body, deps):
             took = (instant(deps.clock()) - begun).total_seconds()
             seen['provider'] = dict(outcome='sender_raised', reasons=[type(error).__name__], deadline_breach=took > limit, evidence=None)
             raise
-        took = (instant(deps.clock()) - begun).total_seconds()
-        verdict = seen['provider'] = transport.judge_outcome(answer, expected, contract, took)
+        verdict = seen['provider'] = transport.judge_outcome(answer, expected, contract, sent_at, deps.clock())
         if verdict['outcome'] != 'delivered':
             raise NotDelivered(verdict['outcome'])                           # the attempt stays uncertain; the answer is kept as evidence
-        return dict(operation_id=op, attempt_id=attempt_id, provider_record_id=verdict['evidence']['record']['provider_record_id'],
+        # The acknowledgment is built from the judged values, never from the retained evidence (which may be a hash only).
+        return dict(operation_id=op, attempt_id=attempt_id, provider_record_id=verdict['provider_record_id'], observed_at=verdict['observed_at'],
                     outcome_sha256=verdict['evidence']['sha256'], deadline_breach=verdict['deadline_breach'])
 
     worker = ScheduledWorker(deps.store, fetch, item['render'], clock=deps.clock, enabled=True, owner='dispatch:' + body['dispatch_id'],

@@ -115,11 +115,12 @@ OUTCOME_REQUIRED = ('contract', 'version', 'provider', 'provider_contract', 'pro
     'state', 'terminal', 'attempt_closed', 'observed_at', 'request_deadline_seconds', 'elapsed_seconds')
 OUTCOME_OPTIONAL = ('detail',)
 OUTCOME_EVIDENCE_BYTES = 4000           # a larger answer is kept as its hash only
+OUTCOME_SKEW_SECONDS = 300              # placeholder: how far a provider's clock may differ from the host's
 
 
-def judge_outcome(answer, expected, contract, elapsed_seconds):
+def judge_outcome(answer, expected, contract, sent_at, received_at):
     """What ONE answer from a provider adapter establishes. Returns
-    {outcome, reasons, deadline_breach, evidence} where outcome is exactly one of:
+    {outcome, reasons, deadline_breach, provider_record_id, observed_at, evidence} where outcome is exactly one of:
 
       delivered               the provider states, terminally, that THIS attempt of THIS operation reached THIS recipient
                               with THIS artifact, under the reviewed contract, and names its own record of it;
@@ -134,7 +135,15 @@ def judge_outcome(answer, expected, contract, elapsed_seconds):
     too long, a disconnect or a missing answer is NOT evidence that nothing was delivered, and nothing here cancels a
     request that is already with a provider. ``deadline_breach`` reports that the adapter did not keep the request
     deadline of the reviewed contract (measured on the host clock, or by its own statement); it is evidence about
-    the adapter, and never turns a delivery into a failure or a failure into a retry."""
+    the adapter, and never turns a delivery into a failure or a failure into a retry.
+
+    ``sent_at`` and ``received_at`` are the HOST clock immediately before the sender was called and when it returned.
+    The answer's own ``observed_at`` must lie between them, give or take OUTCOME_SKEW_SECONDS: an answer dated before
+    the request was made, or after it came back, is not an observation of this request. A delivered or not-delivered
+    answer must be terminal AND closed; an accepted one must be neither.
+
+    ``provider_record_id`` and ``observed_at`` are returned on their own, taken from the judged record. ``evidence``
+    is the answer's hash, plus the answer itself only when it is small enough to keep; nothing may depend on it."""
     def verdict(outcome, reasons, record=None, breach=False):
         body = None
         try:
@@ -144,9 +153,18 @@ def judge_outcome(answer, expected, contract, elapsed_seconds):
         evidence = dict(sha256=sf.digest(body)) if body is not None else dict(sha256=None, unreadable=type(answer).__name__)
         if record is not None and len(body) <= OUTCOME_EVIDENCE_BYTES:
             evidence['record'] = record
-        return dict(outcome=outcome, reasons=reasons, deadline_breach=bool(breach), evidence=evidence)
+        named = record.get('provider_record_id') if record is not None else None
+        seen = record.get('observed_at') if record is not None else None
+        return dict(outcome=outcome, reasons=reasons, deadline_breach=bool(breach), evidence=evidence,
+                    provider_record_id=named if isinstance(named, str) and named.strip() else None,
+                    observed_at=seen if isinstance(seen, str) else None)
     limit = getattr(contract, 'sender_timeout_seconds', None)
-    slow = not isinstance(elapsed_seconds, (int, float)) or isinstance(elapsed_seconds, bool) or not isinstance(limit, int) or elapsed_seconds > limit
+    try:
+        sent, received = instant(sent_at), instant(received_at)
+        elapsed_seconds = (received - sent).total_seconds()
+    except (ValueError, OverflowError, TypeError):
+        sent = received = elapsed_seconds = None
+    slow = elapsed_seconds is None or elapsed_seconds < 0 or not isinstance(limit, int) or isinstance(limit, bool) or elapsed_seconds > limit
     try:
         record = json.loads(sf.canonical(answer)) if isinstance(answer, dict) else None      # one private copy of plain data
     except Exception:
@@ -175,9 +193,14 @@ def judge_outcome(answer, expected, contract, elapsed_seconds):
     if type(record.get('terminal')) is not bool or type(record.get('attempt_closed')) is not bool:
         reasons.append('terminal_and_attempt_closed_must_be_true_or_false')
     try:
-        instant(record.get('observed_at'))
+        observed = instant(record.get('observed_at'))
     except (ValueError, OverflowError, TypeError):
         reasons.append('observed_at_missing_malformed_or_without_offset')
+    else:
+        if sent is None or elapsed_seconds < 0:
+            reasons.append('no_readable_request_window_on_the_host_clock')
+        elif not (sent.timestamp() - OUTCOME_SKEW_SECONDS <= observed.timestamp() <= received.timestamp() + OUTCOME_SKEW_SECONDS):
+            reasons.append('observed_at_outside_the_request_window')
     stated, took = record.get('request_deadline_seconds'), record.get('elapsed_seconds')
     numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 for v in (stated, took))
     if not numbers or stated != limit:
@@ -187,9 +210,9 @@ def judge_outcome(answer, expected, contract, elapsed_seconds):
         return verdict('unknown', reasons, record, breach)
     state, terminal, closed = record['state'], record['terminal'], record['attempt_closed']
     if state == 'delivered':
-        return verdict('delivered', [], record, breach) if terminal else verdict('unknown', ['delivered_but_not_terminal'], record, breach)
+        return verdict('delivered', [], record, breach) if terminal and closed else verdict('unknown', ['delivered_without_terminal_closure'], record, breach)
     if state == 'accepted':
-        return verdict('accepted', [], record, breach) if not terminal else verdict('unknown', ['accepted_cannot_be_terminal'], record, breach)
+        return verdict('accepted', [], record, breach) if not terminal and not closed else verdict('unknown', ['accepted_cannot_be_terminal_or_closed'], record, breach)
     if state == 'not_delivered':
         return verdict('terminal_not_delivered', [], record, breach) if terminal and closed else verdict('unknown', ['not_delivered_without_terminal_closure'], record, breach)
     return verdict('unknown', ['provider_does_not_know'], record, breach)

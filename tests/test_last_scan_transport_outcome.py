@@ -22,12 +22,20 @@ PAYLOAD = dict(receipt=dict(workbook_sha256='w' * 64, checklist_sha256='c' * 64)
 
 
 def answer(state='delivered', **change):
-    return rh.provider_outcome(FAKE_CONTRACT, idempotency_key='op-1', attempt_id='attempt-1', audience='Lauren', payload=PAYLOAD,
-                               deadline_seconds=FAKE_CONTRACT.sender_timeout_seconds, observed_at='2026-11-10T19:00:01+00:00', state=state, **change)
+    return rh.provider_outcome(FAKE_CONTRACT, **dict(dict(idempotency_key='op-1', attempt_id='attempt-1', audience='Lauren', payload=PAYLOAD,
+                               deadline_seconds=FAKE_CONTRACT.sender_timeout_seconds, observed_at='2026-11-10T19:00:01+00:00', state=state), **change))
 
 
-def judge(record, elapsed=1, contract=FAKE_CONTRACT, expected=EXPECTED):
-    return transport.judge_outcome(record, expected, contract, elapsed)
+SENT = '2026-11-10T19:00:00+00:00'
+
+
+def judge(record, elapsed=1, contract=FAKE_CONTRACT, expected=EXPECTED, sent=SENT, received=...):
+    if received is ...:
+        try:
+            received = (rh.utc(sent) + rh.timedelta(seconds=elapsed)).isoformat()
+        except ValueError:
+            received = '2026-11-10T19:00:01+00:00'
+    return transport.judge_outcome(record, expected, contract, sent, received)
 
 
 class OutcomeContract(unittest.TestCase):
@@ -38,7 +46,10 @@ class OutcomeContract(unittest.TestCase):
         self.assertEqual((judge(answer('unknown'))['outcome'], judge(answer('unknown'))['reasons']), ('unknown', ['provider_does_not_know']))
 
     def test_state_and_terminal_must_agree(self):
-        for record, reason in ((answer(terminal=False), 'delivered_but_not_terminal'), (answer('accepted', terminal=True), 'accepted_cannot_be_terminal'),
+        for record, reason in ((answer(terminal=False), 'delivered_without_terminal_closure'), (answer(attempt_closed=False), 'delivered_without_terminal_closure'),
+                               (answer(terminal=False, attempt_closed=False), 'delivered_without_terminal_closure'),
+                               (answer('accepted', terminal=True), 'accepted_cannot_be_terminal_or_closed'),
+                               (answer('accepted', attempt_closed=True), 'accepted_cannot_be_terminal_or_closed'),
                                (answer('not_delivered', terminal=False), 'not_delivered_without_terminal_closure'),
                                (answer('not_delivered', attempt_closed=False), 'not_delivered_without_terminal_closure')):
             self.assertEqual((judge(record)['outcome'], judge(record)['reasons']), ('unknown', [reason]))
@@ -92,13 +103,28 @@ class OutcomeContract(unittest.TestCase):
     def test_the_request_deadline_is_reported_never_assumed(self):
         limit = FAKE_CONTRACT.sender_timeout_seconds
         self.assertEqual(judge(answer(), elapsed=limit)['deadline_breach'], False)
-        for verdict in (judge(answer(), elapsed=limit + 0.001), judge(answer(elapsed_seconds=limit + 1)), judge(answer(), elapsed=None),
-                        judge(answer(), elapsed=True), judge(answer(), contract=replace(FAKE_CONTRACT, sender_timeout_seconds=0), elapsed=1)):
+        for verdict in (judge(answer(), elapsed=limit + 0.001), judge(answer(elapsed_seconds=limit + 1)), judge(answer(), received=None),
+                        judge(answer(), sent='not a time'), judge(answer(), received='2026-11-10T18:59:59+00:00'),
+                        judge(answer(), contract=replace(FAKE_CONTRACT, sender_timeout_seconds=0), elapsed=1)):
             self.assertTrue(verdict['deadline_breach'])
-        late = judge(answer(), elapsed=limit * 10)                               # late, and still a provider-stated terminal delivery
+        for verdict in (judge(answer(), received=None), judge(answer(), sent='not a time'), judge(answer(), received='2026-11-10T18:59:59+00:00')):
+            self.assertEqual((verdict['outcome'], verdict['reasons']), ('unknown', ['no_readable_request_window_on_the_host_clock']))
+        when = '2026-11-10T20:30:00+00:00'                                       # observed inside the (long) request
+        late = judge(answer(observed_at=when), elapsed=limit * 10)               # late, and still a provider-stated terminal delivery
         self.assertEqual((late['outcome'], late['deadline_breach']), ('delivered', True))
-        late = judge(answer('not_delivered'), elapsed=limit * 10)                # a late proof is still only proof
+        late = judge(answer('not_delivered', observed_at=when), elapsed=limit * 10)   # a late proof is still only proof
         self.assertEqual((late['outcome'], late['deadline_breach']), ('terminal_not_delivered', True))
+
+    def test_the_observation_time_must_fall_inside_the_request_give_or_take_the_skew(self):
+        self.assertEqual(transport.OUTCOME_SKEW_SECONDS, 300)
+        say = lambda when, elapsed=10: judge(answer(observed_at=when), elapsed=elapsed)
+        for when in ('2026-11-10T18:55:00+00:00', '2026-11-10T19:00:00+00:00', '2026-11-10T19:00:10+00:00', '2026-11-10T19:05:10+00:00',
+                     '2026-11-10T13:00:05-06:00', '2026-11-10T19:00:05Z'):
+            self.assertEqual(say(when)['outcome'], 'delivered', when)
+        for when in ('2026-11-10T18:54:59+00:00', '2026-11-10T19:05:11+00:00', '2099-01-01T00:00:00+00:00', '2000-01-01T00:00:00+00:00', '2026-11-09T19:00:05+00:00'):
+            for state in ('delivered', 'accepted', 'not_delivered'):
+                verdict = judge(answer(state, observed_at=when), elapsed=10)
+                self.assertEqual((verdict['outcome'], verdict['reasons']), ('unknown', ['observed_at_outside_the_request_window']), (when, state))
 
     def test_evidence_is_kept_or_hashed_and_plain(self):
         record = answer('accepted')
@@ -106,6 +132,16 @@ class OutcomeContract(unittest.TestCase):
         self.assertEqual(verdict['evidence']['record'], record); self.assertIsNot(verdict['evidence']['record'], record)
         big = judge(dict(answer(), detail='x' * 5000))
         self.assertNotIn('record', big['evidence']); self.assertEqual(len(big['evidence']['sha256']), 64)
+        self.assertEqual((big['outcome'], big['provider_record_id'], big['observed_at']), ('delivered', 'fake-provider-record-1', '2026-11-10T19:00:01+00:00'))
+        from hosting import source_first as sf
+        room = transport.OUTCOME_EVIDENCE_BYTES - len(sf.canonical(dict(answer(), detail='')))
+        for extra, kept in ((0, True), (1, False)):                              # to the byte
+            verdict = judge(dict(answer(), detail='x' * (room + extra)))
+            self.assertEqual((verdict['outcome'], 'record' in verdict['evidence'], verdict['provider_record_id']), ('delivered', kept, 'fake-provider-record-1'))
+        for state in ('accepted', 'not_delivered', 'unknown'):                   # every outcome carries the record id and time on their own
+            verdict = judge(dict(answer(state), detail='x' * 5000))
+            self.assertEqual((verdict['provider_record_id'], verdict['observed_at'], 'record' in verdict['evidence']), ('fake-provider-record-1', '2026-11-10T19:00:01+00:00', False))
+        self.assertEqual((judge(None)['provider_record_id'], judge(dict(answer(), provider_record_id=7))['provider_record_id']), (None, None))
         self.assertEqual(judge(object())['evidence']['sha256'], None)
         class Shifty(dict):
             def get(self, key, default=None):
@@ -286,6 +322,50 @@ class DispatchOutcomes(Dispatch):
         scan['calculated'] = {'formula': '=[Created]', 'outputType': 'dateTime'}
         code, body = self.go(deps=self.r.dispatch_deps(sender=self.sender()))
         self.assertEqual((body['status'], body['sources_read'], body['sender_calls'], body['provider_outcome'], self.r.lauren.calls), ('held', 0, 0, None, 0))
+
+
+class EvidenceBoundsAndObservationTime(DispatchOutcomes):
+    """QA of 7bc6152: the acknowledgment must not depend on how much of the answer is kept, and an answer's own
+    timestamp and closure flags must be consistent with the request it claims to answer."""
+    test_delivered_is_the_only_outcome_recorded_as_sent = None                  # inherited helpers only; the parent's tests run in the parent
+    for _name in [n for n in dir(DispatchOutcomes) if n.startswith('test_')]:
+        locals()[_name] = None
+    del _name
+
+    def test_qa_repro_a_delivered_answer_too_large_to_keep_whole_is_still_sent(self):
+        code, body = self.go(deps=self.r.dispatch_deps(sender=self.sender(lambda o: dict(o, detail='x' * 5000))))
+        self.assertEqual((code, body['status'], body['provider_outcome'], body['sender_calls']), (200, 'sent', 'delivered', 1), body)
+        entry = self.entry()
+        evidence = entry['attempts'][0]['provider_outcome']['evidence']
+        self.assertEqual((entry['status'], entry['delivery_status'], 'record' in evidence, len(evidence['sha256'])), ('sent', 'sent', False, 64))
+        self.assertEqual((entry['ack']['provider_record_id'], entry['ack']['outcome_sha256']), ('fake-provider-record-1', evidence['sha256']))
+        for _ in range(2):                                                       # after restarts it is still sent, and never sent again
+            self.r.restart()
+            self.assertEqual((self.entry()['status'], self.go(deps=self.r.dispatch_deps(sender=self.sender()))[1]['status']), ('sent', 'not_pending'))
+        self.assertEqual(self.r.lauren.calls, 1)
+
+    def test_qa_repro_an_observation_time_outside_the_request_is_not_delivery(self):
+        at = self.r.clock.at
+        skew = rh.timedelta(seconds=300)
+        outside = dict(year_2099='2099-01-01T00:00:00+00:00', long_before=(at - rh.timedelta(days=1)).isoformat(),
+                       just_before=(at - skew - rh.timedelta(seconds=1)).isoformat(), just_after=(at + skew + rh.timedelta(seconds=1)).isoformat())
+        for name, when in outside.items():
+            with self.subTest(name):
+                self.setUp()
+                self.r.clock.at = at
+                body, attempt = self.uncertain(self.go(deps=self.r.dispatch_deps(sender=self.sender(lambda o, when=when: dict(o, observed_at=when)))),
+                                               'unknown', 'observed_at_outside_the_request_window')
+                self.assertEqual(attempt['provider_outcome']['evidence']['record']['observed_at'], when)   # what it said is kept
+        for when in ((at - skew).isoformat(), (at + skew).isoformat(), at.isoformat(), at.astimezone(rh.timezone(rh.timedelta(hours=-6))).isoformat()):
+            self.setUp()
+            self.r.clock.at = at
+            self.assertEqual(self.go(deps=self.r.dispatch_deps(sender=self.sender(lambda o, when=when: dict(o, observed_at=when))))[1]['status'], 'sent', when)
+
+    def test_qa_repro_delivered_with_the_attempt_still_open_is_not_delivery(self):
+        self.uncertain(self.go(deps=self.r.dispatch_deps(sender=self.sender(lambda o: dict(o, attempt_closed=False)))), 'unknown', 'delivered_without_terminal_closure')
+        self.setUp()
+        self.uncertain(self.go(deps=self.r.dispatch_deps(sender=self.sender(lambda o: dict(o, state='accepted', terminal=False, attempt_closed=True)))),
+                       'unknown', 'accepted_cannot_be_terminal_or_closed')
 
 
 class Boundaries(unittest.TestCase):
