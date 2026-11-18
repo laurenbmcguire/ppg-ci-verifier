@@ -917,6 +917,79 @@ class OneWorkerManyScopes(Base):
                 self.assertNotIn('unassigned_shifts', out['2'])
                 self.assertNotEqual(out['1']['operation_id'], out['2']['operation_id'])
 
+    # ---- the counts reported are those of the LAST capture the tick committed
+    def due(self, **extra):
+        env = Env(self.store); env.now = DUE; env.extra = dict(extra)
+        return env, env.worker()
+
+    def latest_snapshot(self, env):
+        import json
+        return json.loads(self.store.get_blob(env.state()['snapshot']['ref'])).get('unassigned_shifts')
+
+    def test_qa_repro_absent_then_three_at_the_recheck_is_reported(self):
+        env, w = self.due()
+        env.before_fetch[2] = lambda: env.extra.update(unassigned_shifts={'X': 3})
+        out = w.tick(env.scope, {})
+        self.assertEqual((out['status'], out['unassigned_shifts']), ('superseded', {'X': 3}))
+        self.assertEqual(self.latest_snapshot(env), {'X': 3})                # result and persisted latest evidence agree
+        self.assertNotIn('_latest_unassigned_shifts', out)
+
+    def test_qa_repro_one_then_three_reports_three_not_the_stale_one(self):
+        env, w = self.due(unassigned_shifts={'X': 1})
+        env.before_fetch[2] = lambda: env.extra.update(unassigned_shifts={'X': 3})
+        out = w.tick(env.scope, {})
+        self.assertEqual((out['status'], out['unassigned_shifts']), ('superseded', {'X': 3}))
+        self.assertEqual(self.latest_snapshot(env), {'X': 3})
+        old = out['operation_id']
+        self.assertEqual(env.state()['receipts'][old]['state'], 'draft_ready')   # the earlier draft is kept as history
+
+    def test_three_then_none_at_the_recheck_reports_none(self):
+        env, w = self.due(unassigned_shifts={'X': 3})
+        env.before_fetch[2] = lambda: env.extra.clear()
+        out = w.tick(env.scope, {})
+        self.assertEqual(out['status'], 'superseded'); self.assertNotIn('unassigned_shifts', out)
+        self.assertFalse(self.latest_snapshot(env))
+
+    def test_ready_path_reports_the_recheck_counts_and_retry_path_its_single_capture(self):
+        env, w = self.due(unassigned_shifts={'X': 3})
+        ready = w.tick(env.scope, {})
+        self.assertEqual((ready['status'], ready['artifact_state'], ready['unassigned_shifts']), ('draft_ready', 'built_this_run', {'X': 3}))
+        retry = w.tick(env.scope, {})                                        # one capture, cached draft
+        self.assertEqual((retry['status'], retry['artifact_state'], retry['unassigned_shifts']), ('draft_ready', 'historical_reused', {'X': 3}))
+        env.now = '2026-11-10T21:36:00Z'; env.extra = dict(unassigned_shifts={'X': 4})
+        moved = w.tick(env.scope, {})                                        # the count changed: new operation, latest count
+        self.assertEqual((moved['status'], moved['unassigned_shifts']), ('waiting', {'X': 4}))
+        self.assertNotEqual(moved['operation_id'], ready['operation_id'])
+        self.assertEqual(env.state()['receipts'][ready['operation_id']]['state'], 'draft_ready')
+
+    def test_waiting_and_uncertain_paths_report_their_single_capture(self):
+        env = Env(self.store); env.extra = dict(unassigned_shifts={'X': 2})  # 21:00, not due
+        self.assertEqual(env.worker().tick(env.scope, {})['unassigned_shifts'], {'X': 2})
+        env.now = DUE
+        def fails(snapshot, op): raise OSError('disk')
+        out = env.worker(fails).tick(env.scope, {})
+        self.assertEqual((out['status'], out['unassigned_shifts']), ('uncertain', {'X': 2}))
+
+    def test_two_scopes_rechecking_at_once_keep_their_own_final_counts(self):
+        import threading
+        a = Env(self.store, shift='1'); b = Env(self.store, shift='2'); a.now = b.now = DUE
+        finals = {'1': {'A': 5}, '2': {'B': 7}}; calls = {'1': 0, '2': 0}; gate = threading.Barrier(2)
+        def fetch(scope, settings):
+            shift = scope['shift']; calls[shift] += 1
+            env = a if shift == '1' else b
+            snapshot = env.fetch(scope, settings)
+            if calls[shift] == 2:
+                gate.wait(5)                                                 # both scopes are in their recheck capture together
+                return dict(snapshot, unassigned_shifts=finals[shift])
+            return snapshot
+        worker = ScheduledWorker(self.store, fetch, a.render, clock=a.clock, enabled=True)
+        out = {}
+        threads = [threading.Thread(target=lambda env=env: out.update({env.scope['shift']: worker.tick(env.scope, {})})) for env in (a, b)]
+        for t in threads: t.start()
+        for t in threads: t.join(10)
+        self.assertEqual((out['1']['unassigned_shifts'], out['2']['unassigned_shifts']), ({'A': 5}, {'B': 7}))
+        self.assertEqual((out['1']['status'], out['2']['status']), ('superseded', 'superseded'))
+
     def test_worker_holds_no_per_capture_state(self):
         a, b, worker = self.setup_two()
         before = set(vars(worker))

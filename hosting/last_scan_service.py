@@ -101,6 +101,8 @@ class ScheduledWorker:
         # The contract is checked against the one registry in that module; a worker cannot bring its own.
         self.provider_contract=provider_contract
 
+    _LATEST='_latest_unassigned_shifts'     # internal key: carries the final capture's counts out of _finish; never returned
+
     # ---- one scope
     def tick(self,scope,settings):
         if not self.enabled:return dict(status='disabled')
@@ -113,9 +115,12 @@ class ScheduledWorker:
         try:
             # Everything about this capture stays in local variables: one worker may tick several scopes at once.
             slim,full,ref=self._capture(s,settings)
-            out=self._run(s,key,settings,held,slim,full,ref)
-            unassigned=slim.get('unassigned_shifts')
-            return dict(out,unassigned_shifts=deepcopy(unassigned)) if unassigned else out   # rows of the day in no configured shift
+            out=dict(self._run(s,key,settings,held,slim,full,ref))
+            # Rows of the day in no configured shift, from the LATEST capture this tick committed: the recheck
+            # capture when the tick got that far, otherwise the first one. Never a count from a capture that a
+            # later one in the same tick replaced.
+            unassigned=out.pop(self._LATEST,slim.get('unassigned_shifts'))
+            return dict(out,unassigned_shifts=deepcopy(unassigned)) if unassigned else out
         except LeaseLost:
             return dict(status='lease_lost')     # nothing of ours was committed; the current holder carries on
         except Exception as error:
@@ -237,6 +242,8 @@ class ScheduledWorker:
         """Recheck the source, then commit receipt + outbox only if this operation is still current and the lease is ours."""
         state_key,box_key=key,'outbox:'+key
         slim,_,ref=self._capture(s,settings)      # edits, deletions and late uploads supersede a rendered draft
+        latest=deepcopy(slim.get('unassigned_shifts') or {})
+        def done(out):return dict(out,**{self._LATEST:latest})   # every outcome reports THIS capture's counts
         with fenced(self.store,key,held,self.clock,[state_key,box_key]) as records:
             now=self.clock()
             checked=observe(records[state_key].get('state'),s,slim,now)
@@ -249,11 +256,11 @@ class ScheduledWorker:
             box=records[box_key]
             self._gate(box,current,ready,now,checked.get('due_at'))
             if current!=op:
-                return dict(status='superseded',operation_id=op,superseded_by=current)
+                return done(dict(status='superseded',operation_id=op,superseded_by=current))
             if not ready:
-                return {k:v for k,v in checked.items() if k not in ('receipts','snapshot')}
+                return done({k:v for k,v in checked.items() if k not in ('receipts','snapshot')})
             self._queue(box,op,receipt,now,held['fence'])
-            return self._ready(op,receipt,built,now)
+            return done(self._ready(op,receipt,built,now))
 
     def provenance(self,scope,op):
         """Read-only. What a stored draft is, as against what was most recently observed. Changes nothing.
