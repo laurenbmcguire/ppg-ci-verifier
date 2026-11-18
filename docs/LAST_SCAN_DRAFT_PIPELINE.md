@@ -113,6 +113,12 @@ Status: local code and tests only. Not deployed, not scheduled, not connected to
   in its own folder. An assignment without both has no renderer and is skipped before any read. A bound publisher
   refuses another scope before writing. Mapping, header, template and binding are in `render_version`, which is
   part of the operation ID, and a receipt from another binding or version is refused.
+- **The outbox follows the latest readiness.** Each poll updates the outbox in the same transaction as the timer.
+  If the scope is no longer due (new content, or the same rows with a later verified shift end), a pending entry
+  becomes `held` and cannot be claimed; it returns to `pending` only when a poll finds the scope ready again.
+  `dispatch_test` claims an entry only while the stored state is `draft_ready` for that same operation, under the
+  same row locks a poll takes. A delivery already in flight keeps its status and acknowledgment and is marked
+  `readiness_revoked_at`; it is never re-opened or sent twice.
 - **A cached draft never shortens the hour.** If content returns to an earlier version, the hour restarts like any
   other change. The earlier receipt and outbox entry are used again only when the renewed hour is over. `Date`, `Created`, `Modified` and their Graph names are refused as scan fields.
   Anything else is reported in the run receipt under `issues` and skipped.

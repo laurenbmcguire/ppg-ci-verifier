@@ -201,6 +201,93 @@ class Outbox(Base):
         self.assertEqual(env.entries()[op]['status'], 'superseded')     # delivery outcome unknown: reconcile, do not resend
 
 
+class ReadinessGate(Base):
+    """An outbox entry is deliverable only while the scope's LATEST observed readiness is due."""
+    def extended(self):
+        env, w, op = sc.ready_entry(self.store)
+        env.now = '2026-11-10T21:36:00Z'; env.extra = dict(not_before=sc.EXTENDED)
+        return env, w, op
+
+    def test_qa_repro_same_operation_schedule_extension(self):
+        env, w, op = self.extended()
+        out = w.tick(env.scope, {})
+        self.assertEqual((out['status'], out['operation_id'], out['due_at'][:16]), ('waiting', op, '2026-11-10T23:00'))
+        self.assertEqual(env.entries()[op]['status'], 'held')
+        self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse), dict(status='not_pending'))
+
+    def test_hold_survives_restart_and_is_released_only_at_the_due_time(self):
+        env, w, op = self.extended(); w.tick(env.scope, {})
+        env.store = self.restart(); fresh = env.worker()
+        self.assertEqual(fresh.dispatch_test(env.scope, op, sc.refuse), dict(status='not_pending'))
+        env.now = '2026-11-10T22:59:59Z'
+        self.assertEqual(fresh.tick(env.scope, {})['status'], 'waiting')
+        self.assertEqual(env.entries()[op]['status'], 'held')
+        env.store = self.restart(); env.now = sc.EXTENDED
+        self.assertEqual(env.worker().tick(env.scope, {})['status'], 'draft_ready')
+        entry = env.entries()[op]
+        self.assertEqual((entry['status'], entry['released_at'], len(env.renders)), ('pending', sc.EXTENDED, 1))
+        self.assertNotIn('held_at', entry)
+
+    def test_claim_checks_stored_readiness_even_if_the_entry_still_says_pending(self):
+        env, w, op = sc.ready_entry(self.store)
+        with self.store.transaction(env.key) as record:              # readiness withdrawn, outbox not yet brought in line
+            record['state'].update(status='waiting', due_at='2026-11-10T23:00:00+00:00')
+        self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse), dict(status='held'))
+        self.assertEqual((env.entries()[op]['status'], env.entries()[op]['held_until']), ('held', '2026-11-10T23:00:00+00:00'))
+        with self.store.transaction(env.key) as record:              # or the scope moved on to another operation
+            record['state'].update(status='draft_ready', operation_id='another-operation')
+        with self.store.transaction('outbox:' + env.key) as box:
+            box['entries'][op]['status'] = 'pending'
+        self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse), dict(status='held'))
+
+    def test_extension_during_an_in_flight_delivery_keeps_the_acknowledgment(self):
+        env, w, op = self.extended(); calls = []
+        def sender(**kw):
+            calls.append(kw)
+            self.assertEqual(w.tick(env.scope, {})['status'], 'waiting')       # the wait is extended mid-flight
+            return dict(operation_id=op, provider_receipt='synthetic')
+        self.assertEqual(w.dispatch_test(env.scope, op, sender), dict(status='sent', readiness_revoked=True))
+        entry = env.entries()[op]
+        self.assertEqual((entry['status'], entry['delivery_status'], entry['ack']['provider_receipt'], entry['readiness_revoked_at']),
+                         ('sent', 'sent', 'synthetic', '2026-11-10T21:36:00Z'))
+        env.now = sc.EXTENDED
+        self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')
+        self.assertEqual(env.entries()[op]['status'], 'sent')
+        self.assertEqual(w.dispatch_test(env.scope, op, sender), dict(status='not_pending'))
+        self.assertEqual(len(calls), 1)
+
+    def test_extension_during_a_failed_delivery_stays_uncertain_and_is_never_resent(self):
+        env, w, op = self.extended(); calls = []
+        def sender(**kw):
+            calls.append(kw); w.tick(env.scope, {}); raise TimeoutError('no answer')
+        self.assertEqual(w.dispatch_test(env.scope, op, sender), dict(status='uncertain', delivery_status='uncertain'))
+        entry = env.entries()[op]
+        self.assertEqual((entry['status'], entry['delivery_status'], entry['delivery_error_type'], bool(entry['readiness_revoked_at'])),
+                         ('uncertain', 'uncertain', 'TimeoutError', True))
+        env.now = sc.EXTENDED
+        self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')
+        self.assertEqual(env.entries()[op]['status'], 'uncertain')              # outcome unknown: reconcile, do not re-open
+        self.assertEqual(w.dispatch_test(env.scope, op, sender), dict(status='not_pending'))
+        self.assertEqual(len(calls), 1)
+
+    def test_held_entry_is_superseded_when_content_then_changes(self):
+        env, w, op = self.extended(); w.tick(env.scope, {})
+        env.now = '2026-11-10T21:40:00Z'; env.rows.append(dict(id='2', scan_at='2026-11-10T21:39:00Z'))
+        self.assertEqual(w.tick(env.scope, {})['status'], 'waiting')
+        self.assertEqual(env.entries()[op]['status'], 'superseded')
+        env.now = sc.EXTENDED
+        new = w.tick(env.scope, {})
+        self.assertEqual(new['status'], 'draft_ready')
+        self.assertEqual({k: v['status'] for k, v in env.entries().items()}, {op: 'superseded', new['operation_id']: 'pending'})
+
+    def test_no_scans_left_holds_nothing_deliverable(self):
+        env, w, op = sc.ready_entry(self.store)
+        env.now = '2026-11-10T21:36:00Z'; env.rows.clear()
+        self.assertEqual(w.tick(env.scope, {})['status'], 'no_scans')
+        self.assertEqual(env.entries()[op]['status'], 'superseded')
+        self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse), dict(status='not_pending'))
+
+
 class Timer(Base):
     def test_out_of_order_capture_changes_nothing(self):
         env = Env(self.store); w = env.worker()

@@ -176,6 +176,78 @@ def blobs_are_content_addressed(store):
     raise AssertionError('missing blob must not be invented')
 
 
-ALL = [stale_worker_cannot_enqueue, stale_worker_and_changed_content, changed_between_render_and_enqueue,
+EXTENDED = '2026-11-10T23:00:00Z'   # a verified shift end learned AFTER the draft was ready
+
+
+def ready_entry(store):
+    env = Env(store); env.now = DUE; w = env.worker()
+    return env, w, w.tick(env.scope, {})['operation_id']
+
+
+def refuse(**kw):
+    raise AssertionError('sent while the scope was not due')
+
+
+def schedule_extension_holds_then_releases(store):
+    """Same rows, same operation, but the next poll learns the shift ends later: the pending entry must not be sendable
+    until the renewed due time, across repeated polls, and is then delivered exactly once."""
+    env, w, op = ready_entry(store)
+    assert env.entries()[op]['status'] == 'pending'
+    env.now = '2026-11-10T21:36:00Z'; env.extra = dict(not_before=EXTENDED)
+    out = w.tick(env.scope, {})
+    assert (out['status'], out['operation_id']) == ('waiting', op) and out['due_at'].startswith('2026-11-10T23:00'), out
+    held = env.entries()[op]
+    assert (held['status'], held['held_until']) == ('held', out['due_at']), held
+    assert w.dispatch_test(env.scope, op, refuse) == dict(status='not_pending')
+    for at in ('2026-11-10T21:50:00Z', '2026-11-10T22:59:59Z'):                # repeated polls change nothing
+        env.now = at
+        assert w.tick(env.scope, {})['status'] == 'waiting'
+        assert env.entries()[op] == held and w.dispatch_test(env.scope, op, refuse) == dict(status='not_pending')
+    env.now = EXTENDED
+    assert w.tick(env.scope, {})['status'] == 'draft_ready'
+    assert env.entries()[op]['status'] == 'pending' and len(env.renders) == 1   # cached draft, released, not re-rendered
+    sent = []
+    def sender(**kw): sent.append(kw); return dict(operation_id=kw['idempotency_key'])
+    assert w.dispatch_test(env.scope, op, sender) == dict(status='sent')
+    env.now = '2026-11-10T23:05:00Z'
+    assert w.tick(env.scope, {})['status'] == 'draft_ready'                     # later polls do not re-open a sent entry
+    assert w.dispatch_test(env.scope, op, sender) == dict(status='not_pending') and len(sent) == 1
+    return op
+
+
+def extension_races_with_dispatch_claims(store, senders=6):
+    """A poll that extends the wait and several dispatch claims run at once. Whatever the interleaving: at most one
+    send; if it was sent the acknowledgment is stored; if not, the entry is held; never both, never neither."""
+    import threading
+    env, w, op = ready_entry(store)
+    sent, start = [], threading.Barrier(senders + 1)
+    def sender(**kw): sent.append(kw); return dict(operation_id=kw['idempotency_key'], provider_receipt='synthetic')
+    def dispatch(_):
+        start.wait(5); return env.worker().dispatch_test(env.scope, op, sender)
+    def extend():
+        start.wait(5); return env.worker().tick(env.scope, {})
+    env.now = '2026-11-10T21:36:00Z'; env.extra = dict(not_before=EXTENDED)
+    with ThreadPoolExecutor(senders + 1) as pool:
+        poll = pool.submit(extend); results = [f.result() for f in [pool.submit(dispatch, i) for i in range(senders)]]
+        polled = poll.result()
+    if polled['status'] == 'busy':                                             # make sure the extension was observed
+        polled = env.worker().tick(env.scope, {})
+    entry = env.entries()[op]
+    assert polled['status'] == 'waiting', polled
+    assert len(sent) <= 1, results
+    if sent:
+        assert entry['status'] == 'sent' and entry['ack']['provider_receipt'] == 'synthetic' and entry['delivery_status'] == 'sent', entry
+        assert entry.get('readiness_revoked_at'), entry                         # sent before the extension: flagged
+    else:
+        assert entry['status'] == 'held' and 'ack' not in entry, entry
+    env.now = EXTENDED
+    assert env.worker().tick(env.scope, {})['status'] == 'draft_ready'
+    if not sent:
+        assert env.worker().dispatch_test(env.scope, op, sender) == dict(status='sent')
+    assert env.worker().dispatch_test(env.scope, op, sender) == dict(status='not_pending') and len(sent) == 1
+    return bool(results)
+
+
+ALL = [schedule_extension_holds_then_releases, extension_races_with_dispatch_claims, stale_worker_cannot_enqueue, stale_worker_and_changed_content, changed_between_render_and_enqueue,
        concurrent_ticks_render_once, concurrent_claims_one_winner, atomic_is_all_or_nothing, counter_is_serialized,
        blobs_are_content_addressed]

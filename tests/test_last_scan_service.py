@@ -37,17 +37,25 @@ class Scheduled(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             store=StateStore(Path(d)/'state')
             scope=scope_key(dict(SCOPE,client_id='c',shift='1',zone='UTC'))
-            worker=ScheduledWorker(store.transaction,None,None)
+            # dispatch now requires the scope's stored state to be ready for this operation, so the entry is
+            # produced by a real tick instead of the bare _enqueue helper
+            def fetch(s,settings):return dict(scope=s,rows=[dict(id='1',scan_at='2026-11-10T20:00:00Z')],captured_at='2026-11-10T21:00:00Z',terminal=True)
+            def render(s,op):return dict(operation_id=op,workbook_sha256='a',checklist_sha256='b')
+            worker=ScheduledWorker(store.transaction,fetch,render,clock=lambda:'2026-11-10T21:00:00Z',enabled=True)
             key=sf.digest(scope)
-            worker._enqueue(key,'old',{})
+            old=worker.tick(scope,{})['operation_id']
             def sender(**kw):
                 worker._supersede(key,'new')
-                return dict(operation_id='old',provider_receipt='synthetic')
-            result=worker.dispatch_test(scope,'old',sender)
+                return dict(operation_id=old,provider_receipt='synthetic')
+            result=worker.dispatch_test(scope,old,sender)
             self.assertEqual(result,dict(status='superseded',delivery_status='sent'))
             with store.transaction('outbox:'+key) as box:
-                self.assertEqual(box['entries']['old']['ack']['provider_receipt'],'synthetic')
-                self.assertEqual(box['entries']['old']['status'],'superseded')
+                self.assertEqual(box['entries'][old]['ack']['provider_receipt'],'synthetic')
+                self.assertEqual(box['entries'][old]['status'],'superseded')
+            bare=ScheduledWorker(store.transaction,None,None)
+            other=sf.digest(scope_key(dict(SCOPE,client_id='c',shift='2',zone='UTC')))
+            bare._enqueue(other,'orphan',{})   # an entry with no ready state behind it is held, never sent
+            self.assertEqual(bare.dispatch_test(scope_key(dict(SCOPE,client_id='c',shift='2',zone='UTC')),'orphan',lambda **kw:self.fail('sent')),dict(status='held'))
 
     def test_capture_duration_and_lease_expiry(self):
         with tempfile.TemporaryDirectory() as d:

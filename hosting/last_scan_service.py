@@ -131,9 +131,26 @@ class ScheduledWorker:
     @staticmethod
     def _supersede_in(box,current,now=None):
         for op,entry in (box.get('entries') or {}).items():
-            if op!=current and entry['status'] in ('pending','sent','uncertain'):
+            if op!=current and entry['status'] in ('pending','held','sent','uncertain'):
                 entry['status']='superseded';entry['superseded_by']=current
                 if now:entry['superseded_at']=now
+
+    @staticmethod
+    def _gate(box,current,ready,now=None,due_at=None):
+        """Bring the outbox in line with the readiness just observed, in the same transaction as that observation.
+
+        Other operations are superseded. The CURRENT operation's entry is only deliverable while the scope is
+        ready: if the latest observation is not due (for example the same rows, but a later verified shift end),
+        a pending entry is put on hold. An attempt already in flight cannot be recalled: it keeps its status so
+        its acknowledgment is not lost, and is marked for reconciliation. Releasing a hold is done by _queue,
+        only when the scope is ready again."""
+        ScheduledWorker._supersede_in(box,current,now)
+        entry=(box.get('entries') or {}).get(current)
+        if entry is None or ready:return
+        if entry['status']=='pending':
+            entry.update(status='held',held_at=now,held_until=due_at)
+        elif entry['status'] in ('uncertain','sent') and not entry.get('readiness_revoked_at'):
+            entry.update(readiness_revoked_at=now,readiness_revoked_until=due_at)
 
     def _run(self,s,key,settings,held):
         state_key,box_key=key,'outbox:'+key
@@ -147,7 +164,7 @@ class ScheduledWorker:
                 current['status']='uncertain'    # a crash after this point is reconcile-only
             current['snapshot']=self._stub(slim,ref)
             records[state_key]['state']=current
-            self._supersede_in(records[box_key],op,now)
+            self._gate(records[box_key],op,status=='draft_ready',now,current.get('due_at'))
             public={k:v for k,v in current.items() if k not in ('receipts','snapshot')}
             if status=='draft_ready':            # same content as a finished draft: exact retry, only make sure it is queued
                 receipt=deepcopy(current['receipts'][op]['receipt'])
@@ -201,7 +218,7 @@ class ScheduledWorker:
             if ready:checked['status']='draft_ready'
             records[state_key]['state']=checked
             box=records[box_key]
-            self._supersede_in(box,current,now)
+            self._gate(box,current,ready,now,checked.get('due_at'))
             if current!=op:
                 return dict(status='superseded',operation_id=op,superseded_by=current)
             if not ready:
@@ -220,6 +237,9 @@ class ScheduledWorker:
         elif entry['status']=='superseded' and not entry.get('delivery_status'):
             entry.update(status='pending',requeued_at=now)
             entry.pop('superseded_by',None);entry.pop('superseded_at',None)
+        elif entry['status']=='held':            # the scope is ready again: release, exactly once
+            entry.update(status='pending',released_at=now)
+            entry.pop('held_at',None);entry.pop('held_until',None)
 
     def _health(self,key,error,op=None):
         try:
@@ -240,15 +260,23 @@ class ScheduledWorker:
     def dispatch_test(self,scope,op,sender):
         """Test transport only. No network sender is supplied in this module.
 
-        ``delivery_status`` is recorded apart from ``status``: once an attempt starts it is 'uncertain' until a
+        An entry is claimed only while the scope's latest observed state is ready for this same operation; otherwise
+        it is put on hold and nothing is sent. ``delivery_status`` is recorded apart from ``status``: once an attempt starts it is 'uncertain' until a
         matching acknowledgment arrives, and it stays 'uncertain' (for reconciliation with the provider by the
         operation ID) when the sender fails, also when the entry was superseded while the attempt was in flight.
         """
         key=sf.digest(scope_key(scope))
-        with self.transaction('outbox:'+key) as box:
-            entry=box.get('entries',{}).get(op)
+        # The claim reads the scope's latest readiness and the outbox entry under the same locks a poll takes, so a
+        # poll that extends the wait and this claim cannot interleave: whichever commits first decides.
+        with self.store.atomic([key,'outbox:'+key]) as records:
+            entry=records['outbox:'+key].get('entries',{}).get(op)
             if not entry or entry['status']!='pending':return dict(status='not_pending')
-            entry.update(status='uncertain',delivery_status='uncertain',delivery_attempted_at=self.clock())
+            state=records[key].get('state') or {}
+            now=self.clock()
+            if state.get('operation_id')!=op or state.get('status')!='draft_ready':
+                entry.update(status='held',held_at=now,held_until=state.get('due_at'))
+                return dict(status='held')
+            entry.update(status='uncertain',delivery_status='uncertain',delivery_attempted_at=now)
             payload=deepcopy(entry)
         try:
             ack=sender(idempotency_key=op,audience='Lauren',payload=payload)
@@ -266,4 +294,6 @@ class ScheduledWorker:
             if entry['status']!='uncertain':
                 return dict(status='superseded',delivery_status='sent')
             entry['status']='sent'
+            if entry.get('readiness_revoked_at'):   # sent, then the wait was extended while it was in flight
+                return dict(status='sent',readiness_revoked=True)
         return dict(status='sent')
