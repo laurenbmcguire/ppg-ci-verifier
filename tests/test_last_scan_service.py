@@ -54,8 +54,8 @@ class Scheduled(unittest.TestCase):
                 self.assertEqual(box['entries'][old]['status'],'superseded')
             bare=ScheduledWorker(store.transaction,None,None)
             other=sf.digest(scope_key(dict(SCOPE,client_id='c',shift='2',zone='UTC')))
-            bare._enqueue(other,'orphan',{})   # an entry with no ready state behind it is held, never sent
-            self.assertEqual(bare.dispatch_test(scope_key(dict(SCOPE,client_id='c',shift='2',zone='UTC')),'orphan',lambda **kw:self.fail('sent')),dict(status='held'))
+            bare._enqueue(other,'orphan',{})   # an entry whose source cannot be recaptured is held, never sent
+            self.assertEqual(bare.dispatch_test(scope_key(dict(SCOPE,client_id='c',shift='2',zone='UTC')),'orphan',lambda **kw:self.fail('sent')),dict(status='held',reason='recapture_failed',error_type='TypeError'))
 
     def test_capture_duration_and_lease_expiry(self):
         with tempfile.TemporaryDirectory() as d:

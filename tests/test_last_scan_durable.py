@@ -228,24 +228,18 @@ class ReadinessGate(Base):
         self.assertEqual((entry['status'], entry['released_at'], len(env.renders)), ('pending', sc.EXTENDED, 1))
         self.assertNotIn('held_at', entry)
 
-    def test_claim_checks_stored_readiness_even_if_the_entry_still_says_pending(self):
-        env, w, op = sc.ready_entry(self.store)
-        with self.store.transaction(env.key) as record:              # readiness withdrawn, outbox not yet brought in line
-            record['state'].update(status='waiting', due_at='2026-11-10T23:00:00+00:00')
-        self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse), dict(status='held'))
-        self.assertEqual((env.entries()[op]['status'], env.entries()[op]['held_until']), ('held', '2026-11-10T23:00:00+00:00'))
-        with self.store.transaction(env.key) as record:              # or the scope moved on to another operation
-            record['state'].update(status='draft_ready', operation_id='another-operation')
-        with self.store.transaction('outbox:' + env.key) as box:
-            box['entries'][op]['status'] = 'pending'
-        self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse), dict(status='held'))
-
-    def test_extension_during_an_in_flight_delivery_keeps_the_acknowledgment(self):
-        env, w, op = self.extended(); calls = []
+    def midflight(self, env, w, fail=None):
+        calls = []
         def sender(**kw):
             calls.append(kw)
-            self.assertEqual(w.tick(env.scope, {})['status'], 'waiting')       # the wait is extended mid-flight
-            return dict(operation_id=op, provider_receipt='synthetic')
+            env.now = '2026-11-10T21:36:00Z'; env.extra = dict(not_before=sc.EXTENDED)   # the wait is extended mid-flight
+            assert w.tick(env.scope, {})['status'] == 'waiting'
+            if fail: raise fail
+            return dict(operation_id=kw['idempotency_key'], provider_receipt='synthetic')
+        return calls, sender
+
+    def test_extension_during_an_in_flight_delivery_keeps_the_acknowledgment(self):
+        env, w, op = sc.ready_entry(self.store); calls, sender = self.midflight(env, w)
         self.assertEqual(w.dispatch_test(env.scope, op, sender), dict(status='sent', readiness_revoked=True))
         entry = env.entries()[op]
         self.assertEqual((entry['status'], entry['delivery_status'], entry['ack']['provider_receipt'], entry['readiness_revoked_at']),
@@ -257,9 +251,7 @@ class ReadinessGate(Base):
         self.assertEqual(len(calls), 1)
 
     def test_extension_during_a_failed_delivery_stays_uncertain_and_is_never_resent(self):
-        env, w, op = self.extended(); calls = []
-        def sender(**kw):
-            calls.append(kw); w.tick(env.scope, {}); raise TimeoutError('no answer')
+        env, w, op = sc.ready_entry(self.store); calls, sender = self.midflight(env, w, TimeoutError('no answer'))
         self.assertEqual(w.dispatch_test(env.scope, op, sender), dict(status='uncertain', delivery_status='uncertain'))
         entry = env.entries()[op]
         self.assertEqual((entry['status'], entry['delivery_status'], entry['delivery_error_type'], bool(entry['readiness_revoked_at'])),
@@ -286,6 +278,168 @@ class ReadinessGate(Base):
         self.assertEqual(w.tick(env.scope, {})['status'], 'no_scans')
         self.assertEqual(env.entries()[op]['status'], 'superseded')
         self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse), dict(status='not_pending'))
+
+
+class FreshDispatch(Base):
+    """Dispatch never trusts stored readiness: it recaptures the exact scope and claims in one fenced transaction."""
+    def sender(self):
+        calls = []
+        def send(**kw): calls.append(kw); return dict(operation_id=kw['idempotency_key'], provider_receipt='synthetic')
+        return calls, send
+
+    def assert_draft_kept(self, env, op):
+        self.assertEqual(env.state()['receipts'][op]['state'], 'draft_ready')     # Lauren's draft and receipt are untouched
+        self.assertIn(op, env.published)
+
+    def test_unchanged_source_is_recaptured_then_sent_once(self):
+        env, w, op = sc.ready_entry(self.store); calls, send = self.sender(); reads = env.fetches
+        env.now = '2026-11-10T23:50:00Z'                                          # polling stopped long ago; still unchanged
+        self.assertEqual(w.dispatch_test(env.scope, op, send), dict(status='sent'))
+        entry = env.entries()[op]
+        self.assertEqual((env.fetches - reads, len(calls), entry['claim_captured_at'], entry['claim_fence']), (1, 1, env.now, 2))
+        self.assertEqual(env.state()['snapshot']['captured_at'], env.now)         # the claim is bound to the fresh capture
+
+    def test_stopped_polling_changed_rows_photos_and_resumed_scanning_block_dispatch(self):
+        changes = dict(
+            new_row=lambda env: env.rows.append(dict(id='2', scan_at='2026-11-10T22:10:00Z')),          # scanning resumed
+            edited_row=lambda env: env.rows[0].update(source=dict(edited='quantity corrected')),
+            deleted_row=lambda env: env.rows.clear(),
+            new_photo=lambda env: env.photos.append(dict(record_id='1', name='late.jpg', sha256='c' * 64)))
+        for i, (name, change) in enumerate(changes.items()):
+            with self.subTest(name):
+                env, w, op = sc.ready_entry(StateStore(Path(self.folder.name) / ('c%d.db' % i)))
+                env.now = '2026-11-10T22:15:00Z'; change(env)                     # no poll has seen this
+                out = w.dispatch_test(env.scope, op, sc.refuse)
+                self.assertEqual((out['status'], out['reason']), ('superseded', 'source_changed_or_not_due'))
+                self.assertEqual(env.entries()[op]['status'], 'superseded')
+                self.assertNotEqual(env.state()['operation_id'], op)              # the timer was updated from what was seen
+                self.assertEqual(env.state()['status'], 'no_scans' if name == 'deleted_row' else 'waiting')
+                self.assert_draft_kept(env, op)
+                self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse), dict(status='not_pending'))
+
+    def test_stopped_polling_schedule_extension_holds(self):
+        env, w, op = sc.ready_entry(self.store)
+        env.now = '2026-11-10T21:50:00Z'; env.extra = dict(not_before=sc.EXTENDED)   # same rows, later verified shift end
+        out = w.dispatch_test(env.scope, op, sc.refuse)
+        self.assertEqual((out['status'], out['current_status'], out['due_at'][:16]), ('held', 'waiting', '2026-11-10T23:00'))
+        self.assertEqual((env.entries()[op]['status'], env.state()['status']), ('held', 'waiting'))
+        calls, send = self.sender(); env.now = sc.EXTENDED
+        self.assertEqual(w.dispatch_test(env.scope, op, send), dict(status='not_pending'))   # only a poll releases a hold
+        self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')
+        self.assertEqual(w.dispatch_test(env.scope, op, send), dict(status='sent')); self.assertEqual(len(calls), 1)
+
+    def test_changed_mapping_header_or_template_blocks_dispatch(self):
+        env = Env(self.store); env.now = DUE; pub = Publisher(env, version='template-v1')
+        op = env.worker(pub).tick(env.scope, {})['operation_id']
+        pub.version = 'template-v2'
+        out = env.worker(pub).dispatch_test(env.scope, op, sc.refuse)
+        self.assertEqual((out['status'], env.entries()[op]['status']), ('superseded', 'superseded'))
+        self.assert_draft_kept(env, op)
+
+    def test_source_failure_holds_and_survives_restart(self):
+        env, w, op = sc.ready_entry(self.store)
+        def outage(): raise ConnectionError('source unavailable')
+        env.before_fetch[env.fetches + 1] = outage
+        self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse), dict(status='held', reason='recapture_failed', error_type='ConnectionError'))
+        entry = env.entries()[op]
+        self.assertEqual((entry['status'], entry['held_reason'], entry['held_error_type']), ('held', 'recapture_failed', 'ConnectionError'))
+        self.assertEqual(env.record('health:' + env.key)['error_type'], 'ConnectionError')
+        self.assert_draft_kept(env, op)
+        env.store = self.restart(); fresh = env.worker()
+        env.before_fetch[env.fetches + 1] = outage                                # still down after the restart
+        self.assertEqual(fresh.dispatch_test(env.scope, op, sc.refuse)['status'], 'held')
+        calls, send = self.sender()                                               # source back: a NEW recapture decides
+        self.assertEqual(fresh.dispatch_test(env.scope, op, send), dict(status='sent')); self.assertEqual(len(calls), 1)
+        self.assertNotIn('held_reason', env.entries()[op])
+
+    def test_source_back_but_changed_after_outage_does_not_send(self):
+        env, w, op = sc.ready_entry(self.store)
+        def outage(): raise ConnectionError('source unavailable')
+        env.before_fetch[env.fetches + 1] = outage
+        w.dispatch_test(env.scope, op, sc.refuse)
+        env.now = '2026-11-10T21:50:00Z'; env.extra = dict(not_before=sc.EXTENDED)
+        self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse)['status'], 'held')
+        entry = env.entries()[op]
+        self.assertEqual((entry['status'], entry.get('held_reason'), entry['held_until'][:16]), ('held', None, '2026-11-10T23:00'))
+
+    def test_partial_stale_older_and_wrong_scope_captures_hold(self):
+        other = dict(SCOPE_OTHER)
+        cases = dict(partial=dict(terminal=False), stale=dict(captured_at='2026-11-10T21:40:00Z'),
+                     older_than_state=dict(captured_at='2026-11-10T21:30:00Z'), future=dict(captured_at='2026-11-10T22:30:00Z'),
+                     wrong_scope=dict(scope=other))
+        for i, (name, extra) in enumerate(cases.items()):
+            with self.subTest(name):
+                env, w, op = sc.ready_entry(StateStore(Path(self.folder.name) / ('p%d.db' % i)))
+                before = env.record(env.key)
+                env.now = '2026-11-10T21:50:00Z'; env.extra = extra
+                out = w.dispatch_test(env.scope, op, sc.refuse)
+                self.assertEqual((out['status'], out['reason'], out['error_type']), ('held', 'recapture_failed', 'ValueError'))
+                self.assertEqual(env.entries()[op]['status'], 'held')
+                self.assertEqual(env.record(env.key), before)                     # a bad capture never moves the timer
+                self.assert_draft_kept(env, op)
+
+    def test_change_between_recapture_and_claim_loses_the_fence(self):
+        """The dispatcher stalls after its recapture; its lease expires; a poll sees a new scan. The claim must fail."""
+        env, w, op = sc.ready_entry(self.store); out = {}
+        def stalled():
+            env.now = '2026-11-10T21:41:00Z'                                      # past the dispatcher's 300 second lease
+            env.rows.append(dict(id='2', scan_at='2026-11-10T21:40:00Z'))
+            out['poll'] = env.worker(owner='poller').tick(env.scope, {})
+        env.before_fetch[env.fetches + 1] = stalled
+        self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse), dict(status='lease_lost'))
+        self.assertEqual((out['poll']['status'], env.entries()[op]['status']), ('waiting', 'superseded'))
+        self.assertNotEqual(env.state()['operation_id'], op)
+
+    def test_busy_scope_is_not_dispatched(self):
+        env, w, op = sc.ready_entry(self.store)
+        with self.store.transaction('lease:' + env.key) as lease:
+            lease.update(token='poller', fence=9, expires='2026-11-10T21:40:00Z')
+        reads = env.fetches
+        self.assertEqual(w.dispatch_test(env.scope, op, sc.refuse), dict(status='busy'))
+        self.assertEqual((env.fetches, env.entries()[op]['status']), (reads, 'pending'))
+
+    def test_publisher_bound_to_another_scope_cannot_dispatch(self):
+        env, w, op = sc.ready_entry(self.store)
+        class Other:
+            binding = dict(client_id='someone-else', site_id='s', list_id='l', job='j')
+        reads = env.fetches
+        self.assertEqual(env.worker(Other()).dispatch_test(env.scope, op, sc.refuse), dict(status='error', error_type='RendererBindingMismatch'))
+        self.assertEqual(env.fetches, reads)
+
+    def test_unknown_outcome_is_reconciled_by_asking_never_by_resending(self):
+        env, w, op = sc.ready_entry(self.store); attempts = []
+        def lost(**kw): attempts.append(kw); raise TimeoutError('no answer')
+        self.assertEqual(w.dispatch_test(env.scope, op, lost), dict(status='uncertain', delivery_status='uncertain'))
+        env.store = self.restart(); w = env.worker()
+        self.assertEqual(w.dispatch_test(env.scope, op, lost), dict(status='not_pending'))
+        for vague in (lambda **kw: None, lambda **kw: dict(operation_id='other', delivered=True),
+                      lambda **kw: dict(operation_id=op, delivered='maybe')):
+            self.assertEqual(w.reconcile_test(env.scope, op, vague), dict(status='uncertain'))
+        def down(**kw): raise ConnectionError()
+        self.assertEqual(w.reconcile_test(env.scope, op, down), dict(status='uncertain', error_type='ConnectionError'))
+        self.assertEqual(env.entries()[op]['status'], 'uncertain')
+        found = w.reconcile_test(env.scope, op, lambda **kw: dict(operation_id=op, delivered=True, provider_receipt='synthetic'))
+        self.assertEqual(found, dict(status='sent', delivery_status='sent'))
+        self.assertEqual(env.entries()[op]['ack']['provider_receipt'], 'synthetic')
+        self.assertEqual(w.reconcile_test(env.scope, op, down), dict(status='nothing_to_reconcile'))
+        self.assertEqual(w.dispatch_test(env.scope, op, lost), dict(status='not_pending'))
+        self.assertEqual(len(attempts), 1)
+
+    def test_confirmed_not_delivered_needs_a_fresh_poll_and_recapture_before_any_resend(self):
+        env, w, op = sc.ready_entry(self.store); calls, send = self.sender()
+        def lost(**kw): raise TimeoutError()
+        w.dispatch_test(env.scope, op, lost)
+        self.assertEqual(w.reconcile_test(env.scope, op, lambda **kw: dict(operation_id=op, delivered=False)),
+                         dict(status='held', delivery_status='not_delivered'))
+        self.assertEqual(w.dispatch_test(env.scope, op, send), dict(status='not_pending'))   # not sendable straight away
+        env.now = '2026-11-10T21:40:00Z'
+        self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')                     # a fresh poll releases it
+        self.assertEqual(w.dispatch_test(env.scope, op, send), dict(status='sent'))          # and dispatch recaptures again
+        self.assertEqual(len(calls), 1)
+
+
+SCOPE_OTHER = dict(job='OTHER-JOB', site_id='other-site', list_id='other-list', business_date='2026-11-10',
+                   client_id='client', shift='1', zone='America/Chicago')
 
 
 class Timer(Base):

@@ -226,28 +226,55 @@ def extension_races_with_dispatch_claims(store, senders=6):
         start.wait(5); return env.worker().dispatch_test(env.scope, op, sender)
     def extend():
         start.wait(5); return env.worker().tick(env.scope, {})
-    env.now = '2026-11-10T21:36:00Z'; env.extra = dict(not_before=EXTENDED)
+    def extend_source():                                                       # the SOURCE changes while claims are racing
+        start.wait(5); env.now = '2026-11-10T21:36:00Z'; env.extra = dict(not_before=EXTENDED)
+        return env.worker().tick(env.scope, {})
+    extend = extend_source
     with ThreadPoolExecutor(senders + 1) as pool:
         poll = pool.submit(extend); results = [f.result() for f in [pool.submit(dispatch, i) for i in range(senders)]]
         polled = poll.result()
-    if polled['status'] == 'busy':                                             # make sure the extension was observed
+    if polled['status'] != 'waiting':                                          # make sure the extension was observed
         polled = env.worker().tick(env.scope, {})
     entry = env.entries()[op]
     assert polled['status'] == 'waiting', polled
     assert len(sent) <= 1, results
-    if sent:
+    if sent:                                                                   # recaptured before the source changed
         assert entry['status'] == 'sent' and entry['ack']['provider_receipt'] == 'synthetic' and entry['delivery_status'] == 'sent', entry
-        assert entry.get('readiness_revoked_at'), entry                         # sent before the extension: flagged
+        assert entry.get('readiness_revoked_at') or entry['claim_captured_at'] == DUE, entry
     else:
         assert entry['status'] == 'held' and 'ack' not in entry, entry
     env.now = EXTENDED
     assert env.worker().tick(env.scope, {})['status'] == 'draft_ready'
     if not sent:
-        assert env.worker().dispatch_test(env.scope, op, sender) == dict(status='sent')
+        assert env.worker().dispatch_test(env.scope, op, sender) == dict(status='sent'), env.entries()
     assert env.worker().dispatch_test(env.scope, op, sender) == dict(status='not_pending') and len(sent) == 1
     return bool(results)
 
 
-ALL = [schedule_extension_holds_then_releases, extension_races_with_dispatch_claims, stale_worker_cannot_enqueue, stale_worker_and_changed_content, changed_between_render_and_enqueue,
+def stale_ready_is_never_sent_without_recapture(store):
+    """Polling stopped while the stored state says ready. The source then changed. Dispatch must see it."""
+    env, w, op = ready_entry(store)
+    env.now = '2026-11-10T22:15:00Z'; env.rows.append(dict(id='2', scan_at='2026-11-10T22:10:00Z'))
+    out = w.dispatch_test(env.scope, op, refuse)
+    assert out['status'] == 'superseded' and env.entries()[op]['status'] == 'superseded', out
+    assert env.state()['status'] == 'waiting' and env.state()['due_at'].startswith('2026-11-10T23:15')
+    assert env.state()['receipts'][op]['state'] == 'draft_ready' and op in env.published      # the draft is kept
+    return out
+
+
+def concurrent_dispatch_sends_once(store, senders=6):
+    import threading
+    env, w, op = ready_entry(store); sent, start = [], threading.Barrier(senders)
+    def sender(**kw): sent.append(kw); return dict(operation_id=kw['idempotency_key'])
+    def dispatch(_):
+        start.wait(5); return env.worker().dispatch_test(env.scope, op, sender)['status']
+    with ThreadPoolExecutor(senders) as pool:
+        results = list(pool.map(dispatch, range(senders)))
+    assert len(sent) == 1 and results.count('sent') == 1 and set(results) <= {'sent', 'busy', 'not_pending'}, results
+    assert env.entries()[op]['status'] == 'sent'
+    return results
+
+
+ALL = [stale_ready_is_never_sent_without_recapture, concurrent_dispatch_sends_once, schedule_extension_holds_then_releases, extension_races_with_dispatch_claims, stale_worker_cannot_enqueue, stale_worker_and_changed_content, changed_between_render_and_enqueue,
        concurrent_ticks_render_once, concurrent_claims_one_winner, atomic_is_all_or_nothing, counter_is_serialized,
        blobs_are_content_addressed]

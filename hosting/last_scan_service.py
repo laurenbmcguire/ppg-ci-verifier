@@ -147,7 +147,8 @@ class ScheduledWorker:
         ScheduledWorker._supersede_in(box,current,now)
         entry=(box.get('entries') or {}).get(current)
         if entry is None or ready:return
-        if entry['status']=='pending':
+        if entry['status']=='pending' or (entry['status']=='held' and entry.get('held_reason')):
+            entry.pop('held_reason',None);entry.pop('held_error_type',None)
             entry.update(status='held',held_at=now,held_until=due_at)
         elif entry['status'] in ('uncertain','sent') and not entry.get('readiness_revoked_at'):
             entry.update(readiness_revoked_at=now,readiness_revoked_until=due_at)
@@ -239,7 +240,7 @@ class ScheduledWorker:
             entry.pop('superseded_by',None);entry.pop('superseded_at',None)
         elif entry['status']=='held':            # the scope is ready again: release, exactly once
             entry.update(status='pending',released_at=now)
-            entry.pop('held_at',None);entry.pop('held_until',None)
+            for k in ('held_at','held_until','held_reason','held_error_type'):entry.pop(k,None)
 
     def _health(self,key,error,op=None):
         try:
@@ -257,27 +258,79 @@ class ScheduledWorker:
             self._supersede_in(box,op)
             self._queue(box,op,receipt)
 
-    def dispatch_test(self,scope,op,sender):
+    @staticmethod
+    def _claimable(entry):
+        # a hold caused only by a failed recapture may be tried again, because every try recaptures the source
+        return bool(entry) and (entry['status']=='pending' or (entry['status']=='held' and entry.get('held_reason')=='recapture_failed'))
+
+    def _hold(self,key,held,op,reason,error=None):
+        with fenced(self.store,key,held,self.clock,['outbox:'+key]) as records:
+            entry=records['outbox:'+key].get('entries',{}).get(op)
+            if entry and entry['status']=='pending':
+                entry.update(status='held',held_at=self.clock(),held_reason=reason,
+                             held_error_type=type(error).__name__ if error is not None else None)
+
+    def dispatch_test(self,scope,op,sender,settings=None):
         """Test transport only. No network sender is supplied in this module.
 
-        An entry is claimed only while the scope's latest observed state is ready for this same operation; otherwise
-        it is put on hold and nothing is sent. ``delivery_status`` is recorded apart from ``status``: once an attempt starts it is 'uncertain' until a
+        Stored readiness is never enough to send. Immediately before the claim this takes the scope's lease and
+        recaptures the exact scope from the source; then ONE transaction, fenced by that lease, re-observes the
+        fresh capture against the stored state and claims the entry only if the fresh capture yields this same
+        operation (same rows, photos, mapping/header/template version), the scope is due on the latest schedule,
+        and the capture is not stale. Otherwise nothing is sent: the timer and outbox are updated from what was
+        seen (held or superseded). If the source cannot be read, or the capture is partial, stale or for another
+        scope, the entry is held; "unchanged" is never assumed. The draft and its receipt are never touched.
+
+        ``delivery_status`` is recorded apart from ``status``: once an attempt starts it is 'uncertain' until a
         matching acknowledgment arrives, and it stays 'uncertain' (for reconciliation with the provider by the
         operation ID) when the sender fails, also when the entry was superseded while the attempt was in flight.
+        The source can still change between the recapture and the provider receiving the message; that window is
+        not closed here, only detected by the next poll (``readiness_revoked_at``).
         """
-        key=sf.digest(scope_key(scope))
-        # The claim reads the scope's latest readiness and the outbox entry under the same locks a poll takes, so a
-        # poll that extends the wait and this claim cannot interleave: whichever commits first decides.
-        with self.store.atomic([key,'outbox:'+key]) as records:
-            entry=records['outbox:'+key].get('entries',{}).get(op)
-            if not entry or entry['status']!='pending':return dict(status='not_pending')
-            state=records[key].get('state') or {}
-            now=self.clock()
-            if state.get('operation_id')!=op or state.get('status')!='draft_ready':
-                entry.update(status='held',held_at=now,held_until=state.get('due_at'))
-                return dict(status='held')
-            entry.update(status='uncertain',delivery_status='uncertain',delivery_attempted_at=now)
-            payload=deepcopy(entry)
+        s=scope_key(scope);key=sf.digest(s);state_key,box_key=key,'outbox:'+key
+        with self.transaction(box_key) as box:                      # cheap look first: no source read for a dead entry
+            if not self._claimable(box.get('entries',{}).get(op)):return dict(status='not_pending')
+        bound=getattr(self.render,'binding',None)
+        if bound is not None and bound!=binding(s):
+            return dict(status='error',error_type='RendererBindingMismatch')
+        held=claim(self.store,key,self.clock(),self.lease_seconds,self.owner)
+        if not held:return dict(status='busy')                      # a poll or another dispatch has the scope
+        payload=None
+        try:
+            try:
+                slim,_,ref=self._capture(s,settings or {})
+                with fenced(self.store,key,held,self.clock,[state_key,box_key]) as records:
+                    now=self.clock()
+                    current=observe(records[state_key].get('state'),s,slim,now)   # refuses partial/stale/older/other-scope
+                    ready=current['operation_id']==op and current['status']=='draft_ready'
+                    current['snapshot']=self._stub(slim,ref)
+                    records[state_key]['state']=current
+                    box=records[box_key]
+                    self._gate(box,current['operation_id'],current['status']=='draft_ready',now,current.get('due_at'))
+                    entry=box.get('entries',{}).get(op)
+                    if ready and self._claimable(entry):
+                        for k in ('held_at','held_until','held_reason','held_error_type'):entry.pop(k,None)
+                        entry.update(status='uncertain',delivery_status='uncertain',delivery_attempted_at=now,
+                                     claim_fence=held['fence'],claim_capture=ref,claim_captured_at=slim['captured_at'])
+                        payload=deepcopy(entry)
+                    else:
+                        seen=(entry or {}).get('status')
+                        if seen in ('held','superseded'):
+                            outcome=dict(status=seen,reason='source_changed_or_not_due',
+                                         current_status=current['status'],due_at=current.get('due_at'))
+                        else:                               # another dispatcher already claimed or finished it
+                            outcome=dict(status='not_pending')
+            except LeaseLost:
+                return dict(status='lease_lost')                    # another worker owns the scope now; nothing sent
+            except Exception as error:
+                self._health(key,error,op)
+                try:self._hold(key,held,op,'recapture_failed',error)
+                except LeaseLost:return dict(status='lease_lost')
+                return dict(status='held',reason='recapture_failed',error_type=type(error).__name__)
+        finally:
+            try:release(self.store,key,held,self.clock())
+            except Exception:pass
+        if payload is None:return outcome
         try:
             ack=sender(idempotency_key=op,audience='Lauren',payload=payload)
             if not isinstance(ack,dict) or ack.get('operation_id')!=op:
@@ -297,3 +350,30 @@ class ScheduledWorker:
             if entry.get('readiness_revoked_at'):   # sent, then the wait was extended while it was in flight
                 return dict(status='sent',readiness_revoked=True)
         return dict(status='sent')
+
+    def reconcile_test(self,scope,op,status_lookup):
+        """Settle a delivery whose outcome is unknown by ASKING the (test) transport about this operation ID.
+        Delivered -> recorded as sent with the acknowledgment. Authoritatively not delivered -> the entry is put
+        on hold, so only a fresh poll and a fresh recapture can make it sendable again. Anything else (no answer,
+        error, vague answer) leaves it uncertain. Nothing is ever sent from here."""
+        key=sf.digest(scope_key(scope))
+        with self.transaction('outbox:'+key) as box:
+            entry=box.get('entries',{}).get(op)
+            if not entry or entry.get('delivery_status')!='uncertain':return dict(status='nothing_to_reconcile')
+        try:
+            answer=status_lookup(idempotency_key=op)
+        except Exception as error:
+            return dict(status='uncertain',error_type=type(error).__name__)
+        if not isinstance(answer,dict) or answer.get('operation_id')!=op or answer.get('delivered') not in (True,False):
+            return dict(status='uncertain')
+        with self.transaction('outbox:'+key) as box:
+            entry=box['entries'][op]
+            if entry.get('delivery_status')!='uncertain':return dict(status='nothing_to_reconcile')
+            if answer['delivered']:
+                entry.update(ack=answer,delivery_status='sent',reconciled_at=self.clock())
+                if entry['status']=='uncertain':entry['status']='sent'
+                return dict(status=entry['status'],delivery_status='sent')
+            entry.update(delivery_status='not_delivered',reconciled_at=self.clock())
+            if entry['status']=='uncertain':
+                entry.update(status='held',held_at=self.clock(),held_reason='not_delivered_needs_fresh_readiness')
+            return dict(status=entry['status'],delivery_status='not_delivered')

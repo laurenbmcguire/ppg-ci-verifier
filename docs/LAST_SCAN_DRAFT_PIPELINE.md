@@ -119,6 +119,15 @@ Status: local code and tests only. Not deployed, not scheduled, not connected to
   `dispatch_test` claims an entry only while the stored state is `draft_ready` for that same operation, under the
   same row locks a poll takes. A delivery already in flight keeps its status and acknowledgment and is marked
   `readiness_revoked_at`; it is never re-opened or sent twice.
+- **Dispatch recaptures the source.** Stored readiness is never enough to send. `dispatch_test` takes the scope
+  lease, recaptures the exact scope, and in one transaction fenced by that lease re-observes the fresh capture and
+  claims the entry only if it yields the same operation (rows, photos, mapping/header/template version), the scope
+  is due on the latest schedule, and the capture is complete and fresh. Otherwise nothing is sent and the timer and
+  outbox are updated from what was seen. A failed, partial, stale or wrong-scope capture holds the entry; a hold
+  from a failed capture may be tried again because each try recaptures. Drafts and receipts are never touched.
+  `reconcile_test` settles an unknown delivery by asking the test transport; it never sends.
+  Not closed: the source can change after the recapture and before the provider receives the message, and the
+  claim and the send are not one transaction. Those cases end as `readiness_revoked_at` or `uncertain`.
 - **A cached draft never shortens the hour.** If content returns to an earlier version, the hour restarts like any
   other change. The earlier receipt and outbox entry are used again only when the renewed hour is over. `Date`, `Created`, `Modified` and their Graph names are refused as scan fields.
   Anything else is reported in the run receipt under `issues` and skipped.
