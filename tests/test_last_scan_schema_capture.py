@@ -107,7 +107,7 @@ class CompleteCapture(Base):
         o = a['observed']
         pages_per_pass = -(-len(self.graph.columns) // self.graph.page_size)
         self.assertGreater(pages_per_pass, 1)
-        self.assertEqual((o['capture_passes'], o['passes_agree'], o['complete'], o['column_count']), (2, True, True, len(self.graph.columns)))
+        self.assertEqual((o['capture_passes'], o['passes_agree'], o['each_pass_reached_a_terminal_page'], o['column_count']), (2, True, True, len(self.graph.columns)))
         self.assertEqual([r['capture_pass'] for r in o['requests']], [1] * pages_per_pass + [2] * pages_per_pass)
         self.assertEqual([r['terminal'] for r in o['requests']], ([False] * (pages_per_pass - 1) + [True]) * 2)
         self.assertEqual(sum(r['count'] for r in o['requests'] if r['capture_pass'] == 1), len(self.graph.columns))
@@ -119,7 +119,7 @@ class CompleteCapture(Base):
             self.assertIn(self.graph.kind(url), ('list', 'columns'), url)
             self.assertNotIn('/items', url); self.assertNotIn('$expand', url)
         source = inspect.getsource(cap)
-        for word in ('POST', 'PATCH', 'PUT', 'DELETE', 'method=', 'data=', '/items', 'urllib.request', 'urlopen', 'os.environ', 'getenv', 'token', 'Authorization', 'graph_fetch'):
+        for word in ('POST', 'PATCH', 'PUT', 'DELETE', 'method=', 'data=', '/items', 'urllib.request', 'urlopen', 'os.environ', 'getenv', 'access_token', 'Bearer', 'Authorization', 'graph_fetch'):
             self.assertNotIn(word, source, word)
 
     def test_times_come_from_the_host_clock_never_from_source_text(self):

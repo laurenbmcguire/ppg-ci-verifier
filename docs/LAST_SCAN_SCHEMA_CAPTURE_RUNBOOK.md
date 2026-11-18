@@ -14,6 +14,11 @@ hand. Nobody else, and no scheduled job, should run it.
   source asked for is recorded and no retry is made), server errors, unreachable.
 - Refuses a next-page link that leaves this list's `columns` collection on `graph.microsoft.com/v1.0`, a repeated
   cursor, a malformed page, an answer for another list or site, duplicate or unidentified columns.
+- Refuses, before making the request, a next-page link whose query is anything other than `$skiptoken` (once, the
+  source's opaque cursor, passed through unchanged) and optionally `$top=500` (once, that exact value). A link
+  cannot add `$expand`, `$select`, `$filter` or any other parameter, change the page size, or use another case or
+  a percent-encoded spelling of a parameter name. If the real source spells its cursor parameter differently
+  (for example `%24skiptoken`), the capture will refuse; that would need review, not a workaround.
 - Keeps every column definition exactly as returned, including properties it does not recognise, and lists those
   under `columns_needing_review`.
 - Dates the capture from the host clock you give it. Source timestamps are kept only as quoted text.
@@ -57,7 +62,9 @@ adapter itself never sees a token. Expect about six requests for a typical list.
 
 - `snapshot.site_id` and `snapshot.list_id` are the ones you asked for; `snapshot.list.displayName` is the list
   you expected.
-- `observed.complete` and `observed.passes_agree` are true; `observed.column_count` is plausible.
+- `observed.each_pass_reached_a_terminal_page` and `observed.passes_agree` are true; `observed.column_count` is
+  plausible. That is all the artifact claims: two passes, each to a terminal page, matching. It is not an atomic
+  snapshot (`atomic_snapshot` is false) and establishes no provenance (`provenance_established` is false).
 - `observed.site_identity_echoed_by_source`: if false, the source did not confirm the site in its answer. Note it.
 - `columns_needing_review`: every entry needs a human decision. In particular, properties the validator does not
   recognise will block any mapping onto that column until the recognised-property list is reviewed.

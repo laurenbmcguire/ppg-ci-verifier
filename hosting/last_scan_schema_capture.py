@@ -15,7 +15,9 @@ What this is not:
 
 Fail closed: any non-200 answer (redirects, throttling, permission and server errors included), a malformed or
 missing page, a next-page link that leaves the exact collection, a repeated cursor, an identity that does not match
-the request, duplicate or unidentified columns, or two capture passes that disagree all raise
+the request, a next-page link whose query is anything but the reviewed pagination parameters (so it cannot add
+``$expand``, ``$select`` or ``$filter`` or change the page size; checked before the transport is called), duplicate or
+unidentified columns, or two capture passes that disagree all raise
 ``SchemaCaptureFailure``. A partial snapshot is never returned.
 
 Times recorded as observed come from the caller's clock. Timestamps in the source's own text are kept only as
@@ -34,6 +36,10 @@ KIND, FORMAT = 'candidate_schema_capture', 'schema-capture-v1'
 MAX_COLUMNS = 2000
 PASSES = 2                                   # the columns are read twice; the two reads must agree exactly
 LIST_SELECT = 'id,displayName,webUrl,eTag,lastModifiedDateTime,parentReference'
+COLUMNS_QUERY = '$top=500'                   # the whole of the first columns request's query: no projection, filter or expansion
+MAX_TOKEN_LENGTH = 4096
+# An opaque continuation token, taken byte for byte and never decoded: URL-safe characters and well-formed %XX only.
+TOKEN = re.compile(r"(?:[A-Za-z0-9\-._~!'()*,:@/+=]|%[0-9A-Fa-f]{2})+")
 
 MUST_BE_ESTABLISHED = (
     'That the transport used was the authorised read-only collector, and which identity it ran as. This code cannot see that.',
@@ -69,6 +75,37 @@ def _status_message(status):
     if status == 0:
         return 'The source could not be reached.'
     return f'The source answered HTTP {status}.'
+
+
+def continuation_problem(url):
+    """None when a next-page link's query is exactly what this schema read allows, else why not.
+
+    The first request's query is ``$top=500`` and nothing else. A continuation may carry only: ``$skiptoken`` exactly
+    once (the source's opaque cursor, passed through unchanged) and, optionally, ``$top=500`` exactly once with exactly
+    that value. Keys are matched literally: no other case, no percent-encoded spelling, no other parameter. So a link
+    cannot add ``$expand``, ``$select``, ``$filter`` or anything else, and cannot change the page size. The query is
+    inspected as raw text; the token is never decoded, because decoding an opaque value could change its meaning."""
+    if not isinstance(url, str) or url.count('?') != 1 or '#' in url:
+        return 'the link has no single query string'
+    query = url.split('?', 1)[1]
+    if not query or any(ord(c) < 33 or ord(c) > 126 for c in query) or ';' in query:
+        return 'the query is empty or contains whitespace, control, non-ASCII or ";" characters'
+    seen = {}
+    for part in query.split('&'):
+        key, eq, value = part.partition('=')
+        if not eq or key not in ('$top', '$skiptoken'):
+            return f'the query carries {key or "an empty parameter"!r}, which is not a reviewed pagination parameter'
+        if key in seen:
+            return f'{key} appears more than once'
+        seen[key] = value
+    if seen.get('$top', '500') != '500':
+        return 'the page size was changed'
+    token = seen.get('$skiptoken')
+    if token is None:
+        return 'the link has no $skiptoken'
+    if not token or len(token) > MAX_TOKEN_LENGTH or not TOKEN.fullmatch(token):
+        return 'the $skiptoken is empty, too long or not well-formed'
+    return None
 
 
 def _call(fetch, url):
@@ -113,8 +150,18 @@ def _list_metadata(fetch, base, site_id, list_id, stage):
 
 def _columns(fetch, base, pass_number):
     pages = []
+    first = base + '/columns?' + COLUMNS_QUERY
+    def guarded(url):
+        if url != first:                                                     # every continuation is checked BEFORE the transport is called
+            problem = continuation_problem(url)
+            if problem:
+                _fail('A next-page link tried to change what is read: ' + problem + '. It was not followed.', 'columns',
+                      reason='continuation_query_out_of_scope', capture_pass=pass_number, status=None, link_hash=sf.digest(url), pages=pages)
+        return _call(fetch, url)
     try:
-        raw = collection(base + '/columns?$top=500', 'columns', pages, lambda url: _call(fetch, url), [])
+        raw = collection(first, 'columns', pages, guarded, [])
+    except SchemaCaptureFailure:
+        raise
     except CaptureFailure as error:
         e = error.evidence if isinstance(error.evidence, dict) else {}
         _fail(str(error), 'columns', capture_pass=pass_number, status=e.get('status'), cooldown=e.get('cooldown'),
@@ -187,7 +234,12 @@ def capture_schema(site_id, list_id, *, fetch, clock):
         kind=KIND, format=FORMAT, status='candidate_unreviewed', marked_verified=False, grants_authority=False,
         snapshot=snapshot, snapshot_identity=readiness.snapshot_identity(snapshot), schema_digest=readiness.schema_digest(snapshot),
         observed=dict(started_at=started.isoformat(), completed_at=completed.isoformat(), clock='host clock supplied by the caller',
-                      capture_passes=PASSES, passes_agree=True, complete=True, column_count=len(passes[0]), requests=requests,
+                      capture_passes=PASSES, each_pass_reached_a_terminal_page=True, passes_agree=True, atomic_snapshot=False,
+                      provenance_established=False,
+                      what_this_shows='Each of the two passes reached a terminal page and the two passes returned identical column '
+                                      'definitions. This is not an atomic snapshot: the columns could have differed before, between '
+                                      'requests in a way that was reverted, or after. It says nothing about where the answers came from.',
+                      column_count=len(passes[0]), requests=requests,
                       site_identity_echoed_by_source=echoed_site is not None,
                       source_text_not_used_as_time=dict(list_last_modified_before=before.get('lastModifiedDateTime'), list_last_modified_after=after.get('lastModifiedDateTime'),
                                                         list_etag_before=before.get('eTag'), list_etag_after=after.get('eTag')),
