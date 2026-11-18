@@ -11,7 +11,8 @@ from pathlib import Path
 from unittest import mock
 from hosting import source_first as sf
 from hosting import last_scan_hosted as hosted
-from hosting.last_scan_hosted import ApprovalAuthority, Authorizer, Deps, Principal, Quota
+from hosting.last_scan_hosted import ApprovalAuthority, Authorizer, CaptureAuthority, Deps, Principal, Quota, SchemaProbe
+from hosting import last_scan_readiness as readiness
 from hosting.last_scan_local import StateStore, StoredDraftRouter, StoredDraftPublisher, BlobArtifacts
 from hosting.last_scan_service import source_adapter
 from hosting.last_scan_store import SqliteStore
@@ -37,6 +38,36 @@ class FakeApprovals(ApprovalAuthority):
     """TEST ONLY stand-in for a separately protected approval record."""
     def __init__(self, records=None): self.records = records or {}
     def attestation(self, snapshot_digest): return deepcopy(self.records.get(snapshot_digest))
+
+
+COLLECTOR = 'synthetic-collector'
+
+
+class FakeCaptures(CaptureAuthority):
+    """TEST ONLY stand-in for a separately protected capture record. Not a collector and not origin proof."""
+    def __init__(self, schemas=(), collector=COLLECTOR):
+        self.records = {}
+        for s in schemas if isinstance(schemas, list) else []:
+            if isinstance(s, dict):
+                self.add(s, collector)
+    def add(self, schema, collector=COLLECTOR, **override):
+        identity = readiness.snapshot_identity(schema)
+        self.records[identity] = dict(dict(snapshot_identity=identity, site_id=schema.get('site_id'), list_id=schema.get('list_id'),
+                                           schema_digest=readiness.schema_digest(schema), collector=collector, captured_at=schema.get('captured_at')), **override)
+        return identity
+    def receipt(self, snapshot_identity): return deepcopy(self.records.get(snapshot_identity))
+
+
+class FakeProbe(SchemaProbe):
+    """TEST ONLY stand-in for a read-only live schema look. Answers from synthetic snapshots held in memory."""
+    def __init__(self, schemas, clock, log=None):
+        self.live = {(s.get('site_id'), s.get('list_id')): deepcopy(s) for s in (schemas if isinstance(schemas, list) else []) if isinstance(s, dict)}
+        self.clock, self.calls, self.log = clock, 0, log
+    def current(self, site_id, list_id):
+        self.calls += 1
+        if self.log is not None: self.log.append('probe')
+        s = self.live.get((site_id, list_id))
+        return None if s is None else dict(deepcopy(s), captured_at=self.clock())
 
 
 ALICE, BOB = {'x-test-principal-proof': 'proof-alice'}, {'x-test-principal-proof': 'proof-bob'}
@@ -88,6 +119,9 @@ class Hosted(unittest.TestCase):
                     store=self.store, artifacts=BlobArtifacts(self.store), fetch=self.fetch, clock=lambda: self.now)
         base.update(kw)
         base.setdefault('schemas', schemas_for(base['config']))
+        base.setdefault('captures', FakeCaptures(base['schemas']))
+        base.setdefault('collectors', (COLLECTOR,))
+        base.setdefault('schema_probe', FakeProbe(base['schemas'], base['clock']))
         return Deps(**base)
 
     def body(self, **kw):

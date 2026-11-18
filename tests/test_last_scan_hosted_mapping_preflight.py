@@ -151,7 +151,7 @@ class ApprovalBindsTheExactSnapshot(Base):
 
     def test_snapshot_identity_is_part_of_the_approved_digest(self):
         base = self.digest()
-        changes = dict(captured_at=lambda s: s.update(captured_at='2026-11-11T00:00:00+00:00'),
+        changes = dict(captured_at=lambda s: s.update(captured_at='2026-11-10T21:10:00+00:00'),
                        unmapped_column=lambda s: s['columns'].update(Spare=dict(name='Spare', displayName='Spare', id='dddddddd-0000-4000-8000-000000000999', text={})),
                        unmapped_description=lambda s: s['columns']['DefectPhoto'].update(description='changed'),
                        list_name=lambda s: s['list'].update(displayName='Renamed'), extra_key=lambda s: s.update(note='x'))
@@ -287,7 +287,7 @@ class CachedReceiptsAndIsolation(Base):
 
     def test_a_receipt_from_one_snapshot_identity_is_not_reused_for_another(self):
         self.go(run_id='shared'); reads = list(self.reads)
-        later = dict(self.schema, captured_at='2026-11-11T06:00:00+00:00')              # same columns, a different capture
+        later = dict(self.schema, captured_at='2026-11-10T21:20:00+00:00')              # same columns, a different capture
         digest = self.call(self.deps(schemas=[later]))[1]['snapshot_digest']
         self.approvals.records[digest] = dict(snapshot_digest=digest, approved_by='synthetic approver', approved_at='2026-11-11', principals=['alice'])
         code, body = self.go(self.deps(schemas=[later]), run_id='shared')

@@ -123,10 +123,38 @@ The hosted entry point refuses every request unless, for each configured assignm
 snapshot is supplied and the offline readiness check passes against it
 (see `docs/LAST_SCAN_SOURCE_MAPPING_READINESS.md`). Before activation, still open:
 
-- [ ] Who captures schema snapshots read-only, and how a snapshot is shown to come from the real list. Today the
-      entry point trusts whatever the host supplies; it has only been exercised with synthetic snapshots.
-- [ ] How old a snapshot may be. No maximum age is enforced.
+- [ ] A real capture authority and collector. The code only defines the interface (`CaptureAuthority`) and a
+      server-side list of accepted collector identities (`Deps.collectors`). Neither exists for production; the
+      only implementations are test fakes. Until one exists every request is refused. The entry point reports a
+      receipt as "reported by capture authority"; it cannot verify the authority itself.
+- [ ] A real read-only schema probe (`SchemaProbe`). Interface only; test fake only. Without one, no run.
+- [ ] Owner decision on the bounds, which are placeholders: capture age 24 hours, future skew 5 minutes, probe
+      answer age 60 seconds.
 - [ ] Named people to attest each business meaning per list, and the approver's review of those attestations.
       An approval covers the exact snapshot and contract by hash; it does not show the approver examined them.
 - [ ] Runtime source proof. Readiness says the configuration and a captured schema agree. It does not show what
       the live source returns, and nothing here establishes what the scan field means.
+
+## Schema capture provenance and live drift (added 2026-11-18)
+
+What a run now requires, in addition to everything above:
+
+1. For each supplied snapshot, the capture authority returns a receipt for exactly that snapshot (by hash of the
+   whole snapshot), naming the same site and list, the same column-definition digest, an accepted collector, and
+   a valid offset-aware capture time. Fields inside the snapshot or the configuration are never read as proof.
+2. The receipt's capture time is at most 24 hours old and at most 5 minutes in the future, and the snapshot's own
+   capture time is the same instant. This is checked on every request, so an approved snapshot expires.
+3. The collector and capture time are part of the approved snapshot digest.
+4. After identity, approval, nonce and quota, and before any source read, the probe is asked for each list's
+   current column definitions. They must be well formed, for that list, observed within 60 seconds, and identical
+   to the approved definitions. Otherwise the request ends with `schema_drift` and nothing is read.
+5. The same look is repeated immediately before every individual source read. A read whose look fails is not
+   made; that scope is reported as an error (`SchemaDrift`).
+
+### The race that remains
+
+The look and the read are two separate calls to the source. A column can change in the moment between them, and
+this code cannot close that gap from the outside: it would need the source to return the schema version with the
+rows, or to accept a conditional read. Until then the window is one probe-to-read interval per read, and the
+sealed capture taken by the read is the only record of what was actually returned. A failed look also spends the
+request's nonce and one unit of quota, by design, so the probe cannot be used as a free polling channel.
