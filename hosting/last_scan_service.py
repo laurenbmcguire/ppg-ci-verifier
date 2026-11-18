@@ -111,10 +111,11 @@ class ScheduledWorker:
         held=claim(self.store,key,self.clock(),self.lease_seconds,self.owner)
         if not held:return dict(status='busy')
         try:
-            self._unassigned=None
-            out=self._run(s,key,settings,held)
-            if self._unassigned:out=dict(out,unassigned_shifts=self._unassigned)   # rows of the day in no configured shift
-            return out
+            # Everything about this capture stays in local variables: one worker may tick several scopes at once.
+            slim,full,ref=self._capture(s,settings)
+            out=self._run(s,key,settings,held,slim,full,ref)
+            unassigned=slim.get('unassigned_shifts')
+            return dict(out,unassigned_shifts=deepcopy(unassigned)) if unassigned else out   # rows of the day in no configured shift
         except LeaseLost:
             return dict(status='lease_lost')     # nothing of ours was committed; the current holder carries on
         except Exception as error:
@@ -129,7 +130,6 @@ class ScheduledWorker:
         full=dict(self.fetch(s,settings))
         if hasattr(self.render,'render_version'):full['render_version']=self.render.render_version()
         slim={k:v for k,v in full.items() if k!='photo_blobs'}
-        self._unassigned=full.get('unassigned_shifts') or None
         refs={}
         for name,encoded in sorted((full.get('photo_blobs') or {}).items()):
             refs[name]=self.store.put_blob(base64.b64decode(encoded,validate=True))
@@ -166,9 +166,8 @@ class ScheduledWorker:
         elif entry['status'] in ('uncertain','sent') and not entry.get('readiness_revoked_at'):
             entry.update(readiness_revoked_at=now,readiness_revoked_until=due_at)
 
-    def _run(self,s,key,settings,held):
+    def _run(self,s,key,settings,held,slim,full,ref):
         state_key,box_key=key,'outbox:'+key
-        slim,full,ref=self._capture(s,settings)
         with fenced(self.store,key,held,self.clock,[state_key,box_key]) as records:
             now=self.clock()
             current=observe(records[state_key].get('state'),s,slim,now)
@@ -291,10 +290,11 @@ class ScheduledWorker:
                          for k in sorted(set(was)|set(now_),key=str) if was.get(k)!=now_.get(k)]
         return dict(status='ok',label='HISTORICAL',freshly_verified=False,regenerated=False,
                     artifact=dict(operation_id=op,evidence_as_of=receipt.get('evidence_as_of'),recorded_ready_at=held.get('finished_at'),
+                                  format=receipt.get('format'),render_version=receipt.get('render_version'),
                                   workbook_sha256=receipt.get('workbook_sha256'),checklist_sha256=receipt.get('checklist_sha256'),
                                   reflects='The source exactly as captured at evidence_as_of. Nothing observed later is in it.'),
                     latest_observation=dict(captured_at=latest.get('captured_at'),operation_id=current,scope_status=state.get('status')),
-                    relation='same_content_reused' if current==op else 'superseded_by_newer_content',
+                    relation='same_content_reused' if current==op else 'superseded_by_newer_operation',
                     photo_comparison='compared' if differences is not None else 'unavailable',
                     photo_evidence_differences=differences,generated_at=self.clock())
 

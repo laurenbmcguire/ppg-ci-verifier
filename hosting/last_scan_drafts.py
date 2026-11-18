@@ -66,7 +66,10 @@ def observe(previous, scope, snapshot, now):
     if latest and latest > captured:
         raise ValueError('Future scan requires clock review.')
     photos=[photo_identity(p) for p in snapshot.get('source_capture',{}).get('photos',[]) if p.get('record_id') in ids]
-    fingerprint = sf.digest(dict(rows=sorted(rows, key=lambda r:r['id']), photos=sorted(photos,key=sf.digest)))
+    # Rows of the day in no configured shift are warned about in the checklist, so a change in them is a change
+    # in what the draft must say: it makes a new operation instead of reusing a draft without the warning.
+    fingerprint = sf.digest(dict(rows=sorted(rows, key=lambda r:r['id']), photos=sorted(photos,key=sf.digest),
+                                 unassigned_shifts=snapshot.get('unassigned_shifts') or {}))
     changed = p.get('fingerprint') != fingerprint
     revision = (p.get('revision', 0) + 1) if changed else p['revision']
     # Initial old-data capture can become due immediately; a subsequently observed

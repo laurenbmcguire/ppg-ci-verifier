@@ -28,7 +28,7 @@ class Historical(unittest.TestCase):
         self.now = T1
         clock = mock.patch.object(sf, 'now', lambda: self.now); clock.start(); self.addCleanup(clock.stop)
         self.source = demo.Source(rows=demo.items(scanned_at=SCAN))
-        self.assignment = demo.assignment(recorded_shifts=['1'])
+        self.assignment = demo.assignment()                                 # shifts 1, 2 and 3 are configured; these tests follow shift 1
         self.scope = scope_key(dict(demo.SCOPE, client_id=demo.CLIENT, shift='1', zone='America/Chicago'))
         self.open()
 
@@ -56,7 +56,7 @@ class Historical(unittest.TestCase):
                          ('draft_ready', 'built_this_run', T1, T1))
         frozen = self.stored(op)
         checklist = json.loads(frozen['checklist.json'])
-        self.assertEqual((checklist['evidence_as_of'], checklist['format']), (T1, 'draft-checklist-v2'))
+        self.assertEqual((checklist['evidence_as_of'], checklist['format']), (T1, 'draft-checklist-v3'))
         self.assertIn('HISTORICAL RECORD', checklist['historical_notice']); self.assertIn(T1, checklist['historical_notice'])
         self.assertIn('HISTORICAL RECORD', frozen['checklist.txt'].decode())
         self.assertEqual({p['http_status'] for p in checklist['photo_evidence']}, {403})
@@ -116,7 +116,7 @@ class Historical(unittest.TestCase):
         self.assertTrue(changed['due_at'].startswith('2026-11-10T23:05'))   # new evidence: a full hour again
         p = self.worker.provenance(self.scope, old)
         self.assertEqual((p['label'], p['relation'], p['artifact']['evidence_as_of'], p['latest_observation']['captured_at'],
-                          p['latest_observation']['operation_id']), ('HISTORICAL', 'superseded_by_newer_content', T1, T4, changed['operation_id']))
+                          p['latest_observation']['operation_id']), ('HISTORICAL', 'superseded_by_newer_operation', T1, T4, changed['operation_id']))
         self.assertTrue(all(d['latest_observation']['status'] == 'supported' and d['in_this_draft']['status'] == 'unavailable'
                             for d in p['photo_evidence_differences']))
         self.assertEqual(self.stored(old), frozen)
@@ -149,8 +149,8 @@ class Historical(unittest.TestCase):
     def test_runner_receipt_carries_the_same_distinction(self):
         config = dict(enabled=True, assignments=[self.assignment])
         fetch = lambda scope, settings: source_adapter(scope, settings, capture_fn=lambda s: self.source.capture(s))
-        go = lambda rid: runner.run_once(self.store, config, fetch=fetch, render=self.router, run_id=rid, entries=demo.REGISTRY,
-                                         clock=lambda: self.now)['results'][0]
+        go = lambda rid: [r for r in runner.run_once(self.store, config, fetch=fetch, render=self.router, run_id=rid, entries=demo.REGISTRY,
+                                                     clock=lambda: self.now)['results'] if r['shift'] == '1'][0]
         self.source.photo = lambda url: (403, b'')
         first = go('r1')
         self.now = T2; self.source.photo = lambda url: (404, b'')
@@ -159,9 +159,73 @@ class Historical(unittest.TestCase):
         self.assertEqual((second['artifact_state'], second['evidence_as_of'], second['observed_at'], second['operation_id']),
                          ('historical_reused', T1, T2, first['operation_id']))
 
+    def old_version(self):
+        """Build a draft as an OLDER renderer would have (format v2, different renderer code)."""
+        import contextlib
+        from hosting.last_scan_local import NativeDraftPublisher
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(NativeDraftPublisher, 'FORMAT', 'draft-checklist-v2'))
+        stack.enter_context(mock.patch.object(NativeDraftPublisher, 'renderer_hash', staticmethod(lambda: 'older-renderer-code')))
+        return stack
+
+    def test_old_cached_v2_draft_is_never_reused_as_the_newer_warned_version(self):
+        rows = demo.items(scanned_at=SCAN)
+        for i in (30, 31, 32):
+            rows[i]['fields'][demo.MAP['fields']['shift']] = 'Night'        # rows in no configured shift
+        self.source.rows = rows
+        with self.old_version():
+            old = self.tick(T1, 403)
+        op_old = old['operation_id']; frozen = self.stored(op_old)
+        self.assertEqual(json.loads(frozen['checklist.json'])['format'], 'draft-checklist-v2')
+        self.open()                                                         # the newer code starts
+        new = self.tick(T2, 403)                                            # same source, nothing changed there
+        self.assertNotEqual(new['operation_id'], op_old)                    # NOT a reuse of the old draft
+        self.assertEqual((new['status'], new['artifact_state'], new['evidence_as_of'], new['unassigned_shifts']),
+                         ('draft_ready', 'built_this_run', T2, {'Night': 3}))
+        new_checklist = json.loads(self.publisher.read(new['operation_id'], 'checklist.json'))
+        self.assertEqual((new_checklist['format'], new_checklist['unassigned_shifts']), ('draft-checklist-v3', {'Night': 3}))
+        self.assertIn('3 row(s) with shift "Night"', self.publisher.read(new['operation_id'], 'checklist.txt').decode())
+        # the old draft: untouched, still readable, and described by ITS OWN version and capture time
+        self.assertEqual(self.stored(op_old), frozen)
+        p = self.worker.provenance(self.scope, op_old)
+        self.assertEqual((p['label'], p['relation'], p['artifact']['format'], p['artifact']['evidence_as_of'], p['latest_observation']['operation_id']),
+                         ('HISTORICAL', 'superseded_by_newer_operation', 'draft-checklist-v2', T1, new['operation_id']))
+        self.assertNotEqual(p['artifact']['render_version'], self.worker.provenance(self.scope, new['operation_id'])['artifact']['render_version'])
+        export = self.publisher.export(op_old)['provenance']
+        self.assertEqual((export['format'], export['evidence_as_of'], export['label']), ('draft-checklist-v2', T1, 'HISTORICAL'))
+        with self.store.transaction('outbox:' + sf.digest(self.scope)) as box:
+            self.assertEqual({k: v['status'] for k, v in box['entries'].items()}, {op_old: 'superseded', new['operation_id']: 'pending'})
+        with self.assertRaises(ValueError):                                 # asked to render under the old ID, the newer code refuses
+            self.publisher(dict(scope=self.scope), op_old)
+        again = self.tick(T3, 403)
+        self.assertEqual((again['operation_id'], again['artifact_state'], again['evidence_as_of']), (new['operation_id'], 'historical_reused', T2))
+
+    def test_renderer_code_and_format_are_both_part_of_the_render_version(self):
+        import hosting.last_scan_local as local
+        from hosting.last_scan_local import NativeDraftPublisher
+        base = self.publisher.render_version()
+        with mock.patch.object(NativeDraftPublisher, 'FORMAT', 'draft-checklist-v4'):
+            self.assertNotEqual(self.publisher.render_version(), base)
+        with mock.patch.object(NativeDraftPublisher, 'renderer_hash', staticmethod(lambda: 'edited')):
+            self.assertNotEqual(self.publisher.render_version(), base)
+        self.assertEqual(self.publisher.render_version(), base)
+        self.assertEqual(NativeDraftPublisher.FORMAT, 'draft-checklist-v3')
+        self.assertEqual(NativeDraftPublisher.renderer_hash(), sf.digest(Path(local.__file__).read_bytes()))
+
+    def test_a_newly_appearing_unassigned_row_is_a_new_operation_with_the_warning(self):
+        first = self.tick(T1, 403)
+        self.assertNotIn('unassigned_shifts', first)
+        clean = json.loads(self.publisher.read(first['operation_id'], 'checklist.json'))
+        self.assertEqual(clean['unassigned_shifts'], {})
+        self.source.rows[30]['fields'][demo.MAP['fields']['shift']] = 'Night'   # a row of another shift gets an unknown label
+        changed = self.tick(T2, 403)
+        self.assertNotEqual(changed['operation_id'], first['operation_id'])     # shift 1's own rows did not change, the warning did
+        self.assertEqual((changed['status'], changed['unassigned_shifts']), ('waiting', {'Night': 1}))
+        self.assertEqual(json.loads(self.publisher.read(first['operation_id'], 'checklist.json')), clean)   # old draft not rewritten
+
     def test_changed_checklist_format_is_a_new_operation_not_a_rewrite(self):
         op = self.tick(T1, 403)['operation_id']; frozen = self.stored(op)
-        with mock.patch.object(type(self.publisher), 'FORMAT', 'draft-checklist-v3'):
+        with mock.patch.object(type(self.publisher), 'FORMAT', 'draft-checklist-v4'):
             later = self.tick(T2, 403)
             self.assertNotEqual(later['operation_id'], op)
             self.assertEqual(later['artifact_state'], 'built_this_run')

@@ -21,9 +21,18 @@ class NativeDraftPublisher:
     def __init__(self, output, mapping, header, binding=None):
         self.output=Path(output);self.mapping=deepcopy(mapping);self.header=deepcopy(header)
         self.binding=exact_binding(binding) if binding is not None else None
-    FORMAT='draft-checklist-v2'      # v2: the checklist and receipt say which capture they are a record of
+    # v2: the checklist and receipt say which capture they are a record of.
+    # v3: the checklist reports rows of the day whose shift is in no verified assignment.
+    FORMAT='draft-checklist-v3'
+    @staticmethod
+    def renderer_hash():
+        """Hash of THIS file: the checklist, notes and receipt are written here, so any change to it is a new
+        render version and therefore a new operation. An older stored draft is then never reused as if it had
+        been written by the newer code."""
+        return sf.digest(Path(__file__).read_bytes())
     def render_version(self):
-        return sf.digest(dict(mapping=self.mapping,header=self.header,contract=wb.contract(),generator=wb.generator_hash(),binding=self.binding,format=self.FORMAT))
+        return sf.digest(dict(mapping=self.mapping,header=self.header,contract=wb.contract(),generator=wb.generator_hash(),
+                              binding=self.binding,format=self.FORMAT,renderer=self.renderer_hash()))
     def _own(self,scope):
         if self.binding is not None and exact_binding(scope or {})!=self.binding:
             raise ValueError('This publisher is bound to another client/site/list/job.')
@@ -147,7 +156,8 @@ class StoredDraftPublisher(NativeDraftPublisher):
         if receipt is None:raise LookupError('No stored draft for this operation.')
         files={name:self.artifacts.read(self.key(op),name) for name in ('draft.xlsx','checklist.json','checklist.txt')}
         return dict(files=files,provenance=dict(label='HISTORICAL',freshly_verified=False,regenerated=False,operation_id=op,
-                    evidence_as_of=receipt.get('evidence_as_of'),workbook_sha256=receipt['workbook_sha256'],
+                    evidence_as_of=receipt.get('evidence_as_of'),format=receipt.get('format'),render_version=receipt.get('render_version'),
+                    workbook_sha256=receipt['workbook_sha256'],
                     checklist_sha256=receipt['checklist_sha256'],binding=receipt.get('binding'),client_release='held',
                     note='Stored files are returned unchanged. They reflect the source as captured at evidence_as_of only.'))
     def __call__(self,snapshot,op):

@@ -876,6 +876,66 @@ class Timer(Base):
         self.assertEqual(env.worker().tick(env.scope, {})['status'], 'error'); self.assertIsNone(env.state())
 
 
+class OneWorkerManyScopes(Base):
+    """A worker keeps nothing about a capture on itself, so ticking two scopes at once cannot mix their results."""
+    def setup_two(self):
+        a = Env(self.store, shift='1'); b = Env(self.store, shift='2')
+        def fetch(scope, settings):
+            env = a if scope['shift'] == '1' else b
+            return dict(env.fetch(scope, settings), unassigned_shifts={'Night': 3} if scope['shift'] == '1' else {})
+        worker = ScheduledWorker(self.store, fetch, a.render, clock=a.clock, enabled=True)
+        return a, b, worker
+
+    def interleaved(self, first_to_finish_capture):
+        """Deterministic interleaving: both scopes finish capturing before either goes on."""
+        import threading
+        a, b, worker = self.setup_two()
+        original, done = worker._capture, {'1': threading.Event(), '2': threading.Event()}
+        other = {'1': '2', '2': '1'}
+        def capture(scope, settings):
+            if scope['shift'] != first_to_finish_capture:
+                done[other[scope['shift']]].wait(5)          # let the other scope capture first
+            result = original(scope, settings)
+            done[scope['shift']].set()
+            if scope['shift'] == first_to_finish_capture:
+                done[other[scope['shift']]].wait(5)          # ...and wait until the second has captured too
+            return result
+        worker._capture = capture
+        out = {}
+        threads = [threading.Thread(target=lambda env=env: out.update({env.scope['shift']: worker.tick(env.scope, {})})) for env in (a, b)]
+        for t in threads: t.start()
+        for t in threads: t.join(10)
+        return out, worker
+
+    def test_two_scopes_captured_at_the_same_time_keep_their_own_counts(self):
+        for first in ('1', '2'):
+            with self.subTest(first_capture=first):
+                self.store = StateStore(Path(self.folder.name) / ('two-%s.db' % first))
+                out, worker = self.interleaved(first)
+                self.assertEqual((out['1']['status'], out['2']['status']), ('waiting', 'waiting'))
+                self.assertEqual(out['1'].get('unassigned_shifts'), {'Night': 3})
+                self.assertNotIn('unassigned_shifts', out['2'])
+                self.assertNotEqual(out['1']['operation_id'], out['2']['operation_id'])
+
+    def test_worker_holds_no_per_capture_state(self):
+        a, b, worker = self.setup_two()
+        before = set(vars(worker))
+        one = worker.tick(a.scope, {}); worker.tick(b.scope, {})
+        self.assertEqual(set(vars(worker)), before)                          # ticking added no attribute to the worker
+        self.assertFalse([n for n in vars(worker) if 'unassigned' in n])
+        one['unassigned_shifts']['Night'] = 99                               # a caller editing its result changes nothing else
+        self.assertEqual(worker.tick(a.scope, {})['unassigned_shifts'], {'Night': 3})
+
+    def test_many_concurrent_ticks_of_both_scopes_never_mix(self):
+        from concurrent.futures import ThreadPoolExecutor
+        a, b, worker = self.setup_two()
+        with ThreadPoolExecutor(8) as pool:
+            results = list(pool.map(lambda i: (i % 2, worker.tick((a if i % 2 == 0 else b).scope, {})), range(40)))
+        for which, out in results:
+            if out['status'] == 'busy': continue
+            self.assertEqual(out.get('unassigned_shifts'), {'Night': 3} if which == 0 else None, out)
+
+
 class Blobs(Base):
     def test_photo_bytes_stay_out_of_the_state_row(self):
         env = Env(self.store); env.now = DUE
