@@ -40,6 +40,7 @@ inputs to that check; they are never the approval (that is the ApprovalAuthority
                                                        single-use nonce is reserved and the quota allows it
 A run builds DRAFTS only. Delivery transport stays disabled (hosting.last_scan_transport has no verified provider).
 """
+import json
 import math
 from copy import deepcopy
 import time
@@ -318,13 +319,22 @@ def snapshot_digest(config, entries, router, schemas=None, mapping=None, collect
                                                                 'schema_snapshot', 'schema_digest', 'mapping_contract', 'capture')} for m in mapping or []]))
 
 
-def _attested(deps, digest, principal):
+def _attestation(deps, digest):
+    """(record, why). ONE read of the approval authority, kept as one private copy of plain data. Every question about
+    an approval is put to this one record: nothing is ever combined from two answers, and an object that answers
+    differently each time it is asked is reduced to what it actually holds, once."""
     if not isinstance(deps.approvals, ApprovalAuthority):
-        return False, 'No approval authority is configured.'
+        return None, 'No approval authority is configured.'
     try:
-        record = deps.approvals.attestation(digest)
+        answer = deps.approvals.attestation(digest)
+        record = json.loads(sf.canonical(answer)) if isinstance(answer, dict) else None
     except Exception as error:
-        return False, 'The approval authority could not be read: ' + type(error).__name__
+        return None, 'The approval authority could not be read: ' + type(error).__name__
+    return record, ''
+
+
+def _judge(record, digest, principal):
+    """Whether this one record approves exactly this digest for this caller."""
     if not isinstance(record, dict) or record.get('snapshot_digest') != digest:
         return False, 'No approval exists for exactly this configuration, renderers and job registry.'
     if not all(isinstance(record.get(k), str) and record[k].strip() for k in ('approved_by', 'approved_at')):
@@ -333,6 +343,11 @@ def _attested(deps, digest, principal):
     if not isinstance(allowed, (list, tuple)) or principal.id not in allowed:
         return False, 'This caller is not named in the approval.'
     return True, ''
+
+
+def _attested(deps, digest, principal):
+    record, why = _attestation(deps, digest)
+    return (False, why) if why else _judge(record, digest, principal)
 
 
 def preflight(deps, principal):

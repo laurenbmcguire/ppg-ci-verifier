@@ -20,7 +20,7 @@ from hosting import last_scan_dispatch as dispatch, last_scan_hosted as hosted, 
 from hosting.last_scan_hosted import Quota
 from rehearsal_harness import DAY, LAUREN
 from test_last_scan_durable import FAKE_CONTRACT, trust
-from test_last_scan_hosted import BOB, FakeAuthorizer
+from test_last_scan_hosted import BOB, FakeApprovals, FakeAuthorizer
 from test_one_hour_rehearsal import HTTP_DATE, Base
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,7 +68,7 @@ class Dispatch(Base):
 
     def reapprove(self, principals=('alice',), **kw):
         """The FAKE approver approves a changed configuration or policy (run snapshot and dispatch digest)."""
-        code, dry = self.r.call(mode='dry_run', deps=self.r.deps(**{k: v for k, v in kw.items() if k == 'config'}))
+        code, dry = self.r.call(mode='dry_run', deps=self.r.deps(**{k: v for k, v in kw.items() if k in ('config', 'collectors')}))
         self.assertEqual(code, 200, dry)
         self.r.approvals.records[dry['snapshot_digest']] = dict(snapshot_digest=dry['snapshot_digest'], approved_by='rehearsal fake approver',
                                                                 approved_at=DAY, principals=list(principals))
@@ -439,6 +439,138 @@ class ReplayQuotaAndReceipts(Dispatch):
         self.assertEqual((code, body['status'], body['principal'], body['sources_read'], body['sender_calls']), (409, 'not_pending', 'bob', 0, 0))
         self.assertNotIn('outcome', body); self.assertNotIn('replayed', body)
         self.assertEqual(len(self.r.lauren.messages), 1)
+
+
+class OneRecordPerCheck(Dispatch):
+    """An approval is ONE record from the authority, judged whole. Two records are never combined into a valid one."""
+    def authority(self, answers, cycle=True):
+        """A FAKE authority that answers the dispatch digest with ``answers`` in turn; everything else as recorded."""
+        approved, records = self.approved, self.r.approvals.records
+        class Scripted(FakeApprovals):
+            def __init__(s):
+                s.records, s.asked, s.total = records, 0, 0
+            def attestation(s, digest):
+                s.total += 1
+                if digest != approved:
+                    return deepcopy(records.get(digest))
+                s.asked += 1
+                answer = answers[(s.asked - 1) % len(answers)] if cycle else answers[min(s.asked, len(answers)) - 1]
+                return answer() if callable(answer) else deepcopy(answer)
+        return Scripted()
+
+    def test_qa_repro_two_records_that_each_fail_never_add_up_to_an_approval(self):
+        good = self.r.approvals.records[self.approved]
+        wrong_action, wrong_principal = dict(good, action='not_dispatch'), dict(good, principals=['bob'])
+        for answers in ((wrong_action, wrong_principal), (wrong_principal, wrong_action)):
+            split = self.authority(answers)
+            body = self.refused(self.go(deps=self.r.dispatch_deps(approvals=split)), 'dispatch_approved_for_this_snapshot_recipients_contract_and_principal')
+            self.assertEqual(self.failed(body), ['dispatch_approved_for_this_snapshot_recipients_contract_and_principal'])
+            self.assertEqual(split.asked, 1)                                    # judged on the one record it was given
+        for pair in ((dict(good, snapshot_digest='another'), dict(good, approved_by=' ')), (dict(good, approved_at=None), dict(good, principals='alice')),
+                     ({k: v for k, v in good.items() if k != 'action'}, dict(good, principals=[]))):
+            for answers in (pair, pair[::-1]):
+                self.refused(self.go(deps=self.r.dispatch_deps(approvals=self.authority(answers))))
+
+    def test_one_read_of_each_approval_per_check(self):
+        counting = self.authority((self.r.approvals.records[self.approved],))
+        self.assertEqual(self.go(deps=self.r.dispatch_deps(approvals=counting))[1]['status'], 'sent')
+        self.assertEqual((counting.asked, counting.total), (2, 4))              # run + dispatch before the reservation, and again after the re-read
+
+    def test_a_record_that_answers_differently_each_time_it_is_asked_is_taken_once_as_plain_data(self):
+        good = self.r.approvals.records[self.approved]
+        class Shifty(dict):                                                     # stored: not approved for dispatch. Asked: says whatever passes
+            def get(self, key, default=None):
+                return dispatch.ACTION if key == 'action' else ['alice'] if key == 'principals' else super().get(key, default)
+            def __deepcopy__(self, memo):
+                return self
+        for stored in (dict(good, action='not_dispatch'), dict(good, principals=['bob'])):
+            self.refused(self.go(deps=self.r.dispatch_deps(approvals=self.authority((lambda: Shifty(stored),)))))
+        shared = deepcopy(good)                                                 # the authority hands out a record and withdraws it afterwards
+        def hand_out():
+            later = dict(shared)
+            shared['action'] = 'not_dispatch'
+            return later
+        code, body = self.go(deps=self.r.dispatch_deps(approvals=self.authority((hand_out,))))
+        self.assertEqual((code, body['status'], body['refusal'], body['sender_calls']), (409, 'held', 'dispatch_approval_withdrawn', 0))
+        for junk in (dict(good, principals={'alice'}), [good], 'approved', dict(good, extra=float('nan')), dict(good, action=[dispatch.ACTION])):
+            self.assertEqual(self.go(deps=self.r.dispatch_deps(approvals=self.authority((lambda j=junk: j,))))[1]['status'], 'not_authorized')
+        self.assertEqual(self.r.lauren.calls, 0)
+
+    def test_valid_before_the_read_and_split_after_it_stops_the_claim(self):
+        good = self.r.approvals.records[self.approved]
+        for later in (dict(good, action='not_dispatch'), dict(good, principals=['bob'])):
+            code, body = self.go(deps=self.r.dispatch_deps(approvals=self.authority((good, later), cycle=False)))
+            self.assertEqual((code, body['status'], body['refusal'], body['sources_read'], body['sender_calls']), (409, 'held', 'dispatch_approval_withdrawn', 1, 0))
+        self.assertEqual(self.r.lauren.calls, 0)
+
+
+class CaptureIdentity(Dispatch):
+    """The capture receipt re-checked after the re-read must be the SAME receipt that was approved, not merely a valid one."""
+    def setUp(self):
+        super().setUp()
+        self.two = (rh.COLLECTOR, 'second-collector')                           # both accepted by the (fake) server-side policy
+        self.approved = self.reapprove(collectors=self.two)
+        self.identity = next(k for k, v in self.r.captures.records.items() if v['list_id'] == rh.CLIENTS['alpha']['list_id'])
+        self.original = deepcopy(self.r.captures.records)
+
+    def changed_during_the_read(self, change):
+        def fetch(scope, settings):
+            change(self.r.captures.records)                                     # after every earlier check passed
+            return self.r.fetch(scope, settings)
+        return self.go(deps=self.r.dispatch_deps(collectors=self.two, fetch=fetch))
+
+    def restore(self):
+        self.r.captures.records.clear(); self.r.captures.records.update(deepcopy(self.original))
+
+    def test_qa_repro_another_accepted_collector_is_another_receipt(self):
+        code, body = self.changed_during_the_read(lambda records: records[self.identity].update(collector='second-collector'))
+        self.assertEqual((code, body['status'], body['refusal'], body['sources_read'], body['sender_calls']),
+                         (409, 'held', 'capture_receipt:identity_changed_since_approval', 1, 0), body)
+        self.assertEqual(self.r.lauren.calls, 0)
+        # the receipt stays changed: the run snapshot is now a different one, and nothing is approved for it
+        body = self.go(deps=self.r.dispatch_deps(collectors=self.two))[1]
+        self.assertEqual((body['status'], body['sender_calls']), ('not_authorized', 0))
+        self.assertIn('approval_attested_for_this_snapshot_and_principal', self.failed(body))
+        self.restore()
+        self.assertEqual(self.go(deps=self.r.dispatch_deps(collectors=self.two))[1]['status'], 'sent')
+
+    def test_every_change_to_the_receipt_stops_the_claim(self):
+        other = next(k for k in self.original if k != self.identity)
+        changes = dict(
+            collector=lambda r: r[self.identity].update(collector='second-collector'),
+            captured_at=lambda r: r[self.identity].update(captured_at='2026-11-10T18:31:00+00:00'),
+            captured_at_missing=lambda r: r[self.identity].pop('captured_at'),
+            site=lambda r: r[self.identity].update(site_id=rh.CLIENTS['bravo']['site_id']),
+            list=lambda r: r[self.identity].update(list_id=rh.CLIENTS['bravo']['list_id']),
+            schema_digest=lambda r: r[self.identity].update(schema_digest='0' * 64),
+            snapshot_identity=lambda r: r[self.identity].update(snapshot_identity=other),
+            another_lists_receipt=lambda r: r.update({self.identity: deepcopy(r[other])}),
+            collector_not_accepted=lambda r: r[self.identity].update(collector='stranger'),
+            revoked=lambda r: r.pop(self.identity),
+            missing=lambda r: r.update({self.identity: None}),
+            not_a_record=lambda r: r.update({self.identity: 'receipt'}))
+        for name, change in changes.items():
+            with self.subTest(name):
+                code, body = self.changed_during_the_read(change)
+                self.assertEqual((code, body['status'], body['sources_read'], body['sender_calls']), (409, 'held', 1, 0), body)
+                self.assertTrue(body['refusal'].startswith('capture_receipt:'), body['refusal'])
+                try:
+                    self.assertEqual((self.r.lauren.calls, self.entry().get('delivery_status')), (0, None))
+                finally:
+                    self.restore()
+        self.assertEqual(self.go(deps=self.r.dispatch_deps(collectors=self.two))[1]['status'], 'sent')
+
+    def test_the_same_instant_written_another_way_is_the_same_receipt(self):
+        self.assertEqual(self.original[self.identity]['captured_at'], '2026-11-10T18:30:00+00:00')
+        dry = lambda: self.go(deps=self.r.dispatch_deps(collectors=self.two), mode='dry_run')[1]
+        for same in ('2026-11-10T18:30:00Z', '2026-11-10T19:30:00+01:00', '2026-11-10T12:30:00.000000-06:00'):
+            self.r.captures.records[self.identity]['captured_at'] = same        # no new approval is needed: it is the same receipt
+            body = dry()
+            self.assertEqual((body['authorized'], body['dispatch_digest']), (True, self.approved), same)
+        code, body = self.changed_during_the_read(lambda records: records[self.identity].update(captured_at='2026-11-10T13:30:00-05:00'))
+        self.assertEqual((code, body['status']), (200, 'sent'))
+        self.r.captures.records[self.identity]['captured_at'] = '2026-11-10T18:30:01+00:00'   # one second later is another capture
+        self.assertEqual(dry()['authorized'], False)
 
 
 class Concurrent(Dispatch):

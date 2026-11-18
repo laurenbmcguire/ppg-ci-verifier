@@ -36,7 +36,8 @@ is a wiring boundary, not cryptographic authenticity.
   6. ONE transaction takes the single-use nonce, the hourly dispatch quota, the intent record (per caller and
      dispatch_id) and a single-use, short-lived grant for the transport door;
   7. under the scope's fenced lease the worker probes the live schema, re-reads the source, and this module re-asks
-     the approval and capture authorities; then one fenced transaction re-observes freshness and the quiet period and
+     the approval and capture authorities (each approval as ONE record judged whole; the capture receipt must be the
+     same receipt that was approved, not merely a valid one); then one fenced transaction re-observes freshness and the quiet period and
      claims the entry, and only then is the sender called, once.
 A repeated dispatch_id from the same caller returns the recorded outcome without reading or sending. An interrupted
 one is reported as interrupted and never repeated here: the outbox entry is the record, and an uncertain delivery is
@@ -112,14 +113,14 @@ def dispatch_digest(snapshot, recipients, contract):
 
 
 def _approved(base, digest, principal):
-    ok, why = hosted._attested(base, digest, principal)
+    """ONE record from the authority, read once, judged whole: digest, approver, caller and action all on that record."""
+    record, why = hosted._attestation(base, digest)
+    if why:
+        return False, why
+    ok, why = hosted._judge(record, digest, principal)
     if not ok:
         return False, why
-    try:
-        record = base.approvals.attestation(digest)
-    except Exception as error:
-        return False, 'The approval authority could not be read: ' + type(error).__name__
-    if not isinstance(record, dict) or record.get('action') != ACTION:
+    if record.get('action') != ACTION:
         return False, 'The approval is not for the dispatch action.'
     return True, ''
 
@@ -316,7 +317,11 @@ def handle(method, headers, body, deps):
             if not still:
                 seen['refusal'] = name + '_withdrawn'
                 raise Revoked(reason)
-        reasons, _ = hosted.capture_problems(base, schema, row)
+        # The receipt must be the SAME one the approval covered (collector, capture instant, origin; its site, list,
+        # schema and snapshot are checked against the frozen row), not merely one that is valid now.
+        reasons, capture = hosted.capture_problems(base, schema, row)
+        if not reasons and capture != row['capture']:
+            reasons = ['identity_changed_since_approval']
         if reasons:
             seen['refusal'] = 'capture_receipt:' + ','.join(reasons)
             raise Revoked(seen['refusal'])
