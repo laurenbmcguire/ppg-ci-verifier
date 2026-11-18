@@ -16,6 +16,17 @@ from hosting import source_first_layout as lx
 
 ASSETS=Path(__file__).resolve().parent/'assets'/'source_first'
 UNKNOWN_PART='Part number UNKNOWN (blank at source)'
+def unknown_part_label(shown):
+    """The by-part line for records with no part number.
+
+    Which line that is is decided by the record having no part number, never by what the line says. The wording only has
+    to be readable; if a real part number happens to read the same, this line says more so the two can be told apart.
+    """
+    plain=lambda text:' '.join(str(text).split()).casefold()
+    taken={plain(text) for text in shown if text is not None};label=UNKNOWN_PART;n=0
+    while plain(label) in taken:
+        n+=1;label=UNKNOWN_PART+' - no part number was recorded'+('' if n==1 else f' ({n})')
+    return label
 HEADER_FIELDS=('area','service_type','description','paying_client','client_contact','worksite','prepared_by','part_name')
 
 
@@ -292,7 +303,7 @@ def build(rows,head,cap,bind,blobs):
         if blob is None or sf.digest(blob)!=sha:raise sf.ReviewError('Selected original photo bytes are missing or changed.')
         put(photo_sheet,f'{col}{base}',f"Record {item} · {row['resolved']['reject_reason'] or 'Recorded defect'}")
         put(photo_sheet,f'{col}{base+1}','ID '+row['resolved']['identifier'])
-        put(photo_sheet,f'{col}{base+2}',row['resolved']['shift']+' · Part '+(row['resolved']['part'] if row['resolved']['part'] is not None else 'number UNKNOWN'))
+        put(photo_sheet,f'{col}{base+2}',row['resolved']['shift']+' · '+('Part '+row['resolved']['part'] if row['resolved']['part'] is not None else 'No part number at source'))   # a real part always reads "Part ..."
         put(photo_sheet,f'{col}{base+13}',display(row,'comments',row['resolved']['comments']))
         put(photo_sheet,f'{col}{base+15}','Original source photo · '+sha[:12])
         sh,rn=locations[item];link=f'HYPERLINK("#\'{photo_sheet}\'!{col}{base}","View source photo")'
@@ -311,12 +322,16 @@ def build(rows,head,cap,bind,blobs):
     text_cells.update((photo_sheet,col+str(r)) for r in range(8,21+layout['reject_extra']) for col in ('C','D','I'))
     # All parts receive distinct exact source-string rows, with formula totals
     # referencing the complete reviewed detail range rather than a top-N list.
-    part_totals={}
+    part_totals={};part_groups=[]
+    first={part:next(r for r in rows if r['resolved']['part']==part) for part in layout['parts']}
+    shown={part:display(first[part],'part',part) for part in layout['parts'] if part is not None}
+    unknown_label=unknown_part_label([*shown,*shown.values()])
     for i,part in enumerate(layout['parts'],29):
         part_rows=[r for r in rows if r['resolved']['part']==part]
         part_totals[part]={f:known_sum(r['resolved'][f] for r in part_rows) for f in sf.QUANTITIES}
         # A record with no part number at the source keeps its own line. The label says it is unknown; no number is put in.
-        actual(summary,'B'+str(i),UNKNOWN_PART if part is None else display(part_rows[0],'part',part))
+        actual(summary,'B'+str(i),unknown_label if part is None else shown[part])
+        part_groups.append(dict(part=part,missing=part is None,label=unknown_label if part is None else shown[part],summary_row=i,**part_totals[part]))
         actual(summary,'E'+str(i),head.get('part_name') or None if len(layout['parts'])==1 else None)
         purposes={r['resolved']['inspected_for'] for r in part_rows if r['resolved']['inspected_for'] is not None}
         actual(summary,'H'+str(i),display(next(r for r in part_rows if r['resolved']['inspected_for'] is not None),'inspected_for',next(iter(purposes))) if len(purposes)==1 else 'See detail' if purposes else None)
@@ -387,8 +402,13 @@ def build(rows,head,cap,bind,blobs):
     raw=tx.packed(p)
     budgets=lx.package_limits(p,roots,raw)
     verification=verify(raw,rows,head,cap,bind,expected,locations,photo_expect,layout,text_entries)
-    # Keyed by part number as text; the records with no part number are reported under the same label the sheet shows.
-    verification['part_totals']={UNKNOWN_PART if part is None else part:totals_ for part,totals_ in part_totals.items()}
+    # What a group is and what its line says are kept apart. `part_groups` is every by-part line in order: `part` is the
+    # part number as text, or None with `missing` true for the records that have none; `label` is only the wording shown.
+    # `part_totals` is keyed by real part numbers alone, so a part whose number reads like the unknown wording can never
+    # take the place of, or be replaced by, the records with no part number. Those are in `unknown_part_totals`.
+    verification['part_groups']=part_groups
+    verification['part_totals']={part:totals_ for part,totals_ in part_totals.items() if part is not None}
+    verification['unknown_part_totals']=part_totals.get(None)
     verification['output_budgets']=budgets
     return raw,verification
 
