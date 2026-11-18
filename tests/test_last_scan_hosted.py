@@ -468,7 +468,8 @@ class NotConnected(unittest.TestCase):
             if path.is_file():
                 self.assertIsNone(names.search(path.read_text(errors='ignore')), str(path))
         allowed = {'last_scan_hosted.py', 'last_scan_runner.py', 'last_scan_transport.py', 'last_scan_service.py',
-                   'last_scan_store.py', 'last_scan_local.py', 'last_scan_drafts.py'}
+                   'last_scan_store.py', 'last_scan_local.py', 'last_scan_drafts.py',
+                   'last_scan_readiness.py'}                    # offline validator: reuses the runner's exact registry rule, runs nothing
         for path in (ROOT / 'hosting').glob('*.py'):
             if path.name not in allowed:
                 self.assertIsNone(names.search(path.read_text(errors='ignore')), str(path))
