@@ -20,35 +20,53 @@ def hold_until(cool, observed, *, default=DEFAULT_COOLDOWN, minimum=MIN_COOLDOWN
     """When a source that asked for a wait may be read again. Pure: uses only ``observed``, the caller's own clock
     reading at the moment it saw the answer, so it cannot disagree with the clock the caller later compares with.
 
-    The provider's wait is never shortened. A relative wait is ``observed`` plus the stated seconds; an absolute date
-    is kept as stated; both however far away. A stated wait that cannot be represented as a time at all (a number of
-    seconds beyond the calendar, or too many digits to be a number) returns ``until=None`` with
-    ``manual_release_required=True``: the source is not read again until a person releases it. Nothing usable stated
-    (absent, malformed, negative) waits the default. The result is never before ``observed + minimum``."""
+    The policy, in one place:
+      * NOTHING STATED (no Retry-After header at all): wait the default.
+      * A whole number of seconds: ``observed`` plus that many seconds. An absolute date: as stated. Both are kept in
+        full, however far away; the provider's wait is never shortened.
+      * SOMETHING STATED THAT CANNOT BE SAFELY INTERPRETED (words, a negative or fractional number, a date with no
+        zone or beyond the calendar, an empty value, a number too large to be a time): no end time is invented.
+        ``until`` is None and ``manual_release_required`` is True: the source is not read again until a person
+        releases it. A default wait is never substituted, because it could be shorter than what the provider meant.
+      * SEVERAL DIFFERENT VALUES (``basis`` 'conflict'): if any one of them needs a person, the whole answer does;
+        otherwise the one that ends latest is used. Never the first or the last as they happened to arrive.
+    The result is never before ``observed + minimum``."""
     c = cool if isinstance(cool, dict) else {}
-    until, basis, manual, seconds = None, 'default', False, c.get('seconds')
-    if c.get('basis') == 'relative_seconds':
-        if isinstance(seconds, int) and not isinstance(seconds, bool) and seconds >= 0:
-            basis = 'relative_seconds'
-            try:
-                until = observed + timedelta(seconds=seconds)
-            except OverflowError:
-                manual = True
-        elif c.get('unrepresentable') is True:
-            basis, manual = 'relative_seconds', True
-    elif c.get('known') is True and c.get('not_before'):
-        try:
-            until, basis = instant(c['not_before']), 'http_date'
-        except (ValueError, OverflowError):
-            until = None
-    if not manual:
-        if until is None:
-            until, basis = observed + default, 'default'
-        if until < observed + minimum:
+    seconds = c.get('seconds')
+    def result(until, basis, manual=False):
+        if not manual and until < observed + minimum:
             until = observed + minimum
-    return dict(until=None if manual else until, basis=basis, manual_release_required=manual,
-                needs_attention=manual or until - observed > ATTENTION_COOLDOWN,
-                stated_seconds=seconds if basis == 'relative_seconds' and isinstance(seconds, int) and not isinstance(seconds, bool) and seconds < 10 ** 15 else None)
+        return dict(until=None if manual else until, basis=basis, manual_release_required=manual,
+                    needs_attention=manual or until - observed > ATTENTION_COOLDOWN,
+                    stated_seconds=seconds if basis == 'relative_seconds' and isinstance(seconds, int) and not isinstance(seconds, bool) and seconds < 10 ** 15 else None)
+    basis = c.get('basis')
+    if cool is not None and not isinstance(cool, dict):
+        return result(None, 'invalid', manual=True)          # a wait was reported in a form that cannot be read
+    if basis == 'conflict':
+        candidates = c.get('candidates')
+        if not isinstance(candidates, list) or not candidates or not all(isinstance(x, dict) and x.get('basis') != 'conflict' for x in candidates):
+            return result(None, 'conflict', manual=True)
+        parts = [hold_until(x, observed, default=default, minimum=minimum) for x in candidates]
+        if any(p['manual_release_required'] for p in parts):
+            return result(None, 'conflict', manual=True)
+        return result(max(p['until'] for p in parts), 'conflict')
+    if basis == 'relative_seconds':
+        if isinstance(seconds, int) and not isinstance(seconds, bool) and seconds >= 0:
+            try:
+                return result(observed + timedelta(seconds=seconds), 'relative_seconds')
+            except OverflowError:
+                return result(None, 'relative_seconds', manual=True)
+        return result(None, 'relative_seconds' if c.get('unrepresentable') is True else 'invalid', manual=True)
+    if basis == 'invalid':
+        return result(None, 'invalid', manual=True)
+    if c.get('known') is True and c.get('not_before'):
+        try:
+            return result(instant(c['not_before']), 'http_date')
+        except (ValueError, OverflowError):
+            return result(None, 'invalid', manual=True)
+    if c.get('retry_after') is not None or c.get('known') is True or basis is not None:
+        return result(None, 'invalid', manual=True)          # an older or damaged record that says something was stated
+    return result(observed + default, 'default')
 
 
 def instant(value):

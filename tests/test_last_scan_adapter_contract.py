@@ -279,14 +279,20 @@ class RateLimitsAndRetries(Harness):
             clock[0] = until.isoformat()
             self.assertEqual(self.run_once(good, 'r3', clock=lambda: clock[0])['counts'], {'draft_ready': 3})
 
-    def test_unstated_or_unreadable_retry_time_waits_the_default(self):
-        for headers in ({}, {'Retry-After': None}, {'Retry-After': 'soon'}):
+    def test_unstated_retry_time_waits_the_default_and_an_unreadable_one_needs_a_person(self):
+        clock = '2026-11-10T21:35:00+00:00'
+        for headers in ({}, {'Retry-After': None}):                             # nothing stated
             self.setUp()
-            clock = '2026-11-10T21:35:00+00:00'
             with mock.patch.object(sf, 'now', lambda: clock):
                 out = self.run_once(self.throttled(headers), clock=lambda: clock)
             held = [r for r in out['results'] if r.get('cooldown_until')]
             self.assertEqual([r['cooldown_until'] for r in held], ['2026-11-10T21:50:00+00:00'], headers)
+        self.setUp()                                                            # something stated that cannot be read: no default is substituted
+        with mock.patch.object(sf, 'now', lambda: clock):
+            out = self.run_once(self.throttled({'Retry-After': 'soon'}), clock=lambda: clock)
+        failed = [r for r in out['results'] if r['status'] == 'error']
+        self.assertEqual([(r.get('cooldown_until'), r.get('manual_release_required')) for r in failed], [(None, True)])
+        self.assertEqual(sorted(r['status'] for r in out['results']), ['cooldown', 'cooldown', 'error'])
 
     def test_service_unavailable_on_the_list_identity_also_holds(self):
         clock = '2026-11-10T21:35:00+00:00'

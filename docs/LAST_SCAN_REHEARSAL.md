@@ -59,10 +59,18 @@ Clock mismatch found through the rehearsal and fixed afterwards: a relative `Ret
 a time using the wall clock inside the capture code and then compared with the runner's own clock. With the capture
 clock two minutes behind, a 60-second wait had already "expired" and all three shifts of the same site were read in
 one poll. The runner now counts a relative wait on its own clock from the moment it saw the answer
-(`last_scan_drafts.hold_until`), keeps an absolute date as stated, waits 15 minutes when nothing usable was stated
-and never less than 60 seconds. The provider's wait is never shortened: any wait that can be written as a time is
-kept in full, however long (one over 7 days is also flagged for a person). A wait that cannot be written as a time
-at all is held with no end, and only a named manual release clears it. The hold is one record per site, merged so
+(`last_scan_drafts.hold_until`) and keeps an absolute date as stated. The policy:
+
+| What the source said | Hold |
+|---|---|
+| No `Retry-After` header at all | 15 minutes (default) |
+| A whole number of seconds, or an HTTP date | Kept in full, however long; never under 60 seconds; over 7 days also flagged |
+| Something stated that cannot be safely read (words, negative or fractional number, empty value, a date with no zone or beyond the calendar, a number too large to be a time) | No end time; a named manual release is required. The default is never substituted, because it could be shorter than what the provider meant |
+| Several different values (for example under differently cased header names) | If any one needs a person, the whole answer does; otherwise the one that ends latest. Never first or last as they arrived |
+
+The header name is matched without regard to case. Because of the first row, this code does not claim that it
+never reads earlier than a provider intended: when a provider sends no header at all, the 15-minute default is a
+guess. The 15 minutes and 60 seconds are placeholders awaiting an owner's decision. The hold is one record per site, merged so
 that a later answer can only extend it, and it is honoured before any request to that site: polls, the hosted
 schema probes, and dispatch re-reads, across workers and restarts. See `tests/test_last_scan_cooldown_clock.py`.
 

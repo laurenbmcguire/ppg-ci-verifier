@@ -156,11 +156,20 @@ class ValuePolicy(Base):
         (until,) = self.until(out)
         return until
 
-    def test_malformed_negative_or_missing_values_wait_the_default(self):
+    def test_no_header_at_all_waits_the_default(self):
         self.assertEqual(runner.DEFAULT_COOLDOWN, timedelta(minutes=15))
         for status in (429, 503):
-            for value in (..., '', ' ', 'soon', '-5', '-60', '1.5', '60s', '1e3', '0x10', '+60', '６０', 'Tue, 99 Nov 2026 19:21:00 GMT', 'Tue, 10 Nov 2026 19:21:00'):
-                self.assertEqual(self.one(value, status), '2026-11-10T19:15:00+00:00', (status, value))
+            self.assertEqual(self.one(..., status), '2026-11-10T19:15:00+00:00', status)
+
+    def test_a_stated_but_unreadable_wait_is_never_replaced_by_the_default(self):
+        for status in (429, 503):
+            for value in ('', ' ', 'soon', '-5', '-60', '1.5', '60s', '1e3', '0x10', '+60', '６０', 'Tue, 99 Nov 2026 19:21:00 GMT', 'Tue, 10 Nov 2026 19:21:00'):
+                self.r = Rehearsal(self)
+                self.down('alpha', value, status)
+                out = self.poll()
+                self.assertEqual(self.alpha(out), ['cooldown', 'cooldown', 'error'], (status, value))
+                self.assertEqual({(v.get('cooldown_until'), v.get('manual_release_required')) for k, v in out.items() if k[0] == 'alpha' and v['status'] == 'error'},
+                                 {(None, True)}, (status, value))
 
     def test_zero_or_tiny_values_wait_the_minimum(self):
         self.assertEqual(runner.MIN_COOLDOWN, timedelta(seconds=60))
@@ -432,13 +441,15 @@ class TheConversionItself(unittest.TestCase):
         day = timedelta(days=1)
         cases = [(dict(retry_after='60', known=True, basis='relative_seconds', seconds=60, not_before='1999-01-01T00:00:00+00:00'), 60, 'relative_seconds'),
                  (dict(retry_after='x', known=True, not_before='2026-11-10T19:21:00+00:00'), 21 * 60, 'http_date'),          # the older shape, no basis: an absolute time
-                 (dict(retry_after=None, not_before=None, known=False), 15 * 60, 'default'), (None, 15 * 60, 'default'), ('wait', 15 * 60, 'default'),
-                 (dict(known=True, basis='relative_seconds', seconds='60'), 15 * 60, 'default'), (dict(known=True, basis='relative_seconds', seconds=True), 15 * 60, 'default'),
-                 (dict(known=True, basis='relative_seconds', seconds=-5), 15 * 60, 'default'), (dict(known=True, not_before='not a time'), 15 * 60, 'default'),
-                 (dict(known=True, not_before='2026-11-10T19:21:00'), 15 * 60, 'default')]
+                 (dict(retry_after=None, not_before=None, known=False), 15 * 60, 'default'), (None, 15 * 60, 'default'), ({}, 15 * 60, 'default')]
         for cool, seconds, basis in cases:
             out = hold_until(cool, self.NOW, default=timedelta(minutes=15), minimum=timedelta(seconds=60))
-            self.assertEqual((out['until'], out['basis']), (self.NOW + timedelta(seconds=seconds), basis), cool)
+            self.assertEqual((out['until'], out['basis'], out['manual_release_required']), (self.NOW + timedelta(seconds=seconds), basis, False), cool)
+        for damaged in ('wait', 5, ['60'], dict(known=True, basis='relative_seconds', seconds='60'), dict(known=True, basis='relative_seconds', seconds=True),
+                        dict(known=True, basis='relative_seconds', seconds=-5), dict(known=True, not_before='not a time'), dict(known=True, not_before='2026-11-10T19:21:00'),
+                        dict(known=True), dict(basis='something-new')):
+            out = hold_until(damaged, self.NOW)                                  # a record that says a wait was stated but cannot be read: a person, not a guess
+            self.assertEqual((out['until'], out['manual_release_required']), (None, True), damaged)
 
 
 class SchemaAdapterWait(unittest.TestCase):

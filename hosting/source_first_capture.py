@@ -20,17 +20,28 @@ class CaptureFailure(sf.ReviewError):
         self.evidence = deepcopy(evidence)
 
 
-def cooldown(headers):
-    """What the provider said about waiting, kept apart from any clock.
+def _retry_after_values(headers):
+    """Every Retry-After value in the headers. HTTP header names are case-insensitive, and a transport may hand them
+    over in any casing, more than once, or as a list; none of those may make a stated wait disappear."""
+    if not hasattr(headers, 'items'):
+        return []
+    out = []
+    for name, value in headers.items():
+        if isinstance(name, str) and name.strip().lower() == 'retry-after':
+            out += [v for v in (value if isinstance(value, (list, tuple)) else [value]) if v is not None]
+    return out
 
-    ``basis`` says which kind of answer it was. For 'relative_seconds' the stated number is in ``seconds``; a caller
-    with its own clock should add that to the time IT saw the answer (hosting.last_scan_drafts.hold_until) and not
-    use ``not_before``, which for a relative wait is only this process's wall clock plus the seconds and is kept
-    for the existing source-first service. For 'http_date' ``not_before`` is the provider's absolute time."""
-    value = (headers or {}).get('Retry-After')
-    if value is None:
-        return {'retry_after': None, 'not_before': None, 'known': False}
-    text = str(value)
+
+def _retry_after(value):
+    """One stated Retry-After value, kept apart from any clock."""
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = bytes(value).decode('ascii')
+        except UnicodeDecodeError:
+            return {'retry_after': repr(value)[:200], 'not_before': None, 'known': False, 'basis': 'invalid'}
+    text = value.strip() if isinstance(value, str) else str(value) if isinstance(value, int) and not isinstance(value, bool) else None
+    if text is None:                                        # a boolean, a float, a mapping: not a header value
+        return {'retry_after': repr(value)[:200], 'not_before': None, 'known': False, 'basis': 'invalid'}
     if re.fullmatch(r'[0-9]+', text):                       # ASCII digits only: a whole number of seconds
         try:
             seconds = int(text)
@@ -42,11 +53,42 @@ def cooldown(headers):
             due = None
         return {'retry_after': text[:64], 'not_before': due, 'known': due is not None, 'basis': 'relative_seconds', 'seconds': seconds}
     try:
-        due = parsedate_to_datetime(value)
+        due = parsedate_to_datetime(text)
         if due.tzinfo is None: raise ValueError('Unknown timezone')
         return {'retry_after': text, 'not_before': due.astimezone(timezone.utc).isoformat(), 'known': True, 'basis': 'http_date'}
-    except (TypeError, ValueError, OverflowError):
-        return {'retry_after': text, 'not_before': None, 'known': False}
+    except (TypeError, ValueError, OverflowError, IndexError):
+        # Something WAS stated, and it cannot be read as a wait (words, a negative or fractional number, a date with
+        # no zone or beyond the calendar, an empty value). This is not the same as no header: see hold_until.
+        return {'retry_after': text[:200], 'not_before': None, 'known': False, 'basis': 'invalid'}
+
+
+def cooldown(headers):
+    """What the provider said about waiting, kept apart from any clock.
+
+    No Retry-After at all returns ``{'retry_after': None, 'not_before': None, 'known': False}`` with no ``basis``.
+    Otherwise ``basis`` says what was stated:
+      'relative_seconds'  a whole number of seconds, in ``seconds``. A caller with its own clock adds that to the time
+                          IT saw the answer (hosting.last_scan_drafts.hold_until) and does not use ``not_before``, which
+                          for a relative wait is only this process's wall clock plus the seconds, kept for the existing
+                          source-first service.
+      'http_date'         the provider's absolute time, in ``not_before``.
+      'invalid'           a value was stated but cannot be read as a wait. ``known`` is False and there is no deadline.
+      'conflict'          more than one different value was stated (for example under differently cased names). All of
+                          them are in ``candidates``; none is picked here, because comparing a number of seconds with
+                          a date needs the caller's clock. ``known`` is False and there is no deadline.
+    The header name is matched without regard to case."""
+    stated, seen = [], set()
+    for value in _retry_after_values(headers):
+        one = _retry_after(value)
+        key = (one.get('basis'), one.get('seconds'), one['retry_after'])
+        if key not in seen:
+            seen.add(key); stated.append(one)
+    if not stated:
+        return {'retry_after': None, 'not_before': None, 'known': False}
+    if len(stated) == 1:
+        return stated[0]
+    return {'retry_after': ' | '.join(sorted(s['retry_after'][:40] for s in stated))[:200], 'not_before': None, 'known': False,
+            'basis': 'conflict', 'candidates': stated}
 
 
 def graph_fetch(url):
