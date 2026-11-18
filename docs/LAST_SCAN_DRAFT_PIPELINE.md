@@ -51,3 +51,26 @@ must be disclosed. Historical backfill is not discovery. Partial captures must
 produce an operational issue notification, not silently disappear. Independent
 complete jobs should continue if another scope fails. Drafts remain held but
 must be provided to Lauren with issues, not blocked solely for missing values.
+
+## Follow-on adapters and read-only proof
+last_scan_service.py adds terminal Graph list discovery for explicitly configured
+sites. Only verified explicit active assignments become scopes; unmapped and absent
+lists are issues, not guessed clients. Source adapter invokes sealed Graph capture,
+requiring separately verified timestamp semantics. The caller supplies business
+dates/shifts from operational configuration, not a fixed default.
+
+ScheduledWorker supports an injected clock, persistent polling lease/token fencing,
+post-render source recapture, stale draft suppression and a durable Lauren-only
+test outbox. Expired leases can restart. Uncertain sends cannot automatically
+repeat; successful acknowledgments are retained even when delivery was superseded
+in flight. This cannot retract an already-sent stale draft. No real sender or
+hosted scheduler installed. Lease refresh beyond300s not implemented; workers
+expire safely and need reconciliation. SQLite remains single-host only.
+
+Live delegated connector read-only observation on 2026-11-18: SL Alabama2207
+list32a42ee0-4592-4d73-b893-1b98970b3d4b, canonical site successfully resolved.
+Two historical rows exposed Date,Date0,Shift,QuantityInspected,QuantityOK,
+QuantityNOK,PictureLabel,PictureDefect. Date0 equaled Created in both examples.
+This is NOT proof Date0 represents physical scan time or offline/backfill behavior.
+Only a two-row bounded sample was read; no complete-capture/current-job claim.
+Background app credentials and actual-scan semantics remain unverified.

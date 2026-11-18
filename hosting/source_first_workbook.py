@@ -222,10 +222,10 @@ def build(rows,head,cap,bind,blobs):
         put('_Calc','H'+str(ri),'Yes' if row['id'] in selected else 'No')
     metrics={'K2':len(rows),'K4':len(rejected),'K6':len(selected),'K8':len([r for r in rejected if r['id'] not in selected])}
     for address,value in metrics.items():put('_Calc',address,value)
-    put(summary,'M43','Selected photos');put(summary,'O43','No selected photo')
+    put(summary,'M43','Selected photos');put(summary,'O43','Known rejects without photo' if incomplete else 'No selected photo')
     put(summary,'M44',len(selected),'=_Calc!K6');put(summary,'O44',metrics['K8'],'=_Calc!K8')
     shown=rejected[:13]
-    put(summary,'B47','TOP 13 REJECTED RECORDS · quantity, then source record ID')
+    put(summary,'B47','TOP KNOWN REJECTED QUANTITIES · unknowns excluded' if incomplete else 'TOP 13 REJECTED RECORDS · quantity, then source record ID')
     source_end=len(rows)+1
     source_ids={r['id']:i for i,r in enumerate(sorted(rows,key=lambda r:r['id']),1)}
     for ri,row in enumerate(rows,2):
@@ -509,7 +509,9 @@ def verify(raw,rows,head,cap,bind,expected,locations,photo_expect,layout=None,te
                                     approved_values_hash=sf.digest(r['values'])) for r in rows],
                 photo_provenance=photo_expect,cell_manifest_hash=sf.digest({s+'!'+a:v for (s,a),v in expected.items()}),
                 formula_expectations_checked=True,formula_cache_values_checked=True,source_reference_cache_values_checked=True,native_layout_preserved=True,layout_expansion=layout,typed_source_ledger_verified=True,
-                complete_rejected_record_count=sum(bool(r['resolved']['rejected']) for r in rows),
+                complete_rejected_record_count=None if any(r['resolved']['rejected'] is None for r in rows) else sum(bool(r['resolved']['rejected']) for r in rows),
+                known_rejected_record_count=sum(bool(r['resolved']['rejected']) for r in rows),
+                rejected_quantity_unknown_count=sum(r['resolved']['rejected'] is None for r in rows),
                 top_ranked_count=min(13,sum(bool(r['resolved']['rejected']) for r in rows)),
                 printable_text_segments=len(text_entries),
                 note='Saved values and supported formula expressions match the sealed reviewed snapshot. Live freshness is a separate ten-minute receipt.')

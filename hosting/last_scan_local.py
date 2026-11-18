@@ -28,6 +28,8 @@ class StateStore:
 class NativeDraftPublisher:
     def __init__(self, output, mapping, header):
         self.output=Path(output);self.mapping=deepcopy(mapping);self.header=deepcopy(header)
+    def render_version(self):
+        return sf.digest(dict(mapping=self.mapping,header=self.header,contract=wb.contract(),generator=wb.generator_hash()))
     def lookup(self,op):
         path=self.output/op/'receipt.json'
         if not path.is_file():return None
@@ -37,7 +39,10 @@ class NativeDraftPublisher:
         return receipt
     def __call__(self,snapshot,op):
         found=self.lookup(op)
-        if found:return found
+        if found:
+            if found.get('render_version')!=self.render_version():
+                raise ValueError('Render configuration changed; new operation required.')
+            return found
         cap=snapshot['source_capture'];sf.verify_seal(cap)
         selected={r['id'] for r in snapshot['rows']}
         # Derive a new sealed shift-scoped view while retaining original full-day
@@ -66,6 +71,6 @@ class NativeDraftPublisher:
                'Verification issues:']+[f.get('text','') for f in findings+checklist['layout_findings']]
         (target/'checklist.txt').write_text('\n'.join(notes))
         receipt=dict(operation_id=op,workbook_sha256=sf.digest(raw),checklist_sha256=sf.digest(body),
-                     path=str(target),status='draft_ready',client_release='held')
+                     path=str(target),render_version=self.render_version(),status='draft_ready',client_release='held')
         (target/'receipt.json').write_bytes(sf.canonical(receipt))
         return receipt

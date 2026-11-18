@@ -47,13 +47,16 @@ def observe(previous, scope, snapshot, now):
     captured = instant(snapshot['captured_at'])
     if not timedelta(0) <= at - captured <= MAX_AGE:
         raise ValueError('Capture is stale or future-dated.')
+    if p and captured < instant(p['snapshot']['captured_at']):
+        raise ValueError('Older capture cannot overwrite newer scheduler state.')
     rows = snapshot['rows']; ids = [r['id'] for r in rows]
     if len(ids) != len(set(ids)) or any(not isinstance(i,str) or not i for i in ids):
         raise ValueError('Missing/repeated source IDs.')
     latest = max((instant(r['scan_at']) for r in rows), default=None)
     if latest and latest > captured:
         raise ValueError('Future scan requires clock review.')
-    fingerprint = sf.digest(dict(rows=sorted(rows, key=lambda r:r['id']), photos=snapshot.get('source_capture',{}).get('photos',[])))
+    photos=[p for p in snapshot.get('source_capture',{}).get('photos',[]) if p.get('record_id') in ids]
+    fingerprint = sf.digest(dict(rows=sorted(rows, key=lambda r:r['id']), photos=sorted(photos,key=sf.digest)))
     changed = p.get('fingerprint') != fingerprint
     revision = (p.get('revision', 0) + 1) if changed else p['revision']
     # Initial old-data capture can become due immediately; a subsequently observed
@@ -62,7 +65,7 @@ def observe(previous, scope, snapshot, now):
     end = instant(snapshot['not_before']) if snapshot.get('not_before') else None
     due = max(quiet_from + WAIT, end) if quiet_from and end else quiet_from + WAIT if quiet_from else None
     status = 'no_scans' if not rows else 'due' if at >= due else 'waiting'
-    operation = sf.digest(dict(scope=s, fingerprint=fingerprint, policy='last-scan-draft-v1'))
+    operation = sf.digest(dict(scope=s, fingerprint=fingerprint, render_version=snapshot.get('render_version'), policy='last-scan-draft-v1'))
     # A completed/uncertain dispatch for unchanged content must never be replayed.
     receipts = deepcopy(p.get('receipts', {}))
     if operation in receipts:
@@ -90,6 +93,8 @@ class Runner:
             return {'status':'disabled'}
         key = sf.digest(scope_key(scope))
         snap = self.capture(scope)
+        if hasattr(self.render,'render_version'):
+            snap['render_version']=self.render.render_version()
         with self.transaction(key) as record:
             current = observe(record.get('state'), scope, snap, now)
             record['state'] = current
