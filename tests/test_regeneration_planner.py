@@ -682,8 +682,9 @@ class ReportOnlyCorrections(unittest.TestCase):
                          reason='Part number read from the label on the made-up photo',
                          evidence=[dict(kind='report_cell', file_hash=self.FIXED, sheet='1st Shift', cell='D20'), dict(kind='source_item', record_id='5')]), **over)
 
-    def ack(self, plan, **over):
-        return dict(dict(correction_id=plan['corrections'][0]['correction_id'], reviewed_by='Made-up Supervisor', decision=rp.ACKNOWLEDGE,
+    def ack(self, plan, n=0, **over):
+        return dict(dict(correction_id=plan['corrections'][n]['correction_id'], conflict_digest=plan['corrections'][n]['conflict_digest'],
+                         reviewed_by='Made-up Supervisor', decision=rp.ACKNOWLEDGE,
                          note='Compared the report cell, the item and the photo; keep both on file'), **over)
 
     def test_a_blank_source_does_not_silently_replace_a_documented_correction(self):
@@ -732,18 +733,38 @@ class ReportOnlyCorrections(unittest.TestCase):
         self.assertEqual((saved['corrections'][0]['carried_into_draft'], saved['corrections'][0]['value_trusted'], saved['corrections'][0]['acknowledged']['reviewed_by']),
                          (False, False, 'Made-up Supervisor'))
 
-    def test_a_blank_part_number_the_writer_cannot_lay_out_fails_closed_after_review(self):
-        """Found while testing: the selected-template writer cannot lay out a day in which one record has no part number
-        and others do. The planner says so and leaves nothing behind; it does not fill the blank to get a draft."""
+    def test_a_blank_part_number_gets_a_held_draft_that_keeps_it_blank(self):
+        """The source has no part number for record 5; an earlier report has one typed in. After review, the proposed draft
+        keeps the blank as blank: the row has no part number, its summary line says UNKNOWN, and the conflict is on top."""
+        from openpyxl import load_workbook
+        from hosting import source_first_workbook as wb
         corrections = [self.correction()]
         first = rp.plan(*self.args, existing=self.existing, corrections=corrections)
+        self.assertEqual(first['corrections'][0]['outcome'], 'conflict_source_blank')
+        with self.assertRaises(rp.PlanError):
+            rp.propose(first, *self.args, self.out, existing=self.existing, corrections=corrections)      # not reviewed: nothing
         acks = [self.ack(first)]
         plan = rp.plan(*self.args, existing=self.existing, corrections=corrections, acknowledged=acks)
-        self.assertEqual(plan['status'], 'draft_proposed')
-        with self.assertRaises(rp.PlanError) as failure:
-            rp.propose(plan, *self.args, self.out, existing=self.existing, corrections=corrections, acknowledged=acks)
-        self.assertIn('could not render these source rows', str(failure.exception)); self.assertIn('Nothing was written', str(failure.exception))
-        self.assertFalse(self.out.exists())
+        written = rp.propose(plan, *self.args, self.out, existing=self.existing, corrections=corrections, acknowledged=acks)
+        folder = Path(written['written']['folder'])
+        book = load_workbook(io.BytesIO((folder / 'draft.xlsx').read_bytes()))
+        row = next(r for r in book['1st Shift'].iter_rows(min_row=16) if r[4].value == 'SYN0000005')
+        self.assertIsNone(row[3].value)                                                                 # blank stays blank
+        self.assertEqual((row[6].value, row[10].value), (37, 37))                                       # its quantities are still there
+        summary = book['Summary']
+        self.assertEqual((summary['B29'].value, summary['J29'].value), ('00009900', 2611 - 37))         # the known part number, without that record
+        self.assertEqual((summary['B30'].value, summary['J30'].value), (wb.UNKNOWN_PART, 37))           # the unknown one, on its own line
+        self.assertEqual(summary['J31'].value, 2611)                                                    # and the day total still has every record once
+        everything = [str(c.value) for ws in book for r in ws.iter_rows() for c in r if c.value is not None]
+        self.assertEqual(sum(v == '00009900' for v in everything) > 0, True)
+        src = book['_Source']; head = [c.value for c in src[1]]
+        ledger = next(dict(zip(head, [c.value for c in r])) for r in src.iter_rows(min_row=2) if r[0].value == '5')
+        self.assertEqual(ledger['part_original_type'], 'null'); self.assertIn(ledger['part_approved_value'], (None, ''))
+        review = (folder / 'REVIEW-FIRST.txt').read_text()
+        self.assertIn('The source now is blank.', review); self.assertIn('says "00009900"', review); self.assertIn('not authenticated here', review)
+        checklist = json.loads((folder / 'checklist.json').read_text())
+        self.assertTrue(any(f['code'] == 'missing_value' and f['record_id'] == '5' and f['field'] == 'part' for f in checklist['findings']))
+        self.assertEqual([(v['kind'], v['action']) for v in written['existing_versions']], [('original', 'keep_unchanged'), ('corrected', 'keep_unchanged')])
 
     def test_each_outcome_is_named_for_what_it_is(self):
         rows = late_rows(); rows[4]['raw']['Part'] = '00001111'
@@ -796,12 +817,184 @@ class ReportOnlyCorrections(unittest.TestCase):
         two = [self.correction(), self.correction(record_id='6', evidence=[dict(kind='report_cell', file_hash=self.FIXED, sheet='1st Shift', cell='D21'), dict(kind='source_item', record_id='6')], report_value='00007777')]
         both = rp.plan(*self.args, existing=self.existing, corrections=two)
         self.assertEqual(len(both['corrections_needing_review']), 2)
+        with self.assertRaises(rp.PlanError):
+            rp.plan(*self.args, existing=self.existing, corrections=two, acknowledged=[self.ack(both), self.ack(both)])   # the same correction twice
+        for digest in ('', 'short', 'G' * 64, None):
+            with self.subTest(conflict_digest=digest), self.assertRaises(rp.PlanError):
+                rp.plan(*self.args, existing=self.existing, corrections=two, acknowledged=[self.ack(both, conflict_digest=digest)])
+        with self.assertRaises(rp.PlanError):
+            rp.plan(*self.args, existing=self.existing, corrections=two, acknowledged=[{k: v for k, v in self.ack(both).items() if k != 'conflict_digest'}])
         one = rp.plan(*self.args, existing=self.existing, corrections=two, acknowledged=[self.ack(both)])
         self.assertEqual((one['status'], len(one['corrections_needing_review'])), ('review_required', 1))            # one of two reviewed is not enough
 
     def test_no_corrections_supplied_is_said_not_assumed(self):
         plan = rp.plan(*self.args, existing=self.existing)
         self.assertEqual((plan['corrections'], plan['corrections_needing_review'], plan['status']), ([], [], 'draft_proposed'))
+
+
+class AReviewIsOfOneConflictAsItStood(unittest.TestCase):
+    """QA: a review of "source says 11111, keep it" was accepted again an hour later, when the source said 22222."""
+    FIXED = 'c' * 64
+
+    def setUp(self):
+        self.existing = [dict(file_hash=self.FIXED, kind='corrected', rows=33, **PLAN_SCOPE)]
+        self.correction = dict(report_file_hash=self.FIXED, record_id='5', field='part', report_value='00009900', documented_by='Made-up Reviewer',
+                               reason='Part number read from the made-up label',
+                               evidence=[dict(kind='report_cell', file_hash=self.FIXED, sheet='1st Shift', cell='D20'), dict(kind='source_item', record_id='5')])
+
+    def capture(self, part, taken=TAKEN, version='"1,1"', photos=None, other=None):
+        rows = late_rows(); rows[4]['raw']['Part'] = part; rows[4]['version'] = version
+        if other:
+            rows[9]['raw']['Comments'] = other
+        return with_photos(rows, photos, taken=taken) if photos else sealed(rows, taken=taken)
+
+    def reviewed(self, cap, correction=None, scope=PLAN_SCOPE, assignments=None):
+        correction = correction or self.correction
+        first = rp.plan(assignments or [assignment()], scope, cap, existing=self.existing, corrections=[correction])
+        c = first['corrections'][0]
+        ack = dict(correction_id=c['correction_id'], conflict_digest=c['conflict_digest'], reviewed_by='Made-up Supervisor', decision=rp.ACKNOWLEDGE, note='Keep source 11111')
+        return first, ack
+
+    def after(self, cap, ack, correction=None, scope=PLAN_SCOPE, assignments=None):
+        return rp.plan(assignments or [assignment()], scope, cap, existing=self.existing, corrections=[correction or self.correction], acknowledged=[ack])
+
+    def test_the_review_does_not_carry_to_a_later_capture_with_another_source_value(self):
+        first_capture = self.capture('00011111')
+        _, ack = self.reviewed(first_capture)
+        ok = self.after(first_capture, ack)
+        self.assertEqual((ok['status'], ok['corrections'][0]['acknowledged']['reviewed_by'], ok['corrections'][0]['review_no_longer_applies']), ('draft_proposed', 'Made-up Supervisor', False))
+        later = self.capture('00022222', taken=TAKEN + timedelta(hours=1))                             # the source changed in the next hour
+        again = self.after(later, ack)
+        self.assertEqual((again['status'], again['reason'], again['proposal']['allowed']), ('review_required', 'report_only_correction_not_reviewed', False))
+        c = again['corrections'][0]
+        self.assertEqual((c['acknowledged'], c['review_no_longer_applies'], c['source_value_now']['value']), (None, True, '00022222'))
+        self.assertEqual(again['corrections_needing_review'], [c['correction_id']])
+        self.assertNotEqual(c['conflict_digest'], ack['conflict_digest'])
+        out = Path(tempfile.mkdtemp()).resolve() / 'proposed'
+        with self.assertRaises(rp.PlanError):
+            rp.propose(again, [assignment()], PLAN_SCOPE, later, out, existing=self.existing, corrections=[self.correction], acknowledged=[ack])
+        with self.assertRaises(rp.PlanError):                                                          # nor can the earlier, reviewed plan be written for the new capture
+            rp.propose(ok, [assignment()], PLAN_SCOPE, later, out, existing=self.existing, corrections=[self.correction], acknowledged=[ack])
+        self.assertFalse(out.exists())
+
+    def test_each_thing_the_review_looked_at_is_part_of_what_it_reviewed(self):
+        base = self.capture('00011111')
+        _, ack = self.reviewed(base)
+        image = png((9, 9, 9))
+        changed = {
+            'the source value': (self.capture('00022222'), None, PLAN_SCOPE, None),
+            'the source went blank': (self.capture(None), None, PLAN_SCOPE, None),
+            'the source record version': (self.capture('00011111', version='"2,3"'), None, PLAN_SCOPE, None),
+            'another record in the capture (another capture hash)': (self.capture('00011111', other='edited later'), None, PLAN_SCOPE, None),
+            'a photo of that record was captured since': (self.capture('00011111', photos={'5': image}), None, PLAN_SCOPE, None),
+        }
+        for what, (cap, correction, scope, assignments) in changed.items():
+            with self.subTest(changed=what):
+                plan = self.after(cap, ack, correction, scope, assignments)
+                self.assertEqual((plan['status'], plan['corrections'][0]['acknowledged'], plan['corrections'][0]['review_no_longer_applies']), ('review_required', None, True))
+        # the same content read again later is the same conflict: the review still stands
+        reread = self.after(self.capture('00011111', taken=TAKEN + timedelta(hours=1)), ack)
+        self.assertEqual((reread['status'], reread['corrections'][0]['review_no_longer_applies']), ('draft_proposed', False))
+
+    def test_a_changed_correction_report_value_or_evidence_is_another_conflict(self):
+        base = self.capture('00011111')
+        _, ack = self.reviewed(base)
+        for what, correction in {'report value': dict(self.correction, report_value='00009901'),
+                                 'evidence': dict(self.correction, evidence=self.correction['evidence'] + [dict(kind='photo', sha256='e' * 64)]),
+                                 'report cell': dict(self.correction, evidence=[dict(kind='report_cell', file_hash=self.FIXED, sheet='1st Shift', cell='D21'), dict(kind='source_item', record_id='5')]),
+                                 'field': dict(self.correction, field='identifier')}.items():
+            with self.subTest(changed=what), self.assertRaises(rp.PlanError):
+                self.after(base, ack, correction)                                                    # the review names a correction that is no longer among those supplied
+        # the same correction, with the report version no longer listed for this scope: the evidence status changed
+        gone = rp.plan([assignment()], PLAN_SCOPE, base, existing=[], corrections=[self.correction], acknowledged=[ack])
+        self.assertEqual((gone['status'], gone['corrections'][0]['evidence_status'], gone['corrections'][0]['review_no_longer_applies']), ('review_required', 'not_established', True))
+
+    def test_a_review_of_one_job_or_day_is_not_a_review_of_another(self):
+        base = self.capture('00011111')
+        _, ack = self.reviewed(base)
+        other_scope = dict(PLAN_SCOPE, client_id='synthetic-fixture-two')
+        existing_before = self.existing
+        self.existing = [dict(file_hash=self.FIXED, kind='corrected', rows=33, **other_scope)]
+        plan = self.after(base, ack, scope=other_scope, assignments=[assignment(client_id='synthetic-fixture-two')])
+        self.existing = existing_before
+        self.assertEqual((plan['status'], plan['corrections'][0]['review_no_longer_applies']), ('review_required', True))
+
+    def test_names_are_statements_and_the_inventory_is_only_what_was_supplied(self):
+        base = self.capture('00011111')
+        first, ack = self.reviewed(base)
+        plan = self.after(base, ack)
+        self.assertEqual(plan['corrections'][0]['reviewer_identity'], 'stated_by_caller_not_authenticated')
+        self.assertEqual(first['corrections'][0]['reviewer_identity'], 'stated_by_caller_not_authenticated')
+        self.assertIn('none were looked for', plan['corrections_inventory'])
+        empty = rp.plan([assignment()], PLAN_SCOPE, base, existing=self.existing)
+        self.assertEqual((empty['corrections'], empty['corrections_inventory']), ([], 'only_the_corrections_supplied_were_judged; none were looked for'))
+
+
+class PublicationIsAllOrNothing(unittest.TestCase):
+    """QA: an error while writing regeneration-plan.json left a draft, checklist and receipt marked ready, with no plan
+    and no review notice, and a retry was then refused because the folder existed."""
+    def setUp(self):
+        rows = late_rows(); rows[4]['raw']['Part'] = '00001111'
+        self.cap = sealed(rows)
+        self.existing = [dict(file_hash='c' * 64, kind='corrected', rows=33, **PLAN_SCOPE)]
+        self.corrections = [dict(report_file_hash='c' * 64, record_id='5', field='part', report_value='00009900', documented_by='Made-up Reviewer', reason='Made-up label',
+                                 evidence=[dict(kind='report_cell', file_hash='c' * 64, sheet='1st Shift', cell='D20'), dict(kind='source_item', record_id='5')])]
+        first = rp.plan([assignment()], PLAN_SCOPE, self.cap, existing=self.existing, corrections=self.corrections)
+        c = first['corrections'][0]
+        self.acks = [dict(correction_id=c['correction_id'], conflict_digest=c['conflict_digest'], reviewed_by='Made-up Supervisor', decision=rp.ACKNOWLEDGE, note='Compared all three')]
+        self.kw = dict(existing=self.existing, corrections=self.corrections, acknowledged=self.acks)
+        self.plan = rp.plan([assignment()], PLAN_SCOPE, self.cap, **self.kw)
+        self.out = Path(tempfile.mkdtemp()).resolve() / 'proposed'
+
+    def propose(self):
+        return rp.propose(self.plan, [assignment()], PLAN_SCOPE, self.cap, self.out, **self.kw)
+
+    def test_a_failure_writing_any_one_file_leaves_nothing_and_a_retry_succeeds(self):
+        from unittest import mock
+        real = Path.write_bytes
+        for name in ('regeneration-plan.json', 'REVIEW-FIRST.txt', 'draft.xlsx', 'checklist.json', 'checklist.txt', 'receipt.json'):
+            with self.subTest(failing=name):
+                def failing(path, data, _name=name):
+                    if path.name == _name:
+                        raise OSError(28, 'No space left on device')
+                    return real(path, data)
+                with mock.patch.object(Path, 'write_bytes', failing), self.assertRaises(OSError):
+                    self.propose()
+                left = sorted(p.name for p in self.out.iterdir()) if self.out.exists() else []
+                self.assertEqual(left, [])                                      # no folder, ready or half-made, and no staging left behind
+        written = self.propose()                                                # the retry is not refused
+        folder = Path(written['written']['folder'])
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ['REVIEW-FIRST.txt', 'checklist.json', 'checklist.txt', 'draft.xlsx', 'receipt.json', 'regeneration-plan.json'])
+        self.assertEqual(sorted(written['written']['files']), sorted(p.name for p in folder.iterdir()))
+        self.assertEqual([p.name for p in self.out.iterdir()], [folder.name])
+
+    def test_a_failure_at_the_final_move_leaves_nothing_either(self):
+        import os
+        from unittest import mock
+        with mock.patch.object(os, 'rename', side_effect=OSError(5, 'Input/output error')), self.assertRaises(OSError):
+            self.propose()
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), [])
+        self.propose()
+
+    def test_the_published_folder_is_complete_consistent_and_written_once(self):
+        written = self.propose()
+        folder = Path(written['written']['folder'])
+        receipt = json.loads((folder / 'receipt.json').read_text())
+        self.assertEqual(receipt['workbook_sha256'], hashlib.sha256((folder / 'draft.xlsx').read_bytes()).hexdigest())
+        self.assertEqual(receipt['checklist_sha256'], hashlib.sha256((folder / 'checklist.json').read_bytes()).hexdigest())
+        self.assertEqual((receipt['status'], receipt['client_release'], receipt['path']), ('draft_ready', 'held', str(folder)))
+        saved = json.loads((folder / 'regeneration-plan.json').read_text())
+        self.assertEqual(saved['report_input_hash'], self.plan['report_input_hash']); self.assertEqual(saved['written']['workbook_sha256'], receipt['workbook_sha256'])
+        review = (folder / 'REVIEW-FIRST.txt').read_text()
+        self.assertEqual(review.count('Record 5, part'), 1)                     # the conflict notice, exactly once
+        from hosting.last_scan_local import NativeDraftPublisher
+        publisher = NativeDraftPublisher(self.out, MAP, {}, binding={k: PLAN_SCOPE[k] for k in ('client_id', 'site_id', 'list_id', 'job')})
+        self.assertEqual(publisher.lookup(folder.name)['workbook_sha256'], receipt['workbook_sha256'])   # the existing reader accepts it
+        before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in folder.iterdir()}
+        with self.assertRaises(rp.PlanError):
+            self.propose()
+        self.assertEqual({p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in folder.iterdir()}, before)
+        self.assertEqual([p.name for p in self.out.iterdir()], [folder.name])
 
 
 class Isolation(unittest.TestCase):

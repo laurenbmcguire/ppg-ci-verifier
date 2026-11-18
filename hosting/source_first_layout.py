@@ -121,9 +121,10 @@ def breaks(root,rows):
 
 
 def plan(rows,contract):
+    # A missing part number is a group of its own: it sorts last and stays missing.
     counts=Counter(r['resolved']['shift'] for r in rows)
     return dict(shifts={s['sheet']:max(0,counts[s['sheet']]-s['capacity']) for s in contract['shift_details'].values()},
-                parts=sorted({r['resolved']['part'] for r in rows}),reject_extra=max(0,sum(bool(r['resolved']['rejected']) for r in rows)-13),
+                parts=sorted({r['resolved']['part'] for r in rows},key=lambda v:(v is None,'' if v is None else str(v))),reject_extra=max(0,sum(bool(r['resolved']['rejected']) for r in rows)-13),
                 rank_start=max(30,len(rows)+4))
 
 

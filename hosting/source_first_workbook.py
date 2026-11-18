@@ -15,6 +15,7 @@ from hosting import source_first_template as tx
 from hosting import source_first_layout as lx
 
 ASSETS=Path(__file__).resolve().parent/'assets'/'source_first'
+UNKNOWN_PART='Part number UNKNOWN (blank at source)'
 HEADER_FIELDS=('area','service_type','description','paying_client','client_contact','worksite','prepared_by','part_name')
 
 
@@ -291,7 +292,7 @@ def build(rows,head,cap,bind,blobs):
         if blob is None or sf.digest(blob)!=sha:raise sf.ReviewError('Selected original photo bytes are missing or changed.')
         put(photo_sheet,f'{col}{base}',f"Record {item} · {row['resolved']['reject_reason'] or 'Recorded defect'}")
         put(photo_sheet,f'{col}{base+1}','ID '+row['resolved']['identifier'])
-        put(photo_sheet,f'{col}{base+2}',row['resolved']['shift']+' · Part '+row['resolved']['part'])
+        put(photo_sheet,f'{col}{base+2}',row['resolved']['shift']+' · Part '+(row['resolved']['part'] if row['resolved']['part'] is not None else 'number UNKNOWN'))
         put(photo_sheet,f'{col}{base+13}',display(row,'comments',row['resolved']['comments']))
         put(photo_sheet,f'{col}{base+15}','Original source photo · '+sha[:12])
         sh,rn=locations[item];link=f'HYPERLINK("#\'{photo_sheet}\'!{col}{base}","View source photo")'
@@ -314,7 +315,8 @@ def build(rows,head,cap,bind,blobs):
     for i,part in enumerate(layout['parts'],29):
         part_rows=[r for r in rows if r['resolved']['part']==part]
         part_totals[part]={f:known_sum(r['resolved'][f] for r in part_rows) for f in sf.QUANTITIES}
-        actual(summary,'B'+str(i),display(part_rows[0],'part',part))
+        # A record with no part number at the source keeps its own line. The label says it is unknown; no number is put in.
+        actual(summary,'B'+str(i),UNKNOWN_PART if part is None else display(part_rows[0],'part',part))
         actual(summary,'E'+str(i),head.get('part_name') or None if len(layout['parts'])==1 else None)
         purposes={r['resolved']['inspected_for'] for r in part_rows if r['resolved']['inspected_for'] is not None}
         actual(summary,'H'+str(i),display(next(r for r in part_rows if r['resolved']['inspected_for'] is not None),'inspected_for',next(iter(purposes))) if len(purposes)==1 else 'See detail' if purposes else None)
@@ -385,7 +387,8 @@ def build(rows,head,cap,bind,blobs):
     raw=tx.packed(p)
     budgets=lx.package_limits(p,roots,raw)
     verification=verify(raw,rows,head,cap,bind,expected,locations,photo_expect,layout,text_entries)
-    verification['part_totals']=part_totals
+    # Keyed by part number as text; the records with no part number are reported under the same label the sheet shows.
+    verification['part_totals']={UNKNOWN_PART if part is None else part:totals_ for part,totals_ in part_totals.items()}
     verification['output_budgets']=budgets
     return raw,verification
 
@@ -487,7 +490,9 @@ def verify(raw,rows,head,cap,bind,expected,locations,photo_expect,layout=None,te
             want=row['resolved'][field]
             if lx.needs_continuation(field,want):
                 actual=''.join(t['text'] for t in text_entries if t['record_id']==row['id'] and t['field']==field)
-            if actual!=want or field in ('part','identifier') and type(actual)is not str:
+            # A part number or identifier that is missing at the source must be saved as missing (an empty cell): that is
+            # checked by the equality. One that exists must be saved as text, never as a number.
+            if actual!=want or field in ('part','identifier') and want is not None and type(actual)is not str:
                 raise sf.ReviewError('Saved row identifier/quantity provenance failed.')
         if values[sheet][f'B{r}'].value!=row['values']['shift'].get('value'):raise sf.ReviewError('Recorded shift representation changed.')
     lx.verify_ledger(values,rows,cap)

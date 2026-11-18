@@ -191,17 +191,29 @@ def _links(capture, ids):
     return out, state
 
 
-def _corrections(corrections, acknowledged, capture, mapping, versions):
+def _corrections(corrections, acknowledged, capture, mapping, versions, scope):
     """Documented report-only corrections, each judged against this capture. Nothing here trusts the corrected value.
 
-    -> (records, unresolved): every correction with what the source says now, and the ones that still need a person."""
+    -> (records, unresolved): every correction with what the source says now, and the ones that still need a person.
+
+    A review (acknowledgement) is of ONE conflict as it stood: this scope, field, report version and value, this source
+    record at this version with this value, this capture, this evidence. All of that is in ``conflict_digest``, and an
+    acknowledgement must quote it. If the source is captured again with another value, or the evidence changes, the
+    digest changes and the old review no longer counts: the conflict is open again.
+
+    The names in a correction or a review are whatever the caller wrote. This module is offline and authenticates no
+    one; a name here is a statement, not proof of who reviewed. It also judges only the corrections it is given: it
+    does not look for others, and an empty list is not a finding that none exist."""
     if not isinstance(corrections, (list, tuple)) or not isinstance(acknowledged, (list, tuple)):
         raise PlanError('Corrections and acknowledgements are lists.')
     acks = {}
     for a in acknowledged:
-        if (not isinstance(a, dict) or set(a) != {'correction_id', 'reviewed_by', 'decision', 'note'} or a['decision'] != ACKNOWLEDGE
-                or not _exact(a.get('reviewed_by')) or not isinstance(a.get('note'), str) or len(a['note'].strip()) < 5 or not _exact(a.get('correction_id'))):
-            raise PlanError('An acknowledgement names the correction, who reviewed it, a note, and the decision "%s".' % ACKNOWLEDGE)
+        if (not isinstance(a, dict) or set(a) != {'correction_id', 'conflict_digest', 'reviewed_by', 'decision', 'note'} or a['decision'] != ACKNOWLEDGE
+                or not _exact(a.get('reviewed_by')) or not isinstance(a.get('note'), str) or len(a['note'].strip()) < 5 or not _exact(a.get('correction_id'))
+                or not isinstance(a.get('conflict_digest'), str) or not re.fullmatch(r'[0-9a-f]{64}', a['conflict_digest'])):
+            raise PlanError('An acknowledgement names the correction, the exact conflict it reviewed (conflict_digest), who reviewed it, a note, and the decision "%s".' % ACKNOWLEDGE)
+        if a['correction_id'] in acks:
+            raise PlanError('Two acknowledgements name the same correction.')
         acks[a['correction_id']] = a
     by_id = {r['id']: r for r in capture['records']}
     known_versions = {v['file_hash']: v for v in versions}
@@ -236,12 +248,23 @@ def _corrections(corrections, acknowledged, capture, mapping, versions):
             outcome = ('conflict_source_blank' if sf.missing(now) else
                        'source_agrees' if str(now.get('value')) == c['report_value'] else 'conflict_source_differs')
         conflict = outcome != 'source_agrees'
-        ack = acks.get(cid) if conflict else None
-        out.append(dict(correction_id=cid, report_file_hash=c['report_file_hash'], record_id=c['record_id'], field=c['field'],
+        status_of_evidence = 'exact_report_and_item_named' if not gaps else 'not_established'
+        conflict_digest = sf.digest(dict(
+            scope={k: scope[k] for k in SCOPE_KEYS}, correction_id=cid, field=c['field'], report_file_hash=c['report_file_hash'], report_value=c['report_value'],
+            record_id=c['record_id'], outcome=outcome, source_value=now, source_version=record.get('version') if record else None,
+            source_record_hash=sf.digest(record) if record else None, capture_snapshot_hash=capture['snapshot_hash'],
+            evidence=c['evidence'], evidence_status=status_of_evidence, evidence_gaps=gaps,
+            captured_photos=sorted(str(x) for x in photos), mapped_column=mapping['fields'][c['field']], plan_version=VERSION))
+        given = acks.get(cid) if conflict else None
+        ack = given if given and given['conflict_digest'] == conflict_digest else None
+        out.append(dict(correction_id=cid, conflict_digest=conflict_digest,
+                        review_no_longer_applies=bool(given and not ack),   # a review exists, but of another capture, value or evidence
+                        reviewer_identity='stated_by_caller_not_authenticated',
+                        report_file_hash=c['report_file_hash'], record_id=c['record_id'], field=c['field'],
                         report_value=c['report_value'], source_value_now=now, outcome=outcome, documented_by=c['documented_by'], reason=c['reason'],
-                        evidence=deepcopy(c['evidence']), evidence_status='exact_report_and_item_named' if not gaps else 'not_established',
+                        evidence=deepcopy(c['evidence']), evidence_status=status_of_evidence,
                         evidence_gaps=gaps, value_trusted=False, carried_into_draft=False,
-                        acknowledged=dict(reviewed_by=ack['reviewed_by'], note=ack['note'].strip(), decision=ack['decision']) if ack else None))
+                        acknowledged=dict(reviewed_by=ack['reviewed_by'], note=ack['note'].strip(), decision=ack['decision'], conflict_digest=conflict_digest) if ack else None))
     unknown = sorted(set(acks) - {c['correction_id'] for c in out if c['outcome'] != 'source_agrees'})
     if unknown:
         raise PlanError('An acknowledgement names no open conflict of this plan: ' + ', '.join(unknown))
@@ -338,11 +361,11 @@ def plan(assignments, scope, capture, existing=(), previous_capture=None, header
     # format and its own code. A plan made before any of that changed is a plan for another report.
     render_version = _publisher(Path('.'), assignment, scope, header)[0].render_version()
     listed = _existing(existing, scope, None, capture['snapshot_hash'])
-    corrected, unresolved = _corrections(corrections, acknowledged, capture, mapping, listed)
+    corrected, unresolved = _corrections(corrections, acknowledged, capture, mapping, listed, scope)
     links, link_state = _links(capture, set(selected))
     input_hash = sf.digest(dict(binding=binding, scope={k: scope[k] for k in SCOPE_KEYS}, source_snapshot_hash=capture['snapshot_hash'],
                                 source_ids=selected, unassigned_shifts=unassigned_shifts, plan_version=VERSION, render_version=render_version,
-                                corrections=[{k: c[k] for k in ('correction_id', 'outcome', 'acknowledged')} for c in corrected]))
+                                corrections=[{k: c[k] for k in ('correction_id', 'conflict_digest', 'outcome', 'acknowledged')} for c in corrected]))
     versions = _existing(existing, scope, input_hash, capture['snapshot_hash'])
     same = [v for v in versions if v['relation'] == 'same_input']
     if previous_capture is not None:
@@ -385,6 +408,7 @@ def plan(assignments, scope, capture, existing=(), previous_capture=None, header
         status, reason = 'review_required', 'report_only_correction_not_reviewed'
     return dict(base, status=status, reason=reason, blockers=[], holds=holds,
                 corrections=corrected, corrections_needing_review=[c['correction_id'] for c in unresolved], render_version=render_version,
+                corrections_inventory='only_the_corrections_supplied_were_judged; none were looked for',
                 automated_completion=('blocked_by_report_only_correction' if conflicts else 'blocked_by_unassigned_shift' if unassigned else 'not_claimed'),
                 day_completion='not_established', client_release='held',
                 source=dict(snapshot_hash=capture['snapshot_hash'], envelope_hash=capture['envelope_hash'], captured_at=capture['captured_at'],
@@ -469,29 +493,61 @@ def propose(result, assignments, scope, capture, output, existing=(), previous_c
     snapshot = dict(scope=dict(bound, business_date=scope['business_date']), source_capture=capture,
                     rows=[dict(id=i) for i in again['rows']['source_ids']], photo_blobs=blobs, unassigned_shifts=again['rows']['unassigned_shifts'])
     try:
-        files, _ = publisher.build(snapshot, op)   # pure: worked out in full before anything is written
+        files, receipt = publisher.build(snapshot, op)   # pure: worked out in full before anything is written
     except PlanError:
         raise
     except Exception as e:
         # The selected-template writer could not lay this day out. That is said as it is; no partial draft is left.
         raise PlanError('The draft writer could not render these source rows (%s: %s). Nothing was written.' % (type(e).__name__, str(e)[:200])) from e
-    receipt = publisher(snapshot, op)
-    extra = ['regeneration-plan.json'] + (['REVIEW-FIRST.txt'] if again['holds'] else [])
-    record = dict(again, written=dict(folder=str(target), files=sorted([p.name for p in target.iterdir()] + extra),
+    # The whole bundle is assembled first, in memory: the draft, its checklist, the receipt, this plan and, when there is
+    # anything to review, the notice that says so. It is then written into a hidden staging folder and moved into place in
+    # one step. A failure at any point leaves no folder a reader could take for a finished draft, and a retry is safe.
+    bundle = dict(files)
+    notice = _review_notice(again)
+    if notice is not None:
+        bundle['REVIEW-FIRST.txt'] = notice.encode()
+    receipt = dict(receipt, path=str(target))
+    record = dict(again, written=dict(folder=str(target), files=sorted(list(bundle) + ['receipt.json', 'regeneration-plan.json']),
                                       workbook_sha256=receipt['workbook_sha256'], checklist_sha256=receipt['checklist_sha256'],
                                       photos_embedded=sorted(blobs)))
-    (target / 'regeneration-plan.json').write_bytes(json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False).encode())
-    if again['holds']:
-        lines = ['REVIEW FIRST. This proposed draft is held. A person decides; nothing here was approved or sent.', '']
-        lines += [h['text'] for h in again['holds']]
-        for c in again['corrections']:
-            if c['outcome'] != 'source_agrees':
-                now = c['source_value_now']
-                lines += ['', f'Record {c["record_id"]}, {c["field"]}: an earlier report ({c["report_file_hash"][:12]}) says "{c["report_value"]}" '
-                              f'(documented by {c["documented_by"]}: {c["reason"]}).',
-                          '  The source now ' + ('has no such record.' if now is None else 'is blank.' if sf.missing(now) else f'says "{now.get("value")}".'),
-                          '  This draft shows the source value. The earlier report is unchanged. Evidence: ' +
-                          ('exact report cell and source item named' if c['evidence_status'] != 'not_established' else 'NOT established (' + '; '.join(c['evidence_gaps']) + ')') + '.',
-                          '  Reviewed by ' + c['acknowledged']['reviewed_by'] + ': ' + c['acknowledged']['note'] if c['acknowledged'] else '  Not reviewed.']
-        (target / 'REVIEW-FIRST.txt').write_text('\n'.join(lines))
+    bundle['regeneration-plan.json'] = json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False).encode()
+    bundle['receipt.json'] = sf.canonical(receipt)   # last: the receipt is what marks a draft as ready
+    _publish(out, target, bundle)
     return record
+
+
+def _review_notice(plan_result):
+    if not plan_result['holds']:
+        return None
+    lines = ['REVIEW FIRST. This proposed draft is held. A person decides; nothing here was approved or sent.', '']
+    lines += [h['text'] for h in plan_result['holds']]
+    for c in plan_result['corrections']:
+        if c['outcome'] != 'source_agrees':
+            now = c['source_value_now']
+            lines += ['', f'Record {c["record_id"]}, {c["field"]}: an earlier report ({c["report_file_hash"][:12]}) says "{c["report_value"]}" '
+                          f'(documented by {c["documented_by"]}: {c["reason"]}).',
+                      '  The source now ' + ('has no such record.' if now is None else 'is blank.' if sf.missing(now) else f'says "{now.get("value")}".'),
+                      '  This draft shows the source value. The earlier report is unchanged. Evidence: ' +
+                      ('exact report cell and source item named' if c['evidence_status'] != 'not_established' else 'NOT established (' + '; '.join(c['evidence_gaps']) + ')') + '.',
+                      ('  Reviewed by ' + c['acknowledged']['reviewed_by'] + ' (name as stated; not authenticated here): ' + c['acknowledged']['note']) if c['acknowledged'] else '  Not reviewed.']
+    return '\n'.join(lines)
+
+
+def _publish(out, target, bundle):
+    """Write every file of the bundle into a hidden staging folder, then move the folder into place in one step."""
+    import os
+    import shutil
+    import tempfile
+    out.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix='.staging-' + target.name + '-', dir=str(out)))
+    try:
+        for name, body in bundle.items():
+            (staging / name).write_bytes(body)
+        if sorted(p.name for p in staging.iterdir()) != sorted(bundle):
+            raise PlanError('The staged bundle is not complete. Nothing was published.')
+        if target.exists():
+            raise PlanError('A proposal for exactly these inputs was already written there. Nothing is overwritten.')
+        os.rename(staging, target)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
