@@ -21,6 +21,9 @@ scan field, never infers one from Created, Modified or the report date, and neve
 - Schema missing, or for another site or list; site or list given as a name or URL instead of an exact ID.
 - No single exact registry entry for the client and job.
 - A mapped column missing, replaced (column ID changed), retyped, or sharing a display name with another column.
+- A snapshot that contradicts itself about which column is which: an entry whose own internal name is not the key
+  it is filed under, a missing or shared column ID, or keys that differ only by case or padding. Re-pinning and
+  attesting cannot repair this; it needs a clean capture.
 - Any mapped column that carries a `calculated` facet, whatever its value and whatever other facet sits beside it.
 - Any mapped column with more than one type facet, an empty or malformed facet, a non-boolean flag, or a property
   the validator does not recognise. It does not guess that an unknown property leaves the type alone.
@@ -39,6 +42,9 @@ scan field, never infers one from Created, Modified or the report date, and neve
 - Any of the seven business meanings without an attestation naming who, when and what evidence, bound to the
   current contract. Changing the contract makes the attestation stale.
 - `verified` or `timestamp_semantics_verified` set without those attestations.
+- Sample rows (if supplied) whose scan value is the same instant as Created or Modified in every row, compared as
+  instants whatever offset or fractional form each is written in. Values with no valid offset are not compared
+  and no timezone is assumed for them; the report counts them as not comparable.
 - Sample rows (if supplied) whose scan value equals Created, is missing or has no offset, or whose shift is
   blank or not a recorded shift.
 

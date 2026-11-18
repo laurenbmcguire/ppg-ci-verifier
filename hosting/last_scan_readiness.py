@@ -122,7 +122,7 @@ def column_problems(column):
     for flag in FLAGS:
         if flag in column and not isinstance(column[flag], bool):
             out.append(f'{flag} is not true or false')
-    for key in ('id', 'displayName'):
+    for key in ('id', 'displayName', 'name'):
         if key in column and not _text(column[key]):
             out.append(f'{key} is not text')
     if not _is_plain(column):
@@ -146,6 +146,34 @@ def _columns(schema):
     return good, sorted(repr(n) for n in raw if n not in good)
 
 
+def identity_problems(schema):
+    """Readable reasons the snapshot's column identities contradict themselves. A column is filed under a key; its own
+    internal name must be exactly that key, its ID must be text and belong to no other column, and no two keys may
+    differ only by case or padding. Re-pinning or attesting cannot repair any of these: they are about the source."""
+    columns, _ = _columns(schema)
+    out, ids, folded = [], {}, {}
+    for key, c in columns.items():
+        if c.get('name') != key or not _text(key):
+            out.append(f'the entry filed under {key!r} says its internal name is {c.get("name")!r}')
+        if not _text(c.get('id')):
+            out.append(f'{key!r} has no column ID')
+        else:
+            ids.setdefault(c['id'], []).append(key)
+        folded.setdefault(key.strip().casefold(), []).append(key)
+    out += [f'columns {sorted(keys)} share the column ID {i!r}' for i, keys in ids.items() if len(keys) > 1]
+    out += [f'column keys {sorted(keys)} differ only by case or padding' for keys in folded.values() if len(keys) > 1]
+    return out
+
+
+def _same_instant(x, y):
+    """True/False when both are valid offset-aware timestamps (compared as instants, whatever offset or fractional
+    form each is written in); None when either is not, because no timezone is ever assumed for a naive value."""
+    try:
+        return instant(x) == instant(y)
+    except (ValueError, OverflowError):
+        return None
+
+
 def inventory(schema):
     """What the schema shows, column by column. Discovered metadata only: no meaning is assigned to anything."""
     s = _dict(schema)
@@ -154,7 +182,8 @@ def inventory(schema):
     columns = []
     for name, c in sorted(raw.items(), key=lambda item: str(item[0])):
         kind, d = column_type(c), _dict(c)
-        columns.append(dict(name=name, id=d.get('id'), display_name=d.get('displayName'), type=kind,
+        columns.append(dict(name=name, internal_name=d.get('name'), name_matches_key=d.get('name') == name,
+                            id=d.get('id'), display_name=d.get('displayName'), type=kind,
                             facets=[f for f in FACETS if f in d],
                             format=d['dateTime'].get('format') if kind == 'dateTime' else None,
                             choices=list(d['choice']['choices']) if kind == 'choice' else None,
@@ -241,6 +270,10 @@ def validate(assignment, schema, registry_entries, sample_rows=None):
     if have_schema:
         check('schema_columns_are_well_formed', 'discovered', not malformed_columns,
               f'These schema entries are not column definitions: {", ".join(malformed_columns)}. A snapshot with damaged entries cannot be trusted for the rest.')
+        contradictions = identity_problems(schema)
+        check('schema_column_identities_are_consistent', 'discovered', not contradictions,
+              'The snapshot contradicts itself about which column is which: ' + '; '.join(contradictions) + '.',
+              'A clean read-only capture in which every column is filed under its own internal name with its own ID.')
         listed = schema.get('list')
         check('schema_is_for_this_site_and_list', 'discovered',
               schema.get('site_id') == a.get('site_id') and schema.get('list_id') == a.get('list_id')
@@ -280,6 +313,12 @@ def validate(assignment, schema, registry_entries, sample_rows=None):
                    else f'No column named {name!r} exists in the schema snapshot.')
         if not check(label + '_column_exists', 'discovered', column is not None, missing):
             return None
+        check(label + '_column_name_matches_source', 'discovered', column.get('name') == name,
+              f'The column filed under {name!r} says its internal name is {column.get("name")!r}. The mapping names one column and the source describes another; '
+              're-pinning or attesting cannot settle which is real.',
+              'A clean read-only capture showing the column whose internal name is exactly the mapped name.')
+        check(label + '_column_id_is_unique', 'discovered', text(column.get('id')) and sum(1 for c in columns.values() if c.get('id') == column.get('id')) == 1,
+              f'{name!r} has no column ID, or shares its ID with another column in the snapshot.')
         shared = [n for n, c in columns.items() if n != name and str(c.get('displayName') or '').strip().lower() in
                   (str(column.get('displayName') or '').strip().lower(), name.lower())]
         check(label + '_column_unambiguous', 'discovered', not shared,
@@ -382,9 +421,18 @@ def validate(assignment, schema, registry_entries, sample_rows=None):
         if text(scan):
             for arrival in ('Created', 'Modified', 'createdDateTime', 'lastModifiedDateTime'):
                 pairs = [(r.get(scan), r.get(arrival)) for r in sample_rows if r.get(scan) is not None and r.get(arrival) is not None]
-                if pairs and all(isinstance(x, str) and x == y for x, y in pairs):
+                if not pairs:
+                    continue
+                verdicts = [_same_instant(x, y) for x, y in pairs]
+                # identical text is the same value even when it cannot be parsed; otherwise only valid aware instants compare
+                same = [v is True or (v is None and isinstance(x, str) and isinstance(y, str) and x == y) for v, (x, y) in zip(verdicts, pairs)]
+                observations.append(dict(arrival_field=arrival, rows_with_both=len(pairs), compared=sum(1 for v in verdicts if v is not None),
+                                         same_instant=sum(same), not_comparable=sum(1 for v, s in zip(verdicts, same) if v is None and not s),
+                                         note='Compared as instants. Values without a valid offset were not compared; no timezone was assumed for them.'))
+                if all(same):
                     check('scan_values_differ_from_' + arrival.lower(), 'discovered', False,
-                          f'In every sample row the scan value equals {arrival}. It looks like arrival metadata under another name.',
+                          f'In every sample row the scan value is the same instant as {arrival} (whatever offset each is written in). '
+                          'It looks like arrival metadata under another name.',
                           'Evidence of how the scan field is filled in on the tablet.')
         for q in sf.QUANTITIES:
             if text(fields.get(q)):
