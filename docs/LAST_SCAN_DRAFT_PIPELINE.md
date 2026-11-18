@@ -126,6 +126,20 @@ Status: local code and tests only. Not deployed, not scheduled, not connected to
   outbox are updated from what was seen. A failed, partial, stale or wrong-scope capture holds the entry; a hold
   from a failed capture may be tried again because each try recaptures. Drafts and receipts are never touched.
   `reconcile_test` settles an unknown delivery by asking the test transport; it never sends.
+- **Attempts are fenced by attempt ID.** Each claim creates an attempt (`attempt_id`, number, deadline) in an
+  append-only `attempts` list on the entry. The sender receives `idempotency_key` (the operation ID, the same for
+  every attempt) and `attempt_id`. A success, failure or reconciliation result is applied only to its own attempt;
+  one that arrives after the entry moved on is stored on the old attempt (`late_ack`, `late_error_type`) and, for a
+  late success, flagged as `duplicate_delivery_evidence`. Nothing is deleted.
+- **Transport proof contract.** An unknown outcome leads to another attempt only if the transport answers, for
+  this exact attempt: `operation_id` and `attempt_id` matching, `delivered: false`, `terminal: true`,
+  `attempt_closed: true` (it will reject this attempt if it arrives later) and a non-empty `proof_id`. If this
+  process's own sender call may still be running (attempt in flight and its deadline, 15 minutes by default, not
+  passed) even that is not acted on. The entry then goes on hold and needs a poll that finds the scope ready and
+  a fresh recapture before a new attempt. `delivered: false` alone, "not found", another attempt's proof, no
+  answer or an error all stay uncertain. `delivered: true` naming the attempt is recorded as sent.
+  A real transport must (1) deliver at most once per `idempotency_key`, (2) be able to give that terminal answer
+  per attempt, (3) honour `attempt_closed`. A transport that cannot do (2) and (3) never gets a second attempt.
   Not closed: the source can change after the recapture and before the provider receives the message, and the
   claim and the send are not one transaction. Those cases end as `readiness_revoked_at` or `uncertain`.
 - **A cached draft never shortens the hour.** If content returns to an earlier version, the hour restarts like any

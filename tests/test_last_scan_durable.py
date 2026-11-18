@@ -406,36 +406,200 @@ class FreshDispatch(Base):
         self.assertEqual(env.worker(Other()).dispatch_test(env.scope, op, sc.refuse), dict(status='error', error_type='RendererBindingMismatch'))
         self.assertEqual(env.fetches, reads)
 
-    def test_unknown_outcome_is_reconciled_by_asking_never_by_resending(self):
+    def test_unknown_outcome_survives_restart_and_is_never_resent(self):
         env, w, op = sc.ready_entry(self.store); attempts = []
         def lost(**kw): attempts.append(kw); raise TimeoutError('no answer')
         self.assertEqual(w.dispatch_test(env.scope, op, lost), dict(status='uncertain', delivery_status='uncertain'))
         env.store = self.restart(); w = env.worker()
         self.assertEqual(w.dispatch_test(env.scope, op, lost), dict(status='not_pending'))
-        for vague in (lambda **kw: None, lambda **kw: dict(operation_id='other', delivered=True),
-                      lambda **kw: dict(operation_id=op, delivered='maybe')):
-            self.assertEqual(w.reconcile_test(env.scope, op, vague), dict(status='uncertain'))
-        def down(**kw): raise ConnectionError()
-        self.assertEqual(w.reconcile_test(env.scope, op, down), dict(status='uncertain', error_type='ConnectionError'))
-        self.assertEqual(env.entries()[op]['status'], 'uncertain')
-        found = w.reconcile_test(env.scope, op, lambda **kw: dict(operation_id=op, delivered=True, provider_receipt='synthetic'))
-        self.assertEqual(found, dict(status='sent', delivery_status='sent'))
-        self.assertEqual(env.entries()[op]['ack']['provider_receipt'], 'synthetic')
-        self.assertEqual(w.reconcile_test(env.scope, op, down), dict(status='nothing_to_reconcile'))
-        self.assertEqual(w.dispatch_test(env.scope, op, lost), dict(status='not_pending'))
-        self.assertEqual(len(attempts), 1)
-
-    def test_confirmed_not_delivered_needs_a_fresh_poll_and_recapture_before_any_resend(self):
-        env, w, op = sc.ready_entry(self.store); calls, send = self.sender()
-        def lost(**kw): raise TimeoutError()
-        w.dispatch_test(env.scope, op, lost)
-        self.assertEqual(w.reconcile_test(env.scope, op, lambda **kw: dict(operation_id=op, delivered=False)),
-                         dict(status='held', delivery_status='not_delivered'))
-        self.assertEqual(w.dispatch_test(env.scope, op, send), dict(status='not_pending'))   # not sendable straight away
         env.now = '2026-11-10T21:40:00Z'
-        self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')                     # a fresh poll releases it
-        self.assertEqual(w.dispatch_test(env.scope, op, send), dict(status='sent'))          # and dispatch recaptures again
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')
+        self.assertEqual((env.entries()[op]['status'], len(attempts)), ('uncertain', 1))
+
+
+class AttemptFencing(Base):
+    """Every delivery attempt has its own ID. Only a terminal, attempt-bound proof from the transport can lead to a
+    second attempt, and late callbacks of an old attempt can never change a newer one. Test transport only."""
+    def setUp(self):
+        super().setUp()
+        self.env, self.w, self.op = sc.ready_entry(self.store)
+        self.calls = []
+
+    def entry(self): return self.env.entries()[self.op]
+    def aid(self): return self.entry()['attempt_id']
+
+    def ok(self, **kw):
+        self.calls.append(kw); return dict(operation_id=kw['idempotency_key'], attempt_id=kw['attempt_id'], provider_receipt='synthetic-' + str(len(self.calls)))
+
+    def lost(self, **kw):
+        self.calls.append(kw); raise TimeoutError('no answer')
+
+    def proof(self, **change):
+        def lookup(**kw):
+            return dict(dict(operation_id=kw['idempotency_key'], attempt_id=kw['attempt_id'], delivered=False, terminal=True,
+                             attempt_closed=True, proof_id='synthetic-provider-record-1'), **change)
+        return lookup
+
+    def blocked(self, finish):
+        """Start a dispatch whose sender blocks inside the transport until released."""
+        import threading
+        entered, release, result = threading.Event(), threading.Event(), {}
+        def sender(**kw):
+            self.calls.append(kw); entered.set(); release.wait(10)
+            return finish(kw)
+        thread = threading.Thread(target=lambda: result.update(out=self.w.dispatch_test(self.env.scope, self.op, sender)))
+        thread.start(); self.assertTrue(entered.wait(10))
+        def let_go():
+            release.set(); thread.join(10); return result['out']
+        return let_go
+
+    def test_qa_repro_blocked_sender_reconcile_poll_second_dispatch(self):
+        let_go = self.blocked(lambda kw: dict(operation_id=kw['idempotency_key'], attempt_id=kw['attempt_id'], provider_receipt='first'))
+        w, env, op = self.env.worker(), self.env, self.op
+        bare = w.reconcile_test(env.scope, op, lambda **kw: dict(operation_id=op, delivered=False))    # "not arrived yet"
+        self.assertEqual(bare, dict(status='uncertain', reason='no_terminal_proof_for_this_attempt'))
+        full = w.reconcile_test(env.scope, op, self.proof())                                           # even full proof, mid-flight
+        self.assertEqual((full['status'], full['reason']), ('uncertain', 'attempt_may_still_be_in_flight'))
+        env.now = '2026-11-10T21:40:00Z'
+        self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')                               # a fresh poll
+        self.assertEqual((self.entry()['status'], self.entry()['delivery_status']), ('uncertain', 'uncertain'))
+        self.assertEqual(w.dispatch_test(env.scope, op, self.ok), dict(status='not_pending'))          # second dispatch
+        self.assertEqual(let_go(), dict(status='sent'))                                                # first is NOT called superseded
+        entry = self.entry()
+        self.assertEqual((len(self.calls), entry['status'], entry['ack']['provider_receipt'], len(entry['attempts'])), (1, 'sent', 'first', 1))
+
+    def test_delivered_false_variants_are_never_proof(self):
+        self.w.dispatch_test(self.env.scope, self.op, self.lost)
+        aid, op = self.aid(), self.op
+        vague = [lambda **kw: None, lambda **kw: 'not found', lambda **kw: dict(operation_id=op, delivered=False),
+                 lambda **kw: dict(operation_id=op, attempt_id=aid, delivered=False),
+                 lambda **kw: dict(operation_id=op, attempt_id=aid, delivered=False, terminal=True),
+                 lambda **kw: dict(operation_id=op, attempt_id=aid, delivered=False, attempt_closed=True, proof_id='x'),
+                 self.proof(proof_id=''), self.proof(proof_id=None), self.proof(terminal='yes'), self.proof(attempt_closed=1),
+                 self.proof(delivered=None), self.proof(delivered='false'), self.proof(operation_id='another-operation'),
+                 self.proof(attempt_id=None), self.proof(attempt_id='0' * 32),
+                 lambda **kw: dict(operation_id=op, attempt_id=aid, delivered='maybe')]
+        for i, lookup in enumerate(vague):
+            with self.subTest(i):
+                out = self.w.reconcile_test(self.env.scope, op, lookup)
+                self.assertEqual(out, dict(status='uncertain', reason='no_terminal_proof_for_this_attempt'))
+        entry = self.entry()
+        self.assertEqual((entry['status'], entry['delivery_status'], entry['attempts'][0]['reconcile_checks']), ('uncertain', 'uncertain', len(vague)))
+        self.env.now = '2026-11-10T21:40:00Z'; self.w.tick(self.env.scope, {})
+        self.assertEqual(self.w.dispatch_test(self.env.scope, op, self.ok), dict(status='not_pending'))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_provider_lookup_outage_stays_uncertain(self):
+        self.w.dispatch_test(self.env.scope, self.op, self.lost)
+        def down(**kw): raise ConnectionError('provider lookup unavailable')
+        self.assertEqual(self.w.reconcile_test(self.env.scope, self.op, down), dict(status='uncertain', reason='lookup_failed', error_type='ConnectionError'))
+        self.assertEqual(self.entry()['status'], 'uncertain')
+
+    def test_delivered_true_bound_to_the_attempt_is_recorded_as_sent(self):
+        self.w.dispatch_test(self.env.scope, self.op, self.lost)
+        out = self.w.reconcile_test(self.env.scope, self.op, lambda **kw: dict(operation_id=self.op, attempt_id=kw['attempt_id'], delivered=True, provider_receipt='found'))
+        self.assertEqual(out, dict(status='sent', delivery_status='sent'))
+        entry = self.entry()
+        self.assertEqual((entry['ack']['provider_receipt'], entry['attempts'][0]['state'], entry['attempts'][0]['error_type']), ('found', 'acked', 'TimeoutError'))
+        self.assertEqual(self.w.reconcile_test(self.env.scope, self.op, self.proof()), dict(status='nothing_to_reconcile'))
+        self.assertEqual(self.w.dispatch_test(self.env.scope, self.op, self.ok), dict(status='not_pending'))
+
+    def retried(self):
+        """Attempt 1 returned an error; terminal proof closes it; a fresh poll + recapture allows attempt 2."""
+        self.w.dispatch_test(self.env.scope, self.op, self.lost)
+        first = self.aid()
+        self.assertEqual(self.w.reconcile_test(self.env.scope, self.op, self.proof()), dict(status='held', delivery_status='not_delivered'))
+        self.assertEqual(self.w.dispatch_test(self.env.scope, self.op, self.ok), dict(status='not_pending'))   # not sendable straight away
+        self.env.now = '2026-11-10T21:40:00Z'
+        self.assertEqual(self.w.tick(self.env.scope, {})['status'], 'draft_ready')
+        return first
+
+    def test_terminal_proof_then_fresh_poll_and_recapture_allow_one_new_attempt(self):
+        first = self.retried(); reads = self.env.fetches
+        self.assertEqual(self.w.dispatch_test(self.env.scope, self.op, self.ok), dict(status='sent'))
+        entry = self.entry(); one, two = entry['attempts']
+        self.assertEqual((self.env.fetches - reads, len(self.calls), one['id'], two['id'] != first, two['number']), (1, 2, first, True, 2))
+        self.assertEqual((one['state'], one['closed_proof']['proof_id'], one['error_type'], two['state']),
+                         ('closed_not_delivered', 'synthetic-provider-record-1', 'TimeoutError', 'acked'))   # audit kept
+        self.assertEqual(self.calls[0]['idempotency_key'], self.calls[1]['idempotency_key'])
+        self.assertNotEqual(self.calls[0]['attempt_id'], self.calls[1]['attempt_id'])
+
+    def test_proof_for_an_older_attempt_cannot_reopen_a_newer_one(self):
+        first = self.retried()
+        self.w.dispatch_test(self.env.scope, self.op, self.lost)                    # attempt 2 also has an unknown outcome
+        second = self.aid(); before = self.entry()
+        out = self.w.reconcile_test(self.env.scope, self.op, self.proof(attempt_id=first))   # proof names attempt 1
+        self.assertEqual(out, dict(status='uncertain', reason='no_terminal_proof_for_this_attempt'))
+        after = self.entry()
+        self.assertEqual((after['status'], after['attempt_id'], after['attempts'][1]['state']), ('uncertain', second, 'returned_error'))
+        self.assertEqual(before['attempts'][0], after['attempts'][0])
+
+    def late(self, finish):
+        """Attempt 1 hangs past its deadline, is closed by terminal proof, attempt 2 is sent, THEN attempt 1 returns."""
+        let_go = self.blocked(finish)
+        first = self.aid(); w = self.env.worker()
+        self.env.now = '2026-11-10T21:51:00Z'                                       # past the 15 minute attempt deadline
+        self.assertEqual(w.reconcile_test(self.env.scope, self.op, self.proof()), dict(status='held', delivery_status='not_delivered'))
+        self.assertEqual(w.tick(self.env.scope, {})['status'], 'draft_ready')
+        self.assertEqual(w.dispatch_test(self.env.scope, self.op, self.ok), dict(status='sent'))
+        settled = self.entry()
+        return first, settled, let_go()
+
+    def test_late_ack_of_a_closed_attempt_cannot_corrupt_the_newer_attempt(self):
+        first, settled, out = self.late(lambda kw: dict(operation_id=kw['idempotency_key'], attempt_id=kw['attempt_id'], provider_receipt='late-first'))
+        self.assertEqual(out, dict(status='stale_attempt', delivery_status='sent'))
+        entry = self.entry(); one, two = entry['attempts']
+        self.assertEqual((entry['status'], entry['ack'], entry['attempt_id']), ('sent', settled['ack'], settled['attempt_id']))
+        self.assertEqual((one['late_ack']['provider_receipt'], one['closed_proof']['proof_id'], entry['duplicate_delivery_evidence'], two), ('late-first', 'synthetic-provider-record-1', first, settled['attempts'][1]))
+
+    def test_late_failure_of_a_closed_attempt_cannot_corrupt_the_newer_attempt(self):
+        def fail(kw): raise ConnectionError('late failure')
+        first, settled, out = self.late(fail)
+        self.assertEqual(out, dict(status='stale_attempt', delivery_status='uncertain'))
+        entry = self.entry()
+        self.assertEqual((entry['status'], entry['delivery_status'], entry['ack']), ('sent', 'sent', settled['ack']))
+        self.assertNotIn('delivery_error_type', entry)
+        self.assertEqual((entry['attempts'][0]['late_error_type'], entry['attempts'][0]['state'], entry['attempts'][1]), ('ConnectionError', 'closed_not_delivered', settled['attempts'][1]))
+
+    def test_late_ack_while_on_hold_cancels_the_retry(self):
+        let_go = self.blocked(lambda kw: dict(operation_id=kw['idempotency_key'], attempt_id=kw['attempt_id'], provider_receipt='late-first'))
+        w = self.env.worker(); self.env.now = '2026-11-10T21:51:00Z'
+        self.assertEqual(w.reconcile_test(self.env.scope, self.op, self.proof())['status'], 'held')
+        self.assertEqual(let_go(), dict(status='sent'))                              # it was delivered after all
+        entry = self.entry()
+        self.assertEqual((entry['status'], entry['proof_contradicted_by_late_ack'], entry['attempts'][0]['closed_proof']['proof_id']), ('sent', True, 'synthetic-provider-record-1'))
+        self.assertEqual(w.tick(self.env.scope, {})['status'], 'draft_ready')
+        self.assertEqual(w.dispatch_test(self.env.scope, self.op, self.ok), dict(status='not_pending'))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_crash_mid_send_then_restart_needs_deadline_and_proof(self):
+        def dies(**kw): self.calls.append(kw); raise Crash()
+        with self.assertRaises(Crash):
+            self.w.dispatch_test(self.env.scope, self.op, dies)
+        self.env.store = self.restart(); w = self.env.worker()
+        entry = self.entry()
+        self.assertEqual((entry['status'], entry['attempts'][0]['state']), ('uncertain', 'in_flight'))
+        self.assertEqual(w.dispatch_test(self.env.scope, self.op, self.ok), dict(status='not_pending'))
+        self.env.now = '2026-11-10T21:49:59Z'
+        self.assertEqual(w.reconcile_test(self.env.scope, self.op, self.proof())['reason'], 'attempt_may_still_be_in_flight')
+        self.env.now = '2026-11-10T21:50:00Z'
+        self.assertEqual(w.reconcile_test(self.env.scope, self.op, lambda **kw: dict(operation_id=self.op, delivered=False))['status'], 'uncertain')
+        self.assertEqual(w.reconcile_test(self.env.scope, self.op, self.proof()), dict(status='held', delivery_status='not_delivered'))
+        self.env.store = self.restart(); w = self.env.worker()
+        self.assertEqual(w.tick(self.env.scope, {})['status'], 'draft_ready')
+        self.assertEqual(w.dispatch_test(self.env.scope, self.op, self.ok), dict(status='sent'))
+        self.assertEqual((len(self.calls), [a['state'] for a in self.entry()['attempts']]), (2, ['closed_not_delivered', 'acked']))
+
+    def test_ack_naming_another_attempt_is_not_accepted(self):
+        out = self.w.dispatch_test(self.env.scope, self.op, lambda **kw: dict(operation_id=kw['idempotency_key'], attempt_id='0' * 32))
+        self.assertEqual(out, dict(status='uncertain', delivery_status='uncertain'))
+        self.assertEqual((self.entry()['status'], self.entry()['attempts'][0]['error_type']), ('uncertain', 'ValueError'))
+
+    def test_draft_and_receipt_survive_every_delivery_outcome(self):
+        self.retried(); self.w.dispatch_test(self.env.scope, self.op, self.lost)
+        self.assertEqual(self.env.state()['receipts'][self.op]['state'], 'draft_ready')
+        self.assertIn(self.op, self.env.published)
+        self.assertEqual(self.entry()['receipt'], self.env.published[self.op])
 
 
 SCOPE_OTHER = dict(job='OTHER-JOB', site_id='other-site', list_id='other-list', business_date='2026-11-10',

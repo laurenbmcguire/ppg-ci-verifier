@@ -3,8 +3,10 @@ No scheduling installation or delivery transport is implicitly enabled.
 """
 import base64
 from copy import deepcopy
+from datetime import timedelta
+from uuid import uuid4
 from hosting import source_first as sf, source_first_capture as capture
-from hosting.last_scan_drafts import capture_adapter, observe, scope_key
+from hosting.last_scan_drafts import capture_adapter, instant, observe, scope_key
 from hosting.last_scan_store import LeaseLost, claim, fenced, release
 
 def discover(config, *, fetch=capture.graph_fetch):
@@ -85,12 +87,13 @@ class ScheduledWorker:
     publisher that declares its lookup authoritative may render the same operation again.
     Photo bytes and the captured snapshot are stored as content-addressed blobs, not in the state row.
     """
-    def __init__(self,transaction,fetch,render,*,clock=sf.now,enabled=False,lease_seconds=300,owner=None):
+    def __init__(self,transaction,fetch,render,*,clock=sf.now,enabled=False,lease_seconds=300,owner=None,attempt_seconds=900):
         self.store=getattr(transaction,'__self__',transaction)
         if not hasattr(self.store,'atomic') or not hasattr(self.store,'put_blob'):
             raise TypeError('A store with atomic multi-record transactions is required (hosting.last_scan_store).')
         self.transaction=self.store.transaction;self.fetch=fetch;self.render=render
         self.clock=clock;self.enabled=enabled;self.lease_seconds=lease_seconds;self.owner=owner
+        self.attempt_seconds=attempt_seconds      # the longest a sender call may take; after it an attempt is not "in flight"
 
     # ---- one scope
     def tick(self,scope,settings):
@@ -310,9 +313,15 @@ class ScheduledWorker:
                     entry=box.get('entries',{}).get(op)
                     if ready and self._claimable(entry):
                         for k in ('held_at','held_until','held_reason','held_error_type'):entry.pop(k,None)
+                        attempt=dict(id=uuid4().hex,number=len(entry.get('attempts') or [])+1,state='in_flight',started_at=now,
+                                     deadline=(instant(now)+timedelta(seconds=self.attempt_seconds)).isoformat(),
+                                     fence=held['fence'],capture=ref)
+                        entry.setdefault('attempts',[]).append(attempt)      # append-only audit trail of every attempt
+                        entry.pop('delivery_error_type',None)
                         entry.update(status='uncertain',delivery_status='uncertain',delivery_attempted_at=now,
-                                     claim_fence=held['fence'],claim_capture=ref,claim_captured_at=slim['captured_at'])
-                        payload=deepcopy(entry)
+                                     attempt_id=attempt['id'],claim_fence=held['fence'],claim_capture=ref,
+                                     claim_captured_at=slim['captured_at'])
+                        payload=deepcopy(entry);aid=attempt['id']
                     else:
                         seen=(entry or {}).get('status')
                         if seen in ('held','superseded'):
@@ -331,49 +340,93 @@ class ScheduledWorker:
             try:release(self.store,key,held,self.clock())
             except Exception:pass
         if payload is None:return outcome
+        # Every result of this call is applied only through its own attempt ID: a callback that arrives after the
+        # entry has moved on to another attempt is recorded as evidence on its own attempt and changes nothing else.
         try:
-            ack=sender(idempotency_key=op,audience='Lauren',payload=payload)
-            if not isinstance(ack,dict) or ack.get('operation_id')!=op:
+            ack=sender(idempotency_key=op,attempt_id=aid,audience='Lauren',payload=payload)
+            if not isinstance(ack,dict) or ack.get('operation_id')!=op or ack.get('attempt_id',aid)!=aid:
                 raise ValueError('Matching delivery acknowledgment required.')
         except Exception as error:
-            with self.transaction('outbox:'+key) as box:
-                entry=box['entries'][op]
+            with self.transaction(box_key) as box:
+                entry=box['entries'][op];mine=self._attempt(entry,aid);now=self.clock()
+                if entry.get('attempt_id')!=aid or mine['state']!='in_flight':
+                    mine.update(late_error_type=type(error).__name__,late_error_at=now)
+                    return dict(status='stale_attempt',delivery_status='uncertain')
+                mine.update(state='returned_error',error_type=type(error).__name__,returned_at=now)
                 entry.update(delivery_status='uncertain',delivery_error_type=type(error).__name__)
                 superseded=entry['status']!='uncertain'
             return dict(status='superseded' if superseded else 'uncertain',delivery_status='uncertain')
-        with self.transaction('outbox:'+key) as box:
-            entry=box['entries'][op]
+        with self.transaction(box_key) as box:
+            entry=box['entries'][op];mine=self._attempt(entry,aid);now=self.clock()
+            if entry.get('attempt_id')!=aid:
+                # a later attempt exists: this delivery DID happen, so keep the proof and flag the duplicate
+                mine.update(late_ack=ack,late_ack_at=now)
+                entry['duplicate_delivery_evidence']=aid
+                return dict(status='stale_attempt',delivery_status='sent')
+            if mine.get('closed_proof'):entry['proof_contradicted_by_late_ack']=True
+            mine.update(state='acked',ack=ack,acked_at=now)
             entry.update(ack=ack,delivery_status='sent')
-            if entry['status']!='uncertain':
+            if entry['status'] not in ('uncertain','held','pending'):
                 return dict(status='superseded',delivery_status='sent')
-            entry['status']='sent'
+            for k in ('held_at','held_until','held_reason','held_error_type'):entry.pop(k,None)
+            entry['status']='sent'                  # also when it had been put back on hold: it is delivered, never resend
             if entry.get('readiness_revoked_at'):   # sent, then the wait was extended while it was in flight
                 return dict(status='sent',readiness_revoked=True)
         return dict(status='sent')
 
+    @staticmethod
+    def _attempt(entry,attempt_id):
+        return next(a for a in entry.get('attempts') or [] if a['id']==attempt_id)
+
+    @staticmethod
+    def terminal_non_delivery(answer,op,attempt_id):
+        """The ONLY answer that may ever lead to another attempt. All of it is required:
+        operation_id and attempt_id equal to this attempt; delivered is False; terminal is True (the provider's final
+        state for this attempt, not "not seen yet"); attempt_closed is True (the provider will reject this attempt if it
+        arrives later); and a non-empty proof_id naming the provider's record. A bare delivered:false is not proof."""
+        return (isinstance(answer,dict) and answer.get('operation_id')==op and answer.get('attempt_id')==attempt_id
+                and answer.get('delivered') is False and answer.get('terminal') is True
+                and answer.get('attempt_closed') is True and isinstance(answer.get('proof_id'),str) and bool(answer['proof_id'].strip()))
+
     def reconcile_test(self,scope,op,status_lookup):
-        """Settle a delivery whose outcome is unknown by ASKING the (test) transport about this operation ID.
-        Delivered -> recorded as sent with the acknowledgment. Authoritatively not delivered -> the entry is put
-        on hold, so only a fresh poll and a fresh recapture can make it sendable again. Anything else (no answer,
-        error, vague answer) leaves it uncertain. Nothing is ever sent from here."""
-        key=sf.digest(scope_key(scope))
-        with self.transaction('outbox:'+key) as box:
+        """Settle a delivery whose outcome is unknown by ASKING the (test) transport about this attempt. Never sends.
+
+        The lookup is called with the operation ID and the attempt ID, and its answer must name both.
+          * delivered is True -> recorded as sent, with the answer kept as the acknowledgment.
+          * terminal non-delivery proof (see terminal_non_delivery) -> the attempt is closed and the entry is put on
+            hold; only a later poll that finds the scope ready, followed by a fresh recapture, can lead to a new
+            attempt. While this process's own sender call may still be running (attempt still in flight and its
+            deadline not passed) even that proof is not acted on.
+          * anything else (delivered:false alone, "not found", another attempt's proof, no answer, an error) ->
+            stays uncertain. Not having arrived yet is not the same as never arriving.
+        """
+        key=sf.digest(scope_key(scope));box_key='outbox:'+key
+        with self.transaction(box_key) as box:
             entry=box.get('entries',{}).get(op)
-            if not entry or entry.get('delivery_status')!='uncertain':return dict(status='nothing_to_reconcile')
+            if not entry or entry.get('delivery_status')!='uncertain' or not entry.get('attempt_id'):
+                return dict(status='nothing_to_reconcile')
+            aid=entry['attempt_id']
         try:
-            answer=status_lookup(idempotency_key=op)
+            answer=status_lookup(idempotency_key=op,attempt_id=aid)
         except Exception as error:
-            return dict(status='uncertain',error_type=type(error).__name__)
-        if not isinstance(answer,dict) or answer.get('operation_id')!=op or answer.get('delivered') not in (True,False):
-            return dict(status='uncertain')
-        with self.transaction('outbox:'+key) as box:
-            entry=box['entries'][op]
-            if entry.get('delivery_status')!='uncertain':return dict(status='nothing_to_reconcile')
-            if answer['delivered']:
-                entry.update(ack=answer,delivery_status='sent',reconciled_at=self.clock())
+            return dict(status='uncertain',reason='lookup_failed',error_type=type(error).__name__)
+        with self.transaction(box_key) as box:
+            entry=box['entries'][op];now=self.clock()
+            if entry.get('attempt_id')!=aid or entry.get('delivery_status')!='uncertain':
+                return dict(status='nothing_to_reconcile')          # the entry moved on while we were asking
+            mine=self._attempt(entry,aid)
+            mine['reconcile_checks']=int(mine.get('reconcile_checks') or 0)+1;mine['last_reconcile_at']=now
+            if isinstance(answer,dict) and answer.get('operation_id')==op and answer.get('attempt_id')==aid and answer.get('delivered') is True:
+                mine.update(state='acked',ack=answer,acked_at=now,acked_by='reconciliation')
+                entry.update(ack=answer,delivery_status='sent',reconciled_at=now)
                 if entry['status']=='uncertain':entry['status']='sent'
                 return dict(status=entry['status'],delivery_status='sent')
-            entry.update(delivery_status='not_delivered',reconciled_at=self.clock())
+            if not self.terminal_non_delivery(answer,op,aid):
+                return dict(status='uncertain',reason='no_terminal_proof_for_this_attempt')
+            if mine['state']=='in_flight' and instant(now)<instant(mine['deadline']):
+                return dict(status='uncertain',reason='attempt_may_still_be_in_flight',not_before=mine['deadline'])
+            mine.update(state='closed_not_delivered',closed_proof=answer,closed_at=now)
+            entry.update(delivery_status='not_delivered',reconciled_at=now)
             if entry['status']=='uncertain':
-                entry.update(status='held',held_at=self.clock(),held_reason='not_delivered_needs_fresh_readiness')
+                entry.update(status='held',held_at=now,held_reason='not_delivered_needs_fresh_readiness')
             return dict(status=entry['status'],delivery_status='not_delivered')
