@@ -50,6 +50,28 @@ scan field, never infers one from Created, Modified or the report date, and neve
 
 Blank or absent quantities in sample rows are counted and reported, not judged and never treated as zero.
 
+## Sample rows: three tallies, never mixed
+
+For each arrival field the scan value is compared with, every row that has both values falls into exactly one of:
+same instant, different instant, or not comparable. A pair that cannot be compared is unknown. It is never counted
+as different, so it cannot erase a match.
+
+- Red flag (blocks): at least one pair is the same instant and no comparable pair differs.
+- Incomplete (blocks): any supplied pair could not be compared.
+- Rows with no arrival value are counted and reported; they neither block nor lift a flag.
+
+## What the result does and does not say
+
+Every report carries a `proof` block:
+
+- `schema_dry_run_readiness`: `ready` or `blocked`. Configuration, captured schema and attestations agree. Nothing more.
+- `sample_evidence`: `not_performed`, `rejected_malformed`, `performed_red_flag_found` or `performed_no_red_flag_found`.
+- `runtime_source_proof`: always `not_established`. This tool never sees what the live source returns.
+- `scan_time_semantics`: always `not_established_by_this_tool`.
+
+`not_performed` lists optional checks that did not run (no sample rows; no row with both a scan and an arrival
+value). They are not gates, and their absence is never reported as a pass.
+
 ## Output
 
 `validate(...)` returns `blocked_reasons`, `missing_evidence` (what a person must supply, including the binding

@@ -403,7 +403,11 @@ def validate(assignment, schema, registry_entries, sample_rows=None):
     check('header_uses_only_template_fields', 'configured', not extra, f'Unknown header field(s): {extra}.')
 
     # ---- sample rows: observations only, and red flags; never evidence FOR a meaning
-    observations = []
+    observations, not_performed, compared_any, red_flag, sample_state = [], [], False, False, 'not_performed'
+    if sample_rows is not None and not isinstance(sample_rows, list) or isinstance(sample_rows, list) and not all(isinstance(r, dict) for r in sample_rows):
+        sample_state = 'rejected_malformed'
+    elif sample_rows:
+        sample_state = 'performed'
     if sample_rows is not None and check('sample_rows_are_well_formed', 'discovered', isinstance(sample_rows, list) and all(isinstance(r, dict) for r in sample_rows),
                                          'Sample rows must be a list of row objects; these are not, so none of them was examined.') and sample_rows:
         if text(scan):
@@ -424,16 +428,27 @@ def validate(assignment, schema, registry_entries, sample_rows=None):
                 if not pairs:
                     continue
                 verdicts = [_same_instant(x, y) for x, y in pairs]
-                # identical text is the same value even when it cannot be parsed; otherwise only valid aware instants compare
-                same = [v is True or (v is None and isinstance(x, str) and isinstance(y, str) and x == y) for v, (x, y) in zip(verdicts, pairs)]
-                observations.append(dict(arrival_field=arrival, rows_with_both=len(pairs), compared=sum(1 for v in verdicts if v is not None),
-                                         same_instant=sum(same), not_comparable=sum(1 for v, s in zip(verdicts, same) if v is None and not s),
-                                         note='Compared as instants. Values without a valid offset were not compared; no timezone was assumed for them.'))
-                if all(same):
+                # Three separate tallies. Identical text is the same value even when it cannot be parsed. A pair that
+                # cannot be compared is UNKNOWN: it is never counted as "different", so it cannot erase a red flag.
+                same = sum(1 for v, (x, y) in zip(verdicts, pairs) if v is True or (v is None and isinstance(x, str) and isinstance(y, str) and x == y))
+                different = sum(1 for v in verdicts if v is False)
+                unknown = len(pairs) - same - different
+                compared_any = True
+                observations.append(dict(arrival_field=arrival, rows_with_both=len(pairs), rows_without_arrival_value=len(sample_rows) - len(pairs),
+                                         compared=sum(1 for v in verdicts if v is not None), same_instant=same, different_instant=different, not_comparable=unknown,
+                                         note='Compared as instants. Values without a valid offset were not compared; no timezone was assumed for them, '
+                                              'and they count neither for nor against a match.'))
+                if same and not different:
+                    red_flag = True
                     check('scan_values_differ_from_' + arrival.lower(), 'discovered', False,
-                          f'In every sample row the scan value is the same instant as {arrival} (whatever offset each is written in). '
-                          'It looks like arrival metadata under another name.',
+                          f'In every sample row that could be compared ({same} of {len(pairs)}), the scan value is the same instant as {arrival} '
+                          '(whatever offset each is written in). It looks like arrival metadata under another name.',
                           'Evidence of how the scan field is filled in on the tablet.')
+                if unknown:
+                    check(f'sample_{arrival.lower()}_values_are_comparable', 'discovered', False,
+                          f'{unknown} of {len(pairs)} supplied scan/{arrival} pairs could not be compared (missing offset, not a timestamp, or not text). '
+                          'An incomplete comparison is not a clean one.',
+                          f'Sample rows whose scan and {arrival} values are both offset-aware timestamps.')
         for q in sf.QUANTITIES:
             if text(fields.get(q)):
                 values = [r.get(fields[q]) for r in sample_rows]
@@ -456,7 +471,22 @@ def validate(assignment, schema, registry_entries, sample_rows=None):
                   f'The assignment says {flag}=true, but the attestations that would justify it are missing or stale. A flag is not evidence.')
 
     blocked = [c['check'] for c in checks if not c['ok']]
-    return dict(client_id=a.get('client_id'), job=a.get('job'), site_id=a.get('site_id'), list_id=a.get('list_id'),
+    if sample_state == 'not_performed':
+        not_performed.append(dict(check='sample_rows_examined', reason='No sample rows were supplied, so no row values were looked at. This is not a pass.'))
+    if sample_state != 'performed' or not compared_any:
+        not_performed.append(dict(check='scan_compared_with_arrival_metadata',
+                                  reason='No row carried both a scan value and a Created/Modified value, so the scan field was not compared with arrival metadata. This is not a pass.'))
+    if sample_state == 'performed':
+        sample_state = 'performed_red_flag_found' if red_flag else 'performed_no_red_flag_found'
+    proof = dict(
+        schema_dry_run_readiness='blocked' if blocked else 'ready',
+        sample_evidence=sample_state,
+        runtime_source_proof='not_established',
+        scan_time_semantics='not_established_by_this_tool',
+        statement='Schema dry-run readiness means only that the configuration, the captured schema and the recorded attestations are consistent with '
+                  'each other. It says nothing about what the live source returns at run time, and this tool establishes nothing about what the scan '
+                  'field means: an attestation is a person\'s statement, and a sample without a red flag is the absence of one warning sign.')
+    return dict(proof=proof, not_performed=not_performed,client_id=a.get('client_id'), job=a.get('job'), site_id=a.get('site_id'), list_id=a.get('list_id'),
                 ready_for_dry_run=not blocked, status='blocked' if blocked else 'ready_for_dry_run_only',
                 blocked_reasons=blocked, missing_evidence=[dict(check=c['check'], needed=c['evidence_needed']) for c in checks if not c['ok'] and c['evidence_needed']],
                 checks=checks, attestation_bindings=bindings, schema_digest=schema_digest(schema) if have_schema else None,
@@ -468,7 +498,14 @@ def report_text(report):
     """The same report as plain lines a reviewer can read."""
     lines = [f"Source mapping readiness: {report.get('client_id')} / {report.get('job')}",
              f"Result: {'BLOCKED' if report['blocked_reasons'] else 'READY FOR A DRY RUN ONLY'}  ({len(report['blocked_reasons'])} open of {len(report['checks'])} checks)",
-             'Nothing was read, changed, approved or marked verified to produce this.', '']
+             'Nothing was read, changed, approved or marked verified to produce this.', '',
+             f"Schema dry-run readiness: {report['proof']['schema_dry_run_readiness'].upper()}",
+             f"Sample evidence: {report['proof']['sample_evidence'].replace('_', ' ').upper()}",
+             'Runtime source proof: NOT ESTABLISHED', 'Scan-time meaning: NOT ESTABLISHED BY THIS TOOL', report['proof']['statement'], '']
+    if report['not_performed']:
+        lines.append('Optional checks that were not performed (not a pass):')
+        lines += [f"  NOT PERFORMED  {n['check']} — {n['reason']}" for n in report['not_performed']]
+        lines.append('')
     for basis, title in (('configured', 'Configured in the assignment'), ('discovered', 'Discovered in the schema or sample (mechanical)'),
                          ('attested', 'Business meaning (needs a named person; cannot be discovered)')):
         lines.append(title + ':')
