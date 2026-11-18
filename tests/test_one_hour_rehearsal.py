@@ -302,7 +302,7 @@ class Delivery(Base):
         for path in (ROOT / 'hosting' / 'last_scan_transport.py', ROOT / 'hosting' / 'last_scan_service.py', ROOT / 'docs' / 'LAST_SCAN_REHEARSAL.md'):
             text = path.read_text().lower()
             for line in text.splitlines():
-                if 'exactly once' in line or 'exactly-once' in line:
+                if ('exactly once' in line or 'exactly-once' in line) and any(w in line for w in ('deliver', 'send', 'sent')):   # about delivery, not about releasing a hold
                     self.assertTrue(any(w in line for w in ('not ', 'no ', 'never', 'cannot', 'nothing')), line)
 
 
