@@ -403,9 +403,97 @@ class SecretLookingKeys(unittest.TestCase):
         clean, found = inv.redact({self.KEYS[0]: 1, self.KEYS[1]: {'api_key': 'v'}, 'ordinary name': 2, '2026-11-10|1': 3, 'ALPHA-REHEARSAL': 4})
         self.assertEqual(len(clean), 5)
         self.assertEqual({k for k in clean if not k.startswith('[REDACTED-KEY')}, {'ordinary name', '2026-11-10|1', 'ALPHA-REHEARSAL'})
-        self.assertEqual(len(found), 3)
+        self.assertEqual(len(found), 2)                                          # one per redacted key; nothing beneath one is walked
         self.assertTrue(all(not any(part in where for part in self.PARTS) for where in found))
-        self.assertTrue(any(where.endswith('.api_key') for where in found))
+        self.assertFalse(any('api_key' in where for where in found))
+
+
+class RedactedKeysTakeTheirValuesWithThem(unittest.TestCase):
+    """QA ff298be: when a key is redacted, everything under it goes too. Nothing below it is walked, echoed or located."""
+    KEY = 'password=SYNTHETIC_KEY'
+    PLAIN = 'SYNTHETIC_PLAIN_SECRET'
+
+    def clean(self, packet, locations=1):
+        before = deepcopy(packet)
+        report = inv.inventory(packet, NOW)
+        self.assertEqual(packet, before)
+        never_ready(self, report)
+        code, both, err = run_packet(self, packet, '--format', 'both')
+        self.assertEqual(code, 1)
+        for rendered in (json.dumps(report), inv.text(report), both, err):
+            for part in (self.PLAIN, 'SYNTHETIC_KEY', 'SYNTHETIC_INNER_NAME', self.KEY):
+                self.assertNotIn(part, rendered)
+        where = item(report, 'packet')['facts']['secret_locations']
+        self.assertEqual(len(where), locations, where)
+        self.assertTrue(all(w.endswith(']') and 'REDACTED-KEY' in w.rsplit('.', 1)[-1] for w in where), where)   # the location stops at the key
+        return report
+
+    def test_the_exact_qa_case(self):
+        packet = example()
+        packet['prepared_by'] = {self.KEY: self.PLAIN}
+        report = self.clean(packet)
+        self.assertEqual(item(report, 'packet')['facts']['prepared_by'], {'[REDACTED-KEY-1]': '[REDACTED]'})
+
+    def test_nested_lists_and_objects_under_a_redacted_key(self):
+        below = (self.PLAIN, [self.PLAIN], [[self.PLAIN, 1], {'note': self.PLAIN}], {'SYNTHETIC_INNER_NAME': self.PLAIN}, {'a': {'b': [{'c': self.PLAIN}]}},
+                 {'ordinary': 'x', 'list': [self.PLAIN, {'SYNTHETIC_INNER_NAME': [self.PLAIN]}]}, 5, None, True, [], {})
+        for value in below:
+            for place in ('prepared_by', 'top', 'header', 'evidence', 'collectors', 'operation', 'provider', 'recipient_policy', 'registry'):
+                with self.subTest(value=str(type(value)), place=place):
+                    p = example()
+                    wrapped = {self.KEY: value}
+                    if place == 'prepared_by':
+                        p['prepared_by'] = wrapped
+                    elif place == 'top':
+                        p.update(wrapped)
+                    elif place == 'header':
+                        p['config']['assignments'][0]['header'].update(wrapped)
+                    elif place == 'evidence':
+                        p['evidence'][0]['claim'] = wrapped
+                    elif place == 'collectors':
+                        p['accepted_collectors'] = [wrapped, [wrapped]]
+                    elif place == 'operation':
+                        p['operations']['scheduler']['reference'] = wrapped
+                    elif place == 'provider':
+                        p['provider_contract'].update(wrapped)
+                    elif place == 'recipient_policy':
+                        p['recipient_policy'].update(wrapped)
+                    else:
+                        p['job_registry'].append(wrapped)
+                    self.clean(p, locations=2 if place == 'collectors' else 1)
+
+    def test_the_whole_subtree_is_one_marker(self):
+        clean, found = inv.redact({self.KEY: {'api_key': 'v', 'deep': [{'x': self.PLAIN}]}, 'kept': {'api_key': 'v'}})
+        self.assertEqual(clean, {'[REDACTED-KEY-1]': '[REDACTED]', 'kept': {'api_key': '[REDACTED]'}})
+        self.assertEqual(found, ['packet.[REDACTED-KEY-1]', 'packet.kept.api_key'])
+
+
+class ProviderReviewMarginMatchesTheSendDoor(unittest.TestCase):
+    """QA ff298be: a review that ends within the send door's margin is not 'configured'. Strictly more than 60 seconds."""
+
+    def label(self, seconds):
+        from datetime import timedelta
+        packet = example()
+        packet['provider_contract']['valid_until'] = (inv.instant(NOW) + timedelta(seconds=seconds)).isoformat()
+        found = item(inv.inventory(packet, NOW), 'provider')
+        return found['levels']['configured'], found['blockers']
+
+    def test_the_margin_is_the_send_doors_own(self):
+        from hosting import last_scan_dispatch as door
+        self.assertEqual(inv.SEND_MARGIN_SECONDS, door.GRANT_SECONDS)
+        self.assertEqual(inv.SEND_MARGIN_SECONDS, 60)
+
+    def test_boundaries(self):
+        for seconds in (-1, 0, 1, 59, 59.999, 60):
+            with self.subTest(seconds=seconds):
+                label, blockers = self.label(seconds)
+                self.assertEqual(label, 'no')
+                self.assertTrue(any('valid_until' in b for b in blockers), blockers)
+        for seconds in (60.001, 61, 3600):
+            with self.subTest(seconds=seconds):
+                label, blockers = self.label(seconds)
+                self.assertEqual(label, 'yes_as_supplied')
+                self.assertTrue(any('not a review' in b for b in blockers))
 
 
 class NoSideEffects(unittest.TestCase):

@@ -43,6 +43,7 @@ from hosting.last_scan_local import ArtifactStore
 
 PACKET, VERSION = 'last_scan.readiness_packet', 1
 LEVELS = ('code_tested', 'configured', 'connected', 'independently_verified', 'production_authorized')
+SEND_MARGIN_SECONDS = 60                # the send door refuses a provider review that does not outlast this (a test pins the two together)
 ORDER = ('packet', 'mapping', 'timing', 'report', 'authorities', 'delivery', 'operations')
 TESTED = 'yes_synthetic_tests_only'
 CLAIMED = 'claimed_in_packet_not_verified'
@@ -114,7 +115,8 @@ def _secret_name(k):
 
 def redact(value, path='packet', invalid=None):
     """(a deep copy with anything secret-looking replaced, [where it was]). Neither a secret-looking value nor a
-    secret-looking KEY is returned, printed or used in a location: such a key becomes [REDACTED-KEY-n]."""
+    secret-looking KEY is returned, printed or used in a location: such a key becomes [REDACTED-KEY-n] and its whole
+    value, whatever it holds, becomes [REDACTED]."""
     found = []
     def walk(v, where):
         if isinstance(v, dict):
@@ -123,9 +125,8 @@ def redact(value, path='packet', invalid=None):
                 if isinstance(k, str) and _secret_name(k):
                     n += 1
                     k = '[REDACTED-KEY-%d]' % n
-                    here = '%s.%s' % (where, k)
-                    found.append(here)
-                    out[k] = walk(x, here)
+                    found.append('%s.%s' % (where, k))
+                    out[k] = '[REDACTED]'                                    # the whole value goes with the key: nothing under it is walked, echoed or located
                     continue
                 here = '%s.%s' % (where, k)
                 if isinstance(k, str) and SECRET_KEY.search(k) and x not in (None, '', False, [], {}):
@@ -193,8 +194,8 @@ def _contract_problems(fields, now):
         out.append('outcome_contract_version must be %d, the only outcome contract the transport judges' % transport.OUTCOME_VERSION)
     if has('valid_until'):                                                   # a dispatch needs it stated and in the future
         try:
-            if not instant(value['valid_until']) > instant(now):
-                out.append('valid_until has passed: the review has lapsed')
+            if not (instant(value['valid_until']) - instant(now)).total_seconds() > SEND_MARGIN_SECONDS:
+                out.append('valid_until is not more than %d seconds ahead: the review has lapsed or is about to, and a send would be refused' % SEND_MARGIN_SECONDS)
         except (ValueError, OverflowError, TypeError):
             out.append('valid_until is not stated as an offset-aware time')
     if shape:
