@@ -229,6 +229,76 @@ class KnownAndZeroNok(unittest.TestCase):
         self.assertEqual(s.cell(subtotal.row, 6).value, 0)                 # a real zero is still shown
 
 
+class PhotoEvidenceVersions(unittest.TestCase):
+    """Adding the download's HTTP status to a photo record changes the hash of NEW captures that name photos.
+    These tests pin what that does and does not affect."""
+    def old_style(self, cap):
+        """The same capture as it would have been sealed before the status was recorded."""
+        old = {k: v for k, v in cap.items() if k not in ('snapshot_hash', 'envelope_hash')}
+        old['photos'] = [dict({k: v for k, v in p.items() if k != 'http_status'}, reason='Photo unavailable, unsupported, or over the safe size limit.')
+                         for p in old['photos']]
+        return sf.seal(old)
+
+    def test_an_old_sealed_capture_still_verifies_and_is_never_rewritten(self):
+        cap, _ = demo.Source().capture(); old = self.old_style(cap)
+        frozen = json.dumps(old, sort_keys=True)
+        sf.verify_seal(old)                                                 # its own seal is still valid
+        rows, findings = sf.reviewed_rows(old, demo.MAP, [])
+        head = wb.header(demo.HEADER, old); contract = wb.contract()
+        raw, verification = wb.build(rows, head, old, sf.binding(old, demo.MAP, [], head, contract['clean_sha256'], sf.digest(contract), wb.generator_hash()), {})
+        self.assertEqual(json.dumps(old, sort_keys=True), frozen)           # reading and rendering changed nothing in it
+        self.assertTrue(all('http_status' not in p for p in old['photos']))
+        self.assertEqual(len(by_code(findings)['photo_not_captured']), len(demo.PHOTO_ROWS))   # still reported, old wording kept
+        self.assertTrue(verification['native_layout_preserved'])
+
+    def test_recapture_of_an_unchanged_source_is_an_explicit_recheck_not_a_silent_match(self):
+        cap, _ = demo.Source().capture(); old = self.old_style(cap)
+        self.assertNotEqual(old['snapshot_hash'], cap['snapshot_hash'])
+        change = sf.changes(old, cap)
+        self.assertEqual((change['added'], change['deleted'], change['changed'], change['semantics_changed']), ([], [], [], True))
+        nophoto_rows = [r for r in demo.items() if int(r['id']) not in demo.PHOTO_ROWS]
+        a, _ = demo.Source(rows=nophoto_rows).capture(); b, _ = demo.Source(rows=nophoto_rows).capture()
+        self.assertEqual(a['snapshot_hash'], b['snapshot_hash'])            # captures without photos are unaffected
+
+    def test_no_failure_status_can_make_a_photo_count_as_captured(self):
+        from PIL import Image
+        out = io.BytesIO(); Image.new('RGB', (2, 2), (1, 2, 3)).save(out, format='PNG'); good = out.getvalue()
+        for status, body in ((401, b''), (403, b''), (404, b''), (410, b''), (500, b''), (0, b''), (302, b''), (403, good), (404, good),
+                             (200, b''), (200, b'not an image'), (200, b'<html>Sign in</html>')):
+            with self.subTest(status=status, body=len(body)):
+                source = demo.Source(photo_status=status, photo_bytes=body)
+                source.photo = lambda url, s=status, b=body: (s, b)        # the fake returns exactly this, even a body with an error status
+                cap, blobs = source.capture()
+                self.assertEqual({p['status'] for p in cap['photos']}, {'unavailable'})
+                self.assertEqual({p['http_status'] for p in cap['photos']}, {status})
+                self.assertTrue(all(p.get('sha256') is None for p in cap['photos'])); self.assertEqual(blobs, {})
+                rows, findings = sf.reviewed_rows(cap, demo.MAP, [])
+                self.assertEqual(len(by_code(findings)['photo_not_captured']), len(demo.PHOTO_ROWS))
+        cap, blobs = demo.Source(photo_status=200, photo_bytes=good).capture()
+        self.assertEqual(({p['status'] for p in cap['photos']}, len(blobs)), ({'supported'}, 1))   # only real image bytes with 200
+
+    def test_known_reject_with_any_failure_status_keeps_the_missing_photo_finding(self):
+        for status in (403, 404, 500):
+            cap, _ = demo.Source(rows=demo.items(nok=2), photo_status=status).capture()
+            rows, findings = sf.reviewed_rows(cap, demo.MAP, [])
+            self.assertEqual(len(by_code(findings)['photo_unavailable']), 36, status)
+
+    def test_changing_failure_status_does_not_restart_the_quiet_hour_but_a_captured_photo_does(self):
+        from hosting.last_scan_drafts import observe, scope_key, photo_identity
+        scope = scope_key(dict(demo.SCOPE, client_id=demo.CLIENT, shift='1', zone='America/Chicago'))
+        rows = [dict(id='3', scan_at='2026-11-10T20:30:00Z')]
+        def snap(at, photo):
+            return dict(scope=scope, rows=rows, captured_at=at, terminal=True, source_capture=dict(photos=[photo]))
+        base = dict(record_id='3', record_hash='h', field='DefectPhoto', field_hash='f', status='unavailable')
+        first = observe(None, scope, snap('2026-11-10T21:00:00Z', dict(base, http_status=403, reason='refused (HTTP 403)')), '2026-11-10T21:00:00Z')
+        again = observe(first, scope, snap('2026-11-10T21:10:00Z', dict(base, http_status=404, reason='generic')), '2026-11-10T21:10:00Z')
+        self.assertEqual((again['operation_id'], again['due_at'], again['revision']), (first['operation_id'], first['due_at'], first['revision']))
+        got = observe(again, scope, snap('2026-11-10T21:20:00Z', dict(base, status='supported', sha256='a' * 64, bytes=10, http_status=200)), '2026-11-10T21:20:00Z')
+        self.assertNotEqual(got['operation_id'], first['operation_id'])
+        self.assertTrue(got['due_at'].startswith('2026-11-10T22:20'))       # new evidence: the hour restarts
+        self.assertNotIn('http_status', photo_identity(base)); self.assertNotIn('reason', photo_identity(base))
+
+
 class DraftDownload(unittest.TestCase):
     """The same source through the scheduled runner: one held draft per shift, stored privately, downloadable."""
     @classmethod

@@ -31,6 +31,16 @@ def scope_key(scope):
     return base
 
 
+PHOTO_IDENTITY = ('record_id', 'record_hash', 'field', 'field_hash', 'status', 'sha256', 'bytes')
+
+def photo_identity(photo):
+    """What makes a photo "the same evidence" for the quiet-hour timer: which record and field name it, whether
+    it was captured, and its exact bytes. WHY a download failed (HTTP status, wording of the reason) is kept in
+    the capture and the checklist but is transport detail: a source answering 403 one minute and 404 the next has
+    not changed, and must not restart the hour or create a new draft. Captured vs not captured still does."""
+    return {k: photo.get(k) for k in PHOTO_IDENTITY}
+
+
 def observe(previous, scope, snapshot, now):
     """Pure state transition; caller serializes and persists before acknowledging.
 
@@ -55,7 +65,7 @@ def observe(previous, scope, snapshot, now):
     latest = max((instant(r['scan_at']) for r in rows), default=None)
     if latest and latest > captured:
         raise ValueError('Future scan requires clock review.')
-    photos=[p for p in snapshot.get('source_capture',{}).get('photos',[]) if p.get('record_id') in ids]
+    photos=[photo_identity(p) for p in snapshot.get('source_capture',{}).get('photos',[]) if p.get('record_id') in ids]
     fingerprint = sf.digest(dict(rows=sorted(rows, key=lambda r:r['id']), photos=sorted(photos,key=sf.digest)))
     changed = p.get('fingerprint') != fingerprint
     revision = (p.get('revision', 0) + 1) if changed else p['revision']
