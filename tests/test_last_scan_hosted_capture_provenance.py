@@ -186,7 +186,8 @@ class ReceiptsCannotBeForged(Base):
                 record = super().receipt(identity); inner.records[identity]['collector'] = 'someone-else'    # changes after answering once
                 return record
         deps = self.deps(captures=Shifty([self.schema]))
-        self.ran(deps)
+        code, body = self.go(deps)                                               # approved on the first answer; the change is seen before any source is asked
+        self.assertEqual((code, body['status'], body['sources_read'], body['schema_probes'], self.reads), (409, 'authority_withdrawn', 0, 0, []))
         self.refused(self.deps(captures=deps.captures, approvals=ApprovesAnything()), 'capture_collector_not_accepted')
 
     def test_collector_and_capture_time_are_part_of_what_is_approved(self):

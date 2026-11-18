@@ -226,11 +226,19 @@ class HostedPoll(Hosted):
     def stopped(self, approvals=None, captures=None, reason=''):
         deps = self.deps(quota=hosted.Quota(500), **{k: v for k, v in dict(approvals=approvals, captures=captures).items() if v is not None})
         code, body = self.go(deps)
-        self.assertEqual((code, body['status'], self.reads), (200, 'ran', []), body)             # authorized at the start, and then nothing was read
-        results = body['summary']['results']
-        self.assertTrue(results and all((r['status'], r['error_type']) == ('error', 'AuthorityWithdrawn') for r in results), results)
-        self.assertEqual(self.rows()[1], 0)                                      # no draft, no blob
+        self.no_read(code, body)
         return body
+
+    def no_read(self, code, body):
+        """Authorized at the start, and then nothing was read: stopped around the run-start probe, or before each read."""
+        self.assertEqual(self.reads, [], body)
+        if body['status'] == 'authority_withdrawn':
+            self.assertEqual((code, body['sources_read']), (409, 0))
+        else:
+            self.assertEqual((code, body['status']), (200, 'ran'), body)
+            results = body['summary']['results']
+            self.assertTrue(results and all((r['status'], r['error_type']) == ('error', 'AuthorityWithdrawn') for r in results), results)
+        self.assertEqual(self.rows()[1], 0)                                      # no draft, no blob
 
     def test_an_approval_revoked_expired_or_renewed_after_the_run_started_stops_every_read(self):
         for name, later in dict(revoked=dict(self.record, status='revoked'), revoked_at=dict(self.record, revoked_at=NOW),
@@ -263,8 +271,7 @@ class HostedPoll(Hosted):
                 self.now = iso(timedelta(seconds=31))                            # the run-start probe takes 31 seconds on the host clock
                 return answer
         code, body = self.go(self.deps(schema_probe=Slow(schemas_for(self.config), lambda: self.now)))
-        self.assertEqual((code, body['status'], self.reads), (200, 'ran', []))
-        self.assertEqual({r['error_type'] for r in body['summary']['results']}, {'AuthorityWithdrawn'})
+        self.no_read(code, body)
 
     def test_the_host_clock_going_backwards_is_refused(self):
         self.assertEqual(self.go()[0], 200)
@@ -293,8 +300,7 @@ class HostedPoll(Hosted):
                 self.now = iso(-timedelta(seconds=1))
                 return answer
         code, body = self.go(self.deps(schema_probe=Rewinds(schemas_for(self.config), lambda: self.now)))
-        self.assertEqual((code, body['status'], self.reads), (200, 'ran', []))
-        self.assertEqual({r['error_type'] for r in body['summary']['results']}, {'AuthorityWithdrawn'})
+        self.no_read(code, body)
 
     def test_accepted_issuers_are_server_side_frozen_and_part_of_what_is_approved(self):
         for bad in (None, {}, dict(approval=(af.APPROVAL_ISSUER,)), 'issuers', dict(approval=(af.APPROVAL_ISSUER,), capture=(' x',))):
@@ -530,6 +536,175 @@ class DispatchLifecycle(Dispatch):
         self.refused(self.go(deps=self.r.dispatch_deps(issuers=dict(approval=('another',), capture=(af.CAPTURE_ISSUER,)))))
         self.records[self.approved] = dict(self.kept[self.approved], issuer=af.CAPTURE_ISSUER)   # a capture authority cannot approve
         self.assertIn('issuer_not_accepted', self.detail(self.refused(self.go(), DISPATCH), DISPATCH))
+
+
+def ahead(store, clock, seconds=3600):
+    """What a concurrent worker with a later clock leaves behind: the store has now seen a later time than ours."""
+    with store.transaction(hosted.CLOCK) as seen:
+        seen['high_water'] = (hosted.instant(clock()) + timedelta(seconds=seconds)).isoformat()
+
+
+class HostedWatermarkAndProbeRaces(Hosted):
+    """QA of d38c536: the clock watermark and the lifecycle must be re-checked where time can pass, with no source IO after."""
+    def setUp(self):
+        super().setUp()
+        self.digest = next(iter(self.approvals.records))
+        self.schemas = schemas_for(self.config)
+
+    def approvals_that(self, act, on=1):
+        test = self
+        class Acts(FakeApprovals):
+            def __init__(s): s.asked = 0
+            def attestation(s, digest):
+                s.asked += 1
+                if s.asked == on:
+                    act()
+                return deepcopy(test.approvals.records.get(digest))
+        return Acts()
+
+    def probe_that(self, act, on=1):
+        test = self
+        class Acts(FakeProbe):
+            def current(s, site_id, list_id):
+                answer = super().current(site_id, list_id)
+                if s.calls == on:
+                    act()                                                        # happens while the probe is in flight, before it returns
+                return answer
+        return Acts(self.schemas, lambda: test.now)
+
+    def test_qa_repro_a_watermark_moved_ahead_after_the_preflight_look_is_caught_in_the_reservation(self):
+        code, body = self.go(self.deps(approvals=self.approvals_that(lambda: ahead(self.store, lambda: self.now))))
+        self.assertEqual((code, body['status'], body['sources_read'], self.reads), (409, 'host_clock_behind', 0, []), body)
+        self.assertEqual(self.rows()[1], 0)
+        import sqlite3
+        with sqlite3.connect(self.path) as db:                                   # no nonce and no quota were taken: only the clock record exists
+            keys = [r[0] for r in db.execute('SELECT key FROM scan_draft_state')]
+        self.assertEqual([k for k in keys if k.startswith('auth:') and k != hosted.CLOCK], [])
+        self.store = StateStore(self.path)                                       # after a restart the plain preflight look refuses it
+        code, body = self.go()
+        self.assertEqual((code, self.failed(body), self.reads), (409, ['host_clock_not_behind_the_last_seen_time'], []))
+
+    def test_a_watermark_moved_ahead_during_the_run_stops_the_reads(self):
+        for on in (1, 2):                                                        # during the run-start probe, and during the probe before the read
+            self.store = StateStore(Path(self.folder.name) / ('w%d.db' % on)); self.path = Path(self.folder.name) / ('w%d.db' % on)
+            code, body = self.go(self.deps(schema_probe=self.probe_that(lambda: ahead(self.store, lambda: self.now), on)))
+            self.assertEqual(self.reads, [], (on, body))
+            self.assertIn(body['status'], ('authority_withdrawn', 'ran'))
+            if body['status'] == 'ran':
+                self.assertEqual({r['error_type'] for r in body['summary']['results']}, {'AuthorityWithdrawn'})
+
+    def test_qa_repro_revoked_expired_or_clock_moved_while_a_probe_is_in_flight_reads_no_item(self):
+        record = self.approvals.records[self.digest]
+        acts = dict(revoked=lambda: self.approvals.records.__setitem__(self.digest, dict(record, status='revoked')),
+                    arbitrary_flag=lambda: self.approvals.records.__setitem__(self.digest, dict(record, revoked=True)),
+                    renewed=lambda: self.approvals.records.__setitem__(self.digest, dict(record, record_id='renewed-during-probe')),
+                    gone=lambda: self.approvals.records.pop(self.digest),
+                    expired=lambda: setattr(self, 'now', '2026-11-13T00:00:00+00:00'),
+                    clock_back=lambda: setattr(self, 'now', iso(-timedelta(seconds=1))))
+        for name, act in acts.items():
+            for on in (1, 2):
+                with self.subTest(name=name, probe=on):
+                    self.approvals.records[self.digest] = deepcopy(record); self.now = NOW
+                    self.store = StateStore(Path(self.folder.name) / ('%s%d.db' % (name, on))); self.path = Path(self.folder.name) / ('%s%d.db' % (name, on))
+                    probe = self.probe_that(act, on)
+                    code, body = self.go(self.deps(schema_probe=probe, quota=hosted.Quota(500)))
+                    self.assertEqual((self.reads, probe.calls), ([], on), body.get('status'))   # no item read, and no probe after the one in flight
+                    if on == 1:
+                        self.assertEqual((code, body['status'], body['sources_read']), (409, 'authority_withdrawn', 0))
+                    else:                                                    # a clock that moved also makes the probe answer stale: either way, no read
+                        self.assertTrue({r['error_type'] for r in body['summary']['results']} <= {'AuthorityWithdrawn', 'SchemaDrift'})
+        self.approvals.records[self.digest] = deepcopy(record); self.now = NOW
+
+
+class DispatchWatermarkAndProbeRaces(Dispatch):
+    def setUp(self):
+        super().setUp()
+        self.records = self.r.approvals.records
+        self.kept = deepcopy(self.records)
+
+    def probe_that(self, act):
+        class Acts(rh.AdapterProbe):
+            def current(s, site_id, list_id):
+                answer = super().current(site_id, list_id)
+                act()                                                            # while the probe is in flight, before it returns
+                return answer
+        return Acts(self.r.tenants, self.r.clock)
+
+    def test_qa_repro_revoked_while_the_schema_probe_is_in_flight_reads_no_item(self):
+        run = lambda: next(k for k in self.records if k != self.approved)
+        acts = dict(dispatch_revoked=lambda: self.records[self.approved].update(status='revoked'),
+                    dispatch_arbitrary_flag=lambda: self.records[self.approved].update(revoked=True),
+                    dispatch_renewed=lambda: self.records[self.approved].update(record_id='renewed-during-probe'),
+                    run_revoked=lambda: self.records[run()].update(revoked_at=self.r.clock()),
+                    run_gone=lambda: self.records.pop(run()),
+                    expired=lambda: self.r.clock.advance(days=3),
+                    too_long=lambda: self.r.clock.advance(seconds=dispatch.GRANT_SECONDS + 1),
+                    clock_back=lambda: setattr(self.r.clock, 'at', self.r.clock.at - timedelta(seconds=1)),
+                    watermark_ahead=lambda: ahead(self.r.store, self.r.clock))
+        for name, act in acts.items():
+            with self.subTest(name):
+                self.setUp()                                                    # a fresh rehearsal, store and clock for every case
+                probe = self.probe_that(act)
+                code, body = self.go(deps=self.r.dispatch_deps(schema_probe=probe))
+                self.assertEqual((body['sources_read'], body['sender_calls'], probe.calls, self.item_reads('alpha'), self.r.lauren.calls),
+                                 (0, 0, 1, self.reads, 0), (name, body.get('status'), body.get('refusal')))
+                self.assertIn(body['status'], ('held', 'lease_lost'))
+                self.assertNotEqual(self.entry().get('delivery_status'), 'sent')
+        self.setUp()
+        self.assertEqual(self.go(deps=self.r.dispatch_deps(schema_probe=self.probe_that(lambda: None)))[1]['status'], 'sent')
+
+    def test_qa_repro_a_watermark_moved_ahead_during_authorization_is_caught_in_the_reservation(self):
+        approved, records, test = self.approved, self.records, self
+        class Acts(FakeApprovals):
+            def __init__(s): s.records, s.asked = records, 0
+            def attestation(s, digest):
+                s.asked += 1
+                if s.asked == 2:                                                 # the last authority call before the reservation
+                    ahead(test.r.store, test.r.clock)
+                return deepcopy(records.get(digest))
+        first = self.r.dispatch_request('alpha', '1')
+        for _ in range(2):                                                       # twice: the nonce was not spent the first time
+            code, body = dispatch.handle('POST', rh.ALICE, first, self.r.dispatch_deps(approvals=Acts()))
+            self.assertIn(body['status'], ('host_clock_behind', 'not_authorized'), body)
+            self.assertEqual((code, body['sources_read'], body['sender_calls']), (409, 0, 0))
+        with self.r.store.transaction(transport_grant_key(self)) as grant:
+            self.assertEqual(dict(grant), {})                                    # no grant was written
+        self.untouched(); self.assertEqual(self.entry()['status'], 'pending')
+        self.r.restart()
+        self.refused(self.go(), 'host_clock_not_behind_the_last_seen_time')
+
+    def test_a_watermark_moved_ahead_during_the_read_or_before_the_send(self):
+        def fetch(scope, settings):
+            ahead(self.r.store, self.r.clock)
+            return self.r.fetch(scope, settings)
+        code, body = self.go(deps=self.r.dispatch_deps(fetch=fetch))
+        self.assertEqual((code, body['status'], body['refusal'], body['sender_calls']), (409, 'held', 'host_clock_is_behind_the_last_seen_time', 0), body)
+        with self.r.store.transaction(hosted.CLOCK) as seen:
+            seen.clear()
+        gate = ScheduledWorker._gate
+        marks = []
+        def late(*a, **kw):                                                     # inside the claim, after the last authority check
+            marks.append(1)
+            return gate(*a, **kw)
+        with mock.patch.object(ScheduledWorker, '_gate', staticmethod(late)):
+            code, body = self.go(deps=self.r.dispatch_deps(clock=Jumping(self.r.clock, self.r.store, marks)))
+        self.assertEqual((code, body['status'], body['refusal'], body['sender_calls'], self.r.lauren.calls),
+                         (202, 'uncertain', 'validity_passed_or_clock_went_back_before_the_send', 0, 0), body)
+
+
+class Jumping:
+    """A clock that, once the claim has been made, finds the store has seen a later time (a concurrent worker)."""
+    def __init__(self, clock, store, marks): self.clock, self.store, self.marks, self.done = clock, store, marks, False
+    def __call__(self):
+        if self.marks and not self.done:
+            self.done = True
+            ahead(self.store, self.clock)
+        return self.clock()
+
+
+def transport_grant_key(test):
+    from hosting import last_scan_transport as transport
+    return transport.grant_key(test.r.item('alpha', '1')['scope'], test.op)
 
 
 class RehearsalPoll(Dispatch):

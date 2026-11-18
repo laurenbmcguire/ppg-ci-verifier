@@ -189,11 +189,15 @@ def clock_problem(deps):
     try:
         with deps.store.transaction(CLOCK) as seen:
             high = seen.get('high_water')
-        if high and (instant(high) - instant(deps.clock())).total_seconds() > SCHEMA_FUTURE_SKEW_SECONDS:
+        if clock_behind(high, deps.clock()):
             return 'The host clock is behind the last time this store saw (' + high + ').'
     except Exception as error:
         return 'The clock record could not be read: ' + type(error).__name__
     return None
+
+
+def clock_behind(high, now):
+    return bool(high) and (instant(high) - instant(now)).total_seconds() > SCHEMA_FUTURE_SKEW_SECONDS
 
 
 def mark_clock(record, now):
@@ -253,7 +257,7 @@ class _DriftGuard:
     list before a run starts and again immediately before every source read. Anything short of a fresh, well-formed,
     matching answer is drift. There remains an unavoidable gap between this look and the read that follows it."""
     def __init__(self, deps, mapping, recheck=None):
-        self.deps, self.count, self.skipped_held, self.recheck = deps, 0, [], recheck
+        self.deps, self.count, self.skipped_held, self.recheck, self.withdrawn = deps, 0, [], recheck, None
         self.approved = {(m['site_id'], m['list_id']): m['schema_digest'] for m in mapping}
 
     def held(self, site_id):
@@ -293,7 +297,15 @@ class _DriftGuard:
             if self.held(site_id):                                           # nothing is asked of a held site, and it is not drift:
                 self.skipped_held.append(dict(site_id=site_id, list_id=list_id))   # the runner reports its scopes as cooldown, unread
                 continue
+            # A probe can take time. The authorities and the clock are asked before it and again after it, and the
+            # first refusal ends the round: no further probe is made and no item is ever read.
+            self.withdrawn = self.recheck(dict(site_id=site_id, list_id=list_id)) if self.recheck else None
+            if self.withdrawn:
+                break
             problem = self.problem(site_id, list_id)
+            self.withdrawn = self.recheck(dict(site_id=site_id, list_id=list_id)) if self.recheck else None
+            if self.withdrawn:
+                break
             if problem:
                 out.append(dict(site_id=site_id, list_id=list_id, problem=problem))
         return out
@@ -305,6 +317,9 @@ class _DriftGuard:
         problem = self.problem(scope.get('site_id'), scope.get('list_id'))
         if problem:
             raise SchemaDrift(problem)                                       # the source is not read
+        withdrawn = self.recheck(scope) if self.recheck else None            # again: the probe just made may have taken time
+        if withdrawn:
+            raise AuthorityWithdrawn(withdrawn)                              # no item is read
         return self.deps.fetch(scope, settings)
 
 
@@ -419,20 +434,27 @@ def still_authorized(deps, principal, digest, approval, mapping, started, scope)
     ONE record judged whole, and requires the SAME approval record and the SAME capture receipt as when it started."""
     if instant(deps.clock()) < instant(started):
         return 'host_clock_went_backwards_during_the_call'
+    if clock_problem(deps):                                                  # a concurrent worker has since seen a later time
+        return 'host_clock_is_behind_the_last_seen_time'
     ok, why, now_ = _approval(deps, digest, principal)
     if not ok:
         return 'run_approval_withdrawn: ' + why
     if now_['identity'] != approval['identity']:
         return 'run_approval_is_another_record_than_the_one_this_call_was_authorized_under'
-    row = next((m for m in mapping if m['site_id'] == scope.get('site_id') and m['list_id'] == scope.get('list_id')
-                and m['client_id'] == scope.get('client_id') and m['job'] == scope.get('job')), None)
-    schema = next((s for s in deps.schemas or [] if row and readiness.snapshot_identity(s) == row['schema_snapshot']), None)
-    if schema is None:
+    rows = [m for m in mapping if m['site_id'] == scope.get('site_id') and m['list_id'] == scope.get('list_id')
+            and all(k not in scope or m[k] == scope[k] for k in ('client_id', 'job'))]
+    if not rows:
         return 'capture_receipt:no_approved_schema_for_this_scope'
-    reasons, capture = capture_problems(deps, schema, row)
-    if not reasons and capture != row['capture']:
-        reasons = ['identity_changed_since_approval']
-    return 'capture_receipt:' + ','.join(reasons) if reasons else None
+    for row in rows:
+        schema = next((s for s in deps.schemas or [] if readiness.snapshot_identity(s) == row['schema_snapshot']), None)
+        if schema is None:
+            return 'capture_receipt:no_approved_schema_for_this_scope'
+        reasons, capture = capture_problems(deps, schema, row)
+        if not reasons and capture != row['capture']:
+            reasons = ['identity_changed_since_approval']
+        if reasons:
+            return 'capture_receipt:' + ','.join(reasons)
+    return None
 
 
 def preflight(deps, principal):
@@ -516,6 +538,9 @@ def _reserve(deps, principal, digest, nonce, run_id):
     nonce_key = 'auth:nonce:' + sf.digest(dict(principal=principal.id, nonce=nonce))
     quota_key = 'auth:quota:' + sf.digest(dict(principal=principal.id, snapshot=digest, hour=hour))
     with deps.store.atomic([nonce_key, quota_key, CLOCK]) as records:
+        # In THIS transaction, before anything is taken: the look in preflight may be out of date by now.
+        if clock_behind(records[CLOCK].get('high_water'), now):
+            return 'host_clock_behind'
         if records[nonce_key]:
             return 'replayed_request'
         mark_clock(records[CLOCK], now)
@@ -595,11 +620,14 @@ def handle(method, headers, body, deps):
         return _respond(409, status='not_activated', sources_read=0, records_written=0, **report)
     refused = _reserve(deps, principal, digest, nonce, run_id)
     if refused:
-        return _respond(409 if refused == 'replayed_request' else 429, status=refused, sources_read=0, **report)
+        return _respond(429 if refused == 'quota_exceeded' else 409, status=refused, sources_read=0, **report)
     # Live schema confirmation, read-only: every list once now, then again immediately before each source read.
     # Before EVERY source read the approval and the capture receipt are asked for again: same records, still valid.
     guard = _DriftGuard(deps, mapping, recheck=lambda scope: still_authorized(deps, principal, digest, approval, mapping, started, scope))
     drift = guard.check_all()
+    if guard.withdrawn:                                                      # noticed around a run-start probe: nothing else is asked of any source
+        return _respond(409, status='authority_withdrawn', reason=guard.withdrawn, sources_read=0, schema_probes=guard.count,
+                        **dict(report, live_schema_drift_check='stopped_authority_or_clock'))
     if drift:
         return _respond(409, status='schema_drift', sources_read=0, schema_probes=guard.count, drift=drift,
                         sites_on_provider_wait=guard.skipped_held, **dict(report, live_schema_drift_check='failed_before_any_read'))

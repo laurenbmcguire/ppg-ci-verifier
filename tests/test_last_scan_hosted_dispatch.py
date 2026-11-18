@@ -483,7 +483,7 @@ class OneRecordPerCheck(Dispatch):
     def test_one_read_of_each_approval_per_check(self):
         counting = self.authority((self.r.approvals.records[self.approved],))
         self.assertEqual(self.go(deps=self.r.dispatch_deps(approvals=counting))[1]['status'], 'sent')
-        self.assertEqual((counting.asked, counting.total), (3, 6))              # run + dispatch: before the reservation, before the re-read, after it
+        self.assertEqual((counting.asked, counting.total), (4, 8))              # run + dispatch: at authorization, before the probe, after it, after the re-read
 
     def test_a_record_that_answers_differently_each_time_it_is_asked_is_taken_once_as_plain_data(self):
         good = self.r.approvals.records[self.approved]
@@ -508,7 +508,7 @@ class OneRecordPerCheck(Dispatch):
     def test_valid_before_the_read_and_split_after_it_stops_the_claim(self):
         good = self.r.approvals.records[self.approved]
         for later in (dict(good, action='not_dispatch'), dict(good, principals=['bob'])):
-            for answers, reads in (((good, later), 0), ((good, good, later), 1)):      # split before the re-read, and after it
+            for answers, reads in (((good, later), 0), ((good, good, later), 0), ((good, good, good, later), 1)):   # before the probe, after it, after the re-read
                 code, body = self.go(deps=self.r.dispatch_deps(approvals=self.authority(answers, cycle=False)))
                 self.assertEqual((code, body['status'], body['refusal'], body['sources_read'], body['sender_calls']),
                                  (409, 'held', 'dispatch_approval_withdrawn', reads, 0))

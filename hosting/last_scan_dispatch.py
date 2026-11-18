@@ -46,8 +46,9 @@ never retried (hosting.last_scan_transport). Another caller's dispatch_id is a d
 Every approval and capture receipt must meet the record contract in hosting.last_scan_authority: versioned plain
 data, an accepted issuer, status active, no revocation field set, and validity bounds judged on the HOST clock. The
 dispatch approval covers the run approval RECORD (its id and validity), so a renewed run approval needs a new
-dispatch approval, and the intent and grant name both records. Before the source is read, again after it, the same
-records are asked for and must be the same records, still valid; an approval or receipt that would expire within
+dispatch approval, and the intent and grant name both records. Before the schema probe, after it and before any item
+is read, and again after the read, the same records are asked for and must be the same records, still valid, and the
+host clock must not be behind the latest time the store has seen (checked inside the reservation transaction too); an approval or receipt that would expire within
 GRANT_SECONDS is refused up front; a call that takes longer than GRANT_SECONDS, or sees the host clock go backwards,
 stops; and the sender is not called once any of the three validity bounds has passed.
 
@@ -184,6 +185,9 @@ def _reserve(deps, principal, digest, body, item, intent, contract):
     quota_key = 'auth:dispatch_quota:' + sf.digest(dict(principal=principal.id, dispatch=digest, hour=hour))
     grant_key = transport.grant_key(item['scope'], op)
     with deps.store.atomic([nonce_key, quota_key, intent_key, grant_key, hosted.CLOCK]) as records:
+        # In THIS transaction, before the nonce, quota, intent or grant: the look in preflight may be out of date by now.
+        if hosted.clock_behind(records[hosted.CLOCK].get('high_water'), now):
+            return 'host_clock_behind', None
         if records[nonce_key]:
             return 'replayed_request', None
         hosted.mark_clock(records[hosted.CLOCK], now)
@@ -343,6 +347,9 @@ def handle(method, headers, body, deps):
         if problem:
             seen['refusal'] = 'schema:' + problem
             raise hosted.SchemaDrift(problem)                                # the source is not read
+        why = withdrawn()                                                    # again: the probe just made may have taken time
+        if why:
+            stop(why)                                                        # no item is read
         seen['reads'] += 1
         snapshot = base.fetch(scope, settings)
         why = withdrawn()                                                    # and again after the read, before the claim
@@ -352,7 +359,7 @@ def handle(method, headers, body, deps):
 
     def send(*, idempotency_key, attempt_id, audience, payload):
         at = instant(deps.clock())                                           # clock only; no authority is asked at this point
-        if at < instant(started) or any(at >= instant(b) for b in bounds):
+        if at < instant(started) or any(at >= instant(b) for b in bounds) or hosted.clock_problem(base):
             seen['refusal'] = 'validity_passed_or_clock_went_back_before_the_send'
             raise Revoked(seen['refusal'])                                   # the sender is NOT called; the attempt is recorded as returned in error
         receipt = payload.get('receipt') if isinstance(payload, dict) else None
