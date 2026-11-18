@@ -82,7 +82,17 @@ def _native_layout(raw):
     return out
 
 
+def known_sum(values):
+    values=list(values)
+    return None if any(v is None for v in values) else sum(values)
+
+
+def ratio(numerator,denominator):
+    return numerator/denominator if numerator is not None and denominator else ''
+
+
 def build(rows,head,cap,bind,blobs):
+    incomplete=any(r['resolved'][f] is None for r in rows for f in sf.QUANTITIES)
     c=contract();holds=[f for f in scope_findings(rows,head,cap,c) if f['blocking']]
     if holds:raise sf.ReviewError(holds[0]['text'])
     template=(ASSETS/c['clean_filename']).read_bytes();p=tx.read_package(template);parts=tx.sheets(p)
@@ -91,6 +101,9 @@ def build(rows,head,cap,bind,blobs):
     parts=tx.sheets(p)
     expected={};locations={};photo_expect=[];text_entries=[];text_locations={}
     def actual(sheet,address,value=None,formula=None):
+        # In incomplete drafts, materialize reviewed values instead of Excel
+        # formulas that would silently coerce an unknown blank to zero.
+        if incomplete:formula=None
         tx.write(roots[sheet],address,value,formula)
         expected[(sheet,address)]={'value':value,'formula':formula.lstrip('=') if formula else None}
     def put(sheet,address,value=None,formula=None):
@@ -126,11 +139,11 @@ def build(rows,head,cap,bind,blobs):
     for key,address in c['summary'].items():
         if key in HEADER_FIELDS:put(summary,address,head.get(key) or None)
     put(summary,'D13',job);put(summary,'D14',serial)
-    put(summary,'B5','Daily Report · HELD')
+    put(summary,'B5','DRAFT · UNKNOWN QUANTITIES' if incomplete else 'Daily Report · HELD')
     title=f"{job} · {day} · reviewed source snapshot"
     put(summary,'B6',title)
     put(summary,'B10',f'{len(rows)} recorded inspections. Shift completion and future submissions are not established.')
-    put(summary,'B25','Totals include every approved recorded row once. Blank shifts mean no rows were captured, not that production was completed or not run.')
+    put(summary,'B25','Blank quantities/totals are UNKNOWN, not zero. A total is withheld if any contributing quantity is unknown.' if incomplete else 'Totals include every approved recorded row once. Blank shifts mean no rows were captured, not that production was completed or not run.')
     put(summary,'B29',rows[0]['resolved']['part'] if rows else None)
     inspected_for={r['resolved']['inspected_for'] for r in rows if r['resolved']['inspected_for'] is not None}
     put(summary,'H29',next(iter(inspected_for)) if len(inspected_for)==1 else 'See shift detail' if inspected_for else None)
@@ -144,7 +157,7 @@ def build(rows,head,cap,bind,blobs):
     # Retain a truthful source-record unit instead of calling arbitrary scans boxes.
     for address in ('B8','F20'):put(summary,address,'Records')
     for address in ('G48','H48'):put(summary,address,None)
-    totals={f:sum(r['resolved'][f] for r in rows) for f in sf.QUANTITIES}
+    totals={f:known_sum(r['resolved'][f] for r in rows) for f in sf.QUANTITIES}
     selected=head.get('photo_choices',{})
     def photo_status(item):
         available=[p for p in cap['photos'] if p.get('record_id')==item]
@@ -169,13 +182,13 @@ def build(rows,head,cap,bind,blobs):
                 # blank-coercing calculation; the reconciliation is independent.
                 put(sheet,col+str(rr),display(row,field,value))
             put(sheet,'M'+str(rr),photo_status(row['id']) if row['resolved']['rejected'] and row['id'] not in selected else None)
-        quantities={f:sum(r['resolved'][f] for r in subset) for f in sf.QUANTITIES}
+        quantities={f:known_sum(r['resolved'][f] for r in subset) for f in sf.QUANTITIES}
         for col,inputcol,field in (('A','G',None),('C','G','inspected'),('E','K','certified'),('G','J','rejected')):
             value=len(subset) if field is None else quantities[field]
             put(sheet,f'{col}{total}',value,f'={"COUNT" if field is None else "SUM"}({inputcol}{start}:{inputcol}{end})')
         put(sheet,f'A{total-1}','Records inspected')
         for col,num in (('J','G'),('L','E')):
-            value=(quantities['rejected' if col=='J' else 'certified']/quantities['inspected']) if quantities['inspected'] else ''
+            value=ratio(quantities['rejected' if col=='J' else 'certified'],quantities['inspected'])
             put(sheet,f'{col}{total}',value,f'=IF(C{total}=0,"",{num}{total}/MAX(1,C{total}))')
         for key in ('billing_name','billing_hours','billing_total'):put(sheet,spec[key],'Unavailable')
         put(sheet,'D'+str(int(spec['billing_total'][1:])+1),'Unavailable')
@@ -186,11 +199,11 @@ def build(rows,head,cap,bind,blobs):
             value=(len(subset) if field is None else quantities[field]) if subset else ''
             put(summary,f'{col}{index}',value,f'=IF(\'{sheet}\'!A{total}=0,"",\'{sheet}\'!{source}{total})')
         for col,num,field in (('L','K','rejected'),('M','I','certified')):
-            value=quantities[field]/quantities['inspected'] if quantities['inspected'] else ''
+            value=ratio(quantities[field],quantities['inspected'])
             put(summary,f'{col}{index}',value,f'=IF(G{index}="","",IF(G{index}=0,"",{num}{index}/MAX(1,G{index})))')
         put(summary,'N'+str(index),'Unavailable');put(summary,'P'+str(index),'Unavailable')
     for col,field in (('F',None),('G','inspected'),('I','certified'),('K','rejected')):put(summary,col+'24',len(rows) if field is None else totals[field],f'=SUM({col}21:{col}23)')
-    for col,num,field in (('L','K','rejected'),('M','I','certified')):put(summary,col+'24',totals[field]/totals['inspected'] if totals['inspected'] else '',f'=IF(G24=0,"",{num}24/MAX(1,G24))')
+    for col,num,field in (('L','K','rejected'),('M','I','certified')):put(summary,col+'24',ratio(totals[field],totals['inspected']),f'=IF(G24=0,"",{num}24/MAX(1,G24))')
     put(summary,'N24','Unavailable');put(summary,'P24','Unavailable')
     for dest,source in {'B9':'F24','D9':'G24','G9':'I24','J9':'K24','M9':'L24','O9':'M24'}.items():put(summary,dest,expected[(summary,source)]['value'],'='+source)
     for dest,source in {'J29':'G24','L29':'I24','N29':'K24','P29':'L24','J30':'J29','L30':'L29','N30':'N29','P30':'P29'}.items():put(summary,dest,expected[(summary,source)]['value'],'='+source)
@@ -217,7 +230,7 @@ def build(rows,head,cap,bind,blobs):
     source_ids={r['id']:i for i,r in enumerate(sorted(rows,key=lambda r:r['id']),1)}
     for ri,row in enumerate(rows,2):
         ordinal=source_ids[row['id']]
-        rank=1+sum(r['resolved']['rejected']>row['resolved']['rejected'] or r['resolved']['rejected']==row['resolved']['rejected'] and r['id']<row['id'] for r in rows)
+        rank=None if row['resolved']['rejected'] is None else 1+sum(r['resolved']['rejected']>row['resolved']['rejected'] or r['resolved']['rejected']==row['resolved']['rejected'] and r['id']<row['id'] for r in rows if r['resolved']['rejected'] is not None)
         put('_Calc','L'+str(ri),ordinal)
         put('_Calc','F'+str(ri),rank,f'=COUNTIF($D$2:$D${source_end},">"&D{ri})+COUNTIFS($D$2:$D${source_end},D{ri},$L$2:$L${source_end},"<"&L{ri})+1')
     for i in range(13):
@@ -235,13 +248,13 @@ def build(rows,head,cap,bind,blobs):
         put('_Calc','N'+str(cr),v.get('rejected'),f'=IF(D{cr}="","",D{cr})')
         for outcol,incol in {'B':'A','C':'B','E':'C','F':'D','I':'G'}.items():put(summary,outcol+str(outrow),values[incol],f'=IF(_Calc!{incol}{cr}="","",_Calc!{incol}{cr})')
         for col in ('G','H'):put(summary,col+str(outrow),None)
-    for col,field in (('E','inspected'),('F','rejected')):put(summary,col+'62',sum(r['resolved'][field] for r in shown),f'=SUM({col}49:{col}61)')
+    for col,field in (('E','inspected'),('F','rejected')):put(summary,col+'62',known_sum(r['resolved'][field] for r in shown),f'=SUM({col}49:{col}61)')
     put(summary,'G62',None);put(summary,'H62',None)
     put(summary,'B62','Shown-record subtotal')
-    denom=sum(r['resolved']['inspected'] for r in shown)
-    put(summary,'I62',sum(r['resolved']['rejected'] for r in shown)/denom if denom else '', '=IF(E62=0,"",F62/MAX(1,E62))')
+    denom=known_sum(r['resolved']['inspected'] for r in shown)
+    put(summary,'I62',ratio(known_sum(r['resolved']['rejected'] for r in shown),denom), '=IF(E62=0,"",F62/MAX(1,E62))')
     for r,label,result,note in [(66,'Defect categories','Unavailable','No category totals were inferred from comments.'),(67,'Reject quantity vs. inspected','Checked','Every approved row was checked independently.'),(68,'Rejected records without selected photo',str(metrics['K8']),'Missing images remain explicit.'),(69,'Billable hours','Unavailable','Labor fields are not mapped in this pilot.'),(70,'Inspector name','Unavailable','Inspector fields are not mapped in this pilot.'),(71,'Certified + rejected = inspected','Checked','Independently checked source quantities are retained.')]:
-        for col,value in (('B',label),('E',result),('J',note)):put(summary,col+str(r),value)
+        for col,value in (('B',label),('E','Incomplete' if incomplete and result=='Checked' else result),('J','Unknown quantities require review.' if incomplete and result=='Checked' else note)):put(summary,col+str(r),value)
     # No generic category chart should imply holes/glue counts. Keep its native
     # dimensions/anchor but rebind its two series to actual inspected/rejected.
     for name in list(p):
@@ -297,7 +310,7 @@ def build(rows,head,cap,bind,blobs):
     part_totals={}
     for i,part in enumerate(layout['parts'],29):
         part_rows=[r for r in rows if r['resolved']['part']==part]
-        part_totals[part]={f:sum(r['resolved'][f] for r in part_rows) for f in sf.QUANTITIES}
+        part_totals[part]={f:known_sum(r['resolved'][f] for r in part_rows) for f in sf.QUANTITIES}
         actual(summary,'B'+str(i),display(part_rows[0],'part',part))
         actual(summary,'E'+str(i),head.get('part_name') or None if len(layout['parts'])==1 else None)
         purposes={r['resolved']['inspected_for'] for r in part_rows if r['resolved']['inspected_for'] is not None}
@@ -305,11 +318,11 @@ def build(rows,head,cap,bind,blobs):
         for dest,source,field in [('J','C','inspected'),('L','E','certified'),('N','D','rejected')]:
             formula='=SUMIF(_Calc!$J$2:$J$'+str(len(rows)+1)+','+str(i-28)+',_Calc!$'+source+'$2:$'+source+'$'+str(len(rows)+1)+')'
             actual(summary,dest+str(i),part_totals[part][field],formula)
-        actual(summary,'P'+str(i),part_totals[part]['rejected']/part_totals[part]['inspected'] if part_totals[part]['inspected'] else '',f'=IF(J{i}=0,"",N{i}/MAX(1,J{i}))')
+        actual(summary,'P'+str(i),ratio(part_totals[part]['rejected'],part_totals[part]['inspected']),f'=IF(J{i}=0,"",N{i}/MAX(1,J{i}))')
         text_cells.add((summary,'B'+str(i)))
     end=29+layout['part_extra'];total=end+1
     for col,field in [('J','inspected'),('L','certified'),('N','rejected')]:actual(summary,col+str(total),totals[field],f'=SUM({col}29:{col}{end})')
-    actual(summary,'P'+str(total),totals['rejected']/totals['inspected'] if totals['inspected'] else '',f'=IF(J{total}=0,"",N{total}/MAX(1,J{total}))')
+    actual(summary,'P'+str(total),ratio(totals['rejected'],totals['inspected']),f'=IF(J{total}=0,"",N{total}/MAX(1,J{total}))')
     # The source block includes certified quantities separately; no inferred
     # relationship substitutes for their reviewed source representation.
     for ri,row in enumerate(rows,2):
@@ -479,7 +492,7 @@ def verify(raw,rows,head,cap,bind,expected,locations,photo_expect,layout=None,te
     if ledger_ids!=[r['id'] for r in rows] or len(set(ledger_ids))!=len(rows):raise sf.ReviewError('Source ledger record identity coverage failed.')
     for rr,t in enumerate(text_entries,5):
         if values['Source Text']['D'+str(rr)].value!=t['text']:raise sf.ReviewError('Complete source text continuation failed.')
-    totals={f:sum(r['resolved'][f] for r in rows) for f in sf.QUANTITIES}
+    totals={f:known_sum(r['resolved'][f] for r in rows) for f in sf.QUANTITIES}
     for col,f in [('G','inspected'),('I','certified'),('K','rejected')]:
         if values['Summary'][col+'24'].value!=totals[f]:raise sf.ReviewError('Saved daily total differs from the complete approved scope.')
     actual=images(raw);source_images=[im for im in actual if im['sha256'] not in c['preserve_media_sha256']]
