@@ -108,7 +108,7 @@ What the rehearsal does not cover or fix, stated here and in the harness:
 | Host clock | Validity is judged only on the host's clock; a clock more than 5 min behind the last time the store saw is refused | `last_scan_hosted.clock_problem`, `Deps.clock` | A host whose clock is synchronised and monitored. A clock that runs fast, or slow by less than the skew, is not detected | Root |
 | Scheduler host | One bounded, replay-safe call per firing; nonce, quota and receipts | `last_scan_hosted.handle` (no route, no schedule reaches it) | A reviewed route and schedule; the store migration; a decision on firing interval. The existing twice-daily reporting task is untouched and unrelated | Root |
 | Durable store | SQLite and PostgreSQL stores; PostgreSQL proven on a disposable cluster by the reviewer | `last_scan_store.PostgresStore.install()` | An approved migration on the hosted database; the pending connection-limit decision | Root |
-| Verified delivery contract | Registry of verified provider contracts, empty; uncertain outcomes never retried without one | `last_scan_transport.VERIFIED_CONTRACTS`, `deliver` | A real provider whose behaviour (at most once per key, terminal status per attempt) is evidenced and reviewed. The hosted entry point has no dispatch step at all; one would have to be designed and reviewed | Root + provider |
+| Verified delivery contract | Registry of verified provider contracts, empty; a version 1 outcome contract for what an adapter answers; uncertain outcomes never retried | `last_scan_transport.VERIFIED_CONTRACTS`, `ProviderContract`, `judge_outcome`, `deliver`; `last_scan_dispatch` | A real provider and adapter, with the evidence listed under "Provider adapter contract" below, reviewed and approved outside this work. Pending external approval; nothing is registered | Root + provider |
 | Client release | Held everywhere; drafts go to an internal audience only | checklist `client_release: held` | Unchanged by this work; release stays a separate human decision | Lauren |
 
 ## Authority adapter contract (version 1)
@@ -146,6 +146,43 @@ What the runner does with it, and what follows for whoever operates the authorit
 
 Not provided by this contract: any proof that a record is genuine. Signing, transport security and who may write to
 the authority belong to the real authority and its adapter, and none exists.
+
+## Provider adapter contract (version 1)
+
+No provider adapter exists and none is registered. An adapter would be called as
+`sender(idempotency_key, attempt_id, audience, payload, deadline_seconds)` and must answer with **exactly** this plain
+JSON (`hosting/last_scan_transport.judge_outcome`); anything else is recorded as unknown:
+
+`contract: last_scan.transport_outcome`, `version: 1`, `provider`, `provider_contract` (hash of the reviewed
+`ProviderContract`), `provider_record_id`, `operation_id`, `attempt_id`, `idempotency_key`, `recipient`,
+`workbook_sha256`, `checklist_sha256`, `state`, `terminal`, `attempt_closed`, `observed_at`,
+`request_deadline_seconds`, `elapsed_seconds`, optional `detail`.
+
+| `state` | Means | Recorded as |
+|---|---|---|
+| `delivered` (terminal) | the provider states this attempt of this operation reached this recipient with this artifact | sent |
+| `accepted` (not terminal) | taken by the provider, not yet delivered | uncertain; never sent again |
+| `not_delivered` (terminal, attempt closed) | the provider's final statement that this attempt was not delivered | uncertain, with the proof kept on the attempt; never sent again by this path |
+| `unknown`, any other state, any mismatch, any unknown field, no answer, an exception | nothing is established | uncertain; never sent again |
+
+Evidence a real provider would have to supply before a `ProviderContract` could be reviewed and listed, none of
+which exists today:
+
+1. **Idempotency that survives.** At most one delivery per idempotency key, across the provider's own retries,
+   restarts and regions, for at least as long as an entry can stay uncertain; and what it answers to a repeated key.
+2. **Per-attempt terminal status.** A lookup, by operation and attempt, that distinguishes "not seen yet" from a
+   final not-delivered, and a guarantee that a closed attempt is rejected if it arrives later.
+3. **A request deadline the adapter enforces itself.** `sender_timeout_seconds` is told to the adapter and must be
+   reported back. This code does not and cannot cancel a request that is already with a provider: a slow call, a
+   disconnect or no answer is not a failure, and an adapter that overruns is only recorded as having done so.
+4. **What "accepted" becomes.** Whether, how and how late an accepted message is delivered, and how that is learned.
+5. **Recipient and artifact binding.** Proof in the answer of which recipient and which exact bytes were delivered.
+6. **Review validity.** `valid_until` on the contract: the review lapses, and a dispatch needs at least 60 seconds
+   of it left. Removing the contract from the registry stops the next send.
+
+Still missing in this code, on purpose: an authorized way to reconcile an uncertain entry. The worker's
+`reconcile_test` is test-only; a provider's later answer about an uncertain attempt has no production door, so
+uncertain entries stay uncertain until a person decides.
 
 ## Exact next step for a real read-only proof (root-owned)
 

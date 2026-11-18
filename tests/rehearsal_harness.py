@@ -169,16 +169,32 @@ class AdapterProbe(SchemaProbe):
         return capture_schema(site_id, list_id, fetch=tenant.get, clock=self.clock)['snapshot']
 
 
+def provider_outcome(contract, *, idempotency_key, attempt_id, audience, payload, deadline_seconds, observed_at, state='delivered',
+                     record_id='fake-provider-record-1', **change):
+    """TEST ONLY: an answer in the shape hosting.last_scan_transport.judge_outcome requires (version 1). Not a provider."""
+    receipt = payload['receipt']
+    out = dict(contract=transport.OUTCOME_CONTRACT, version=transport.OUTCOME_VERSION, provider=contract.provider, provider_contract=contract.digest(),
+               provider_record_id=record_id, operation_id=idempotency_key, attempt_id=attempt_id, idempotency_key=idempotency_key, recipient=audience,
+               workbook_sha256=receipt['workbook_sha256'], checklist_sha256=receipt['checklist_sha256'], state=state,
+               terminal=state in ('delivered', 'not_delivered'), attempt_closed=state in ('delivered', 'not_delivered'), observed_at=observed_at,
+               request_deadline_seconds=deadline_seconds, elapsed_seconds=0)
+    out.update(change)
+    return out
+
+
 class FakeLaurenOutbox:
-    """TEST ONLY delivery sink. Keeps messages in a list. Its one recipient is a fictitious address."""
-    def __init__(self): self.messages, self.calls, self.fail = [], 0, None
-    def send(self, *, idempotency_key, attempt_id, audience, payload):
+    """TEST ONLY delivery sink. Keeps messages in a list. Its one recipient is a fictitious address. It answers in the
+    version 1 outcome shape as a "delivered" from the FAKE provider contract; it is not a provider and proves nothing."""
+    def __init__(self, clock=None, contract=FAKE_CONTRACT): self.messages, self.calls, self.fail, self.clock, self.contract = [], 0, None, clock, contract
+    def send(self, *, idempotency_key, attempt_id, audience, payload, deadline_seconds=None):
         self.calls += 1
         if self.fail:
             raise self.fail
         assert audience == 'Lauren', audience
         self.messages.append(dict(to=LAUREN, operation_id=idempotency_key, attempt_id=attempt_id, payload=deepcopy(payload)))
-        return dict(operation_id=idempotency_key, attempt_id=attempt_id, provider_receipt='fake-receipt-%d' % len(self.messages))
+        return provider_outcome(self.contract, idempotency_key=idempotency_key, attempt_id=attempt_id, audience=audience, payload=payload,
+                                deadline_seconds=self.contract.sender_timeout_seconds if deadline_seconds is None else deadline_seconds,
+                                observed_at=self.clock() if self.clock else '2026-11-10T19:00:00+00:00', record_id='fake-receipt-%d' % len(self.messages))
 
 
 class Rehearsal:
@@ -194,7 +210,7 @@ class Rehearsal:
         self.clock = Clock(self.START)
         self.tenants = {name: Tenant(CLIENTS[name], self.clock, self.SCANS[name]) for name in clients}
         self.n, self.last, self.dispatch_n = 0, {}, itertools.count(1)
-        self.lauren = FakeLaurenOutbox()
+        self.lauren = FakeLaurenOutbox(self.clock)
         self.approvals, self.captures = FakeApprovals(), RecordedCaptures()
         self.artifacts_log = {}
         # 1. schema candidate capture, half an hour before the rehearsal starts, through the adapter and a mocked transport

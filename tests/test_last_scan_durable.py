@@ -16,7 +16,7 @@ from hosting.last_scan_transport import ProviderContract
 FAKE_CONTRACT = ProviderContract(provider='synthetic-test-transport', version='1', at_most_once_per_idempotency_key=True,
                                  terminal_status_per_attempt=True, honours_attempt_closed=True, sender_timeout_seconds=600,
                                  retry_after_terminal_non_delivery=True, verified_by='test fixture', verified_at='2026-11-10',
-                                 evidence='tests/test_last_scan_durable.py')
+                                 evidence='tests/test_last_scan_durable.py', outcome_contract_version=1, valid_until='2026-11-13T00:00:00+00:00')
 FAKE_REGISTRY = {(FAKE_CONTRACT.provider, FAKE_CONTRACT.version): FAKE_CONTRACT.digest()}
 VERIFIED = dict(provider_contract=FAKE_CONTRACT)
 

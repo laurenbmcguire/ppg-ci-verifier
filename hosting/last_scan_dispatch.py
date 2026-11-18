@@ -55,6 +55,15 @@ phases in a fixed order: the authority callbacks first, then a pure gate (hosted
 compares the host clock and the store's last-seen time with the bounds already on record. The gate is the last thing
 before the probe, before the item read, before the claim and before the send.
 
+What the sender answers is judged under the outcome contract in hosting.last_scan_transport (judge_outcome). Only a
+terminal "delivered" naming exactly this operation, attempt, idempotency key, recipient and artifact, from exactly the
+reviewed provider contract, with the provider's own record, is recorded as sent. "accepted", a terminal not-delivered
+proof, an unreadable or mismatched answer, an exception and no answer at all leave the attempt uncertain, with the
+answer kept on the attempt as evidence, and nothing is sent again. The 60 second limit is an ADMISSION limit: it
+decides whether the sender is called, not how long the sender takes. The request deadline belongs to the provider
+contract (``sender_timeout_seconds``); the adapter is told it, must enforce it and must report it, and an adapter
+that overruns is recorded as having broken it. This code cannot cancel a request that is already with a provider.
+
 NOT CLOSED, and not claimed: the source can change between the schema probe and the read, between the read and the
 claim, and between the claim and the provider receiving the message; an approval can be withdrawn after the last
 re-check. Those windows are narrowed and the next poll detects a changed source, nothing more. No exactly-once
@@ -85,6 +94,10 @@ GRANT_SECONDS = 60                      # placeholder: how long an unused transp
 INTENT = 'dispatch:intent:'
 RACE = ('not_closed: the source can change between the schema probe, the re-read, the claim and the provider '
         'receiving the message, and an approval can be withdrawn after the last re-check')
+
+
+class NotDelivered(Exception):
+    """The provider adapter answered, and the answer is not a terminal delivery of exactly this attempt."""
 
 
 class Revoked(Exception):
@@ -291,6 +304,19 @@ def handle(method, headers, body, deps):
     check('authorizations_stay_valid_long_enough_to_send', len(bounds) < 3 or all(           # a missing one already failed its own check above
               (instant(b) - instant(started)).total_seconds() > GRANT_SECONDS for b in bounds),
           'The run approval, the dispatch approval or the capture receipt is missing or expires within %d seconds.' % GRANT_SECONDS)
+    # The reviewed contract must say how the adapter answers, what request deadline it enforces, and until when the
+    # review holds. The review's end is one more validity bound for every gate below, the one before the send included.
+    try:
+        until = instant(contract.valid_until).isoformat() if trusted else None
+    except (ValueError, OverflowError, TypeError):
+        until = None
+    limit = getattr(contract, 'sender_timeout_seconds', None)
+    check('provider_contract_states_outcome_contract_deadline_and_validity',
+          trusted and contract.outcome_contract_version == transport.OUTCOME_VERSION and type(contract.outcome_contract_version) is int
+          and type(limit) is int and limit > 0 and until is not None and (instant(until) - instant(started)).total_seconds() > GRANT_SECONDS,
+          'The provider contract must state outcome contract version %d, a request deadline in whole seconds, and a review validity '
+          'that does not end within %d seconds.' % (transport.OUTCOME_VERSION, GRANT_SECONDS))
+    bounds = bounds + ([until] if until else [])
     authorized = all(c['ok'] for c in checks)
     report = dict(mode=mode, dispatch_id=body['dispatch_id'], principal=principal.id, snapshot_digest=digest, dispatch_digest=approval,
                   checks=checks, authorized=authorized, issues=issues, run_approval=run_approval and {k: v for k, v in run_approval.items() if k != 'identity'},
@@ -321,7 +347,7 @@ def handle(method, headers, body, deps):
         return _respond(429 if refused == 'quota_exceeded' else 409, status=refused, sources_read=0, sender_calls=0, **report)
 
     # ---- under the scope's lease: live schema, source re-read, authorities re-asked; then the fenced claim; then send
-    guard, seen = hosted._DriftGuard(base, mapping), dict(reads=0, sends=0, refusal=None, detail=None)
+    guard, seen = hosted._DriftGuard(base, mapping), dict(reads=0, sends=0, refusal=None, detail=None, provider=None, attempt=None)
 
     def withdrawn():
         """None, or why this dispatch may not go on. Asks the authorities; never the source. Each approval is ONE record
@@ -369,16 +395,49 @@ def handle(method, headers, body, deps):
         receipt = payload.get('receipt') if isinstance(payload, dict) else None
         if audience != body['recipient'] or idempotency_key != op or not isinstance(receipt, dict) or any(receipt.get(k) != body[k] for k in ARTIFACT):
             raise Revoked('The claimed entry is not the authorized artifact for the authorized recipient.')
+        if not transport.verified(contract):                                 # withdrawn from the reviewed registry since authorization
+            seen['refusal'] = 'provider_contract_no_longer_verified'
+            raise Revoked(seen['refusal'])
+        expected = dict(operation_id=op, attempt_id=attempt_id, idempotency_key=idempotency_key, recipient=audience,
+                        workbook_sha256=body['workbook_sha256'], checklist_sha256=body['checklist_sha256'])
         seen['sends'] += 1
-        return sender(idempotency_key=idempotency_key, attempt_id=attempt_id, audience=audience, payload=payload)
+        seen['attempt'], begun = attempt_id, instant(deps.clock())
+        seen['provider'] = dict(outcome='no_answer', reasons=['the_sender_did_not_return'], deadline_breach=False, evidence=None)
+        try:
+            # The adapter is told the reviewed request deadline and must enforce it itself. Nothing here can cancel a
+            # request that is already with a provider, so a slow or failed call proves nothing about delivery.
+            answer = sender(idempotency_key=idempotency_key, attempt_id=attempt_id, audience=audience, payload=payload, deadline_seconds=limit)
+        except Exception as error:
+            took = (instant(deps.clock()) - begun).total_seconds()
+            seen['provider'] = dict(outcome='sender_raised', reasons=[type(error).__name__], deadline_breach=took > limit, evidence=None)
+            raise
+        took = (instant(deps.clock()) - begun).total_seconds()
+        verdict = seen['provider'] = transport.judge_outcome(answer, expected, contract, took)
+        if verdict['outcome'] != 'delivered':
+            raise NotDelivered(verdict['outcome'])                           # the attempt stays uncertain; the answer is kept as evidence
+        return dict(operation_id=op, attempt_id=attempt_id, provider_record_id=verdict['evidence']['record']['provider_record_id'],
+                    outcome_sha256=verdict['evidence']['sha256'], deadline_breach=verdict['deadline_breach'])
 
     worker = ScheduledWorker(deps.store, fetch, item['render'], clock=deps.clock, enabled=True, owner='dispatch:' + body['dispatch_id'],
                              provider_contract=contract)
     outcome = transport.deliver(worker, item['scope'], op, send, item['settings'], grant=dict(id=grant_id))
     status = outcome.get('status')
     code = 200 if status == 'sent' else 202 if status == 'uncertain' else 409
+    provider = seen['provider']
+    if provider is not None:
+        # What the adapter answered is kept on its own attempt, whatever it was: delivered, accepted, a terminal
+        # not-delivered proof, or something that could not be read. It is evidence. It never reopens the entry.
+        with deps.store.transaction('outbox:' + item['key']) as box:
+            entry = box.get('entries', {}).get(op) or {}
+            mine = next((a for a in entry.get('attempts') or [] if a.get('id') == seen['attempt']), None)
+            if mine is not None:
+                mine['provider_outcome'] = provider
+                entry['provider_outcome'] = provider['outcome']
+                if provider['deadline_breach']:
+                    entry['provider_deadline_breach'] = True
     result = dict(status=status, outcome=outcome, refusal=seen['refusal'], refusal_detail=seen['detail'], sources_read=seen['reads'], schema_probes=guard.count,
-                  sender_calls=seen['sends'])
+                  sender_calls=seen['sends'], provider_outcome=provider and provider['outcome'], provider_reasons=provider and provider['reasons'],
+                  provider_deadline_breach=bool(provider and provider['deadline_breach']))
     with deps.store.transaction(_keys(principal, body)[1]) as record:
         record.update(status='finished', code=code, response=result, finished_at=deps.clock())
     return _respond(code, **dict(report, **result))
