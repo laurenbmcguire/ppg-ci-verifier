@@ -1,5 +1,11 @@
 # One-hour reporting rehearsal (fully synthetic)
 
+> **Reading note (2026-11-18).** A draft is due **one hour after the last scan**. That is Lauren's explicit requirement,
+> not a placeholder and not an open decision; nothing in this document reopens it. Still unverified around it: which
+> column is the actual scan, each shift's end, the lunch and pause policy, and how offline or late-arriving rows are
+> handled. Statements here such as "no route, no schedule reaches it" describe production wiring in the reviewed
+> branch. They are not a statement about any live environment, which was not inspected.
+
 `tests/rehearsal_harness.py` and `tests/test_one_hour_rehearsal.py` run the whole path on the real code against
 invented data held in memory. Run it with:
 
@@ -281,8 +287,9 @@ the transport already applies (required text present, at-most-once stated, a pos
 current outcome contract version, a `valid_until` more than 60 seconds ahead, the same margin the send door applies). Malformed metadata is a blocker, never a crash. Meeting
 those rules is not a review and never lists the contract in code.
 
-**What the report lists.** Per client / job: source mapping and scan-time meaning, registry entry, internal recipient,
-report header/template/photos; per shift: shift end, quiet-time, lunch and offline-capture questions; then identity,
+**What the report lists.** Per client / job: source mapping and scan-time meaning, registry entry, recipient (Lauren only),
+report header/template/photos; per shift: shift end, lunch and offline or late-arrival questions (the one-hour wait
+itself is reported as the fixed requirement, never as a question); then identity,
 approval authority, capture authority, provider/sender/status adapter, credentials (always UNKNOWN: nothing is read),
 and hosting, scheduler, store, recovery, operator workflow, approvals process, recipient and retention decisions; the
 hosted preflight result on packet data; the residual limits that remain even when everything is answered (including

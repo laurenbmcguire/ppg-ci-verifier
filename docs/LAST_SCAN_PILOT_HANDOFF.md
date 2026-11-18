@@ -8,7 +8,7 @@ is outside this document. "Not recorded here" below means exactly that, and says
 elsewhere. Evidence that already exists from that work can be brought in through the intake table.
 
 **Not checked for this document:** any deployment, the hosted app, any schedule, any credential, any real list.
-"No production wiring" below describes the reviewed branch, not any live environment.
+"No production wiring" below describes the reviewed branch; it is not a statement about any live environment.
 **Nothing here is an approval.** No real client data, job number or file belongs in this document or in the repository.
 
 **The requirement.** A draft is due **one hour after the last scan**. That is Lauren's explicit requirement, not a
@@ -48,7 +48,8 @@ been right repeatedly; C is last. Release to a client is Lauren's decision in ev
 **The draft is always delivered.** Whatever draft is available goes to Lauren with its checklist, privately, even
 when a photo is missing, a shift value is unmapped or a difference is unexplained. Each gap is flagged on the
 checklist; nothing is filled in, and no blank becomes a zero. Lauren decides hold or release. Gaps stop the pilot
-from being *accepted*; they never withhold the draft.
+from being *accepted*; they never withhold the draft. The one limit: no authorization, source-scope or safety gate is
+bypassed to get a draft. If no authorized draft can be produced, the exact blocker is reported and nothing is made up.
 
 Bounds for A: read-only toward the source; one list, one date, one shift; no schedule; no automated send; blank
 quantities shown as unknown, never zero; the existing reporting process continues unchanged and remains the report
@@ -98,7 +99,7 @@ intake into a blocker list. It cannot verify any row and never reports readiness
 
 | Track | Accept the step when | Stop the step (and what still happens) |
 |---|---|---|
-| A | Rows 1 to 9 exist with two roles each; for at least three past shifts covering each shift in use, every difference between draft and sent report is explained in writing by the report owner; no unknown was filled. | **Not accepted, draft still delivered:** a missing photo, an unmapped shift value, an unexplained difference, or a scan column not yet shown to differ from Created/Modified. The available draft and checklist go to Lauren with the gap flagged, no invented zeros; she decides hold or release. **Stop the run itself** only if it would need a write to the source, a permission change, or a change to an existing schedule. |
+| A | Rows 1 to 9 exist with two roles each; for at least three past shifts covering each shift in use, every difference between draft and sent report is explained in writing by the report owner; no unknown was filled. | **Not accepted, draft still delivered:** a missing photo, an unmapped shift value, an unexplained difference, or a scan column not yet shown to differ from Created/Modified. The available draft and checklist go to Lauren with the gap flagged, no invented zeros; she decides hold or release. **Never bypass an authorization, source-scope or safety gate:** stop any read that is unsafe or unauthorized (missing or wrong access, wrong list or scope, data that cannot be reached, a write, a permission change, or a change to an existing schedule). Deliver whatever authorized private draft and issue list exists; if none can be produced, report the exact blocker and fabricate nothing. |
 | B | A has been accepted; rows 10 to 13 exist; a dry run on the real configuration reports its snapshot digest and that exact digest is approved in a real authority; a watched run on one list matches A's result. | Any gate is satisfied by a fake or a packet; the existing schedule would have to change; the store migration or connection limit is undecided; the host clock or schema drifts. Track A continues by hand meanwhile. |
 | C | B has been accepted; row 14 is reviewed and listed in code; recipient is Lauren only. | Any uncertain delivery is held for a person and never resent automatically; the draft stays readable privately. Delivery to a client is not part of this track at all. |
 

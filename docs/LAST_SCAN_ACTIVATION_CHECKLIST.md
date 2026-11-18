@@ -7,7 +7,7 @@ any live environment**: no deployment, hosted environment or live schedule was i
 the branch the modules do import each other (the send and reconciliation boundaries, the readiness inventory script
 and the tests import the entry-point module), and the tests create the tables in disposable databases.
 No real-source validation evidence is recorded for this isolated runner branch; separate reporting work is outside
-this document. Nothing in this document has been done. Each step below needs its own approval.
+this document. A draft is due one hour after the last scan: that is Lauren's explicit requirement, not a placeholder. Nothing in this document has been done. Each step below needs its own approval.
 Stop at the first step that cannot be completed.
 
 For the operator's view (what to supply first, and the manual draft comparison that does not wait for any of this),
@@ -46,8 +46,9 @@ read `docs/LAST_SCAN_PILOT_HANDOFF.md`. This checklist covers the automated runn
    `recorded_shifts`, optional `business_dates` and `not_before`, and this list's own `mapping` and `header`.
 4. **Job registry.** A verified registry entry with the exact `client_key`, `site_id`, `list_id` and `job`.
    Seed entries carry site names, not site ids, and do not match.
-5. **Existing scheduled reporting task.** It already builds reports for a fixed list of jobs. For each such job
-   either set `externally_built: true` here or retire it there first. Do not change that schedule as part of this.
+5. **Existing scheduled reporting.** Confirm the current scheduled reporting and the jobs it covers with the root
+   owner and the report owner; it was not inspected for this document. Mark each confirmed covered job
+   `externally_built: true` here. Do not modify that schedule here.
 6. **External systems this code only has interfaces for.** None is implemented, and none should be faked in
    production. For a run: the three below, plus `CaptureAuthority`, the accepted collector and issuer lists and a
    `SchemaProbe` (see the mapping and provenance sections further down). For a send: also a recipient policy, a

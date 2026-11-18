@@ -1,5 +1,13 @@
 # One-hour SharePoint draft pipeline: isolated prototype
 
+> **Reading note (2026-11-18).** A draft is due **one hour after the last scan**. That is Lauren's explicit requirement,
+> not a placeholder and not an open decision; nothing in this document reopens it. Still unverified around it: which
+> column is the actual scan, each shift's end, the lunch and pause policy, and how offline or late-arriving rows are
+> handled. The first half of this document is older design context for the prototype; where it and
+> `docs/LAST_SCAN_PILOT_HANDOFF.md` differ, the handoff is current. "Not deployed", "no route, cron or scheduled task
+> exists" and "has not been run anywhere" describe this work and the reviewed branch.
+> They are not a statement about any live environment, which was not inspected.
+
 Status: NOT DEPLOYED. No live reads, source mutations, client delivery, approval,
 production scheduler or credentials were enabled by this work.
 
@@ -170,7 +178,7 @@ Status: local code and tests only. Not deployed, not scheduled, not connected to
 ### Timing rules (unchanged, now tested end to end)
 
 The hour restarts when scanning resumes and when a late row, edit, delete or photo for this shift is first seen.
-A quiet hour is never called shift end or lunch end: the draft says `provisional_quiet_window_schedule_unknown`,
+The hour itself is the requirement. An hour without a scan makes the draft due; it is never called shift end or lunch end: the draft says `provisional_quiet_window_schedule_unknown`,
 `day_completion: not_established`, `client_release: held`. When a verified scheduled end (`not_before`) is supplied
 the draft waits for it and says `verified_schedule`. Without one, a provisional draft is still produced.
 
@@ -189,9 +197,9 @@ concurrency is unverified, not passed.
 
 ### Not done here: blockers before any activation
 
-1. No route, cron or scheduled task exists. A host entry point needs authentication, a unique `run_id` per firing,
+1. No route, cron or scheduled task for this runner exists in the reviewed branch. A host entry point needs authentication, a unique `run_id` per firing,
    and a budget below the host's time limit.
-2. `PostgresStore.install()` has not been run anywhere. Creating the two tables in the hosted schema is a migration
+2. `PostgresStore.install()` is not called by any production path in this branch (tests run it on disposable databases). Creating the two tables in the hosted schema is a migration
    that needs approval; the role's connection limit also matters (each record transaction opens one connection).
 3. Proven on local PostgreSQL 17 only, not on the hosted database or through its connection pooler.
 4. No live assignment exists. Each client list needs a person-verified actual-scan field, shift field, timezone

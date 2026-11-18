@@ -496,6 +496,80 @@ class ProviderReviewMarginMatchesTheSendDoor(unittest.TestCase):
                 self.assertTrue(any('not a review' in b for b in blockers))
 
 
+class TheOneHourRuleIsARequirement(unittest.TestCase):
+    """One hour after the last scan is the fixed user requirement. The output must say so, never call it a placeholder
+    or an unrecorded decision, and still name what is unverified around it."""
+
+    def outputs(self, packet=None):
+        report = inv.inventory(example() if packet is None else packet, NOW)
+        return report, inv.text(report), json.dumps(report)
+
+    def test_the_requirement_is_stated_and_matches_the_timer_that_is_not_changed_here(self):
+        from datetime import timedelta
+        self.assertEqual(inv.WAIT, timedelta(hours=1))
+        report, text, dumped = self.outputs()
+        self.assertIn('one hour after the last scan', report['requirement'])
+        self.assertIn('fixed user requirement', report['requirement'])
+        self.assertIn('not a placeholder', report['requirement'])
+        self.assertIn(report['requirement'], text)
+        for empty in (None, {}, []):
+            self.assertEqual(self.outputs(empty)[0]['requirement'], report['requirement'])
+
+    def test_no_output_calls_the_hour_a_placeholder_or_an_open_decision(self):
+        for packet in (None, {}, dict(example(), synthetic=False)):
+            report, text, dumped = self.outputs(packet)
+            for rendered in (text, dumped):
+                for wrong in ('60 minutes quiet', 'minutes quiet', 'quiet minutes', 'operating decision nobody has recorded', 'means \\"the shift is finished\\"',
+                              'means "the shift is finished"', 'early draft'):
+                    self.assertNotIn(wrong, rendered)
+            placeholders = [r for r in report['residual_limits'] if 'placeholder' in r]
+            self.assertEqual(len(placeholders), 1)
+            self.assertNotIn('60 minutes', placeholders[0].split('not one of them')[0])
+            self.assertIn('one-hour wait after the last scan is not one of them', placeholders[0])
+            for needed in ('24 hours', '7 days', '5 minutes', '60 seconds'):
+                self.assertIn(needed, placeholders[0])
+
+    def test_what_is_still_unverified_stays_actionable(self):
+        report, text, _ = self.outputs()
+        mapping = item(report, 'assignment[0].mapping')
+        self.assertTrue(any('scan column records the moment of the actual scan' in b for b in mapping['blockers']))
+        self.assertTrue(any('which column the tablet fills at the moment of the scan' in q for q in mapping['needed']))
+        for ident in ('assignment[0].shift[1]', 'assignment[1].shift[1]', 'assignment[1].shift[2]'):
+            shift = item(report, ident)
+            unverified = [b for b in shift['blockers'] if b.startswith('Not yet verified')]
+            self.assertEqual(len(unverified), 1, shift['blockers'])
+            for word in ('shift end', 'lunch', 'offline', 'late-arriving', 'one-hour wait itself is fixed'):
+                self.assertIn(word, unverified[0])
+            self.assertTrue(any('scheduled end time' in q and 'lunch' in q and 'offline' in q for q in shift['needed']))
+            self.assertEqual(shift['facts']['wait_after_last_scan_minutes'], 60)
+            self.assertEqual(shift['facts']['wait_is'], 'fixed user requirement')
+            self.assertNotIn('quiet_minutes', shift['facts'])
+            self.assertEqual(shift['status'], 'blocked')
+        missing = [b for b in item(report, 'assignment[1].shift[1]')['blockers'] if b.startswith('No shift end is configured for: 2026-11-10')]
+        self.assertEqual(len(missing), 1)
+        self.assertIn('still due 60 minutes after the last scan', missing[0])
+        self.assertIn('supersede', missing[0])
+        self.assertIn('Not yet verified', text)
+
+    def test_the_documents_say_the_same(self):
+        docs = ROOT / 'docs'
+        for name in ('LAST_SCAN_PILOT_HANDOFF.md', 'LAST_SCAN_ACTIVATION_CHECKLIST.md', 'LAST_SCAN_REHEARSAL.md', 'LAST_SCAN_DRAFT_PIPELINE.md'):
+            body = ' '.join((docs / name).read_text().split())
+            with self.subTest(doc=name):
+                self.assertRegex(body, r"(?i)one hour after the last scan")
+                self.assertRegex(body, r"(?i)requirement")
+                self.assertNotRegex(body, r"(?i)60 minutes quiet")
+                self.assertNotRegex(body, r"(?i)quiet[- ](period|time|hour)s? (is|are) (a )?placeholder")
+                self.assertRegex(body, r"(?i)not a statement about any live environment")
+        handoff = ' '.join((docs / 'LAST_SCAN_PILOT_HANDOFF.md').read_text().split())
+        self.assertIn('Never bypass an authorization, source-scope or safety gate', handoff)
+        self.assertIn('report the exact blocker', handoff)
+        self.assertNotIn('Stop the run itself', handoff)
+        checklist = ' '.join((docs / 'LAST_SCAN_ACTIVATION_CHECKLIST.md').read_text().split())
+        self.assertIn('Confirm the current scheduled reporting', checklist)
+        self.assertNotIn('It already builds reports for a fixed list of jobs', checklist)
+
+
 class NoSideEffects(unittest.TestCase):
     def test_no_network_no_store_no_process_and_no_write(self):
         real_open = builtins.open

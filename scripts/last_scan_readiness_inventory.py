@@ -65,13 +65,16 @@ SECRET_VALUE = re.compile(r'(^\s*Bearer\s+\S|^eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-
 KEY_ASSIGN = re.compile(SECRET_KEY.pattern + r'[\w-]*(\s*[=:]\s*\S|\s+\S{12,})', re.I)   # a name with its value attached, pasted where a name belongs
 HEX = re.compile(r'^[0-9a-fA-F]+$')
 OPAQUE = re.compile(r'^[A-Za-z0-9+/=_-]{48,}$')
+REQUIREMENT = ('A draft is due one hour after the last scan. That is the fixed user requirement, not a placeholder and not an open decision. '
+               'Still unverified around it: which column is the actual scan, and each shift\'s end, lunch and pauses, and offline or late-arriving rows.')
 RESIDUAL = (
     'An approval or receipt withdrawn at its authority after the last re-check and before the read, claim or send is not seen until the next re-check.',
     'The source can change between the schema probe, the item read, the claim and the provider receiving the message.',
     'A host clock that runs fast, or slow by less than the allowed skew, is not detected.',
     'No exactly-once delivery: an uncertain delivery stays uncertain until a provider states its outcome and a person reconciles it.',
     'A provider that breaks its contract (delivers after stating not delivered, ignores its deadline) is recorded, not prevented.',
-    'Every bound in the code (60 minutes quiet, 24 hours schema age, 7 days approval validity, 5 minutes skew, 60 seconds limits) is a placeholder awaiting an owner.')
+    'These bounds in the code are placeholders awaiting an owner: 24 hours schema age, 7 days approval validity, 5 minutes skew, 60 seconds send and reconcile limits. '
+    'The one-hour wait after the last scan is not one of them: it is the fixed user requirement.')
 
 
 class _PacketApprovals(hosted.ApprovalAuthority):
@@ -310,12 +313,13 @@ def inventory(packet, now):
             missing = [d for d in dates if '%s|%s' % (d, shift) not in ends] if dates else ['every date']
             timing = _evidence(packet, now, topic='shift_schedule', client_id=a.get('client_id'), job=a.get('job'), shift=shift)
             add('timing', 'assignment[%d].shift[%s]' % (i, shift), 'Timing for %s shift %s' % (label, shift), _levels(not missing, any(e['kind'] == 'independent' for e in timing)),
-                blockers=(['No shift end is configured for: ' + ', '.join(map(str, missing)) + '. Without it a draft is due %d minutes after the last scan, so a long lunch or a '
-                           'stoppage produces an early draft that later scans supersede.' % (WAIT.total_seconds() // 60)] if missing else [])
-                + ['Whether %d quiet minutes means "the shift is finished" for this client is an operating decision nobody has recorded.' % (WAIT.total_seconds() // 60)],
+                blockers=(['No shift end is configured for: ' + ', '.join(map(str, missing)) + '. The draft is still due %d minutes after the last scan (the fixed requirement); with no stated shift end, a lunch or '
+                           'stoppage longer than that produces a draft that later scans supersede.' % (WAIT.total_seconds() // 60)] if missing else [])
+                + ['Not yet verified for this shift: its shift end, the lunch and pause policy, and how offline or late-arriving rows are handled. '
+                   'The one-hour wait itself is fixed and is not in question.'],
                 needed=['Shift %s for %s: scheduled end time and timezone on each pilot date; the longest normal pause (lunch, breaks, changeover); whether tablets ever '
-                        'work offline and how late their rows can arrive; and who decides a report may be drafted.' % (shift, label)],
-                evidence=timing, facts=dict(quiet_minutes=int(WAIT.total_seconds() // 60), shift_end_configured_for=sorted(k for k in ends if k.endswith('|%s' % shift)),
+                        'work offline and how late their rows can arrive; and what a later row should do to a draft already made.' % (shift, label)],
+                evidence=timing, facts=dict(wait_after_last_scan_minutes=int(WAIT.total_seconds() // 60), wait_is='fixed user requirement', shift_end_configured_for=sorted(k for k in ends if k.endswith('|%s' % shift)),
                                             dates=dates, late_rows='a later row supersedes the draft and restarts the wait; nothing already delivered is recalled'))
         header = a.get('header') if isinstance(a.get('header'), dict) else {}
         fields = (a.get('mapping') or {}).get('fields') if isinstance(a.get('mapping'), dict) else None
@@ -397,7 +401,7 @@ def inventory(packet, now):
     by_area = [[q['ask'] for x in items if x['area'] == area for q in questions if q['id'] == x['id']] for area in ORDER]
     steps = ([qs[0] for qs in by_area if qs] + [q for qs in by_area for q in qs[1:]])[:8]   # one from every area first
     unknowns = sorted({'%s: %s' % (x['id'], level) for x in items for level, value in x['levels'].items() if str(value).startswith('unknown')})
-    return dict(report='last_scan.readiness_inventory', version=1, generated_at=now,
+    return dict(report='last_scan.readiness_inventory', version=1, generated_at=now, requirement=REQUIREMENT,
                 verdict=dict(ready_for_pilot=False, launch_blockers=len(blockers), unknowns=len(unknowns), synthetic_packet=synthetic,
                              statement='Not ready. This command finds blockers; it cannot grant readiness. It makes no call, so nothing is shown to be connected, '
                                        'authenticated or authorized, and nothing in a packet proves where the packet came from.'),
@@ -414,6 +418,7 @@ def text(report):
     out.append('LAST-SCAN DRAFT RUNNER: INTEGRATION READINESS INVENTORY (offline, read-only)')
     out.append('Verdict: NOT READY FOR A PILOT. %d blockers, %d unknowns.%s' % (v['launch_blockers'], v['unknowns'], ' SYNTHETIC PACKET: format demonstration only.' if v['synthetic_packet'] else ''))
     out.append(v['statement'])
+    out.append('Requirement: ' + report['requirement'])
     out.append('')
     out.append('Not done by this command: ' + '; '.join(report['not_performed']) + '.')
     area = None
