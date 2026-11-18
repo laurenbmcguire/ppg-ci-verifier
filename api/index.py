@@ -2031,6 +2031,7 @@ class handler(BaseHTTPRequestHandler):
                     if not isinstance(upload, dict) or not isinstance(upload.get('upload_id'), str) or not isinstance(upload.get('filename'), str):
                         raise Conflict('Upload id and filename are required.')
                     data = {'item': SpreadsheetInbox(directory).finish_upload(upload['upload_id'], upload['filename'], upload.get('part_count'), upload.get('sha256'))}
+                    upload_receipt = data['item'].pop('upload_receipt')
                     body = encode_json(data)
                 elif route == '/api/spreadsheets/source-upload':
                     upload = json.loads(raw)
@@ -2094,6 +2095,12 @@ class handler(BaseHTTPRequestHandler):
                             body = encode_json({'item': cleaned})
                 except Exception:
                     debug_log()  # the upload itself was saved; the formatting can still be fixed from the report
+            if route == '/api/spreadsheets/upload/finish':
+                # Bind the verified input bytes to the exact item returned after server-side conversion/formatting.
+                # This receipt is transport metadata only; it does not rewrite a stored report or its provenance.
+                response = json.loads(body)
+                response['upload_receipt'] = dict(upload_receipt, file_hash=response['item']['file_hash'])
+                body = encode_json(response)
             # Uploading preserves the user's manual-vs-AI choice. Provider preparation
             # requires a separate explicit action; configuration is not consent.
             return self.send(200, body, content_type, headers)

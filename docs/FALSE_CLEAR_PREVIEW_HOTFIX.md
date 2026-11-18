@@ -32,3 +32,22 @@ No protected snapshot is durably altered. Exact fallback wording identifies a pa
 not its human author; a person who copied that exact payload requires review.
 No actual live report, client delivery, AI paid call, or excluded customer system was touched.
 Deployment and authenticated live readback require independent approval of this diff.
+
+## Upload receipt follow-on
+
+The baseline upload success path called an undefined receipt renderer after the server
+could already have saved the file. This follow-on defines that renderer and validates
+the returned content hash. A missing/wrong/failed finish response causes a read of the
+exact content hash, never another upload or finish request. Positive readback establishes
+only that the exact bytes exist, not that this particular request created them. Failed or
+absent readback stays unconfirmed. Renderer failures after confirmation retain the saved
+item and cannot claim nothing was saved. Tests use fictional filenames and stubbed bytes.
+
+
+Converted PDF/Word uploads and server-formatted results use an authenticated transport
+receipt: server-computed verified input SHA, initially stored workbook hash, and exact
+returned report hash. This metadata is not saved into the historical report. Converted
+lost responses remain unconfirmed because no original-document-digest lookup exists;
+no original hash is presented as a converted-workbook ID. Raw Excel/CSV can still be
+reconciled by exact-byte lookup. Tests include actual fictional PDF/Word conversion via
+local HTTP and a stubbed server-format operation returning an actual local stored child.

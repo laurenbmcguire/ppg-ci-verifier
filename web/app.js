@@ -6057,6 +6057,12 @@
     toast('AI workbook changes are paused. Review and apply cell corrections instead.', true);
     return hash;
   }
+  function uploadReceipt(row, file, item, recovered) {
+    // Existence of these exact bytes is confirmed, not source verification or approval.
+    row.replaceChildren(h('span', {}, `${file.name}: ${recovered ? 'saved copy found after the upload answer was unclear' : 'saved'}. Review the report checks before using it.`),
+      h('a', {class: 'btn small', href: '#r=' + item.file_hash}, 'Open saved report'));
+    row.classList.add('saved');
+  }
   async function uploadOne(file) {
     const meter = h('b'), text = h('span', {}, `Preparing ${file.name}…`);
     const row = h('div', {class: 'uploading'}, text, h('div', {class: 'meter'}, meter));
@@ -6065,28 +6071,57 @@
       : /\.doc$/i.test(file.name) ? `${file.name} is an older Word file. In Word choose File, Save As, Word Document (.docx), then upload that copy.`
       : !/\.(csv|xlsx|pdf|docx)$/i.test(file.name) ? `${file.name} is not a file the app can check. Upload Excel (.xlsx), CSV, PDF or Word (.docx).` : file.size < 1 ? `${file.name} is empty.` : null;
     if (problem) { row.classList.add('failed'); text.textContent = problem; return null; }
+    let hash = null, finishAttempted = false, confirmed = null, recovered = false;
+    const convertedType = /\.pdf$/i.test(file.name) ? 'PDF' : /\.docx$/i.test(file.name) ? 'Word' : null;
+    const exact = item => item && typeof item === 'object' && /^[0-9a-f]{64}$/.test(hash || '') && item.file_hash === hash;
+    const boundReceipt = result => result?.upload_receipt?.protocol === 'ppg-upload-v1' &&
+      result.upload_receipt.input_sha256 === hash && /^[0-9a-f]{64}$/.test(result.upload_receipt.stored_file_hash || '') &&
+      /^[0-9a-f]{64}$/.test(result.item?.file_hash || '') && result.upload_receipt.file_hash === result.item.file_hash;
     try {
-      const hash = await sha256(file);
+      hash = await sha256(file);
       const id = crypto.randomUUID().replace(/-/g, ''), parts = Math.max(1, Math.ceil(file.size / CHUNK));
       for (let i = 0; i < parts; i++) {
         text.textContent = `Uploading ${file.name}` + (parts > 1 ? ` (part ${i + 1} of ${parts})` : '');
         meter.style.width = `${Math.round((i / parts) * 60)}%`;
         await api('/api/spreadsheets/upload/part', {upload_id: id, index: i, content_base64: await toBase64(file.slice(i * CHUNK, (i + 1) * CHUNK))});
       }
-      text.textContent = `Checking ${file.name}: rows, SharePoint, usual day and AI. This can take a minute.`;
+      text.textContent = `Saving and checking ${file.name}. This can take a minute.`;
       meter.style.width = '75%';
+      finishAttempted = true;
       let result;
       try { result = await api('/api/spreadsheets/upload/finish', {upload_id: id, filename: file.name, part_count: parts, sha256: hash}); }
-      catch (e) {   // no clear answer: the file's own SHA-256 is its ID, so ask whether it was saved before calling it failed
-        let saved = null; try { saved = await api('/api/spreadsheet?id=' + hash); } catch (e2) { saved = null; }
-        if (!saved) throw e;
-        result = {item: saved, recovered: true};
+      catch (e) { /* Reconcile by the exact bytes below; never repeat the finish request. */ }
+      if (boundReceipt(result) || !convertedType && exact(result?.item)) confirmed = result.item;
+      else {
+        // A wrong/missing receipt or transport failure proves neither success nor failure. A read can establish only
+        // that this exact file already exists, not that this request created it. A failed/absent read is not proof of loss.
+        let saved = null;
+        // There is no original-document-digest lookup endpoint. Do not pretend its hash is a converted workbook ID.
+        if (!convertedType) { try { saved = await api('/api/spreadsheet?id=' + hash); } catch (e) { /* unknown */ } }
+        if (exact(saved)) { confirmed = saved; recovered = true; }
       }
-      meter.style.width = '100%';
-      receipt(row, file, result.item, result.recovered);
-      if (result.item.idempotent) toast(`${file.name} was already uploaded, so the saved copy was opened.`);
-      return result.item;
-    } catch (e) { row.classList.add('failed'); text.textContent = `${file.name}: ${e.message} Nothing was saved; upload it again (the same file is never stored twice).`; return null; }
+      if (!confirmed) {
+        row.classList.add('failed');
+        text.textContent = `${file.name}: Upload outcome could not be confirmed. It may already be saved or still finishing. Check the report list before taking further action. No upload was retried. Uploaded-file fingerprint: ${hash}`;
+        return null;
+      }
+      // Persistence is already confirmed. A broken receipt/list renderer must never turn that into "nothing saved".
+      try {
+        meter.style.width = '100%'; uploadReceipt(row, file, confirmed, recovered);
+        if (confirmed.idempotent) toast(`${file.name} already has a saved copy; that copy is confirmed.`);
+      } catch (e) {
+        text.textContent = `${file.name}: Saved copy confirmed, but this page could not display its receipt. Open the report list. Report ID: ${confirmed.file_hash}`;
+        try { row.replaceChildren(text); } catch (_) { /* return the confirmed item even if the DOM cannot be updated */ }
+      }
+      return confirmed;
+    } catch (e) {
+      if (confirmed) return confirmed;
+      row.classList.add('failed');
+      text.textContent = finishAttempted
+        ? `${file.name}: Upload outcome could not be confirmed. Check the report list; do not assume it failed. No upload was retried. Uploaded-file fingerprint: ${hash || 'unavailable'}`
+        : `${file.name}: Upload stopped before the final save request. Temporary upload parts may exist. ${e.message}`;
+      return null;
+    }
   }
   $('file-input').addEventListener('change', e => { const files = [...e.target.files]; e.target.value = ''; if (files.length) upload(files); });
   let dragDepth = 0;

@@ -154,13 +154,17 @@ class SpreadsheetInbox:
             with self.connect() as db:
                 found = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (sha256,)).fetchone()
                 if found:
-                    return dict(self.latest(db, sha256, json.loads(found['result_json'])), idempotent=True, duplicate=True)
+                    _, stored_raw = self._original(db, sha256)
+                    return dict(self.latest(db, sha256, json.loads(found['result_json'])), idempotent=True, duplicate=True,
+                                upload_receipt=dict(protocol='ppg-upload-v1', input_sha256=hashlib.sha256(stored_raw).hexdigest(), stored_file_hash=sha256))
         if len(chunks) != part_count:
             raise ValueError(f'Upload incomplete: {len(chunks)} of {part_count} parts arrived. Nothing was saved; upload the file again.')
         raw = b''.join(chunks)
         if hashlib.sha256(raw).hexdigest() != sha256:
             raise ValueError('Uploaded bytes do not match the file hash computed in the browser. Nothing was saved; upload the file again.')
-        return self.ingest(filename, raw)
+        item = self.ingest(filename, raw)
+        # Ephemeral response provenance, not a change to the saved report or its approval fingerprint.
+        return dict(item, upload_receipt=dict(protocol='ppg-upload-v1', input_sha256=hashlib.sha256(raw).hexdigest(), stored_file_hash=item['file_hash']))
     def _original(self, db, file_hash):
         row = db.execute('SELECT result_json FROM spreadsheets WHERE file_hash=?', (file_hash,)).fetchone()
         if not row:
