@@ -169,3 +169,9 @@ for the whole request, and is part of the approved snapshot digest. Adding a col
 flight cannot let it through; removing one cannot change a request already being judged; the next request sees
 the new list, and a changed list needs a new approval. This is a wiring boundary. Supplying these objects to the
 entry point does not make them authentic, and nothing in this code proves a collector or authority is genuine.
+
+## Before working through this checklist
+
+Run the offline readiness inventory (`docs/LAST_SCAN_REHEARSAL.md`, "Readiness inventory") on a non-secret packet for the
+pilot list. It lists the open blockers and the exact questions to ask; it cannot tick any item on this checklist, and
+its output is not an approval.

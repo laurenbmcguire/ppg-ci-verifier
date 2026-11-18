@@ -230,3 +230,54 @@ existing read-only app registration:
 
 Everything after that (who attests the scan column, the capture authority, the scheduler, delivery) stays blocked
 on its own row.
+
+## Readiness inventory (offline, read-only)
+
+`scripts/last_scan_readiness_inventory.py` answers one question for an operator: **what still blocks a pilot, and what
+exactly do I ask or supply next?** It reads one JSON file (the *readiness packet*: non-secret configuration, schema and
+contract metadata), runs the existing validators over it (`last_scan_readiness.validate`, the real
+`last_scan_hosted.preflight`, `last_scan_authority.problems`, `last_scan_transport.verified`) and prints a report. It
+opens no store, calls no source, provider or network, reads no key, sends nothing and writes nothing.
+
+    PYTHONPATH=. python scripts/last_scan_readiness_inventory.py docs/examples/last_scan_readiness_packet.synthetic.json \
+        --now 2026-11-10T19:00:00+00:00                 # human-readable
+    PYTHONPATH=. python scripts/last_scan_readiness_inventory.py PACKET.json --format json    # or: both
+
+Exit code is **1** whenever a report was produced (the command never reports readiness, so it never exits 0) and **2**
+when the packet file could not be read or `--now` is not an offset-aware time. `--now` defaults to the current time;
+the synthetic example's approval is valid 2026-11-10 to 2026-11-13, so pass the `--now` above to see it accepted on
+packet data.
+
+**What the five levels mean.** Every item reports all five; this command can only ever raise the first two.
+
+| Level | Meaning | Can this command show it? |
+| --- | --- | --- |
+| `code_tested` | the code path exists and passes synthetic tests | yes (always "synthetic tests only") |
+| `configured` | present in the packet and accepted by the validators *as supplied* | yes |
+| `connected` | a real system answered with real credentials | never: no call is made |
+| `independently_verified` | someone other than the configurer checked the real source | only "claimed in packet, not verified" |
+| `production_authorized` | a real authority approved it and a reviewed provider is registered | never |
+
+A hash, a `verified` flag, a signature field or a self-attestation in a packet proves nothing about where the packet
+came from; the report says "presented", never "authenticated". Evidence entries are echoed with who, when (and age) and
+kind (`independent`, `self_attested`, `synthetic`, otherwise `unstated`).
+
+**Packet shape** (`"packet": "last_scan.readiness_packet", "version": 1`): `synthetic` (anything but `false` is treated
+as synthetic), `prepared_by`, `prepared_at`, `pilot_principal`, `config` (the runner configuration with `assignments`),
+`job_registry`, `schemas`, `capture_receipts`, `approvals`, `accepted_collectors`, `accepted_issuers`,
+`provider_contract` (the contract's fields; never registers it), `recipient_policy` (client id to internal audience),
+`evidence` (`topic` of `scan_time_meaning`, `shift_schedule` or `report_template`, with `client_id`, `job`, `shift`,
+`kind`, `by`, `at`, `claim`, `reference`) and `operations` (`hosting`, `scheduler`, `durable_store`, `recovery`,
+`operator_workflow`, `approvals_process`, `recipient`, `retention`, each `{decided, by, at, reference}`).
+**Never put a key, token, password or connection string in a packet.** Anything that looks like one is replaced before
+the report is built, its location (not its value) is listed, and it becomes a blocker.
+
+**What the report lists.** Per client / job: source mapping and scan-time meaning, registry entry, internal recipient,
+report header/template/photos; per shift: shift end, quiet-time, lunch and offline-capture questions; then identity,
+approval authority, capture authority, provider/sender/status adapter, credentials (always UNKNOWN: nothing is read),
+and hosting, scheduler, store, recovery, operator workflow, approvals process, recipient and retention decisions; the
+hosted preflight result on packet data; the residual limits that remain even when everything is answered (including
+that a withdrawal at an authority after the last re-check is not atomic with the read or send).
+
+The example packet is **synthetic** (invented clients, `example.sharepoint.com`), built from the rehearsal fixtures. It
+demonstrates the format only; a passing check on it is not evidence about any real system.
