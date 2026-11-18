@@ -24,7 +24,9 @@ only read the packet. They are not authorities: an approval or capture receipt i
 authenticated.
 """
 import argparse
+import dataclasses
 import json
+import math
 import re
 import sys
 from copy import deepcopy
@@ -59,6 +61,7 @@ CREDENTIALS = ('read-only source access for the one list in the pilot (existing 
                'the identity system operators and the scheduler sign in with', 'the delivery provider account', 'the approval and capture authorities')
 SECRET_KEY = re.compile(r'(secret|passw|token|api[_-]?key|authorization|credential|private[_-]?key|database[_-]?url|connection[_-]?string|cookie|bearer)', re.I)
 SECRET_VALUE = re.compile(r'(^\s*Bearer\s+\S|^eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|://[^/\s:@]+:[^/\s@]+@|-----BEGIN [A-Z ]*PRIVATE KEY|^sk-[A-Za-z0-9_-]{16,}$)')
+KEY_ASSIGN = re.compile(SECRET_KEY.pattern + r'[\w-]*(\s*[=:]\s*\S|\s+\S{12,})', re.I)   # a name with its value attached, pasted where a name belongs
 HEX = re.compile(r'^[0-9a-fA-F]+$')
 OPAQUE = re.compile(r'^[A-Za-z0-9+/=_-]{48,}$')
 RESIDUAL = (
@@ -100,13 +103,30 @@ class _NoArtifacts(ArtifactStore):
         raise LookupError('The readiness inventory stores nothing.')
 
 
-def redact(value, path='packet'):
-    """(a deep copy with anything secret-looking replaced, [where it was]). Values are never returned or printed."""
+def _secret_text(v):
+    return bool(SECRET_VALUE.search(v) or (OPAQUE.match(v) and not HEX.match(v)))
+
+
+def _secret_name(k):
+    """A KEY that looks like a secret itself (pasted in the wrong place), as opposed to a key that merely names one."""
+    return _secret_text(k) or bool(KEY_ASSIGN.search(k)) or len(k) > 120 or '\n' in k
+
+
+def redact(value, path='packet', invalid=None):
+    """(a deep copy with anything secret-looking replaced, [where it was]). Neither a secret-looking value nor a
+    secret-looking KEY is returned, printed or used in a location: such a key becomes [REDACTED-KEY-n]."""
     found = []
     def walk(v, where):
         if isinstance(v, dict):
-            out = {}
+            out, n = {}, 0
             for k, x in v.items():
+                if isinstance(k, str) and _secret_name(k):
+                    n += 1
+                    k = '[REDACTED-KEY-%d]' % n
+                    here = '%s.%s' % (where, k)
+                    found.append(here)
+                    out[k] = walk(x, here)
+                    continue
                 here = '%s.%s' % (where, k)
                 if isinstance(k, str) and SECRET_KEY.search(k) and x not in (None, '', False, [], {}):
                     found.append(here)
@@ -116,7 +136,11 @@ def redact(value, path='packet'):
             return out
         if isinstance(v, list):
             return [walk(x, '%s[%d]' % (where, i)) for i, x in enumerate(v)]
-        if isinstance(v, str) and (SECRET_VALUE.search(v) or (OPAQUE.match(v) and not HEX.match(v))):
+        if isinstance(v, float) and not math.isfinite(v):                    # NaN and Infinity are not JSON; treated as absent and reported
+            if invalid is not None:
+                invalid.append(where)
+            return None
+        if isinstance(v, str) and _secret_text(v):
             found.append(where)
             return '[REDACTED]'
         return v
@@ -129,6 +153,56 @@ def _age(stamp, now):
     except (ValueError, OverflowError, TypeError):
         return dict(stated=stamp if isinstance(stamp, str) else None, age='unknown: missing, malformed or without an offset')
     return dict(stated=stamp, age_hours=round(seconds / 3600, 2), in_the_future=seconds < 0)
+
+
+def _contract_problems(fields, now):
+    """(why the presented provider metadata does not meet the contract's own rules, the contract or None). Never raises.
+    Building the dataclass checks nothing, so every field is checked here against its declared type and the rules the
+    transport already applies (verified, permits_retry, the outcome contract version, a review that has not lapsed).
+    Whether the deadline fits an attempt is decided against the attempt's own length at dispatch, not here."""
+    if not isinstance(fields, dict) or not fields:
+        return ['No provider contract metadata is presented.'], None
+    declared = {f.name: f for f in dataclasses.fields(transport.ProviderContract)}
+    out, shape = [], []
+    extra = sorted(str(k) for k in fields if k not in declared)
+    if extra:
+        shape.append('%d unknown field(s) that are not part of the contract: %s' % (len(extra), ', '.join(extra)))
+    value = {}
+    for name, f in declared.items():
+        required = f.default is dataclasses.MISSING
+        kind = str if required else type(f.default)
+        if name not in fields:
+            if required:
+                shape.append(name + ' is missing')
+            else:
+                value[name] = f.default
+        elif type(fields[name]) is not kind:
+            shape.append('%s must be %s' % (name, {str: 'text', bool: 'true or false', int: 'a whole number'}[kind]))
+        else:
+            value[name] = fields[name]
+    def has(name):
+        return name in value
+    for name in ('provider', 'version', 'verified_by', 'verified_at', 'evidence'):
+        if has(name) and not value[name].strip():
+            out.append(name + ' is blank')
+    if has('at_most_once_per_idempotency_key') and value['at_most_once_per_idempotency_key'] is not True:
+        out.append('at_most_once_per_idempotency_key is not true: no dispatch is allowed without it')
+    if has('sender_timeout_seconds') and not value['sender_timeout_seconds'] > 0:
+        out.append('sender_timeout_seconds must be a positive whole number: it is the deadline the sender enforces')
+    if has('outcome_contract_version') and value['outcome_contract_version'] != transport.OUTCOME_VERSION:
+        out.append('outcome_contract_version must be %d, the only outcome contract the transport judges' % transport.OUTCOME_VERSION)
+    if has('valid_until'):                                                   # a dispatch needs it stated and in the future
+        try:
+            if not instant(value['valid_until']) > instant(now):
+                out.append('valid_until has passed: the review has lapsed')
+        except (ValueError, OverflowError, TypeError):
+            out.append('valid_until is not stated as an offset-aware time')
+    if shape:
+        return shape + out, None
+    try:
+        return out, transport.ProviderContract(**value)
+    except Exception:                                                        # fail closed: unusable metadata is a blocker, never a crash
+        return out + ['the contract could not be built from these fields'], None
 
 
 def _levels(configured, verified=False):
@@ -155,7 +229,10 @@ def inventory(packet, now):
                           blockers=list(blockers), needed=list(needed), evidence=list(evidence), facts=facts or {}))
     if not isinstance(packet, dict):
         packet, shape = {}, ['The packet is not a JSON object.']
-    packet, secrets = redact(packet)
+    numbers = []
+    packet, secrets = redact(packet, invalid=numbers)
+    if numbers:
+        shape.append('%d number(s) in the packet are NaN or Infinity, which is not valid JSON. They are treated as absent: %s.' % (len(numbers), ', '.join(numbers[:10])))
     if packet.get('packet') != PACKET or type(packet.get('version')) is not int or packet.get('version') != VERSION:
         shape.append('The packet must say "packet": "%s" and "version": %d.' % (PACKET, VERSION))
     unknown = sorted(set(packet) - KNOWN_KEYS)
@@ -169,7 +246,7 @@ def inventory(packet, now):
     approvals = packet.get('approvals') if isinstance(packet.get('approvals'), list) else []
     issuers = authority.freeze_issuers(packet.get('accepted_issuers'))
     add('packet', 'packet', 'The readiness packet itself', _levels(not shape and not secrets),
-        blockers=shape + (['The packet contains %d secret-looking value(s). They were not read into the report. Remove them: this packet is for non-secret metadata only.' % len(secrets)] if secrets else [])
+        blockers=shape + (['The packet contains %d secret-looking value(s) or key(s). They were not read into the report. Remove them: this packet is for non-secret metadata only.' % len(secrets)] if secrets else [])
         + (['The packet is synthetic (or not marked "synthetic": false). It shows the report format; nothing in it is evidence about a real system.'] if synthetic else []),
         needed=(['A packet built from the real pilot list: its configuration, one read-only schema capture, and the registry entry. No keys, tokens or connection strings.'] if synthetic else []),
         facts=dict(prepared_by=packet.get('prepared_by'), prepared=_age(packet.get('prepared_at'), now), synthetic=synthetic, secret_locations=secrets,
@@ -202,7 +279,10 @@ def inventory(packet, now):
         label = '%s / %s' % (a.get('client_id') or '?', a.get('job') or '?')
         row = next((m for m in mapping if m.get('assignment') == i), None) or {}
         matches = [s for s in schemas or [] if isinstance(s, dict) and s.get('site_id') == a.get('site_id') and s.get('list_id') == a.get('list_id')]
-        report = readiness.validate(a, matches[0], entries) if len(matches) == 1 else None
+        try:
+            report = readiness.validate(a, matches[0], entries) if len(matches) == 1 else None
+        except Exception:                                                    # fail closed: the mapping row below still blocks
+            report = None
         needed = [c['evidence_needed'] for c in (report or {}).get('checks', []) if not c['ok'] and c.get('evidence_needed')]
         planned = [x for x in scopes if x['scope'].get('client_id') == a.get('client_id') and x['scope'].get('job') == a.get('job')]
         problems = (list(row.get('blocked_reasons') or []) if row else ['not_evaluated: the mapping check produced no row for this assignment']) + sorted(
@@ -277,16 +357,16 @@ def inventory(packet, now):
         blockers=['No real capture authority or collector exists. A receipt in a packet says where a schema claims to come from; it does not show it.'],
         needed=['Who runs the schema capture, on which approved machine, and where its receipt is recorded outside the runner.'],
         facts=dict(presented=seen('capture', receipts), accepted_collectors=packet.get('accepted_collectors')))
-    fields = packet.get('provider_contract') if isinstance(packet.get('provider_contract'), dict) else None
+    wrong, contract = _contract_problems(packet.get('provider_contract'), now)
     try:
-        contract = transport.ProviderContract(**fields) if fields else None
-    except TypeError:
-        contract = None
-    listed = transport.verified(contract)
-    add('delivery', 'provider', 'Delivery provider, sender and status adapter', _levels(contract is not None),
+        listed = transport.verified(contract) is True
+    except Exception:                                                        # fail closed
+        listed = False
+    add('delivery', 'provider', 'Delivery provider, sender and status adapter', _levels(not wrong),
         blockers=['No delivery provider is verified in code: delivery is disabled and every dispatch is refused.' if not listed else 'A provider contract is listed in code.',
                   'No sender and no status adapter exist. No message can be sent and no uncertain delivery can be reconciled.']
-        + ([] if contract else ['No provider contract metadata is presented, or it does not have the contract\'s fields.']),
+        + ([('The presented provider contract metadata is not valid under the contract\'s own rules: ' + '; '.join(wrong) + '.') if wrong[0][:2] != 'No' else wrong[0]] if wrong else [])
+        + ([] if wrong else ['The metadata meets the contract\'s rules as supplied. That is not a review: nothing shows the provider behaves this way.']),
         needed=['From the provider, in writing: one delivery per idempotency key across its own retries; a per-attempt final status that differs from "not seen yet"; that a closed '
                 'attempt is rejected if it arrives later; the request deadline it enforces; what "accepted" becomes; how recipient and exact bytes are proven.',
                 'An owner\'s decision to review that evidence and register the contract by a reviewed code change. Pending external approval.'],
@@ -383,7 +463,7 @@ def main(argv=None):
     if args.format in ('text', 'both'):
         sys.stdout.write(text(report))
     if args.format in ('json', 'both'):
-        sys.stdout.write(json.dumps(report, indent=2, sort_keys=True) + '\n')
+        sys.stdout.write(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + '\n')
     return 1                                                                 # never 0: this command never reports readiness
 
 

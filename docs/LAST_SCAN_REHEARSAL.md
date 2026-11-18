@@ -271,6 +271,14 @@ as synthetic), `prepared_by`, `prepared_at`, `pilot_principal`, `config` (the ru
 `operator_workflow`, `approvals_process`, `recipient`, `retention`, each `{decided, by, at, reference}`).
 **Never put a key, token, password or connection string in a packet.** Anything that looks like one is replaced before
 the report is built, its location (not its value) is listed, and it becomes a blocker.
+A secret pasted as a JSON *key* is treated the same way: the key becomes `[REDACTED-KEY-n]` in every message and location.
+Detection is by pattern, so it is a safety net and not a guarantee. NaN and Infinity are not JSON; they are treated as
+absent and reported.
+
+`provider_contract` is marked `configured` only when every field has its declared type and the metadata meets the rules
+the transport already applies (required text present, at-most-once stated, a positive whole-number sender deadline, the
+current outcome contract version, a `valid_until` in the future). Malformed metadata is a blocker, never a crash. Meeting
+those rules is not a review and never lists the contract in code.
 
 **What the report lists.** Per client / job: source mapping and scan-time meaning, registry entry, internal recipient,
 report header/template/photos; per shift: shift end, quiet-time, lunch and offline-capture questions; then identity,

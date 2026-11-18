@@ -266,6 +266,148 @@ class SecretsAreNeverEchoed(unittest.TestCase):
         self.assertEqual(found, [])
 
 
+class MalformedProviderMetadata(unittest.TestCase):
+    """QA d496b2c (1) and (2): malformed contract metadata is a blocked report, and a constructor is not a validation."""
+
+    def provider(self, **change):
+        packet = example()
+        packet['provider_contract'].update(change)
+        report = inv.inventory(packet, NOW)
+        never_ready(self, report)
+        json.dumps(report)
+        inv.text(report)
+        return item(report, 'provider')
+
+    def test_the_exact_qa_cases_do_not_throw(self):
+        for change in (dict(provider=[]), dict(version={}), dict(provider=[], version={}), dict(provider={'a': []}), dict(version=[[1]])):
+            with self.subTest(change=change):
+                found = self.provider(**change)
+                self.assertEqual(found['levels']['configured'], 'no')
+                self.assertIs(found['facts']['listed_in_code'], False)
+                self.assertTrue(any('provider contract metadata is not valid' in b for b in found['blockers']))
+
+    def test_every_contract_field_with_every_bad_value(self):
+        for name in sorted(example()['provider_contract']):
+            for bad in BAD + (float('nan'), float('inf'), -1, 0, ''):
+                with self.subTest(name=name, bad=bad):
+                    found = self.provider(**{name: bad})
+                    self.assertIs(found['facts']['listed_in_code'], False)
+                    self.assertTrue(found['levels']['connected'].startswith('unknown'))
+                    if type(bad) is not type(example()['provider_contract'][name]):
+                        self.assertEqual(found['levels']['configured'], 'no', (name, bad))
+        for whole in BAD + ([example()['provider_contract']], {'provider': 'p'}, {'unknown_field': 1}):
+            with self.subTest(whole=whole):
+                packet = example()
+                packet['provider_contract'] = whole
+                found = item(inv.inventory(packet, NOW), 'provider')
+                self.assertEqual(found['levels']['configured'], 'no')
+
+    def test_a_deadline_that_is_not_a_positive_whole_number_is_not_configured(self):
+        for bad in ('never', '60', 0, -5, True, False, 1.5, 60.0, float('nan'), float('inf'), float('-inf'), None, [], {}):
+            with self.subTest(bad=bad):
+                found = self.provider(sender_timeout_seconds=bad)
+                self.assertEqual(found['levels']['configured'], 'no')
+                self.assertTrue(any('sender_timeout_seconds' in b for b in found['blockers']), found['blockers'])
+                self.assertTrue(found['levels']['connected'].startswith('unknown'))
+                self.assertEqual(found['levels']['production_authorized'], 'no')
+
+    def test_other_contract_rules_decide_the_label(self):
+        self.assertEqual(self.provider()['levels']['configured'], 'yes_as_supplied')      # the synthetic contract meets the rules as supplied
+        self.assertEqual(self.provider(sender_timeout_seconds=10 ** 400)['levels']['configured'], 'yes_as_supplied')   # no existing rule caps it here; nothing throws
+        for change, word in ((dict(at_most_once_per_idempotency_key=False), 'at_most_once_per_idempotency_key'), (dict(verified_by='  '), 'verified_by'),
+                             (dict(evidence=''), 'evidence'), (dict(outcome_contract_version=0), 'outcome_contract_version'),
+                             (dict(outcome_contract_version=99), 'outcome_contract_version'), (dict(valid_until='2026-11-10T18:00:00+00:00'), 'valid_until'),
+                             (dict(valid_until='soon'), 'valid_until'), (dict(valid_until=''), 'valid_until'), (dict(extra_field=1), 'unknown')):
+            with self.subTest(change=change):
+                found = self.provider(**change)
+                self.assertEqual(found['levels']['configured'], 'no')
+                self.assertTrue(any(word in b for b in found['blockers']), found['blockers'])
+
+    def test_every_value_anywhere_in_the_packet_can_be_malformed(self):
+        """Replace each value at each path in the example, one at a time. Nothing may throw, and nothing may become ready."""
+        def paths(node, here=()):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    yield here + (k,)
+                    yield from paths(v, here + (k,))
+            elif isinstance(node, list):
+                for i, v in enumerate(node):
+                    yield here + (i,)
+                    yield from paths(v, here + (i,))
+        base, count = example(), 0
+        for path in paths(base):
+            for bad in (None, 5, 'x', [], {}, [[1]], {'a': []}, float('nan')):
+                packet = deepcopy(base)
+                node = packet
+                for step in path[:-1]:
+                    node = node[step]
+                node[path[-1]] = bad
+                try:
+                    report = inv.inventory(packet, NOW)
+                    json.dumps(report)
+                    inv.text(report)
+                except Exception as error:                                         # noqa: BLE001 - the point of the test
+                    self.fail('%r = %r raised %s: %s' % (path, bad, type(error).__name__, error))
+                self.assertIs(report['verdict']['ready_for_pilot'], False)
+                count += 1
+        self.assertGreater(count, 2000)
+
+
+class SecretLookingKeys(unittest.TestCase):
+    """QA d496b2c (3): a secret pasted as a JSON KEY must not come back in a message, a path, or anywhere else."""
+    KEYS = ('Bearer SYNTHETIC_KEY_VALUE', 'eyJTWU5USEVUSUM.eyJTWU5USEVUSUMx.U1lOVEhFVElDLXNpZw', 'https://synthetic-user:SYNTHETIC-PASS@host.example.invalid/x',
+            'password=SYNTHETIC-PASSWORD-VALUE', 'api_key: SYNTHETIC-API-KEY-VALUE', 'sk-SYNTHETICsyntheticSYNTHETIC0123', 'U1lOVEhFVElDLUtFWS1WQUxVRS1TWU5USEVUSUMtS0VZLVZBTFVFLVNZTlRIRVRJQw==',
+            '-----BEGIN PRIVATE KEY----- SYNTHETIC', 'token SYNTHETIC-TOKEN-VALUE-1234567890')
+    PARTS = ('SYNTHETIC_KEY_VALUE', 'eyJTWU5USEVUSUM', 'SYNTHETIC-PASS', 'SYNTHETIC-PASSWORD-VALUE', 'SYNTHETIC-API-KEY-VALUE', 'sk-SYNTHETIC', 'U1lOVEhFVElD', 'BEGIN PRIVATE KEY', 'SYNTHETIC-TOKEN-VALUE')
+
+    def clean(self, packet):
+        before = deepcopy(packet)
+        report = inv.inventory(packet, NOW)
+        self.assertEqual(packet, before)
+        never_ready(self, report)
+        code, both, err = run_packet(self, packet, '--format', 'both')
+        self.assertEqual(code, 1)
+        for rendered in (json.dumps(report), inv.text(report), both, err):
+            for part in self.PARTS + self.KEYS:
+                self.assertNotIn(part, rendered)
+        return report
+
+    def test_the_exact_qa_case_an_unknown_top_level_key(self):
+        packet = example()
+        packet['Bearer SYNTHETIC_KEY_VALUE'] = 'x'
+        report = self.clean(packet)
+        blockers = item(report, 'packet')['blockers']
+        self.assertTrue(any('Unknown top-level entries' in b for b in blockers))
+        self.assertTrue(any('secret-looking' in b for b in blockers))
+        self.assertEqual(item(report, 'packet')['levels']['configured'], 'no')
+        self.assertEqual(len(item(report, 'packet')['facts']['secret_locations']), 1)
+
+    def test_secret_looking_keys_at_every_depth(self):
+        for key in self.KEYS:
+            for place in ('top', 'config', 'header', 'mapping', 'not_before', 'recipient_policy', 'operations', 'operation', 'evidence', 'provider', 'issuers', 'schema', 'collector'):
+                with self.subTest(key=key[:12], place=place):
+                    p = example()
+                    a = p['config']['assignments'][0]
+                    target = dict(top=p, config=p['config'], header=a['header'], mapping=a['mapping'], not_before=a['not_before'], recipient_policy=p['recipient_policy'],
+                                  operations=p['operations'], operation=p['operations']['scheduler'], evidence=p['evidence'][0], provider=p['provider_contract'],
+                                  issuers=p['accepted_issuers'], schema=p['schemas'][0])
+                    if place == 'collector':
+                        p['accepted_collectors'] = [{key: {key: [{key: 'x'}]}}]
+                    else:
+                        target[place][key] = {key: 'x'} if place in ('top', 'config', 'operations') else 'x'
+                    report = self.clean(p)
+                    self.assertTrue(item(report, 'packet')['facts']['secret_locations'])
+                    self.assertTrue(any('secret-looking' in b for b in item(report, 'packet')['blockers']))
+
+    def test_several_such_keys_in_one_object_stay_distinct_and_named_keys_stay_readable(self):
+        clean, found = inv.redact({self.KEYS[0]: 1, self.KEYS[1]: {'api_key': 'v'}, 'ordinary name': 2, '2026-11-10|1': 3, 'ALPHA-REHEARSAL': 4})
+        self.assertEqual(len(clean), 5)
+        self.assertEqual({k for k in clean if not k.startswith('[REDACTED-KEY')}, {'ordinary name', '2026-11-10|1', 'ALPHA-REHEARSAL'})
+        self.assertEqual(len(found), 3)
+        self.assertTrue(all(not any(part in where for part in self.PARTS) for where in found))
+        self.assertTrue(any(where.endswith('.api_key') for where in found))
+
+
 class NoSideEffects(unittest.TestCase):
     def test_no_network_no_store_no_process_and_no_write(self):
         real_open = builtins.open
