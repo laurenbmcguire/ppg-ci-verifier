@@ -444,6 +444,22 @@ class SnapshotIsolation(Hosted):
         self.assertEqual(report['summary']['planned'], 1)
 
 
+class HostedCursorIsolation(Hosted):
+    def test_one_principals_runs_do_not_move_anothers_starting_point(self):
+        config = dict(enabled=True, assignments=[assignment(recorded_shifts=['1', '2', '3', '4'])])
+        self.approve(config, principals=('alice', 'bob'))
+        deps = lambda: self.deps(config=config, quota=Quota(50))
+        shift = lambda headers: self.go(deps(), headers=headers, max_scopes=1)[1]['summary']['results'][0]['shift']
+        alone = [shift(BOB) for _ in range(4)]
+        self.store = StateStore(Path(self.folder.name) / 'second.db')       # a clean store, same configuration
+        mixed = []
+        for _ in range(4):
+            mixed.append(shift(BOB))
+            for _ in range(3):
+                shift(ALICE)
+        self.assertEqual((sorted(alone), mixed), (['1', '2', '3', '4'], alone))
+
+
 class NotConnected(unittest.TestCase):
     """The prepared code must not be reachable from the deployed app."""
     def test_no_route_cron_or_import_reaches_the_runner(self):

@@ -265,6 +265,52 @@ class Bounded(Harness):
             self.assertEqual((record['status'], record['attempts']), ('finished', 2))
 
 
+class CursorIsolation(Harness):
+    """The rotation cursor belongs to one receipt namespace (hosted: verified principal + approved snapshot)."""
+    SHIFTS = ['1', '2', '3', '4', '5']
+
+    def one(self, run_id, namespace, **kw):
+        out = self.go(dict(enabled=True, assignments=[assignment(recorded_shifts=self.SHIFTS)]), run_id, max_scopes=1,
+                      receipt_namespace=namespace, **kw)
+        return out['results'][0]['shift']
+
+    def test_repro_shared_cursor_let_one_caller_starve_another(self):
+        # Before: B took one scope per run, and A ran in between. A's runs moved the shared cursor, so B's next run
+        # started wherever A had left it. Here A always leaves it in the same place, and B never left that scope.
+        order = [self.one('solo-%d' % i, 'namespace-solo') for i in range(5)]
+        self.assertEqual(sorted(order), self.SHIFTS)                       # alone, B reaches every scope in five runs
+        seen = []
+        for i in range(5):
+            seen.append(self.one('b-%d' % i, 'namespace-b'))
+            for j in range(4):                                             # A: four single-scope runs in between
+                self.one('a-%d-%d' % (i, j), 'namespace-a')
+        self.assertEqual(sorted(seen), self.SHIFTS)                        # B still reaches every scope
+        self.assertEqual(seen, order)                                      # in exactly its own order
+
+    def test_each_namespace_has_its_own_cursor_record_and_none_touches_the_legacy_one(self):
+        self.one('x', 'namespace-a'); self.one('y', 'namespace-b')
+        import sqlite3
+        with sqlite3.connect(self.store.path) as db:
+            keys = sorted(k for (k,) in db.execute("SELECT key FROM scan_draft_state WHERE key LIKE 'runner:cursor%' AND value != '{}'"))
+        self.assertEqual(len(keys), 2); self.assertNotIn('runner:cursor', keys)
+        self.assertEqual(self.one('z', None), self.one('z2', 'namespace-c'))   # a fresh namespace and the legacy cursor both start at the beginning
+        with self.store.transaction('runner:cursor') as legacy:
+            self.assertTrue(legacy.get('after'))
+
+    def test_cursor_survives_restart_within_its_namespace(self):
+        first = self.one('r1', 'namespace-a')
+        self.store = StateStore(self.store.path)
+        second = self.one('r2', 'namespace-a')
+        self.assertNotEqual(first, second)
+
+    def test_provider_cooldown_and_scope_leases_stay_shared_on_purpose(self):
+        self.fail[LIST] = CaptureFailure('Throttled.', dict(status=429, cooldown=dict(retry_after='600', not_before='2026-11-10T21:45:00+00:00', known=True)))
+        self.one('a1', 'namespace-a')
+        self.fail.clear(); reads = len(self.fetched)
+        out = self.go(dict(enabled=True, assignments=[assignment(recorded_shifts=self.SHIFTS)]), 'b1', receipt_namespace='namespace-b')
+        self.assertEqual((out['counts'], len(self.fetched)), ({'cooldown': 5}, reads))   # the source asked everyone to wait
+
+
 # ---- two real clients through the real native publisher ----------------------------------------------------------
 def native_capture(scope, mapping, values, captured_at, extra):
     """A sealed synthetic capture whose column names follow THIS client's mapping."""

@@ -126,6 +126,9 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
         raise ValueError('receipt_namespace must be nonempty text when supplied.')
     run_key = RUN + sf.digest(run_id if receipt_namespace is None else
                               dict(namespace=receipt_namespace, run_id=run_id))
+    # The rotation cursor is kept per namespace too. A shared cursor would let one caller's runs decide where
+    # another caller's pass starts, and so keep some of that caller's scopes from ever getting a turn.
+    cursor_key = CURSOR if receipt_namespace is None else CURSOR + ':' + sf.digest(dict(namespace=receipt_namespace))
     started = monotonic()
     with store.transaction(run_key) as record:
         if record.get('status') == 'finished':
@@ -133,7 +136,7 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
         record.update(status='started', run_id=run_id, attempts=int(record.get('attempts') or 0) + 1)
         record.setdefault('started_at', clock())
     scopes, issues = plan(config, entries, clock(), render)
-    with store.transaction(CURSOR) as cursor:
+    with store.transaction(cursor_key) as cursor:
         after = cursor.get('after')
     order = [x for x in scopes if after is None or x['key'] > after] + [x for x in scopes if after is not None and x['key'] <= after]
 
@@ -181,7 +184,7 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
                                                          'due_at', 'timing_basis', 'cooldown_until') if k in out}))
         last = item['key']
     if last is not None:
-        with store.transaction(CURSOR) as cursor:
+        with store.transaction(cursor_key) as cursor:
             cursor.update(after=last, at=clock())
     counts = {}
     for r in results:
