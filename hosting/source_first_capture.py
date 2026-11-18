@@ -21,18 +21,32 @@ class CaptureFailure(sf.ReviewError):
 
 
 def cooldown(headers):
+    """What the provider said about waiting, kept apart from any clock.
+
+    ``basis`` says which kind of answer it was. For 'relative_seconds' the stated number is in ``seconds``; a caller
+    with its own clock should add that to the time IT saw the answer (hosting.last_scan_drafts.hold_until) and not
+    use ``not_before``, which for a relative wait is only this process's wall clock plus the seconds and is kept
+    for the existing source-first service. For 'http_date' ``not_before`` is the provider's absolute time."""
     value = (headers or {}).get('Retry-After')
     if value is None:
         return {'retry_after': None, 'not_before': None, 'known': False}
+    text = str(value)
+    if re.fullmatch(r'[0-9]+', text):                       # ASCII digits only: a whole number of seconds
+        try:
+            seconds = int(text)
+        except ValueError:                                  # too many digits to be a number at all
+            return {'retry_after': text[:64], 'not_before': None, 'known': False, 'basis': 'relative_seconds', 'seconds': None, 'unrepresentable': True}
+        try:
+            due = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+        except OverflowError:
+            due = None
+        return {'retry_after': text[:64], 'not_before': due, 'known': due is not None, 'basis': 'relative_seconds', 'seconds': seconds}
     try:
-        if re.fullmatch(r'[0-9]+', str(value)):
-            due = datetime.now(timezone.utc) + timedelta(seconds=int(value))
-        else:
-            due = parsedate_to_datetime(value)
-            if due.tzinfo is None: raise ValueError('Unknown timezone')
-        return {'retry_after': str(value), 'not_before': due.astimezone(timezone.utc).isoformat(), 'known': True}
+        due = parsedate_to_datetime(value)
+        if due.tzinfo is None: raise ValueError('Unknown timezone')
+        return {'retry_after': text, 'not_before': due.astimezone(timezone.utc).isoformat(), 'known': True, 'basis': 'http_date'}
     except (TypeError, ValueError, OverflowError):
-        return {'retry_after': str(value), 'not_before': None, 'known': False}
+        return {'retry_after': text, 'not_before': None, 'known': False}
 
 
 def graph_fetch(url):

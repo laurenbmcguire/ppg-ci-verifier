@@ -19,11 +19,10 @@ from zoneinfo import ZoneInfo
 
 from hosting import source_first as sf
 from hosting import registry as job_registry
-from hosting.last_scan_drafts import FORBIDDEN_SCAN_FIELDS, instant, scope_key
+from hosting.last_scan_drafts import DEFAULT_COOLDOWN, FORBIDDEN_SCAN_FIELDS, MAX_COOLDOWN, MIN_COOLDOWN, hold_until, instant, scope_key
 from hosting.last_scan_service import ScheduledWorker
 
 REQUIRED = ('client_id', 'job', 'site_id', 'list_id', 'zone', 'scan_field', 'shift_field')
-DEFAULT_COOLDOWN = timedelta(minutes=15)
 CURSOR, HOLD, RUN = 'runner:cursor', 'runner:hold:', 'run:'
 
 
@@ -144,7 +143,9 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
         except Exception as error:
             cool = (getattr(error, 'evidence', None) or {}).get('cooldown') if isinstance(getattr(error, 'evidence', None), dict) else None
             if cool:
-                seen_cooldown[scope['site_id']] = cool
+                # Noted on THIS runner's clock at the moment the answer was seen. The wait is counted from here, never
+                # from a time worked out on another clock inside the capture code.
+                seen_cooldown[scope['site_id']] = dict(cool=cool, observed=instant(clock()))
             raise
 
     results, deferred, last = [], 0, None
@@ -166,16 +167,14 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
             out = worker.tick(s, item['settings'])
         except Exception as error:                 # one scope never stops the others
             out = dict(status='error', error_type=type(error).__name__)
-        cool = seen_cooldown.pop(s['site_id'], None)
-        if cool:
-            until = cool.get('not_before') if cool.get('known') and cool.get('not_before') else None
-            try:
-                until = instant(until).isoformat() if until else None
-            except Exception:
-                until = None
-            until = until or (instant(clock()) + DEFAULT_COOLDOWN).isoformat()
+        seen = seen_cooldown.pop(s['site_id'], None)
+        if seen:
+            wait = hold_until(seen['cool'], seen['observed'])
+            until = wait['until'].isoformat()
             with store.transaction(hold_key) as hold:
-                hold.update(not_before=until, recorded_at=clock(), provider_stated=bool(cool.get('known')))
+                hold.update(not_before=until, recorded_at=clock(), observed_at=seen['observed'].isoformat(), basis=wait['basis'],
+                            provider_stated=wait['basis'] != 'default', stated_seconds=wait['stated_seconds'],
+                            capped_at_maximum=wait['capped_at_maximum'])
             out = dict(out, cooldown_until=until)
         results.append(dict(row, **{k: out[k] for k in ('status', 'operation_id', 'error_type', 'reconcile', 'superseded_by',
                                                          'due_at', 'timing_basis', 'cooldown_until', 'artifact_state', 'evidence_as_of', 'observed_at', 'unassigned_shifts') if k in out}))

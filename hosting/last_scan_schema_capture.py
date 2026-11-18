@@ -29,7 +29,7 @@ from urllib.parse import quote
 
 from hosting import source_first as sf
 from hosting import last_scan_readiness as readiness
-from hosting.last_scan_drafts import instant
+from hosting.last_scan_drafts import hold_until, instant
 from hosting.source_first_capture import CaptureFailure, collection, cooldown
 
 KIND, FORMAT = 'candidate_schema_capture', 'schema-capture-v1'
@@ -130,12 +130,23 @@ def _now(clock, stage):
         _fail('The host clock did not return an offset-aware time, so the capture cannot be dated.', stage)
 
 
-def _list_metadata(fetch, base, site_id, list_id, stage):
+def _wait(clock, cool):
+    """When the caller may try again, on the caller's own clock from the moment the answer was seen. Never worked
+    out from the wall clock inside the capture code."""
+    try:
+        wait = hold_until(cool, instant(clock()))
+    except (ValueError, OverflowError):
+        return dict(wait_until=None, wait_basis='host_clock_unusable')
+    return dict(wait_until=wait['until'].isoformat(), wait_basis=wait['basis'], wait_capped_at_maximum=wait['capped_at_maximum'])
+
+
+def _list_metadata(fetch, base, site_id, list_id, stage, clock):
     url = base + '?$select=' + LIST_SELECT
     status, page, headers = _call(fetch, url)
     if status != 200:
+        held = status in (429, 503)
         _fail(_status_message(status), stage, status=status, request_hash=sf.digest(url),
-              cooldown=cooldown(headers) if status in (429, 503) else None)
+              cooldown=cooldown(headers) if held else None, **(_wait(clock, cooldown(headers)) if held else {}))
     if not isinstance(page, dict) or page.get('id') != list_id:
         _fail('The answer is not for the exact list that was asked for.', stage, status=status, request_hash=sf.digest(url),
               returned_id=page.get('id') if isinstance(page, dict) else None)
@@ -148,7 +159,7 @@ def _list_metadata(fetch, base, site_id, list_id, stage):
     return page, echoed
 
 
-def _columns(fetch, base, pass_number):
+def _columns(fetch, base, pass_number, clock):
     pages = []
     first = base + '/columns?' + COLUMNS_QUERY
     def guarded(url):
@@ -165,7 +176,8 @@ def _columns(fetch, base, pass_number):
     except CaptureFailure as error:
         e = error.evidence if isinstance(error.evidence, dict) else {}
         _fail(str(error), 'columns', capture_pass=pass_number, status=e.get('status'), cooldown=e.get('cooldown'),
-              failed_request_hash=e.get('failed_request_hash'), pages=e.get('pages'))
+              failed_request_hash=e.get('failed_request_hash'), pages=e.get('pages'),
+              **(_wait(clock, e.get('cooldown')) if e.get('status') in (429, 503) else {}))
     except (ValueError, TypeError):                                          # a page that is not plain JSON data
         _fail('A column page is not plain data.', 'columns', capture_pass=pass_number, status=None, pages=pages)
     if not pages or not pages[-1].get('terminal'):
@@ -204,14 +216,14 @@ def capture_schema(site_id, list_id, *, fetch, clock):
     started_text, started = _now(clock, 'setup')
     base = '/sites/' + quote(site_id, safe='') + '/lists/' + quote(list_id, safe='')
 
-    before, echoed_site = _list_metadata(fetch, base, site_id, list_id, 'list_identity')
+    before, echoed_site = _list_metadata(fetch, base, site_id, list_id, 'list_identity', clock)
     passes, requests = [], []
     for n in range(1, PASSES + 1):
-        columns, pages = _columns(fetch, base, n)
+        columns, pages = _columns(fetch, base, n, clock)
         passes.append(columns)
         requests += [dict(capture_pass=n, kind='columns', request_hash=p['request_hash'], page_hash=p['page_hash'], status=p['status'],
                           count=p['count'], terminal=p['terminal']) for p in pages]
-    after, _ = _list_metadata(fetch, base, site_id, list_id, 'list_identity_recheck')
+    after, _ = _list_metadata(fetch, base, site_id, list_id, 'list_identity_recheck', clock)
     digests = [sf.digest({k: readiness.column_evidence(v) for k, v in p.items()}) for p in passes]
     if len(set(digests)) != 1:
         changed = sorted(k for k in set(passes[0]) | set(passes[-1]) if passes[0].get(k) != passes[-1].get(k))
