@@ -16,6 +16,10 @@ this code does not own:
                           configuration counts for nothing: only this authority's own record does.
   * ``SchemaProbe``       a read-only look at a list's current column definitions, used to confirm the approved
                           schema is still the live one immediately before each source read.
+The accepted-collector policy (``Deps.collectors``) is copied into a private immutable set before the first callback,
+used unchanged for the whole request, and included in the approved snapshot digest. Handing these objects in is a
+wiring boundary, not cryptographic authenticity: nothing here proves that an authority, a collector or a policy is
+genuine, only that the request was judged against exactly what the host supplied when it arrived.
 None of these exists for production. The only implementations are TEST-ONLY fakes in the test suite. A receipt from
 a CaptureAuthority is reported as "reported by capture authority"; this module cannot verify the authority itself
 and never calls a snapshot trusted on its own account.
@@ -135,11 +139,26 @@ def _router(deps):
     return StoredDraftRouter(deps.artifacts, config['assignments'])
 
 
-def _collectors(deps):
-    c = deps.collectors
-    if isinstance(c, (frozenset, set, tuple, list)) and c and all(isinstance(x, str) and x.strip() and x == x.strip() for x in c):
-        return frozenset(c)
+def _freeze_collectors(value):
+    """The accepted-collector policy as one private immutable set, or None (deny). The host's container is read exactly
+    once, into a tuple, and only that tuple is validated and kept, so nothing that changes the container afterwards
+    (a callback, another thread) can change the policy a request is judged under."""
+    if isinstance(value, frozenset):
+        taken = tuple(value)
+    elif isinstance(value, (set, tuple, list)):
+        try:
+            taken = tuple(value)
+        except RuntimeError:                                                 # a set resized by another thread mid-copy
+            return None
+    else:
+        return None
+    if taken and all(isinstance(x, str) and x.strip() and x == x.strip() for x in taken):
+        return frozenset(taken)
     return None
+
+
+def _collectors(deps):
+    return _freeze_collectors(deps.collectors)
 
 
 def capture_problems(deps, schema, row):
@@ -266,11 +285,11 @@ def mapping_readiness(config, entries, schemas, capture_check=None):
     return out
 
 
-def snapshot_digest(config, entries, router, schemas=None, mapping=None):
+def snapshot_digest(config, entries, router, schemas=None, mapping=None, collectors=None):
     """One hash over everything an approval must cover: the configuration, the renderer version of every routed
     assignment (mapping, header, pinned template, generator code, binding), the job registry as supplied, the
     identity of every supplied schema snapshot, and per assignment the snapshot and mapping contract it was checked
-    against together with the outcome."""
+    against together with the outcome, and the accepted-collector policy in force."""
     renders = {}
     for a in (config or {}).get('assignments') or []:
         try:
@@ -280,6 +299,7 @@ def snapshot_digest(config, entries, router, schemas=None, mapping=None):
     registry = sorted(sf.digest(e) for e in entries or [])
     return sf.digest(dict(config={k: v for k, v in (config or {}).items() if k != 'activation'},
                           render_versions=renders, registry=registry,
+                          accepted_collectors=sorted(collectors) if isinstance(collectors, frozenset) else None,
                           schema_snapshots=sorted(readiness.snapshot_identity(s) for s in schemas) if isinstance(schemas, list) else None,
                           mapping_readiness=[{k: m[k] for k in ('assignment', 'client_id', 'job', 'site_id', 'list_id', 'ready', 'blocked_reasons',
                                                                 'schema_snapshot', 'schema_digest', 'mapping_contract', 'capture')} for m in mapping or []]))
@@ -352,7 +372,7 @@ def preflight(deps, principal):
     blocking = [i for i in issues if i.get('code') != 'built_by_external_process']
     check('at_least_one_runnable_scope', bool(scopes), 'No assignment is complete, verified, in the registry and routed.')
     check('no_assignment_issues', not blocking, ', '.join(sorted({i['code'] for i in blocking})))
-    digest = snapshot_digest(config, deps.entries if isinstance(deps.entries, list) else [], router, deps.schemas, mapping) if router is not None else None
+    digest = snapshot_digest(config, deps.entries if isinstance(deps.entries, list) else [], router, deps.schemas, mapping, _collectors(deps)) if router is not None else None
     ok, why = _attested(deps, digest, principal) if digest else (False, 'There is nothing complete enough to approve.')
     check('approval_attested_for_this_snapshot_and_principal', ok, why)
     check('quota_configured', isinstance(deps.quota, Quota) and isinstance(deps.quota.runs_per_hour, int)
@@ -400,10 +420,12 @@ def handle(method, headers, body, deps):
         return _respond(401, status='unauthorized')
     # Own the authorization inputs before any dependency callback can mutate their originals.
     # The same private snapshot is used for hashing, planning, approval and execution.
+    # The accepted-collector policy is frozen here too, first, so no callback can widen or narrow it mid-request.
+    policy = _freeze_collectors(deps.collectors)
     try:
         body = deepcopy(body)
         headers = dict(headers)
-        deps = replace(deps, config=deepcopy(deps.config), entries=deepcopy(deps.entries), schemas=deepcopy(deps.schemas))
+        deps = replace(deps, config=deepcopy(deps.config), entries=deepcopy(deps.entries), schemas=deepcopy(deps.schemas), collectors=policy)
         body_digest = sf.digest(body)             # refuses NaN / infinity / non-JSON values anywhere in the body
     except Exception:
         return _respond(400, status='bad_request', detail='The body must be plain JSON with finite numbers.')
@@ -443,7 +465,7 @@ def handle(method, headers, body, deps):
                   planned=[dict(scope=x['key'], job=x['scope']['job'], client_id=x['scope']['client_id'],
                                 business_date=x['scope']['business_date'], shift=x['scope']['shift']) for x in scopes],
                   issues=issues, limits=limits, transport='disabled', client_release='held',
-                  mapping_readiness=mapping, proof=dict(NO_PROOF),
+                  mapping_readiness=mapping, proof=dict(NO_PROOF), accepted_collectors=sorted(policy) if policy is not None else None,
                   live_schema_drift_check='not_performed_in_dry_run' if mode == 'dry_run' else 'not_performed')
     if mode == 'dry_run':
         return _respond(200, status='dry_run', sources_read=0, records_written=0, **report)

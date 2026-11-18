@@ -158,3 +158,11 @@ this code cannot close that gap from the outside: it would need the source to re
 rows, or to accept a conditional read. Until then the window is one probe-to-read interval per read, and the
 sealed capture taken by the read is the only record of what was actually returned. A failed look also spends the
 request's nonce and one unit of quota, by design, so the probe cannot be used as a free polling channel.
+
+### Accepted-collector policy (added 2026-11-18)
+
+The list of accepted collectors is copied into a private immutable set before any callback runs, used unchanged
+for the whole request, and is part of the approved snapshot digest. Adding a collector while a request is in
+flight cannot let it through; removing one cannot change a request already being judged; the next request sees
+the new list, and a changed list needs a new approval. This is a wiring boundary. Supplying these objects to the
+entry point does not make them authentic, and nothing in this code proves a collector or authority is genuine.
