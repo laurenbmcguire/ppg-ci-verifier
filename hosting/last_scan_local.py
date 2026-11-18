@@ -29,6 +29,7 @@ class NativeDraftPublisher:
     # On this single local filesystem an absent operation folder means nothing was written, so the same operation
     # may be rendered again. A folder without its receipt is an interrupted write: that stays for a person.
     lookup_is_authoritative=True
+    FILES=(('draft.xlsx','workbook_sha256'),('checklist.json','checklist_sha256'))
     def lookup(self,op):
         path=self.output/op/'receipt.json'
         if not path.is_file():
@@ -36,16 +37,12 @@ class NativeDraftPublisher:
             return None
         receipt=json.loads(path.read_text())
         if receipt.get('binding')!=self.binding:raise ValueError('Published draft belongs to another client/site/list/job.')
-        for filename,key in [('draft.xlsx','workbook_sha256'),('checklist.json','checklist_sha256')]:
+        for filename,key in self.FILES:
             if sf.digest((path.parent/filename).read_bytes())!=receipt[key]:raise ValueError('Published bytes changed.')
         return receipt
-    def __call__(self,snapshot,op):
+    def build(self,snapshot,op):
+        """Pure: (files, receipt) for this operation. Writes nothing."""
         self._own(snapshot.get('scope'))
-        found=self.lookup(op)
-        if found:
-            if found.get('render_version')!=self.render_version():
-                raise ValueError('Render configuration changed; new operation required.')
-            return found
         cap=snapshot['source_capture'];sf.verify_seal(cap)
         selected={r['id'] for r in snapshot['rows']}
         # Derive a new sealed shift-scoped view while retaining original full-day
@@ -66,17 +63,80 @@ class NativeDraftPublisher:
                        timing_note='One-hour quiet-window draft; not proof of final scan or complete shift.',
                        photo_evidence=view['photos'])
         body=sf.canonical(checklist)
-        target=self.output/op
-        target.mkdir(parents=True,exist_ok=False) # uncertain partial write requires reconcile; never overwrite
-        (target/'draft.xlsx').write_bytes(raw);(target/'checklist.json').write_bytes(body)
         notes=['PPG DRAFT — not approved for client release','Workbook SHA-256: '+sf.digest(raw),
                'Shift/day completion is not established.','Source IDs: '+', '.join(sorted(selected)),
                'Verification issues:']+[f.get('text','') for f in findings+checklist['layout_findings']]
-        (target/'checklist.txt').write_text('\n'.join(notes))
         receipt=dict(operation_id=op,workbook_sha256=sf.digest(raw),checklist_sha256=sf.digest(body),
-                     path=str(target),render_version=self.render_version(),binding=self.binding,status='draft_ready',client_release='held')
+                     render_version=self.render_version(),binding=self.binding,status='draft_ready',client_release='held')
+        return {'draft.xlsx':raw,'checklist.json':body,'checklist.txt':'\n'.join(notes).encode()},receipt
+    def __call__(self,snapshot,op):
+        self._own(snapshot.get('scope'))
+        found=self.lookup(op)
+        if found:
+            if found.get('render_version')!=self.render_version():
+                raise ValueError('Render configuration changed; new operation required.')
+            return found
+        files,receipt=self.build(snapshot,op)
+        target=self.output/op
+        target.mkdir(parents=True,exist_ok=False) # uncertain partial write requires reconcile; never overwrite
+        for name,body in files.items():(target/name).write_bytes(body)
+        receipt=dict(receipt,path=str(target))
         (target/'receipt.json').write_bytes(sf.canonical(receipt))
         return receipt
+
+
+class ArtifactStore:
+    """Where finished drafts are kept. A hosted deployment needs private, durable storage behind this interface."""
+    def lookup(self,key):raise NotImplementedError          # -> receipt dict, or None if nothing was committed
+    def commit(self,key,files,receipt):raise NotImplementedError   # all files + receipt, or nothing
+    def read(self,key,name):raise NotImplementedError       # -> bytes of one stored file
+
+
+class BlobArtifacts(ArtifactStore):
+    """Drafts kept in the runner's own durable store: files as content-addressed private blobs, and one record per
+    draft written in a single transaction. No record means nothing was committed, so its lookup is authoritative."""
+    def __init__(self,store):self.store=store
+    def lookup(self,key):
+        with self.store.transaction('artifact:'+key) as record:
+            return deepcopy(record.get('receipt'))
+    def commit(self,key,files,receipt):
+        refs={name:self.store.put_blob(body) for name,body in files.items()}
+        with self.store.transaction('artifact:'+key) as record:
+            if record.get('receipt'):return deepcopy(record['receipt'])      # first writer wins; never overwritten
+            record.update(receipt=receipt,files=refs)
+            return deepcopy(receipt)
+    def read(self,key,name):
+        with self.store.transaction('artifact:'+key) as record:
+            ref=(record.get('files') or {})[name]
+        return self.store.get_blob(ref)
+
+
+class StoredDraftPublisher(NativeDraftPublisher):
+    """Same native draft, kept in an ArtifactStore instead of a local folder. Always bound to one exact scope."""
+    def __init__(self,artifacts,mapping,header,binding):
+        super().__init__('.',mapping,header,binding=binding)
+        if self.binding is None:raise ValueError('A stored publisher must be bound to one client/site/list/job.')
+        self.artifacts=artifacts;self.output=None
+    def key(self,op):return sf.digest(self.binding)[:16]+':'+op
+    def lookup(self,op):
+        receipt=self.artifacts.lookup(self.key(op))
+        if receipt is None:return None
+        if receipt.get('binding')!=self.binding:raise ValueError('Published draft belongs to another client/site/list/job.')
+        for filename,field in self.FILES:
+            if sf.digest(self.artifacts.read(self.key(op),filename))!=receipt[field]:raise ValueError('Published bytes changed.')
+        return receipt
+    def read(self,op,name):
+        """Draft access for Lauren, whatever happened to delivery."""
+        return self.artifacts.read(self.key(op),name)
+    def __call__(self,snapshot,op):
+        self._own(snapshot.get('scope'))
+        found=self.lookup(op)
+        if found:
+            if found.get('render_version')!=self.render_version():
+                raise ValueError('Render configuration changed; new operation required.')
+            return found
+        files,receipt=self.build(snapshot,op)
+        return self.artifacts.commit(self.key(op),files,dict(receipt,stored='private_blob'))
 
 
 class NativeDraftRouter(RendererRouter):
@@ -90,5 +150,15 @@ class NativeDraftRouter(RendererRouter):
                 continue
             try:bound=exact_binding(a)
             except ValueError:continue
-            publishers.append(NativeDraftPublisher(Path(output)/sf.digest(bound)[:16],a['mapping'],a['header'],binding=bound))
+            publishers.append(self.publisher(output,a,bound))
         super().__init__(publishers)
+    @staticmethod
+    def publisher(output,a,bound):
+        return NativeDraftPublisher(Path(output)/sf.digest(bound)[:16],a['mapping'],a['header'],binding=bound)
+
+
+class StoredDraftRouter(NativeDraftRouter):
+    """As NativeDraftRouter, but every draft goes to the given ArtifactStore."""
+    @staticmethod
+    def publisher(artifacts,a,bound):
+        return StoredDraftPublisher(artifacts,a['mapping'],a['header'],bound)

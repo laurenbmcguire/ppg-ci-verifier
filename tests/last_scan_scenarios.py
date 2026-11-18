@@ -20,6 +20,7 @@ class Env:
         self.rows = [dict(id='1', scan_at='2026-11-10T20:30:00Z')]
         self.photos, self.blobs, self.extra = [], {}, {}
         self.fetches, self.renders, self.published, self.before_fetch = 0, [], {}, {}
+        self.worker_kw = {}
         self.scope = scope_key(dict(SCOPE, client_id='client', shift=shift, zone=zone))
         self.key = sf.digest(self.scope)
 
@@ -40,7 +41,7 @@ class Env:
         return dict(self.published[op])
 
     def worker(self, render=None, **kw):
-        return ScheduledWorker(self.store, self.fetch, render or self.render, clock=self.clock, enabled=True, **kw)
+        return ScheduledWorker(self.store, self.fetch, render or self.render, clock=self.clock, enabled=True, **dict(self.worker_kw, **kw))
 
     def record(self, key):
         with self.store.transaction(key) as r:
@@ -179,8 +180,8 @@ def blobs_are_content_addressed(store):
 EXTENDED = '2026-11-10T23:00:00Z'   # a verified shift end learned AFTER the draft was ready
 
 
-def ready_entry(store):
-    env = Env(store); env.now = DUE; w = env.worker()
+def ready_entry(store, **worker_kw):
+    env = Env(store); env.now = DUE; env.worker_kw = worker_kw; w = env.worker()
     return env, w, w.tick(env.scope, {})['operation_id']
 
 

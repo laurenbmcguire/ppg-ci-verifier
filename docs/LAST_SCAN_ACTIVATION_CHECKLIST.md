@@ -1,0 +1,88 @@
+# Last-scan draft runner: activation checklist
+
+Status on branch `claude/durable-report-runner-20261118`: **prepared, disabled, not connected.** No route, cron,
+scheduled task, database table, secret or sender exists for it. Nothing in this document has been done.
+Each step below needs its own approval. Stop at the first step that cannot be completed.
+
+## What exists (code only)
+
+| Piece | File | State |
+|---|---|---|
+| Entry point `handle(method, headers, body, deps)` | `hosting/last_scan_hosted.py` | Not imported by anything. |
+| Runner, worker, timer | `hosting/last_scan_runner.py`, `last_scan_service.py`, `last_scan_drafts.py` | Off unless `enabled` is exactly `true`. |
+| Durable store | `hosting/last_scan_store.py` | PostgreSQL tables are created only by an explicit `install()`; never called. |
+| Draft storage | `BlobArtifacts`, `StoredDraftPublisher`, `StoredDraftRouter` in `hosting/last_scan_local.py` | Drafts as private blobs in the same store. |
+| Delivery gate | `hosting/last_scan_transport.py` | `VERIFIED_CONTRACTS` is empty: no sending, no retry. |
+
+## Order of activation (none of it done)
+
+1. **Merge prerequisites.** The Fix-with-AI audit repair (separate branch) and this branch are reviewed and merged
+   by the owner. The known `test_ai_proposal_guards` 403/404 failure is resolved by the main auditor.
+2. **Database migration (needs approval).** Run `PostgresStore(connect, schema='ci_verifier').install()` once. It
+   creates `scan_draft_state` and `scan_draft_blob`. Check the role's connection limit first: every record
+   transaction opens one connection. Re-run the real-PostgreSQL tests against a disposable copy of the hosted
+   version and through the hosted pooler; today they are proven on local PostgreSQL 17 only.
+3. **Configuration under `last_scan_runner`.** Written by a person, per client list:
+   `verified`, `active`, `timestamp_semantics_verified`, `client_id`, `job`, `site_id`, `list_id`, `zone`,
+   `scan_field` (a verified actual-scan time; never Date, Date0, Created or Modified), `shift_field`,
+   `recorded_shifts`, optional `business_dates` and `not_before`, and this list's own `mapping` and `header`.
+4. **Job registry.** A verified registry entry with the exact `client_key`, `site_id`, `list_id` and `job`.
+   Seed entries carry site names, not site ids, and do not match.
+5. **Existing scheduled reporting task.** It already builds reports for a fixed list of jobs. For each such job
+   either set `externally_built: true` here or retire it there first. Do not change that schedule as part of this.
+6. **Dry run.** Call the entry point with `mode: "dry_run"` (the default). It reads no source and writes nothing.
+   Every preflight check must be `ok` and the planned scopes must be exactly the intended ones.
+7. **Approval record.** Add `activation: {approved_by, approved_at, config_digest}` where `config_digest` is the
+   value the dry run returned. Any later change to the configuration invalidates it.
+8. **Host wiring (a reviewed code change).** One authenticated route that builds `Deps` and calls `handle`:
+   the token from the host's secret store (32+ characters), the store, `runner.registry_entries(inbox)`,
+   `StoredDraftRouter(BlobArtifacts(store), assignments)`, and the read-only source adapter. Budget must stay
+   below the host's time limit (capped at 45 seconds here).
+9. **Schedule (a separate decision).** A scheduled caller with a unique `run_id` per firing. Not created here.
+10. **First live run** on one list, watched by a person; compare the draft with a hand-built report.
+
+## Preflight checks returned by every call
+
+`configuration_present`, `enabled_is_exactly_true`, `approval_matches_this_configuration`,
+`job_registry_available`, `renderer_router_available`, `source_adapter_configured`, `durable_store_ready`
+(read-only; never creates tables), `at_least_one_runnable_scope`, `no_assignment_issues`,
+`delivery_transport_disabled`.
+
+## Delivery: disabled, and what would be needed
+
+There is no provider, so there is no sender, and none should be invented. Drafts are built, held, and readable
+through `StoredDraftPublisher.read(op, name)`; an internal outbox entry is recorded and never attempted.
+
+Before any transport could be enabled, an independent reviewer would need written evidence from the provider that:
+
+1. it delivers at most once per idempotency key (the operation ID);
+2. it can state, for one attempt ID, a **final** not-delivered status, distinct from "not seen yet";
+3. once it reports an attempt closed, it rejects that attempt if it arrives later;
+4. its send call is cut off within a known time, shorter than the runner's `attempt_seconds`;
+5. how each of those was tested, by whom, and when.
+
+Only then would a `ProviderContract` with those facts be added, by reviewed code change, to
+`VERIFIED_CONTRACTS` in `hosting/last_scan_transport.py`. Without it: `deliver` refuses, an uncertain delivery is
+never retried, reconciliation does not query anything, and a passed deadline changes nothing. Even with it, the
+claim is not exactly-once: the source can change between the recapture and the provider receiving the message, the
+claim and the send are separate steps, and a provider that breaks its contract can cause a second delivery (which is
+recorded, not prevented).
+
+## Independent review
+
+```sh
+cd /Users/lauren/projects/ppg-claude-report-runner-20261118
+export PY=/Users/lauren/projects/ppg-verifier-claude-pilot-7Nepp5hs/test-venv/bin/python
+export PYTHONPATH=.:tests TMPDIR=$PWD/.tmp PYTHONDONTWRITEBYTECODE=1
+$PY -m pytest -q -p no:cacheprovider tests/test_last_scan_drafts.py tests/test_last_scan_local.py \
+    tests/test_last_scan_service.py tests/test_last_scan_durable.py tests/test_last_scan_runner.py \
+    tests/test_last_scan_hosted.py tests/test_explain.py
+PY=$PY sh scripts/last-scan-pg-test.sh       # disposable PostgreSQL in .tmp/pg, unix socket only, deleted afterwards
+$PY scripts/last_scan_synthetic_demo.py $PWD/.tmp/demo
+```
+
+Things worth trying to break:
+- enable a retry without editing `VERIFIED_CONTRACTS` (`NoRetryByDefault` in `tests/test_last_scan_durable.py`);
+- reach a source read or a store write through `handle` without a valid token, an exact approval, or a passing
+  preflight (`tests/test_last_scan_hosted.py`);
+- find any import of `last_scan_*` from `api/`, `web/`, `vercel.json` or another `hosting/` module (`NotConnected`).

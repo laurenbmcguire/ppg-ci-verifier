@@ -94,6 +94,12 @@ class SqliteStore(_Store):
                 raise
             db.execute('COMMIT')
 
+    def ready(self):
+        """Read-only: are the tables there? Creates nothing."""
+        with closing(sqlite3.connect(self.path, timeout=self.timeout)) as db:
+            names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        return {STATE, BLOB} <= names
+
     def _read(self, db, key):
         import json
         row = db.execute(f'SELECT value FROM {STATE} WHERE key=?', (key,)).fetchone()
@@ -149,6 +155,13 @@ class PostgresStore(_Store):
                 conn.close()
             except Exception:
                 pass
+
+    def ready(self):
+        """Read-only: are the tables there? Creates nothing, locks nothing, never runs install()."""
+        with self._tx() as cur:
+            cur.execute('SELECT to_regclass(%s) IS NOT NULL AND to_regclass(%s) IS NOT NULL',
+                        (self.prefix + STATE, self.prefix + BLOB))
+            return bool(cur.fetchone()[0])
 
     def _read(self, cur, key):
         import json

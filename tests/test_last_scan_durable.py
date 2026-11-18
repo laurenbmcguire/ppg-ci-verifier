@@ -9,16 +9,29 @@ from hosting.last_scan_local import StateStore
 from hosting.last_scan_service import ScheduledWorker
 import last_scan_scenarios as sc
 from last_scan_scenarios import Env, Publisher, Crash, DUE
+from hosting import last_scan_transport as transport
+from hosting.last_scan_transport import ProviderContract
+
+# A FAKE provider contract and a FAKE registry that lists it. Tests only: the real registry is empty.
+FAKE_CONTRACT = ProviderContract(provider='synthetic-test-transport', version='1', at_most_once_per_idempotency_key=True,
+                                 terminal_status_per_attempt=True, honours_attempt_closed=True, sender_timeout_seconds=600,
+                                 retry_after_terminal_non_delivery=True, verified_by='test fixture', verified_at='2026-11-10',
+                                 evidence='tests/test_last_scan_durable.py')
+FAKE_REGISTRY = {(FAKE_CONTRACT.provider, FAKE_CONTRACT.version): FAKE_CONTRACT.digest()}
+VERIFIED = dict(provider_contract=FAKE_CONTRACT, contract_registry=FAKE_REGISTRY)
 
 
 class Base(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory(); self.addCleanup(self.folder.cleanup)
         self.path = Path(self.folder.name) / 'state.db'
-        self.store = StateStore(self.path)
+        self.store = self.make_store()
+
+    def make_store(self):
+        return StateStore(self.path)        # overridden to run the same tests on real PostgreSQL
 
     def restart(self):
-        return StateStore(self.path)        # a new process: nothing in memory survives
+        return self.make_store()            # a new process: nothing in memory survives
 
 
 class SharedScenarios(Base):
@@ -419,10 +432,12 @@ class FreshDispatch(Base):
 
 class AttemptFencing(Base):
     """Every delivery attempt has its own ID. Only a terminal, attempt-bound proof from the transport can lead to a
-    second attempt, and late callbacks of an old attempt can never change a newer one. Test transport only."""
+    second attempt, and late callbacks of an old attempt can never change a newer one. Test transport only, and
+    only under the FAKE verified provider contract; without one nothing is ever retried (see NoRetryByDefault)."""
+    worker_kw = VERIFIED
     def setUp(self):
         super().setUp()
-        self.env, self.w, self.op = sc.ready_entry(self.store)
+        self.env, self.w, self.op = sc.ready_entry(self.store, **self.worker_kw)
         self.calls = []
 
     def entry(self): return self.env.entries()[self.op]
@@ -600,6 +615,112 @@ class AttemptFencing(Base):
         self.assertEqual(self.env.state()['receipts'][self.op]['state'], 'draft_ready')
         self.assertIn(self.op, self.env.published)
         self.assertEqual(self.entry()['receipt'], self.env.published[self.op])
+
+
+class NoRetryByDefault(Base):
+    """Safest default: with no provider contract verified in code, an uncertain delivery is never retried, the
+    provider is never queried, and nothing a caller supplies at run time changes that."""
+    def uncertain(self, **worker_kw):
+        env, w, op = sc.ready_entry(self.store, **worker_kw); calls = []
+        def lost(**kw): calls.append(kw); raise TimeoutError('no answer')
+        self.assertEqual(w.dispatch_test(env.scope, op, lost), dict(status='uncertain', delivery_status='uncertain'))
+        return env, w, op, calls
+
+    def full_proof(self, **kw):
+        return dict(operation_id=kw['idempotency_key'], attempt_id=kw['attempt_id'], delivered=False, terminal=True,
+                    attempt_closed=True, proof_id='synthetic-provider-record-1')
+
+    def never_retried(self, env, w, op, calls, reason, queried):
+        asked = []
+        def lookup(**kw): asked.append(kw); return self.full_proof(**kw)
+        for at in ('2026-11-10T21:36:00Z', '2026-11-10T21:51:00Z', '2026-11-11T21:35:00Z'):      # before and long after any deadline
+            env.now = at
+            self.assertEqual(w.reconcile_test(env.scope, op, lookup), dict(status='uncertain', reason=reason))
+        self.assertEqual(bool(asked), queried)
+        entry = env.entries()[op]
+        self.assertEqual((entry['status'], entry['delivery_status'], entry['attempts'][0]['state'], len(entry['attempts'])),
+                         ('uncertain', 'uncertain', 'returned_error', 1))
+        env.rows = list(env.rows)
+        env.now = '2026-11-11T21:36:00Z'
+        self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')
+        self.assertEqual(w.dispatch_test(env.scope, op, lambda **kw: self.fail('retried')), dict(status='not_pending'))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(env.state()['receipts'][op]['state'], 'draft_ready'); self.assertIn(op, env.published)   # draft kept
+        return entry
+
+    def test_real_registry_is_empty(self):
+        self.assertEqual(dict(transport.VERIFIED_CONTRACTS), {})
+        with self.assertRaises(TypeError):
+            transport.VERIFIED_CONTRACTS['x'] = 'y'
+        self.assertFalse(transport.verified(FAKE_CONTRACT)); self.assertFalse(transport.permits_retry(FAKE_CONTRACT, None, 900))
+
+    def test_no_contract_full_looking_proof_and_passed_deadline_change_nothing(self):
+        self.never_retried(*self.uncertain(), reason='no_verified_provider_contract', queried=False)
+
+    def test_delivered_true_is_not_trusted_without_a_contract_either(self):
+        env, w, op, calls = self.uncertain()
+        out = w.reconcile_test(env.scope, op, lambda **kw: dict(operation_id=op, attempt_id=kw['attempt_id'], delivered=True))
+        self.assertEqual(out, dict(status='uncertain', reason='no_verified_provider_contract'))
+        self.assertEqual(env.entries()[op]['status'], 'uncertain'); self.assertNotIn('ack', env.entries()[op])
+
+    def test_unknown_or_unlisted_or_altered_contracts_do_not_count(self):
+        from dataclasses import replace
+        cases = dict(
+            contract_but_default_registry=dict(provider_contract=FAKE_CONTRACT),
+            caller_boolean=dict(provider_contract=True, contract_registry=FAKE_REGISTRY),
+            plain_dict=dict(provider_contract=dict(retry_after_terminal_non_delivery=True), contract_registry=FAKE_REGISTRY),
+            unlisted_provider=dict(provider_contract=replace(FAKE_CONTRACT, provider='unknown-provider'), contract_registry=FAKE_REGISTRY),
+            altered_after_review=dict(provider_contract=replace(FAKE_CONTRACT, sender_timeout_seconds=601), contract_registry=FAKE_REGISTRY),
+            registry_not_a_mapping=dict(provider_contract=FAKE_CONTRACT, contract_registry=[FAKE_CONTRACT.digest()]),
+            registry_says_true=dict(provider_contract=FAKE_CONTRACT, contract_registry={(FAKE_CONTRACT.provider, '1'): True}))
+        for i, (name, kw) in enumerate(cases.items()):
+            with self.subTest(name):
+                self.store = StateStore(Path(self.folder.name) / ('u%d.db' % i))
+                self.never_retried(*self.uncertain(**kw), reason='no_verified_provider_contract', queried=False)
+
+    def test_verified_contract_that_does_not_permit_retry_keeps_proof_as_evidence_only(self):
+        from dataclasses import replace
+        weak = dict(no_retry_permission=replace(FAKE_CONTRACT, retry_after_terminal_non_delivery=False),
+                    no_terminal_status=replace(FAKE_CONTRACT, terminal_status_per_attempt=False),
+                    no_attempt_close=replace(FAKE_CONTRACT, honours_attempt_closed=False),
+                    no_sender_timeout=replace(FAKE_CONTRACT, sender_timeout_seconds=0),
+                    timeout_longer_than_attempt=replace(FAKE_CONTRACT, sender_timeout_seconds=901))
+        for i, (name, contract) in enumerate(weak.items()):
+            with self.subTest(name):
+                self.store = StateStore(Path(self.folder.name) / ('w%d.db' % i))
+                registry = {(contract.provider, contract.version): contract.digest()}
+                entry = self.never_retried(*self.uncertain(provider_contract=contract, contract_registry=registry),
+                                           reason='retry_not_permitted_by_provider_contract', queried=True)
+                self.assertEqual(entry['attempts'][0]['terminal_proof_not_acted_on']['proof_id'], 'synthetic-provider-record-1')
+
+    def test_contract_without_at_most_once_is_not_verified_at_all(self):
+        from dataclasses import replace
+        contract = replace(FAKE_CONTRACT, at_most_once_per_idempotency_key=False)
+        registry = {(contract.provider, contract.version): contract.digest()}
+        self.assertFalse(transport.verified(contract, registry))
+        for blank in ('verified_by', 'verified_at', 'evidence'):
+            c = replace(FAKE_CONTRACT, **{blank: ' '})
+            self.assertFalse(transport.verified(c, {(c.provider, c.version): c.digest()}), blank)
+
+    def test_deliver_refuses_to_send_without_a_verified_contract(self):
+        env, w, op = sc.ready_entry(self.store); reads = env.fetches
+        for worker in (w, env.worker(provider_contract=FAKE_CONTRACT), env.worker(provider_contract=True, contract_registry=FAKE_REGISTRY)):
+            self.assertEqual(transport.deliver(worker, env.scope, op, lambda **kw: self.fail('sent')), dict(status='transport_disabled'))
+        self.assertEqual((env.fetches, env.entries()[op]['status']), (reads, 'pending'))     # nothing read, nothing claimed
+        sent = []
+        def send(**kw): sent.append(kw); return dict(operation_id=kw['idempotency_key'], attempt_id=kw['attempt_id'])
+        self.assertEqual(transport.deliver(env.worker(**VERIFIED), env.scope, op, send), dict(status='sent'))   # fake contract only
+        self.assertEqual(len(sent), 1)
+
+    def test_deadline_alone_never_closes_an_attempt_even_with_a_contract(self):
+        env, w, op = sc.ready_entry(self.store, **VERIFIED)
+        with self.assertRaises(Crash):
+            w.dispatch_test(env.scope, op, lambda **kw: (_ for _ in ()).throw(Crash()))
+        env.now = '2026-11-12T00:00:00Z'                                             # far past the deadline, no proof at all
+        for lookup in (lambda **kw: None, lambda **kw: dict(operation_id=op, attempt_id=kw['attempt_id'], delivered=False)):
+            self.assertEqual(w.reconcile_test(env.scope, op, lookup), dict(status='uncertain', reason='no_terminal_proof_for_this_attempt'))
+        self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')
+        self.assertEqual((env.entries()[op]['status'], env.entries()[op]['attempts'][0]['state']), ('uncertain', 'in_flight'))
 
 
 SCOPE_OTHER = dict(job='OTHER-JOB', site_id='other-site', list_id='other-list', business_date='2026-11-10',

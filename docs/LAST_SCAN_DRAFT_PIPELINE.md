@@ -131,6 +131,11 @@ Status: local code and tests only. Not deployed, not scheduled, not connected to
   every attempt) and `attempt_id`. A success, failure or reconciliation result is applied only to its own attempt;
   one that arrives after the entry moved on is stored on the old attempt (`late_ack`, `late_error_type`) and, for a
   late success, flagged as `duplicate_delivery_evidence`. Nothing is deleted.
+- **No automatic retry by default.** `hosting/last_scan_transport.py` holds the registry of verified provider
+  contracts, and it is empty. Without a contract listed there, `reconcile_test` does not query anything and changes
+  nothing, `deliver` refuses to send, and no flag, lookup answer or deadline can alter that at run time. The proof
+  contract below applies only under a contract that is listed there and also permits a retry.
+  See `docs/LAST_SCAN_ACTIVATION_CHECKLIST.md` for the hosted entry point (prepared, not connected).
 - **Transport proof contract.** An unknown outcome leads to another attempt only if the transport answers, for
   this exact attempt: `operation_id` and `attempt_id` matching, `delivered: false`, `terminal: true`,
   `attempt_closed: true` (it will reject this attempt if it arrives later) and a non-empty `proof_id`. If this

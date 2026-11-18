@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import timedelta
 from uuid import uuid4
 from hosting import source_first as sf, source_first_capture as capture
+from hosting import last_scan_transport as transport
 from hosting.last_scan_drafts import capture_adapter, instant, observe, scope_key
 from hosting.last_scan_store import LeaseLost, claim, fenced, release
 
@@ -87,13 +88,16 @@ class ScheduledWorker:
     publisher that declares its lookup authoritative may render the same operation again.
     Photo bytes and the captured snapshot are stored as content-addressed blobs, not in the state row.
     """
-    def __init__(self,transaction,fetch,render,*,clock=sf.now,enabled=False,lease_seconds=300,owner=None,attempt_seconds=900):
+    def __init__(self,transaction,fetch,render,*,clock=sf.now,enabled=False,lease_seconds=300,owner=None,attempt_seconds=900,
+                 provider_contract=None,contract_registry=None):
         self.store=getattr(transaction,'__self__',transaction)
         if not hasattr(self.store,'atomic') or not hasattr(self.store,'put_blob'):
             raise TypeError('A store with atomic multi-record transactions is required (hosting.last_scan_store).')
         self.transaction=self.store.transaction;self.fetch=fetch;self.render=render
         self.clock=clock;self.enabled=enabled;self.lease_seconds=lease_seconds;self.owner=owner
-        self.attempt_seconds=attempt_seconds      # the longest a sender call may take; after it an attempt is not "in flight"
+        self.attempt_seconds=attempt_seconds      # an extra wait before a closed attempt may be replaced; never proof by itself
+        # Default: no provider contract, so an uncertain delivery is NEVER retried (see hosting.last_scan_transport).
+        self.provider_contract=provider_contract;self.contract_registry=contract_registry
 
     # ---- one scope
     def tick(self,scope,settings):
@@ -391,12 +395,16 @@ class ScheduledWorker:
     def reconcile_test(self,scope,op,status_lookup):
         """Settle a delivery whose outcome is unknown by ASKING the (test) transport about this attempt. Never sends.
 
-        The lookup is called with the operation ID and the attempt ID, and its answer must name both.
+        DEFAULT: without a provider contract verified in hosting.last_scan_transport this does nothing at all. The
+        provider is not queried, whatever a lookup would say is not trusted, and the entry stays uncertain. No
+        answer, flag or deadline can change that at run time.
+
+        With a verified contract the lookup is called with the operation ID and the attempt ID, and must name both:
           * delivered is True -> recorded as sent, with the answer kept as the acknowledgment.
-          * terminal non-delivery proof (see terminal_non_delivery) -> the attempt is closed and the entry is put on
-            hold; only a later poll that finds the scope ready, followed by a fresh recapture, can lead to a new
-            attempt. While this process's own sender call may still be running (attempt still in flight and its
-            deadline not passed) even that proof is not acted on.
+          * terminal non-delivery proof (see terminal_non_delivery) -> only if the contract also permits a retry
+            (permits_retry), and never while this process's own sender call may still be running, the attempt is
+            closed and the entry is put on hold; only a later poll that finds the scope ready, followed by a fresh
+            recapture, can lead to a new attempt. Otherwise the proof is stored on the attempt and nothing changes.
           * anything else (delivered:false alone, "not found", another attempt's proof, no answer, an error) ->
             stays uncertain. Not having arrived yet is not the same as never arriving.
         """
@@ -406,6 +414,8 @@ class ScheduledWorker:
             if not entry or entry.get('delivery_status')!='uncertain' or not entry.get('attempt_id'):
                 return dict(status='nothing_to_reconcile')
             aid=entry['attempt_id']
+        if not transport.verified(self.provider_contract,self.contract_registry):
+            return dict(status='uncertain',reason='no_verified_provider_contract')      # provider not even queried
         try:
             answer=status_lookup(idempotency_key=op,attempt_id=aid)
         except Exception as error:
@@ -423,9 +433,13 @@ class ScheduledWorker:
                 return dict(status=entry['status'],delivery_status='sent')
             if not self.terminal_non_delivery(answer,op,aid):
                 return dict(status='uncertain',reason='no_terminal_proof_for_this_attempt')
+            if not transport.permits_retry(self.provider_contract,self.contract_registry,self.attempt_seconds):
+                mine.update(terminal_proof_not_acted_on=answer,terminal_proof_seen_at=now)   # kept as evidence only
+                return dict(status='uncertain',reason='retry_not_permitted_by_provider_contract')
             if mine['state']=='in_flight' and instant(now)<instant(mine['deadline']):
                 return dict(status='uncertain',reason='attempt_may_still_be_in_flight',not_before=mine['deadline'])
-            mine.update(state='closed_not_delivered',closed_proof=answer,closed_at=now)
+            mine.update(state='closed_not_delivered',closed_proof=answer,closed_at=now,
+                        closed_under_contract=self.provider_contract.digest())
             entry.update(delivery_status='not_delivered',reconciled_at=now)
             if entry['status']=='uncertain':
                 entry.update(status='held',held_at=now,held_reason='not_delivered_needs_fresh_readiness')

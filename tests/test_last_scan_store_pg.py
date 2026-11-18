@@ -96,5 +96,57 @@ class RealPostgres(unittest.TestCase):
             self.assertEqual((r['a'], r['b']), ({'n': 1}, {'n': 1}))
 
 
+import test_last_scan_durable as durable
+
+
+class _OnPostgres:
+    """Run a SQLite test class unchanged against the disposable PostgreSQL server."""
+    def make_store(self):
+        import psycopg
+        connect = lambda: psycopg.connect(host=HOST, port=int(PORT), dbname='postgres', autocommit=False, connect_timeout=5)
+        if not getattr(self, 'schema', None):
+            self.schema = 't_' + uuid4().hex[:16]
+            conn = connect(); conn.execute('CREATE SCHEMA ' + self.schema); conn.commit(); conn.close()
+            PostgresStore(connect, schema=self.schema).install()
+        return PostgresStore(connect, schema=self.schema)
+
+
+SKIP = unittest.skipUnless(HOST and PORT and HOST.startswith('/') and '/.tmp/' in HOST,
+                           'No disposable PostgreSQL cluster: hosted concurrency UNVERIFIED (run scripts/last-scan-pg-test.sh).')
+
+
+@SKIP
+class AttemptFencingOnPostgres(_OnPostgres, durable.AttemptFencing):
+    pass
+
+
+@SKIP
+class ReadinessGateOnPostgres(_OnPostgres, durable.ReadinessGate):
+    pass
+
+
+@SKIP
+class CrashRestartOnPostgres(_OnPostgres, durable.CrashRestart):
+    pass
+
+
+@SKIP
+class StoreReadiness(RealPostgres):
+    def test_ready_is_read_only_and_reports_missing_tables(self):
+        schema = 't_' + uuid4().hex[:16]
+        conn = self.connect(); conn.execute('CREATE SCHEMA ' + schema); conn.commit(); conn.close()
+        store = PostgresStore(self.connect, schema=schema)
+        self.assertFalse(store.ready())
+        conn = self.connect()
+        tables = conn.execute('SELECT count(*) FROM information_schema.tables WHERE table_schema=%s', (schema,)).fetchone()[0]
+        conn.close()
+        self.assertEqual(tables, 0)                     # checking created nothing
+        store.install(); self.assertTrue(store.ready())
+
+    test_server_is_the_disposable_one = None; test_shared_scenarios = None; test_nothing_is_created_without_install = None
+    test_row_lock_held_by_another_session_times_out_then_recovers = None; test_second_writer_waits_and_sees_the_first_commit = None
+    test_killed_backend_commits_nothing = None
+
+
 if __name__ == '__main__':
     unittest.main()
