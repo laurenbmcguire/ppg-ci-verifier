@@ -185,9 +185,29 @@ which exists today:
 6. **Review validity.** `valid_until` on the contract: the review lapses, and a dispatch needs at least 60 seconds
    of it left. Removing the contract from the registry stops the next send.
 
-Still missing in this code, on purpose: an authorized way to reconcile an uncertain entry. The worker's
-`reconcile_test` is test-only; a provider's later answer about an uncertain attempt has no production door, so
-uncertain entries stay uncertain until a person decides.
+## Reconciling an uncertain delivery
+
+`hosting/last_scan_reconcile.py` is prepared and connected to nothing. It lets one verified caller, under a
+**reconcile approval for exactly one attempt**, ask a provider **status adapter** about that attempt and record what
+the provider states. It never sends, never re-queues and never makes an entry deliverable again.
+
+| Provider states (version 1 outcome, for exactly this attempt) | Recorded |
+|---|---|
+| terminal, closed `delivered` | the entry becomes `sent` |
+| terminal, closed `not_delivered` | the entry becomes `not_delivered`, a final state no poll, timer or dispatch reopens |
+| the same, while the original sender call may still be running (attempt in flight, its deadline not passed) | nothing; kept in the audit trail |
+| `accepted`, `unknown`, a bare `delivered: false`, any mismatch, an error, no answer, a passed deadline | nothing; kept in the audit trail |
+
+Each reconciliation that reaches the provider appends one audit entry to the operation (at most 50): who, when,
+under which approval record, which provider contract and provider record, the answer's hash, the decision, and the
+entry before and after. A late acknowledgment from the original sender is still recorded afterwards and, if it
+contradicts a recorded non-delivery, says so (`proof_contradicted_by_late_ack`).
+
+Needed before it could be used, none of which exists: a status adapter for a real provider; the provider evidence
+listed above (in particular a per-attempt terminal status that distinguishes "not seen yet" from final, and a closed
+attempt that is rejected if it arrives later); an approval authority that can issue per-attempt reconcile approvals;
+and an owner's decision on who may reconcile. There is no operator screen. Sending a report again after a recorded
+non-delivery is not offered by any code path: it is a person's decision and a new operation.
 
 ## Exact next step for a real read-only proof (root-owned)
 

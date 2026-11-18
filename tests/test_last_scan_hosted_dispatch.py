@@ -674,7 +674,7 @@ class RestartAndUncertain(Dispatch):
 class Boundaries(unittest.TestCase):
     def test_nothing_reaches_the_dispatch_module_and_it_owns_no_authority_or_sender(self):
         for path in list((ROOT / 'api').rglob('*.py')) + list((ROOT / 'hosting').glob('*.py')) + list((ROOT / 'scripts').glob('*.py')) + [ROOT / 'vercel.json']:
-            if path.is_file() and path.name != 'last_scan_dispatch.py':
+            if path.is_file() and path.name not in ('last_scan_dispatch.py', 'last_scan_reconcile.py'):   # the reconcile boundary reuses its policy helpers
                 text = path.read_text(errors='ignore')
                 self.assertNotIn('last_scan_dispatch', text.replace('hosting.last_scan_dispatch)', ''), str(path))   # one docstring mention in the transport module
         text = (ROOT / 'hosting' / 'last_scan_dispatch.py').read_text()
