@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from hosting import source_first as sf
 from hosting import last_scan_runner as runner
-from hosting.last_scan_local import StateStore, NativeDraftPublisher
+from hosting.last_scan_local import StateStore, NativeDraftRouter
 from hosting.last_scan_service import source_adapter
 from source_first_fixture import capture, MAP, SCOPE
 
@@ -33,12 +33,14 @@ def main(folder):
         c['captured_at'] = now[0]
         return sf.seal({k: v for k, v in c.items() if k not in ('snapshot_hash', 'envelope_hash')}), {}
     store = StateStore(out / 'state.db')
-    publisher = NativeDraftPublisher(out / 'drafts', MAP, {})
     entry = dict(client_key='synthetic', site_id=SCOPE['site_id'], list_id=SCOPE['list_id'], job=SCOPE['job'], verified=True)
     config = dict(enabled=True, assignments=[dict(
         verified=True, active=True, timestamp_semantics_verified=True, client_id='synthetic', job=SCOPE['job'],
         site_id=SCOPE['site_id'], list_id=SCOPE['list_id'], zone='America/Chicago', scan_field='ActualScan',
-        shift_field='Shift', recorded_shifts=['1'], business_dates=['2026-11-10'])])
+        shift_field='Shift', recorded_shifts=['1'], business_dates=['2026-11-10'],
+        mapping=MAP, header={})])       # this assignment's own report mapping and header
+    publisher = NativeDraftRouter(out / 'drafts', config['assignments'])
+    drafts = publisher.for_scope(config['assignments'][0]).output
     def fire(at, run_id=None):
         now[0] = at
         result = runner.run_once(store, config, fetch=lambda s, settings: source_adapter(s, settings, capture_fn=cap),
@@ -55,10 +57,10 @@ def main(folder):
     comment[0] = 'Two scratched parts (count corrected later)'
     fire('2026-11-10T22:40:00Z')
     op = done['results'][0]['operation_id']
-    checklist = json.loads((out / 'drafts' / op / 'checklist.json').read_text())
+    checklist = json.loads((drafts / op / 'checklist.json').read_text())
     with store.transaction('outbox:' + done['results'][0]['scope']) as box:
         entries = {k[:12]: v['status'] for k, v in box['entries'].items()}
-    print(json.dumps(dict(draft=str(out / 'drafts' / op / 'draft.xlsx'), checklist_status=checklist['status'],
+    print(json.dumps(dict(draft=str(drafts / op / 'draft.xlsx'), checklist_status=checklist['status'],
                           client_release=checklist['client_release'], day_completion=checklist['day_completion'],
                           unknown_values=[f['field'] for f in checklist['findings'] if f.get('code') == 'missing_value'],
                           outbox=entries, notifications_sent=done['notifications_sent']), indent=2))

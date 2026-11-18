@@ -43,6 +43,33 @@ def source_adapter(scope,settings,*,capture_fn=capture.capture):
     return capture_adapter(scope,scan_field=settings['scan_field'],shift_field=settings['shift_field'],
         capture_fn=capture_fn,not_before=settings.get('not_before',{}).get(scope['business_date']+'|'+scope['shift']))
 
+BINDING=('client_id','site_id','list_id','job')
+
+def binding(value):
+    """The exact client / site / list / job a renderer is allowed to serve. No normalising, no partial match."""
+    out={k:value.get(k) for k in BINDING}
+    if any(not isinstance(v,str) or not v.strip() or v!=v.strip() for v in out.values()):
+        raise ValueError('Exact client, site, list and job are required.')
+    return out
+
+class RendererRouter:
+    """Exactly one publisher per client/site/list/job. There is no default publisher: an unrouted scope is refused.
+
+    Every publisher carries its own ``binding`` and a ``render_version()`` covering its mapping, header and template,
+    so that configuration is part of each operation ID and a receipt is never reused after it changes."""
+    def __init__(self,publishers):
+        self._by={}
+        for p in publishers:
+            key=sf.digest(binding(getattr(p,'binding',None) or {}))
+            if key in self._by:raise ValueError('Two publishers claim the same client/site/list/job.')
+            if not callable(p) or not callable(getattr(p,'render_version',None)):
+                raise TypeError('A publisher must be callable and report its render_version().')
+            self._by[key]=p
+    def for_scope(self,scope):
+        found=self._by.get(sf.digest(binding(scope)))
+        if found is None:raise LookupError('No verified renderer is configured for this exact client/site/list/job.')
+        return found
+
 class ScheduledWorker:
     """One scope per tick, under a fenced lease, on a store with ``atomic(keys)`` (hosting.last_scan_store).
 
@@ -69,6 +96,9 @@ class ScheduledWorker:
     def tick(self,scope,settings):
         if not self.enabled:return dict(status='disabled')
         s=scope_key(scope);key=sf.digest(s)
+        bound=getattr(self.render,'binding',None)
+        if bound is not None and bound!=binding(s):   # before any lease, read or render
+            return dict(status='error',error_type='RendererBindingMismatch')
         held=claim(self.store,key,self.clock(),self.lease_seconds,self.owner)
         if not held:return dict(status='busy')
         try:
@@ -137,10 +167,14 @@ class ScheduledWorker:
                 return dict(status='uncertain',operation_id=op,error_type=type(error).__name__)
         return self._finish(s,key,settings,held,op,receipt)
 
-    @staticmethod
-    def _checked(receipt,op):
+    def _checked(self,receipt,op):
         if not isinstance(receipt,dict) or receipt.get('operation_id')!=op or not receipt.get('workbook_sha256') or not receipt.get('checklist_sha256'):
             raise ValueError('Renderer must return matching workbook and checklist receipt.')
+        bound=getattr(self.render,'binding',None)
+        if bound is not None and receipt.get('binding')!=bound:
+            raise ValueError('Receipt belongs to another client/site/list/job.')
+        if receipt.get('render_version') is not None and hasattr(self.render,'render_version') and receipt['render_version']!=self.render.render_version():
+            raise ValueError('Receipt was made with another mapping/header/template.')
         return receipt
 
     def _reconcile(self,op,full):
@@ -163,12 +197,15 @@ class ScheduledWorker:
             current=checked['operation_id']
             checked['receipts'][op]=dict(state='draft_ready',receipt=receipt,finished_at=now,fence=held['fence'])
             checked['snapshot']=self._stub(slim,ref)
-            if current==op:checked['status']='draft_ready'
+            ready=current==op and checked['status'] in ('uncertain','draft_ready','due')   # never before the timer
+            if ready:checked['status']='draft_ready'
             records[state_key]['state']=checked
             box=records[box_key]
             self._supersede_in(box,current,now)
             if current!=op:
                 return dict(status='superseded',operation_id=op,superseded_by=current)
+            if not ready:
+                return {k:v for k,v in checked.items() if k not in ('receipts','snapshot')}
             self._queue(box,op,receipt,now,held['fence'])
             return dict(status='draft_ready',operation_id=op,receipt=receipt)
 

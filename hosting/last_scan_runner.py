@@ -4,8 +4,8 @@ Nothing here registers a schedule, opens a route or sends anything. A host that 
 ``run_once`` periodically with a unique ``run_id`` per firing. With no configuration, or ``enabled`` not exactly
 True, it does nothing and reads nothing.
 
-What a run may touch is decided only by explicit, verified assignments that ALSO match a verified entry of the
-job registry (client / site / list / job). Nothing is matched by name, guessed, or defaulted: an assignment that
+What a run may touch is decided only by explicit, verified assignments that ALSO match, exactly, a verified entry
+of the job registry (client key, site id, list id, job) and have their own renderer for that exact binding. Nothing is matched by name, guessed, or defaulted: an assignment that
 is incomplete, unverified or not in the registry becomes an issue in the run receipt and is skipped.
 
 Each run is bounded (time budget, maximum scopes), starts where the previous run stopped, keeps one scope's
@@ -35,12 +35,24 @@ def registry_entries(inbox):
     return job_registry.entries(inbox.setting(job_registry.REGISTRY_KEY, []) or [])
 
 
-def _in_registry(a, entries):
-    for e in entries or []:
-        if e.get('verified') is True and e.get('list_id') == a['list_id'] and e.get('site_id') == a['site_id'] \
-                and e.get('job') and job_registry._same_job(str(a['job']), str(e['job'])):
-            return True
-    return False
+def _registry_problem(a, entries):
+    """None only when the verified registry says this exact site + list belongs to this exact client key and job.
+    Exact strings: no name matching, no shared-number matching, no aliases."""
+    claims = {(e.get('client_key'), None if e.get('job') is None else str(e['job']), e.get('source') or None)
+              for e in entries or []
+              if e.get('verified') is True and e.get('site_id') == a['site_id'] and e.get('list_id') == a['list_id']}
+    if not claims:
+        return 'not_in_verified_job_registry'
+    if len(claims) > 1:
+        return 'ambiguous_job_registry'
+    client, job, source = next(iter(claims))
+    if source:
+        return 'registry_entry_is_another_source'
+    if client != a['client_id']:
+        return 'registry_client_mismatch'
+    if job != a['job']:
+        return 'registry_job_mismatch'
+    return None
 
 
 def _dates(a, now):
@@ -50,8 +62,8 @@ def _dates(a, now):
     return [(local - timedelta(days=1)).isoformat(), local.isoformat()]
 
 
-def plan(config, entries, now):
-    """Explicit assignments -> ([{scope, settings}], issues). Pure; reads no source."""
+def plan(config, entries, now, router=None):
+    """Explicit assignments -> ([{scope, settings, render}], issues). Pure; reads no source."""
     scopes, issues, seen = [], [], set()
     for i, a in enumerate(config.get('assignments') or []):
         where = dict(index=i, site_id=a.get('site_id'), list_id=a.get('list_id'), job=a.get('job'))
@@ -72,10 +84,17 @@ def plan(config, entries, now):
             issue('recorded_shifts_missing'); continue
         if entries is None:
             issue('job_registry_unavailable'); continue
-        if not _in_registry(a, entries):
-            issue('not_in_verified_job_registry'); continue
+        problem = _registry_problem(a, entries)
+        if problem:
+            issue(problem); continue
         if a.get('externally_built') is True:      # another approved process builds this job: never build it twice
             issue('built_by_external_process'); continue
+        render = None
+        if router is not None:
+            try:
+                render = router.for_scope(a)
+            except (LookupError, ValueError):
+                issue('no_renderer_for_scope'); continue
         try:
             for day in _dates(a, now):
                 for shift in shifts:
@@ -85,7 +104,7 @@ def plan(config, entries, now):
                     if key in seen:
                         issue('duplicate_scope'); continue
                     seen.add(key)
-                    scopes.append(dict(key=key, scope=s, settings=deepcopy(a)))
+                    scopes.append(dict(key=key, scope=s, settings=deepcopy(a), render=render))
         except Exception as error:
             issue('invalid_scope:' + type(error).__name__)
     return sorted(scopes, key=lambda x: x['key']), issues
@@ -97,6 +116,8 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
     without reading any source; an interrupted one resumes, and every scope step is idempotent by operation."""
     if not isinstance(config, dict) or config.get('enabled') is not True:
         return dict(status='disabled')
+    if not callable(getattr(render, 'for_scope', None)):
+        raise TypeError('A renderer router is required: one verified publisher per exact client/site/list/job.')
     if not isinstance(run_id, str) or not run_id.strip():
         raise ValueError('A unique run_id per firing is required.')
     run_key = RUN + sf.digest(run_id)
@@ -106,7 +127,7 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
             return dict(deepcopy(record['summary']), replayed=True)
         record.update(status='started', run_id=run_id, attempts=int(record.get('attempts') or 0) + 1)
         record.setdefault('started_at', clock())
-    scopes, issues = plan(config, entries, clock())
+    scopes, issues = plan(config, entries, clock(), render)
     with store.transaction(CURSOR) as cursor:
         after = cursor.get('after')
     order = [x for x in scopes if after is None or x['key'] > after] + [x for x in scopes if after is not None and x['key'] <= after]
@@ -120,7 +141,6 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
             if cool:
                 seen_cooldown[scope['site_id']] = cool
             raise
-    worker = ScheduledWorker(store, guarded, render, clock=clock, enabled=True, lease_seconds=lease_seconds, owner=run_id)
 
     results, deferred, last = [], 0, None
     for n, item in enumerate(order):
@@ -136,6 +156,8 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
             results.append(dict(row, status='cooldown', not_before=held_until)); last = item['key']
             continue
         try:
+            worker = ScheduledWorker(store, guarded, item['render'], clock=clock, enabled=True,
+                                     lease_seconds=lease_seconds, owner=run_id)
             out = worker.tick(s, item['settings'])
         except Exception as error:                 # one scope never stops the others
             out = dict(status='error', error_type=type(error).__name__)

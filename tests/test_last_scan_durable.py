@@ -53,16 +53,58 @@ class Idempotency(Base):
         self.assertEqual(entries[first['operation_id']]['status'], 'superseded')
         self.assertEqual(entries[second['operation_id']]['status'], 'pending')
 
-    def test_reverted_content_requeues_only_if_never_attempted(self):
+    def reverted(self):
+        """Ready at 21:35 -> a new row seen at 21:36 -> the row deleted again by 21:37 (content is the old version)."""
         env = Env(self.store); env.now = DUE; w = env.worker()
         a = w.tick(env.scope, {})
         env.rows.append(dict(id='2', scan_at='2026-11-10T21:30:00Z')); env.now = '2026-11-10T21:36:00Z'
         self.assertEqual(w.tick(env.scope, {})['status'], 'waiting')
         self.assertEqual(env.entries()[a['operation_id']]['status'], 'superseded')
-        env.rows.pop(); env.now = '2026-11-10T21:37:00Z'     # the late row is deleted again
-        self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')   # known finished content: no second render
-        self.assertEqual(env.entries()[a['operation_id']]['status'], 'pending')
-        self.assertEqual(len(env.renders), 1)
+        env.rows.pop(); env.now = '2026-11-10T21:37:00Z'
+        return env, a['operation_id']
+
+    def test_reverted_content_waits_the_full_renewed_hour(self):
+        env, op = self.reverted(); w = env.worker()
+        back = w.tick(env.scope, {})
+        self.assertEqual((back['status'], back['operation_id']), ('waiting', op))     # same content, but NOT ready early
+        self.assertTrue(back['due_at'].startswith('2026-11-10T22:37'))
+        self.assertEqual(env.entries()[op]['status'], 'superseded')                  # the old outbox entry is not revived
+        self.assertEqual(w.dispatch_test(env.scope, op, lambda **kw: self.fail('sent early')), dict(status='not_pending'))
+        env.now = '2026-11-10T22:36:59Z'
+        self.assertEqual(w.tick(env.scope, {})['status'], 'waiting')
+        self.assertEqual(env.entries()[op]['status'], 'superseded')
+        env.now = '2026-11-10T22:37:00Z'
+        self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')              # the cached draft is reused...
+        self.assertEqual((len(env.renders), env.entries()[op]['status']), (1, 'pending'))   # ...without a second render
+
+    def test_reverted_content_after_restart_and_under_concurrency(self):
+        from concurrent.futures import ThreadPoolExecutor
+        env, op = self.reverted()
+        env.store = self.restart()                                                   # a new process sees only the database
+        self.assertEqual(env.worker().tick(env.scope, {})['status'], 'waiting')
+        def burst():
+            with ThreadPoolExecutor(6) as pool:
+                return [r['status'] for r in pool.map(lambda _: env.worker().tick(env.scope, {}), range(6))]
+        env.now = '2026-11-10T21:38:00Z'
+        early = burst()
+        self.assertTrue(set(early) <= {'waiting', 'busy'} and 'waiting' in early, early)
+        self.assertEqual((env.entries()[op]['status'], len(env.renders)), ('superseded', 1))
+        env.store = self.restart(); env.now = '2026-11-10T22:37:00Z'
+        late = burst()
+        self.assertTrue(set(late) <= {'draft_ready', 'busy'} and 'draft_ready' in late, late)
+        self.assertEqual(({k: v['status'] for k, v in env.entries().items()}, len(env.renders)), ({op: 'pending'}, 1))
+
+    def test_uncertain_claim_for_reverted_content_also_waits(self):
+        env = Env(self.store); env.now = DUE
+        def fails(snapshot, op): raise OSError('disk')
+        self.assertEqual(env.worker(fails).tick(env.scope, {})['status'], 'uncertain')
+        env.rows.append(dict(id='2', scan_at='2026-11-10T21:30:00Z')); env.now = '2026-11-10T21:36:00Z'
+        self.assertEqual(env.worker().tick(env.scope, {})['status'], 'waiting')
+        env.rows.pop(); env.now = '2026-11-10T21:37:00Z'
+        self.assertEqual(env.worker().tick(env.scope, {})['status'], 'waiting')
+        env.now = '2026-11-10T22:37:00Z'
+        self.assertEqual(env.worker().tick(env.scope, {})['status'], 'uncertain')    # due again: reconcile, never re-render blindly
+        self.assertEqual(env.renders, [])
 
 
 class CrashRestart(Base):
@@ -153,6 +195,8 @@ class Outbox(Base):
         entry = env.entries()[op]
         self.assertEqual((entry['status'], entry['delivery_status']), ('superseded', 'uncertain'))
         env.rows.pop(); env.now = '2026-11-10T21:37:00Z'
+        self.assertEqual(w.tick(env.scope, {})['status'], 'waiting')
+        env.now = '2026-11-10T22:37:00Z'
         self.assertEqual(w.tick(env.scope, {})['status'], 'draft_ready')
         self.assertEqual(env.entries()[op]['status'], 'superseded')     # delivery outcome unknown: reconcile, do not resend
 

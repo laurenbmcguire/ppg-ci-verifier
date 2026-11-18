@@ -9,16 +9,23 @@ import json
 from pathlib import Path
 from hosting import source_first as sf, source_first_workbook as wb
 from hosting.last_scan_store import SqliteStore
+from hosting.last_scan_service import RendererRouter, binding as exact_binding
 
 class StateStore(SqliteStore):
     """Local SQLite store. Same interface as the hosted store (hosting.last_scan_store): ``transaction(key)`` for one
     record, ``atomic(keys)`` for several records committed together, and content-addressed blobs."""
 
 class NativeDraftPublisher:
-    def __init__(self, output, mapping, header):
+    """One mapping + header + pinned template. With ``binding`` it serves exactly that client/site/list/job and
+    refuses any other scope before writing anything."""
+    def __init__(self, output, mapping, header, binding=None):
         self.output=Path(output);self.mapping=deepcopy(mapping);self.header=deepcopy(header)
+        self.binding=exact_binding(binding) if binding is not None else None
     def render_version(self):
-        return sf.digest(dict(mapping=self.mapping,header=self.header,contract=wb.contract(),generator=wb.generator_hash()))
+        return sf.digest(dict(mapping=self.mapping,header=self.header,contract=wb.contract(),generator=wb.generator_hash(),binding=self.binding))
+    def _own(self,scope):
+        if self.binding is not None and exact_binding(scope or {})!=self.binding:
+            raise ValueError('This publisher is bound to another client/site/list/job.')
     # On this single local filesystem an absent operation folder means nothing was written, so the same operation
     # may be rendered again. A folder without its receipt is an interrupted write: that stays for a person.
     lookup_is_authoritative=True
@@ -28,10 +35,12 @@ class NativeDraftPublisher:
             if path.parent.exists():raise ValueError('Interrupted artifact write; reconcile by hand, never overwrite.')
             return None
         receipt=json.loads(path.read_text())
+        if receipt.get('binding')!=self.binding:raise ValueError('Published draft belongs to another client/site/list/job.')
         for filename,key in [('draft.xlsx','workbook_sha256'),('checklist.json','checklist_sha256')]:
             if sf.digest((path.parent/filename).read_bytes())!=receipt[key]:raise ValueError('Published bytes changed.')
         return receipt
     def __call__(self,snapshot,op):
+        self._own(snapshot.get('scope'))
         found=self.lookup(op)
         if found:
             if found.get('render_version')!=self.render_version():
@@ -49,7 +58,7 @@ class NativeDraftPublisher:
         bind=sf.binding(view,self.mapping,[],head,contract['clean_sha256'],sf.digest(contract),wb.generator_hash())
         blobs={k:base64.b64decode(v,validate=True) for k,v in snapshot.get('photo_blobs',{}).items()}
         raw,verification=wb.build(rows,head,view,bind,blobs)
-        checklist=dict(operation_id=op,scope=snapshot['scope'],source_snapshot_hash=cap['snapshot_hash'],
+        checklist=dict(operation_id=op,scope=snapshot['scope'],binding=self.binding,render_version=self.render_version(),source_snapshot_hash=cap['snapshot_hash'],
                        scoped_snapshot_hash=view['snapshot_hash'],captured_at=cap['captured_at'],
                        workbook_sha256=sf.digest(raw),source_ids=sorted(selected),findings=findings,
                        layout_findings=wb.scope_findings(rows,head,view,contract),verification=verification,
@@ -65,6 +74,21 @@ class NativeDraftPublisher:
                'Verification issues:']+[f.get('text','') for f in findings+checklist['layout_findings']]
         (target/'checklist.txt').write_text('\n'.join(notes))
         receipt=dict(operation_id=op,workbook_sha256=sf.digest(raw),checklist_sha256=sf.digest(body),
-                     path=str(target),render_version=self.render_version(),status='draft_ready',client_release='held')
+                     path=str(target),render_version=self.render_version(),binding=self.binding,status='draft_ready',client_release='held')
         (target/'receipt.json').write_bytes(sf.canonical(receipt))
         return receipt
+
+
+class NativeDraftRouter(RendererRouter):
+    """One bound NativeDraftPublisher per verified assignment, built from that assignment's OWN ``mapping`` and
+    ``header``. An assignment without both gets no publisher (and so cannot run); nothing is shared or defaulted.
+    Each binding writes to its own folder."""
+    def __init__(self,output,assignments):
+        publishers=[]
+        for a in assignments or []:
+            if not isinstance(a.get('mapping'),dict) or not a['mapping'].get('fields') or not isinstance(a.get('header'),dict):
+                continue
+            try:bound=exact_binding(a)
+            except ValueError:continue
+            publishers.append(NativeDraftPublisher(Path(output)/sf.digest(bound)[:16],a['mapping'],a['header'],binding=bound))
+        super().__init__(publishers)

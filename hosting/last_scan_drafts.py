@@ -66,9 +66,11 @@ def observe(previous, scope, snapshot, now):
     due = max(quiet_from + WAIT, end) if quiet_from and end else quiet_from + WAIT if quiet_from else None
     status = 'no_scans' if not rows else 'due' if at >= due else 'waiting'
     operation = sf.digest(dict(scope=s, fingerprint=fingerprint, render_version=snapshot.get('render_version'), policy='last-scan-draft-v1'))
-    # A completed/uncertain dispatch for unchanged content must never be replayed.
+    # A completed/uncertain dispatch for unchanged content must never be replayed. A receipt is only a cached
+    # artifact: when content returns to an earlier version the hour restarted above, and the earlier receipt must
+    # NOT make it ready early. It is consulted only once the renewed timer is due.
     receipts = deepcopy(p.get('receipts', {}))
-    if operation in receipts:
+    if operation in receipts and status == 'due':
         status = receipts[operation]['state']
     return dict(scope=s, fingerprint=fingerprint, revision=revision, captured_at=now,
                 quiet_from=quiet_from.isoformat() if quiet_from else None,

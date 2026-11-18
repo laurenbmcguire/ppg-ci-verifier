@@ -104,8 +104,17 @@ Status: local code and tests only. Not deployed, not scheduled, not connected to
 - **State rows stay small.** Photo bytes and the captured snapshot are blobs addressed by SHA-256; the state row
   keeps `{captured_at, ref, rows, ...}` only. Identical photos are stored once.
 - **No guessed mappings.** An assignment needs `verified`, `active`, `timestamp_semantics_verified`, client, job,
-  site id, list id, timezone, actual-scan field, shift field and recorded shifts, and must match a verified registry
-  entry on site id + list id + job. `Date`, `Created`, `Modified` and their Graph names are refused as scan fields.
+  site id, list id, timezone, actual-scan field, shift field and recorded shifts. The verified registry must say
+  that this exact site id + list id belongs to this exact client key and job: exact strings, no name matching, no
+  shared-number matching, no aliases. Two verified entries that disagree about a list make it ambiguous and it is
+  skipped. Every mismatch is reported and causes no read and no render.
+- **One renderer per exact client/site/list/job.** `run_once` takes a `RendererRouter`, never a single publisher.
+  `NativeDraftRouter` builds one bound `NativeDraftPublisher` from each assignment's own `mapping` and `header`,
+  in its own folder. An assignment without both has no renderer and is skipped before any read. A bound publisher
+  refuses another scope before writing. Mapping, header, template and binding are in `render_version`, which is
+  part of the operation ID, and a receipt from another binding or version is refused.
+- **A cached draft never shortens the hour.** If content returns to an earlier version, the hour restarts like any
+  other change. The earlier receipt and outbox entry are used again only when the renewed hour is over. `Date`, `Created`, `Modified` and their Graph names are refused as scan fields.
   Anything else is reported in the run receipt under `issues` and skipped.
 - **Bounded and polite.** Time budget, maximum scopes per pass, rotating start point, per-scope failure isolation,
   provider cooldown held per site across runs (default 15 minutes when the provider gives no time).
