@@ -21,9 +21,10 @@ this code does not own:
 A run builds DRAFTS only. Delivery transport stays disabled (hosting.last_scan_transport has no verified provider).
 """
 import math
+from copy import deepcopy
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
 from hosting import source_first as sf
@@ -201,7 +202,12 @@ def handle(method, headers, body, deps):
         return _respond(503, status='not_configured')
     if not isinstance(headers, Mapping) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in headers.items()):
         return _respond(401, status='unauthorized')
+    # Own the authorization inputs before any dependency callback can mutate their originals.
+    # The same private snapshot is used for hashing, planning, approval and execution.
     try:
+        body = deepcopy(body)
+        headers = dict(headers)
+        deps = replace(deps, config=deepcopy(deps.config), entries=deepcopy(deps.entries))
         body_digest = sf.digest(body)             # refuses NaN / infinity / non-JSON values anywhere in the body
     except Exception:
         return _respond(400, status='bad_request', detail='The body must be plain JSON with finite numbers.')
@@ -250,6 +256,7 @@ def handle(method, headers, body, deps):
         return _respond(409 if refused == 'replayed_request' else 429, status=refused, sources_read=0, **report)
     try:
         summary = runner.run_once(deps.store, deps.config, fetch=deps.fetch, render=router, run_id=run_id,
+                                  receipt_namespace=sf.digest(dict(principal=principal.id, snapshot=digest)),
                                   entries=deps.entries, clock=deps.clock, monotonic=deps.monotonic,
                                   budget_seconds=limits['budget_seconds'], max_scopes=limits['max_scopes'])
     except Exception as error:

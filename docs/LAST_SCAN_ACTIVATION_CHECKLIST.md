@@ -104,3 +104,15 @@ Things worth trying to break:
   exact snapshot, a fresh single-use nonce, quota, or a passing preflight (`tests/test_last_scan_hosted.py`);
 - send or retry by handing the worker a registry of your own (`NoRetryByDefault`);
 - find any import of `last_scan_*` from `api/`, `web/`, `vercel.json` or another `hosting/` module (`NotConnected`).
+
+
+### Hosted authorization snapshot isolation
+
+`handle` takes private deep copies of the request, stored configuration and job registry before calling
+identity or approval dependencies. The copied inputs are retained through hashing, planning, approval and
+execution; a concurrent edit of the caller-owned objects cannot replace the approved scope mid-run.
+Hosted run receipts are separately keyed by verified principal, approved snapshot digest and caller run ID.
+Reusing a run ID with a different principal or approved snapshot never returns another run's receipt.
+Existing unscoped local receipts are not reused by hosted calls; source operation idempotency remains intact.
+These boundaries are regression-tested with synthetic identity/approval systems only. They do not configure
+an actual identity provider, approval authority, delivery provider, route or schedule.

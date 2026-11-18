@@ -111,16 +111,21 @@ def plan(config, entries, now, router=None):
 
 
 def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now, budget_seconds=40, max_scopes=25,
-             lease_seconds=300, monotonic=time.monotonic):
+             lease_seconds=300, monotonic=time.monotonic, receipt_namespace=None):
     """One bounded pass. Safe to call again with the same run_id: a finished run is replayed from its receipt
-    without reading any source; an interrupted one resumes, and every scope step is idempotent by operation."""
+    without reading any source; an interrupted one resumes, and every scope step is idempotent by operation.
+    Hosted callers MUST supply a server-derived receipt_namespace bound to the verified principal and approved
+    snapshot. None retains the separate legacy namespace for trusted local callers only."""
     if not isinstance(config, dict) or config.get('enabled') is not True:
         return dict(status='disabled')
     if not callable(getattr(render, 'for_scope', None)):
         raise TypeError('A renderer router is required: one verified publisher per exact client/site/list/job.')
     if not isinstance(run_id, str) or not run_id.strip():
         raise ValueError('A unique run_id per firing is required.')
-    run_key = RUN + sf.digest(run_id)
+    if receipt_namespace is not None and (not isinstance(receipt_namespace, str) or not receipt_namespace):
+        raise ValueError('receipt_namespace must be nonempty text when supplied.')
+    run_key = RUN + sf.digest(run_id if receipt_namespace is None else
+                              dict(namespace=receipt_namespace, run_id=run_id))
     started = monotonic()
     with store.transaction(run_key) as record:
         if record.get('status') == 'finished':

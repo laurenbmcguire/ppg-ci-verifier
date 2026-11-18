@@ -370,6 +370,80 @@ class ReplayAndQuota(Hosted):
         self.assertTrue(again['replayed']); self.assertEqual((len(self.reads), again['counts']), (reads, first['counts']))
 
 
+class SnapshotIsolation(Hosted):
+    def test_same_run_id_does_not_reuse_another_principals_receipt(self):
+        self.approve(self.config, principals=('alice', 'bob'))
+        first = self.go(run_id='shared')[1]['summary']
+        reads = len(self.reads)
+        second = self.go(headers=BOB, run_id='shared')[1]['summary']
+        self.assertNotIn('replayed', second)
+        self.assertGreater(len(self.reads), reads)
+        self.assertEqual(first['run_id'], second['run_id'])
+
+    def test_same_run_id_does_not_reuse_another_approved_snapshots_receipt(self):
+        self.go(run_id='shared')
+        changed = deepcopy(self.config)
+        changed['assignments'][0]['recorded_shifts'] = ['2']
+        self.approve(changed)
+        code, report = self.go(self.deps(config=changed), run_id='shared')
+        self.assertEqual(code, 200)
+        self.assertNotIn('replayed', report['summary'])
+        self.assertEqual(report['summary']['results'][0]['shift'], '2')
+        self.assertEqual(self.reads[-1], '2')
+
+    def test_config_mutation_during_approval_cannot_change_execution(self):
+        original = self.config
+        approvals = self.approvals
+        class MutatingApproval(ApprovalAuthority):
+            def attestation(self, digest):
+                original['assignments'][0]['recorded_shifts'][0] = 'UNAPPROVED-SHIFT'
+                return approvals.attestation(digest)
+        code, report = self.go(self.deps(approvals=MutatingApproval()))
+        self.assertEqual(code, 200)
+        self.assertTrue(self.reads)
+        self.assertEqual(set(self.reads), {'1'})
+        self.assertEqual(report['planned'][0]['shift'], '1')
+        self.assertEqual(report['summary']['results'][0]['shift'], '1')
+
+    def test_registry_mutation_during_approval_cannot_change_execution(self):
+        entries = [deepcopy(ENTRY)]
+        approvals = self.approvals
+        class MutatingApproval(ApprovalAuthority):
+            def attestation(self, digest):
+                entries[0]['verified'] = False
+                return approvals.attestation(digest)
+        code, report = self.go(self.deps(entries=entries, approvals=MutatingApproval()))
+        self.assertEqual(code, 200)
+        self.assertEqual(report['summary']['planned'], 1)
+        self.assertTrue(self.reads)
+        self.assertEqual(set(self.reads), {'1'})
+
+    def test_body_mutation_during_authentication_cannot_escalate_dry_run(self):
+        body = self.body(mode='dry_run')
+        class MutatingAuthorizer(FakeAuthorizer):
+            def verify(self, method, headers, digest):
+                body['mode'] = 'run'
+                return super().verify(method, headers, digest)
+        code, report = self.call(self.deps(authorizer=MutatingAuthorizer()), body)
+        self.assertEqual((code, report['status']), (200, 'dry_run'))
+        self.untouched()
+
+    def test_config_and_dependency_replacement_during_authentication_use_original_snapshot(self):
+        deps = self.deps()
+        class MutatingAuthorizer(FakeAuthorizer):
+            def verify(self, method, headers, digest):
+                deps.config['assignments'][0]['recorded_shifts'][0] = 'UNAPPROVED-SHIFT'
+                deps.config = {'enabled': False}
+                deps.entries.clear()
+                return super().verify(method, headers, digest)
+        deps.authorizer = MutatingAuthorizer()
+        code, report = self.go(deps)
+        self.assertEqual(code, 200)
+        self.assertTrue(self.reads)
+        self.assertEqual(set(self.reads), {'1'})
+        self.assertEqual(report['summary']['planned'], 1)
+
+
 class NotConnected(unittest.TestCase):
     """The prepared code must not be reachable from the deployed app."""
     def test_no_route_cron_or_import_reaches_the_runner(self):
