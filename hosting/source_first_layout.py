@@ -215,6 +215,13 @@ def make_text_sheet(package,roots,entries,put):
     set_print(package,'Source Text',f'$A$1:$D${4+len(entries)}','$4:$4')
 
 
+def ledger_value(typed_value):
+    """What the provenance sheet stores for one typed source value. A structured value (for example a lookup
+    object) is kept as its exact canonical JSON text: recorded as evidence, never interpreted, never a number."""
+    if typed_value['type']=='structured':return sf.canonical(typed_value['value']).decode()
+    return typed_value.get('value')
+
+
 def write_ledger(rows,cap,put):
     metadata=('source_record_id','source_version','source_record_hash','snapshot_hash')
     for i,name in enumerate(metadata,1):put('_Source',letters(i)+'1',name)
@@ -229,7 +236,7 @@ def write_ledger(rows,cap,put):
         if 'original_values' not in row:raise sf.ReviewError('Original mapped typed provenance is required for expanded generation.')
         for fi,field in enumerate(sf.FIELDS):
             original=row['original_values'][field];approved=row['values'][field]
-            for i,value in enumerate((original['type'],original.get('value'),approved['type'],approved.get('value'))):put('_Source',letters(5+fi*4+i)+str(rn),value)
+            for i,value in enumerate((original['type'],ledger_value(original),approved['type'],ledger_value(approved))):put('_Source',letters(5+fi*4+i)+str(rn),value)
 
 
 def verify_ledger(values,rows,cap):
@@ -243,7 +250,7 @@ def verify_ledger(values,rows,cap):
             if sheet.cell(rn,i).value!=want or sheet.cell(rn,i).data_type!='s':raise sf.ReviewError('Saved source identity provenance failed.')
         for fi,field in enumerate(sf.FIELDS):
             for start,source in ((5,row['original_values'][field]),(7,row['values'][field])):
-                typ=sheet.cell(rn,start+fi*4).value;actual=sheet.cell(rn,start+fi*4+1).value;want=source.get('value')
+                typ=sheet.cell(rn,start+fi*4).value;actual=sheet.cell(rn,start+fi*4+1).value;want=ledger_value(source)
                 if typ!=source['type'] or not (actual==want or actual is None and want==''):raise sf.ReviewError('Saved typed source provenance failed.')
                 if want not in (None,'') and type(want) is not type(actual):raise sf.ReviewError('Saved source value type changed.')
 

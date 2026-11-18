@@ -244,6 +244,7 @@ def _capture(scope, *, fetch=None, date_capture=None, photo_fetch=None, _evidenc
             st, blob, photo_headers = response(photo_fetch, photo_url)
             if st in (429,503):
                 raise CaptureFailure('Source photo provider has a cooldown. No early retry is allowed.',dict(status=st,failed_request=photo_url,remaining_cursor=photo_url,cooldown=cooldown(photo_headers),pages=pages,raw_pages=raw_pages))
+            photo['http_status'] = st                      # kept as evidence: denied, missing and unreadable are different
             size = photo_embed.image_size(blob) if st == 200 and 0 < len(blob) <= MAX_PHOTO_BYTES else None
             st_after, after, item_headers = response(fetch, item_url)
             if st_after in (429,503):
@@ -252,6 +253,9 @@ def _capture(scope, *, fetch=None, date_capture=None, photo_fetch=None, _evidenc
                 raise CaptureFailure('Exact source item could not be read after photo capture.',dict(status=st_after,failed_request=item_url,remaining_cursor=item_url,pages=pages,raw_pages=raw_pages))
             if substantive(after) != substantive(original):
                 raise sf.ReviewError('Source record changed while its photo was downloaded. Recapture required.')
+            if st in (401, 403):
+                photo['reason'] = 'The source refused permission to download this photo (HTTP %d). It was not captured and no substitute was inserted.' % st
+                continue
             if not size or any(n <= 0 or n > 20000 for n in size) or total + len(blob) > MAX_TOTAL_PHOTO_BYTES:
                 photo['reason'] = 'Photo unavailable, unsupported, or over the safe size limit.'
                 continue

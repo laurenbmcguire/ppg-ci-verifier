@@ -276,6 +276,9 @@ _add('no_renderer_for_scope',
 _add('built_by_external_process',
      'Another approved process builds this job, so it is skipped here to avoid two reports.',
      'Remove the flag only after that process stops building the job.', True)
+_add('photo_not_captured',
+     'The source record names a defect photo, but the photo could not be downloaded, so it is not in the report.',
+     'Check the photo and its permissions at the source, then capture again. No substitute picture is used.', True)
 _add('blank_header',
      'A column has no heading, so it cannot be read or checked.',
      'Add a heading to the column.', True)

@@ -65,7 +65,9 @@ class NativeDraftPublisher:
         body=sf.canonical(checklist)
         notes=['PPG DRAFT — not approved for client release','Workbook SHA-256: '+sf.digest(raw),
                'Shift/day completion is not established.','Source IDs: '+', '.join(sorted(selected)),
-               'Verification issues:']+[f.get('text','') for f in findings+checklist['layout_findings']]
+               'Verification issues (%d). Nothing below was corrected, filled in or hidden:'%len(findings+checklist['layout_findings'])]
+        notes+=[('Record '+str(f['record_id'])+': ' if f.get('record_id') else '')+f.get('text','')+' ['+str(f.get('code'))+']' for f in findings+checklist['layout_findings']]
+        notes+=['Photos named at the source but not captured:']+[f"Record {p['record_id']}: {p.get('reason')}" for p in view['photos'] if p.get('status')!='supported'] if any(p.get('status')!='supported' for p in view['photos']) else []
         receipt=dict(operation_id=op,workbook_sha256=sf.digest(raw),checklist_sha256=sf.digest(body),
                      render_version=self.render_version(),binding=self.binding,status='draft_ready',client_release='held')
         return {'draft.xlsx':raw,'checklist.json':body,'checklist.txt':'\n'.join(notes).encode()},receipt

@@ -248,12 +248,15 @@ def build(rows,head,cap,bind,blobs):
         put('_Calc','N'+str(cr),v.get('rejected'),f'=IF(D{cr}="","",D{cr})')
         for outcol,incol in {'B':'A','C':'B','E':'C','F':'D','I':'G'}.items():put(summary,outcol+str(outrow),values[incol],f'=IF(_Calc!{incol}{cr}="","",_Calc!{incol}{cr})')
         for col in ('G','H'):put(summary,col+str(outrow),None)
-    for col,field in (('E','inspected'),('F','rejected')):put(summary,col+'62',known_sum(r['resolved'][field] for r in shown),f'=SUM({col}49:{col}61)')
+    # With unknown reject quantities and no known rejected record to show, a subtotal of 0 would read as
+    # "no rejects". It stays blank: unknown is not zero.
+    nothing_known=incomplete and not shown
+    for col,field in (('E','inspected'),('F','rejected')):put(summary,col+'62',None if nothing_known else known_sum(r['resolved'][field] for r in shown),f'=SUM({col}49:{col}61)')
     put(summary,'G62',None);put(summary,'H62',None)
     put(summary,'B62','Shown-record subtotal')
     denom=known_sum(r['resolved']['inspected'] for r in shown)
     put(summary,'I62',ratio(known_sum(r['resolved']['rejected'] for r in shown),denom), '=IF(E62=0,"",F62/MAX(1,E62))')
-    for r,label,result,note in [(66,'Defect categories','Unavailable','No category totals were inferred from comments.'),(67,'Reject quantity vs. inspected','Checked','Every approved row was checked independently.'),(68,'Rejected records without selected photo',str(metrics['K8']),'Missing images remain explicit.'),(69,'Billable hours','Unavailable','Labor fields are not mapped in this pilot.'),(70,'Inspector name','Unavailable','Inspector fields are not mapped in this pilot.'),(71,'Certified + rejected = inspected','Checked','Independently checked source quantities are retained.')]:
+    for r,label,result,note in [(66,'Defect categories','Unavailable','No category totals were inferred from comments.'),(67,'Reject quantity vs. inspected','Checked','Every approved row was checked independently.'),(68,'Rejected records without selected photo',str(metrics['K8']) if not any(r['resolved']['rejected'] is None for r in rows) else f"{metrics['K8']} known; unknown on {len([r for r in rows if r['resolved']['rejected'] is None])} records",'Missing images remain explicit.'),(69,'Billable hours','Unavailable','Labor fields are not mapped in this pilot.'),(70,'Inspector name','Unavailable','Inspector fields are not mapped in this pilot.'),(71,'Certified + rejected = inspected','Checked','Independently checked source quantities are retained.')]:
         for col,value in (('B',label),('E','Incomplete' if incomplete and result=='Checked' else result),('J','Unknown quantities require review.' if incomplete and result=='Checked' else note)):put(summary,col+str(r),value)
     # No generic category chart should imply holes/glue counts. Keep its native
     # dimensions/anchor but rebind its two series to actual inspected/rejected.
@@ -332,7 +335,10 @@ def build(rows,head,cap,bind,blobs):
         put('_Calc','J'+str(ri),layout['parts'].index(row['resolved']['part'])+1)
     supported=sum(p.get('status')=='supported' for p in cap['photos'])
     unavailable=len(cap['photos'])-supported
+    unknown_rejects=len([r for r in rows if r['resolved']['rejected'] is None])
     coverage=f"Representative photos: {len(selected)} selected; {supported} supported captured; {supported-len(selected)} supported not selected; {unavailable} unavailable or not attempted. {metrics['K8']} rejected records have no selected photo."
+    if unknown_rejects:
+        coverage=f"Representative photos: {len(selected)} selected; {supported} supported captured; {supported-len(selected)} supported not selected; {unavailable} unavailable or not attempted. {metrics['K8']} records with a known rejected quantity have no selected photo; the rejected quantity is unknown on {unknown_rejects} records."
     put(summary,'B42',coverage)
     put(photo_sheet,'A6','ALL REJECTED RECORDS · exact source record IDs below')
     put(summary,'B10',f'{len(rows)} recorded inspections. See all parts and complete rejected-record traceability. Completion is unknown.')
