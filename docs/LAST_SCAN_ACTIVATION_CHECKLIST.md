@@ -1,8 +1,13 @@
 # Last-scan draft runner: activation checklist
 
-Status on branch `claude/durable-report-runner-20261118`: **prepared, disabled, not connected.** No route, cron,
-scheduled task, database table, secret or sender exists for it. Nothing in this document has been done.
-Each step below needs its own approval. Stop at the first step that cannot be completed.
+Status on branch `claude/durable-report-runner-20261118`: **prepared, disabled, not connected.** In this branch's
+code there is no route, cron entry, scheduled task or table creation for it, no secret, and no real sender, status
+adapter, identity system or authority. **No deployment, hosted environment or live schedule was inspected for this
+document**; it describes the branch. Nothing in this document has been done. Each step below needs its own approval.
+Stop at the first step that cannot be completed.
+
+For the operator's view (what to supply first, and the manual draft comparison that does not wait for any of this),
+read `docs/LAST_SCAN_PILOT_HANDOFF.md`. This checklist covers the automated runner and delivery only.
 
 ## What exists (code only)
 
@@ -12,13 +17,21 @@ Each step below needs its own approval. Stop at the first step that cannot be co
 | Runner, worker, timer | `hosting/last_scan_runner.py`, `last_scan_service.py`, `last_scan_drafts.py` | Off unless `enabled` is exactly `true`. |
 | Durable store | `hosting/last_scan_store.py` | PostgreSQL tables are created only by an explicit `install()`; never called. |
 | Draft storage | `BlobArtifacts`, `StoredDraftPublisher`, `StoredDraftRouter` in `hosting/last_scan_local.py` | Drafts as private blobs in the same store. |
-| Delivery gate | `hosting/last_scan_transport.py` | `VERIFIED_CONTRACTS` is empty: no sending, no retry. `deliver` also needs a single-use grant stored by the dispatch boundary. |
-| Dispatch boundary | `hosting/last_scan_dispatch.py` | Imported by nothing. Every dependency defaults to deny; tested against fakes only. |
+| Delivery gate and outcome contract | `hosting/last_scan_transport.py` | `VERIFIED_CONTRACTS` is empty: no sending, no retry. `deliver` also needs a single-use grant stored by the dispatch boundary. Provider answers are judged against a version 1 outcome contract; only a stated delivery counts. |
+| Dispatch boundary (the send door) | `hosting/last_scan_dispatch.py` | Imported only by the reconciliation module. It calls a sender **supplied by the host**; no sender is implemented. Every dependency defaults to deny; tested against fakes only. |
+| Reconciliation boundary | `hosting/last_scan_reconcile.py` | Imported by nothing. Records a provider's stated outcome for one uncertain attempt, with its own approval and audit trail; never resends. Needs a status adapter supplied by the host; none is implemented. |
+| Authority record contract | `hosting/last_scan_authority.py` | Version 1 shape and lifecycle rules for approvals and capture receipts. Defines the contract; is not an authority. |
+| Source-mapping readiness | `hosting/last_scan_readiness.py` | Offline check; a mandatory preflight. Never marks a mapping verified. |
+| Schema capture | `hosting/last_scan_schema_capture.py` | Manual, GET-only, columns only. No default transport; run only by hand per its runbook. |
+| Readiness inventory | `scripts/last_scan_readiness_inventory.py` | Offline blocker list from a non-secret packet. Never reports readiness. |
 
 ## Order of activation (none of it done)
 
 1. **Merge prerequisites.** The Fix-with-AI audit repair (separate branch) and this branch are reviewed and merged
-   by the owner. The known `test_ai_proposal_guards` 403/404 failure is resolved by the main auditor.
+   by the owner. `tests/test_ai_proposal_guards.py::test_http_cross_report_access_never_calls_model_or_saves`
+   is **still open** and belongs to the main auditor, not to this branch: observed here on 2026-11-18, it passes
+   when the suite runs with `CI_LOCAL_DEV=1` (as the full-suite runs for this branch do) and fails without it
+   (the server answers 403 where the test expects 404). Which answer is right is the auditor's decision.
 2. **Database migration (needs approval).** Run `PostgresStore(connect, schema='ci_verifier').install()` once. It
    creates `scan_draft_state` and `scan_draft_blob`. Check the role's connection limit first: every record
    transaction opens one connection. Re-run the real-PostgreSQL tests against a disposable copy of the hosted
@@ -31,8 +44,11 @@ Each step below needs its own approval. Stop at the first step that cannot be co
    Seed entries carry site names, not site ids, and do not match.
 5. **Existing scheduled reporting task.** It already builds reports for a fixed list of jobs. For each such job
    either set `externally_built: true` here or retire it there first. Do not change that schedule as part of this.
-6. **Three external systems this code only has interfaces for.** None is implemented, and none should be faked in
-   production:
+6. **External systems this code only has interfaces for.** None is implemented, and none should be faked in
+   production. For a run: the three below, plus `CaptureAuthority`, the accepted collector and issuer lists and a
+   `SchemaProbe` (see the mapping and provenance sections further down). For a send: also a recipient policy, a
+   dispatch quota, a sender and a reviewed provider contract. For reconciliation: also a status adapter and its
+   own quota.
    - `Authorizer`: verifies the caller and returns a `Principal`. It is given the hash of the exact request body
      so a signature can cover the timestamp and nonce. A shared static token is not accepted anywhere.
    - `ApprovalAuthority`: stored where the runner and the configuration editor cannot write. It answers for one
@@ -58,10 +74,13 @@ Each step below needs its own approval. Stop at the first step that cannot be co
 2. POST, a plain JSON body with only the allowed fields, finite numbers, `max_scopes` a whole number.
 3. `timestamp` within 5 minutes of the host clock.
 4. For a run: a `nonce` of 16 to 200 characters.
-5. Every preflight check: `configuration_present`, `enabled_is_exactly_true`, `job_registry_available`,
-   `renderers_built_from_configuration`, `source_adapter_configured`, `durable_store_ready` (read-only),
-   `at_least_one_runnable_scope`, `no_assignment_issues`, `approval_attested_for_this_snapshot_and_principal`,
-   `quota_configured`, `delivery_transport_disabled`.
+5. Every preflight check (18): `configuration_present`, `enabled_is_exactly_true`, `job_registry_available`,
+   `schema_snapshots_supplied`, `capture_authority_configured`, `accepted_collectors_configured`,
+   `accepted_authority_issuers_configured`, `live_schema_probe_configured`,
+   `source_mapping_ready_for_every_assignment`, `renderers_built_from_configuration`, `source_adapter_configured`,
+   `durable_store_ready` (read-only), `host_clock_not_behind_the_last_seen_time`, `at_least_one_runnable_scope`,
+   `no_assignment_issues`, `approval_attested_for_this_snapshot_and_principal`, `quota_configured`,
+   `delivery_transport_disabled`.
 6. The nonce and the hourly quota are taken in one transaction. A used nonce gives 409, an exhausted quota 429.
    Only after this is any source read.
 
@@ -70,8 +89,15 @@ compromised authorizer or approval authority defeats everything above; replay pr
 
 ## Delivery: disabled, and what would be needed
 
-There is no provider, so there is no sender, and none should be invented. Drafts are built, held, and readable
-through `StoredDraftPublisher.read(op, name)`; an internal outbox entry is recorded and never attempted.
+There is **no real provider, sender or status adapter**, and none should be invented. The code path for a send
+exists and is closed: the dispatch boundary would call a host-supplied sender, but only after every run gate above
+and its own checks (`recipient_policy_configured`, `recipient_is_the_approved_one_for_this_client`,
+`scope_is_exactly_one_approved_planned_scope`, `dispatch_approved_for_this_snapshot_recipients_contract_and_principal`,
+`authorizations_stay_valid_long_enough_to_send`, `provider_contract_verified`,
+`provider_contract_states_outcome_contract_deadline_and_validity`, `dispatch_sender_configured`,
+`dispatch_quota_configured`), and `provider_contract_verified` cannot pass while the registry is empty. Drafts are
+built, held, and readable through `StoredDraftPublisher.read(op, name)`; an internal outbox entry is recorded and
+never attempted. The recipient is internal only; a client is never a recipient.
 
 Before any transport could be enabled, an independent reviewer would need written evidence from the provider that:
 
@@ -83,7 +109,12 @@ Before any transport could be enabled, an independent reviewer would need writte
 
 Only then would a `ProviderContract` with those facts be added, by reviewed code change, to
 `VERIFIED_CONTRACTS` in `hosting/last_scan_transport.py`. Without it: `deliver` refuses, an uncertain delivery is
-never retried, reconciliation does not query anything, and a passed deadline changes nothing. Even with it, the
+never retried, and a passed deadline changes nothing. A reconciliation boundary exists
+(`hosting/last_scan_reconcile.py`, "Reconciling an uncertain delivery" in `docs/LAST_SCAN_REHEARSAL.md`): given a
+verified principal, its own approval, a listed provider contract and a host-supplied status adapter, it records what
+the attempt's own provider states, keeps an audit trail and never resends. With no listed contract and no status
+adapter it refuses every request, so today it queries nothing. A withdrawal at an external authority after the last
+re-check and before the read, send or recording is not atomic with it. Even with a listed contract, the
 claim is not exactly-once: the source can change between the recapture and the provider receiving the message, the
 claim and the send are separate steps, and a provider that breaks its contract can cause a second delivery (which is
 recorded, not prevented).
@@ -96,7 +127,10 @@ export PY=/Users/lauren/projects/ppg-verifier-claude-pilot-7Nepp5hs/test-venv/bi
 export PYTHONPATH=.:tests TMPDIR=$PWD/.tmp PYTHONDONTWRITEBYTECODE=1
 $PY -m pytest -q -p no:cacheprovider tests/test_last_scan_drafts.py tests/test_last_scan_local.py \
     tests/test_last_scan_service.py tests/test_last_scan_durable.py tests/test_last_scan_runner.py \
-    tests/test_last_scan_hosted.py tests/test_explain.py
+    tests/test_last_scan_hosted.py tests/test_last_scan_hosted_dispatch.py tests/test_last_scan_reconcile.py \
+    tests/test_last_scan_authority_lifecycle.py tests/test_last_scan_transport_outcome.py \
+    tests/test_last_scan_readiness.py tests/test_last_scan_readiness_inventory.py \
+    tests/test_last_scan_schema_capture.py tests/test_one_hour_rehearsal.py tests/test_explain.py
 PY=$PY sh scripts/last-scan-pg-test.sh       # disposable PostgreSQL in .tmp/pg, unix socket only, deleted afterwards
 $PY scripts/last_scan_synthetic_demo.py $PWD/.tmp/demo
 ```
@@ -106,7 +140,11 @@ Things worth trying to break:
 - reach a source read or a store write through `handle` without a verified principal, an attested approval for the
   exact snapshot, a fresh single-use nonce, quota, or a passing preflight (`tests/test_last_scan_hosted.py`);
 - send or retry by handing the worker a registry of your own (`NoRetryByDefault`);
-- find any import of `last_scan_*` from `api/`, `web/`, `vercel.json` or another `hosting/` module (`NotConnected`).
+- find any import of `last_scan_*` from `api/`, `web/`, `vercel.json` or another `hosting/` module (`NotConnected`);
+- reach the sender without a stored single-use grant, or with a provider contract that is not listed
+  (`tests/test_last_scan_hosted_dispatch.py`);
+- record a delivery outcome for another provider's attempt, or after an approval lapses
+  (`tests/test_last_scan_reconcile.py`).
 
 
 ### Hosted authorization snapshot isolation
