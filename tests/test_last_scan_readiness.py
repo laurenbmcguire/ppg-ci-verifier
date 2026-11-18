@@ -113,14 +113,14 @@ class NothingIsVerifiedAutomatically(Base):
 class Drift(Base):
     def test_replaced_column_is_detected_by_its_id(self):
         report = self.validate(schema=self.with_column(F['inspected'], id='dddddddd-0000-4000-8000-999999999999'))
-        self.assertEqual(blocked(report), {'inspected_column_id_unchanged'})
+        self.assertEqual(blocked(report), {'inspected_column_id_unchanged', 'inspected_definition_unchanged'})
         report = self.validate(schema=self.with_column('ActualScan', id='dddddddd-0000-4000-8000-999999999998'))
-        self.assertEqual(blocked(report), {'scan_field_column_id_unchanged'})
+        self.assertEqual(blocked(report), {'scan_field_column_id_unchanged', 'scan_field_definition_unchanged'})
 
     def test_re_pinning_to_the_new_column_needs_a_new_attestation(self):
         schema = self.with_column('ActualScan', id='dddddddd-0000-4000-8000-999999999998')
-        a = deepcopy(self.a); a['field_contract']['scan']['column_id'] = 'dddddddd-0000-4000-8000-999999999998'
-        self.assertEqual(blocked(self.validate(a, schema)), {'scan_time_meaning_attested', 'verified_flag_is_backed_by_attestations',
+        a = rf.pin(self.a, schema)                                          # contract follows the schema; old attestations kept
+        self.assertEqual(blocked(self.validate(a, schema)), {'scan_time_meaning_attested', 'template_and_header_attested', 'verified_flag_is_backed_by_attestations',
                                                              'timestamp_semantics_verified_flag_is_backed_by_attestations'})
 
     def test_changed_types_are_detected(self):
@@ -139,9 +139,9 @@ class Drift(Base):
 
     def test_shift_choices_added_or_removed(self):
         more = self.retype(F['shift'], 'choice', {'choices': ['1', '2', '3', 'Night']})
-        self.assertEqual(blocked(self.validate(schema=more)), {'every_shift_choice_is_covered'})
+        self.assertEqual(blocked(self.validate(schema=more)), {'every_shift_choice_is_covered', 'shift_definition_unchanged'})
         fewer = self.retype(F['shift'], 'choice', {'choices': ['1', '2']})
-        self.assertEqual(blocked(self.validate(schema=fewer)), {'recorded_shifts_exist_as_choices'})
+        self.assertEqual(blocked(self.validate(schema=fewer)), {'recorded_shifts_exist_as_choices', 'shift_definition_unchanged'})
 
     def test_schema_digest_changes_with_any_of_it(self):
         base = readiness.schema_digest(self.schema)

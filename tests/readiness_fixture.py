@@ -37,7 +37,7 @@ def pin(assignment, schema):
     a = deepcopy(assignment); fields = a['mapping']['fields']; contract = {}
     def entry(name):
         c = schema['columns'][name]
-        out = dict(column=name, column_id=c['id'], type=readiness.column_type(c))
+        out = dict(column=name, column_id=c.get('id'), type=readiness.column_type(c), definition=readiness.column_evidence(c))
         if out['type'] == 'dateTime':
             out['format'] = c['dateTime'].get('format')
         return out

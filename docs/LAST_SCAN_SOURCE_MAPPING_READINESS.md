@@ -21,6 +21,15 @@ scan field, never infers one from Created, Modified or the report date, and neve
 - Schema missing, or for another site or list; site or list given as a name or URL instead of an exact ID.
 - No single exact registry entry for the client and job.
 - A mapped column missing, replaced (column ID changed), retyped, or sharing a display name with another column.
+- Any mapped column that carries a `calculated` facet, whatever its value and whatever other facet sits beside it.
+- Any mapped column with more than one type facet, an empty or malformed facet, a non-boolean flag, or a property
+  the validator does not recognise. It does not guess that an unknown property leaves the type alone.
+- Any mapped column whose full definition (every facet and its contents, read-only, hidden, required, indexed,
+  default value, validation, names) differs from the hash pinned in `field_contract[...].definition`. Re-pinning
+  changes the contract, so the attestations bound to it go stale and must be given again.
+- A scan column with any default value (a default of "now" would stamp creation time).
+- Malformed input at any depth: damaged column entries, a field contract or sample rows of the wrong shape, a
+  malformed list identity or registry. These become named blocked reasons, not exceptions.
 - A report field unmapped, unpinned, or one column mapped to two fields.
 - Scan field absent, or Created/Modified/the report date, date-only, computed, read-only or not a date-and-time.
 - Shift values not listed exactly once, not mapped to a template shift, missing from the column's choices, or a
@@ -41,7 +50,15 @@ Blank or absent quantities in sample rows are counted and reported, not judged a
 digest to attest against), every check with its basis, and `status` of `blocked` or `ready_for_dry_run_only`.
 `report_text(report)` renders it for a reviewer.
 
+## Errors
+
+Malformed input never raises. There is no catch-all: a bug in the validator or the registry rule, or a broken
+pinned template, raises instead of being reported as a blocked reason.
+
 ## Limits
+
+- The list of recognised column properties was written from documentation, not from a real capture. A real
+  capture may be blocked by a property not on the list; that is the safe direction, and the list then needs review.
 
 - Exercised on synthetic schemas and rows only. No real list has been checked.
 - It is a standalone check. The runner and hosted entry point do not call it yet; their existing gates
