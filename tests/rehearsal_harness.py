@@ -15,6 +15,7 @@ and photo below is made up. Nothing here is an identity system, an approval syst
 a schedule or a route, and none of it can be imported by application code (it lives under tests/).
 """
 import io
+import itertools
 import json
 import tempfile
 from copy import deepcopy
@@ -26,6 +27,7 @@ from openpyxl import load_workbook
 
 import demo_client_fixture as demo
 import readiness_fixture as rf
+from hosting import last_scan_dispatch as hosted_dispatch
 from hosting import last_scan_hosted as hosted, last_scan_readiness as readiness, last_scan_runner as runner
 from hosting import last_scan_transport as transport, source_first as sf
 from hosting.last_scan_hosted import CaptureAuthority, Deps, Quota, SchemaProbe
@@ -190,7 +192,7 @@ class Rehearsal:
         self.path = Path(self.folder.name) / 'rehearsal-state.db'
         self.clock = Clock(self.START)
         self.tenants = {name: Tenant(CLIENTS[name], self.clock, self.SCANS[name]) for name in clients}
-        self.n, self.last = 0, {}
+        self.n, self.last, self.dispatch_n = 0, {}, itertools.count(1)
         self.lauren = FakeLaurenOutbox()
         self.approvals, self.captures = FakeApprovals(), RecordedCaptures()
         self.artifacts_log = {}
@@ -285,15 +287,55 @@ class Rehearsal:
             return deepcopy(box.get('entries', {}))
 
     def dispatch(self, client, shift, op=None, sender=None, contract=FAKE_CONTRACT):
-        """Hand one ready draft to the FAKE Lauren outbox through the one real door (transport.deliver).
-
-        KNOWN GAP, on purpose not hidden: this path does NOT go through the hosted entry point. No identity, approval,
-        capture-receipt, capture-age or live schema probe check runs here. The worker does re-read the source rows and
-        refuses if they changed, but a column definition that drifted since approval is not noticed at dispatch. The
-        hosted entry point has no dispatch step at all; one would have to be designed and reviewed."""
+        """TEST-ONLY DIRECT SEAM. Calls the worker's test transport (``dispatch_test``) straight away, to exercise the
+        worker's own claim, recapture and outbox behaviour. It is NOT a production path and authorizes nothing: no
+        identity, approval, recipient policy, capture receipt or live schema probe runs here. The production door
+        (``transport.deliver``) refuses this same call for want of a dispatch grant (``through_the_door_without_a_grant``);
+        the authorized path is ``hosted_dispatch`` below."""
         item = self.item(client, shift)
         worker = ScheduledWorker(self.store, self.fetch, item['render'], clock=self.clock, enabled=True, provider_contract=contract)
-        return transport.deliver(worker, item['scope'], op or self.last[(client, shift)]['operation_id'], sender or self.lauren.send, item['settings'])
+        if not transport.verified(contract):
+            return dict(status='transport_disabled')
+        return worker.dispatch_test(item['scope'], op or self.last[(client, shift)]['operation_id'], sender or self.lauren.send, item['settings'])
+
+    def through_the_door_without_a_grant(self, client, shift, op=None, grant=None):
+        """What the old helper did: bring a worker, a contract and a sender to transport.deliver, with no hosted grant."""
+        item = self.item(client, shift)
+        worker = ScheduledWorker(self.store, self.fetch, item['render'], clock=self.clock, enabled=True, provider_contract=FAKE_CONTRACT)
+        return transport.deliver(worker, item['scope'], op or self.last[(client, shift)]['operation_id'], self.lauren.send, item['settings'], grant=grant)
+
+    # ---- the authorized dispatch path (hosting.last_scan_dispatch), with FAKE authorities only
+    def dispatch_deps(self, **kw):
+        base = dict(authorizer=FakeAuthorizer(), approvals=self.approvals, quota=Quota(10000), config=self.config, entries=self.entries,
+                    schemas=self.schemas, captures=self.captures, collectors=(COLLECTOR,), schema_probe=AdapterProbe(self.tenants, self.clock),
+                    store=self.store, artifacts=BlobArtifacts(self.store), fetch=self.fetch, clock=self.clock,
+                    provider_contract=FAKE_CONTRACT, recipients={t.spec['client_id']: 'Lauren' for t in self.tenants.values()},
+                    sender=self.lauren.send, dispatch_quota=Quota(10000))
+        base.update(kw)
+        return hosted_dispatch.Deps(**base)
+
+    def dispatch_request(self, client, shift, op=None, **change):
+        s = self.item(client, shift)['scope']
+        op = op or (self.last.get((client, shift)) or {}).get('operation_id') or 'no-operation-yet'
+        receipt = self.outbox(client, shift).get(op, {}).get('receipt') or {}
+        n = next(self.dispatch_n)
+        body = dict({k: s[k] for k in hosted_dispatch.SCOPE}, dispatch_id='rehearsal-dispatch-%04d' % n, mode='dispatch', timestamp=self.clock(),
+                    nonce='rehearsal-dispatch-nonce-%06d' % n, recipient='Lauren', operation_id=op,
+                    **{k: receipt.get(k) or 'unknown' for k in hosted_dispatch.ARTIFACT if k != 'operation_id'})
+        body.update(change)
+        return body
+
+    def hosted_dispatch(self, client, shift, headers=ALICE, deps=None, op=None, **change):
+        return hosted_dispatch.handle('POST', headers, self.dispatch_request(client, shift, op, **change), deps or self.dispatch_deps())
+
+    def approve_dispatch(self, principals=('alice',), deps=None, **record):
+        """A FAKE approver approves exactly the dispatch digest a dry run reports (TEST ONLY; not an approval system)."""
+        client, tenant = next(iter(self.tenants.items()))
+        code, dry = self.hosted_dispatch(client, tenant.spec['shifts'][0], deps=deps, mode='dry_run')
+        assert code == 200 and dry['dispatch_digest'], dry
+        self.approvals.records[dry['dispatch_digest']] = dict(dict(snapshot_digest=dry['dispatch_digest'], action=hosted_dispatch.ACTION,
+                                                                    approved_by='rehearsal fake approver', approved_at=DAY, principals=list(principals)), **record)
+        return dry['dispatch_digest']
 
 
 def texts(book, names=VISIBLE):

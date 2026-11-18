@@ -738,7 +738,12 @@ class NoRetryByDefault(Base):
         sent = []
         def send(**kw): sent.append(kw); return dict(operation_id=kw['idempotency_key'], attempt_id=kw['attempt_id'])
         trust(self, FAKE_CONTRACT)                               # only inside this test process
-        self.assertEqual(transport.deliver(env.worker(**VERIFIED), env.scope, op, send), dict(status='sent'))
+        # A verified contract alone no longer opens the door: it also takes the hosted dispatch boundary's stored grant
+        # (tests/test_last_scan_hosted_dispatch.py). Nothing is read, claimed or sent without one.
+        for grant in (None, dict(id='made-up'), 'made-up', True):
+            self.assertEqual(transport.deliver(env.worker(**VERIFIED), env.scope, op, send, grant=grant), dict(status='dispatch_not_authorized'))
+        self.assertEqual((env.fetches, env.entries()[op]['status'], sent), (reads, 'pending', []))
+        self.assertEqual(env.worker(**VERIFIED).dispatch_test(env.scope, op, send), dict(status='sent'))   # the worker's test transport, directly
         self.assertEqual(len(sent), 1)
 
     def test_no_production_code_supplies_or_replaces_the_registry(self):

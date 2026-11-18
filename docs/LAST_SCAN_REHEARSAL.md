@@ -76,13 +76,26 @@ schema probes, and dispatch re-reads, across workers and restarts. See `tests/te
 
 What the rehearsal does not cover or fix, stated here and in the harness:
 
-- **Dispatch bypasses the hosted checks.** `Rehearsal.dispatch` goes through the worker and the one delivery door,
-  not through the hosted entry point, so no identity, approval, capture-receipt or live schema probe check runs
-  there. A test pins this as a known gap. The hosted entry point has no dispatch step.
+- **`Rehearsal.dispatch` is a test-only direct seam.** It calls the worker's test transport (`dispatch_test`)
+  directly and authorizes nothing: no identity, approval, recipient policy, capture-receipt or live schema probe
+  check runs there. It exists to exercise the worker's own claim and outbox behaviour. The production door
+  (`last_scan_transport.deliver`) refuses the same call for want of a dispatch grant.
+- **The authorized path is `hosting/last_scan_dispatch.py`**, prepared and connected to nothing. It repeats the
+  hosted run preflight for the caller, then requires a verified provider contract, a server-side recipient policy,
+  a dispatch approval covering snapshot, recipients and contract, the exact stored artifact, and a single-use
+  nonce, quota, intent and grant, before the worker probes the schema and re-reads the source under its lease. A
+  drifted column stops it before any item is read (`tests/test_last_scan_hosted_dispatch.py`). Every authority,
+  contract, recipient and sender behind it in the tests is a fake; none exists for production.
+- **Races that stay open at dispatch.** The source can change between the schema probe, the re-read, the claim and
+  the provider receiving the message, and an approval can be withdrawn after the last re-check. The dispatch grant
+  is a record in the runner's own store: code that can write the store can write one. `dispatch_test` stays
+  callable by tests.
 - **A restart reopens only the durable store.** The fake source, approval and capture records, outbox and clock
   stand for outside systems and are not reset.
-- **Dispatch is still not a production path.** It now shares the per-site wait, but it still runs none of the
-  hosted identity, approval, capture-receipt or schema-drift checks. That remains an unreleased blocker.
+- **Dispatch is still not a production path.** The boundary above has only been run against fakes. No real
+  identity system, approval authority, capture authority, schema probe, recipient policy store, provider or sender
+  exists, the provider registry is empty, and nothing routes to it. That remains an unreleased blocker pending
+  independent review.
 
 ## Activation gap matrix
 

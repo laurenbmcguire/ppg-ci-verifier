@@ -521,6 +521,7 @@ class NotConnected(unittest.TestCase):
             if path.is_file():
                 self.assertIsNone(names.search(path.read_text(errors='ignore')), str(path))
         allowed = {'last_scan_hosted.py', 'last_scan_runner.py', 'last_scan_transport.py', 'last_scan_service.py',
+                   'last_scan_dispatch.py',                     # hosted dispatch boundary: prepared, imported by nothing
                    'last_scan_store.py', 'last_scan_local.py', 'last_scan_drafts.py',
                    'last_scan_readiness.py'}                    # offline validator: reuses the runner's exact registry rule, runs nothing
         for path in (ROOT / 'hosting').glob('*.py'):
@@ -530,7 +531,7 @@ class NotConnected(unittest.TestCase):
             self.assertNotIn('crons', json.loads((ROOT / 'vercel.json').read_text()))
 
     def test_hosted_module_has_no_network_client_secret_reader_identity_provider_or_sender(self):
-        text = (ROOT / 'hosting' / 'last_scan_hosted.py').read_text() + (ROOT / 'hosting' / 'last_scan_transport.py').read_text()
+        text = ''.join((ROOT / 'hosting' / n).read_text() for n in ('last_scan_hosted.py', 'last_scan_transport.py', 'last_scan_dispatch.py'))
         for forbidden in ('urllib', 'requests', 'http.client', 'smtplib', 'os.environ', 'getenv', 'psycopg', 'socket', 'subprocess',
                           '.install(', 'Bearer', 'compare_digest', 'expected_token', 'jwt'):
             self.assertNotIn(forbidden, text, forbidden)

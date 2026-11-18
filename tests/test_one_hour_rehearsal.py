@@ -299,17 +299,25 @@ class Delivery(Base):
         out = self.r.dispatch('alpha', '1', sender=lambda **kw: dict(operation_id='something-else'))
         self.assertEqual(out, dict(status='uncertain', delivery_status='uncertain'))
 
-    def test_known_gap_dispatch_does_not_run_the_hosted_schema_probe(self):
-        """Pins a KNOWN GAP so it cannot be forgotten: dispatch bypasses the hosted checks, the live schema probe
-        included. When a reviewed hosted dispatch step exists this test must be turned around to expect a refusal."""
+    def test_a_drifted_schema_stops_the_hosted_dispatch_and_the_old_bypass_is_shut(self):
+        """Was the pinned KNOWN GAP (dispatch ignored a drifted schema). Turned around: the authorized dispatch path
+        refuses before any item is read, and the production door refuses a caller that skips that path."""
         trust(self, FAKE_CONTRACT)
         self.poll()
+        self.r.approve_dispatch()
         scan = next(c for c in self.r.tenants['alpha'].columns_now if c['name'] == 'ActualScan')
         scan['calculated'] = {'formula': '=[Created]', 'outputType': 'dateTime'}                  # the live schema drifts after the draft was built
         self.at('19:05')
         self.r.poll()
         self.assertEqual(self.r.last_response[1]['status'], 'schema_drift')     # the hosted poll notices...
-        self.assertEqual(self.r.dispatch('alpha', '1'), dict(status='sent'))    # ...the dispatch path does not
+        reads = self.item_reads('alpha')
+        code, body = self.r.hosted_dispatch('alpha', '1')                       # ...and so does the hosted dispatch
+        self.assertEqual((code, body['status'], body['refusal'], body['sources_read'], body['sender_calls']),
+                         (409, 'held', 'schema:live_schema_differs_from_the_approved_snapshot', 0, 0))
+        self.assertEqual(self.r.through_the_door_without_a_grant('alpha', '1'), dict(status='dispatch_not_authorized'))
+        self.assertEqual((self.r.lauren.calls, self.item_reads('alpha')), (0, reads))
+        # The direct test seam authorizes nothing and still ignores the drift. It is test-only, not a production path.
+        self.assertEqual(self.r.dispatch('alpha', '1'), dict(status='sent'))
         self.assertEqual(len(self.r.lauren.messages), 1)
 
     def test_no_exactly_once_claim_is_made_anywhere(self):

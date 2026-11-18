@@ -12,7 +12,8 @@ Each step below needs its own approval. Stop at the first step that cannot be co
 | Runner, worker, timer | `hosting/last_scan_runner.py`, `last_scan_service.py`, `last_scan_drafts.py` | Off unless `enabled` is exactly `true`. |
 | Durable store | `hosting/last_scan_store.py` | PostgreSQL tables are created only by an explicit `install()`; never called. |
 | Draft storage | `BlobArtifacts`, `StoredDraftPublisher`, `StoredDraftRouter` in `hosting/last_scan_local.py` | Drafts as private blobs in the same store. |
-| Delivery gate | `hosting/last_scan_transport.py` | `VERIFIED_CONTRACTS` is empty: no sending, no retry. |
+| Delivery gate | `hosting/last_scan_transport.py` | `VERIFIED_CONTRACTS` is empty: no sending, no retry. `deliver` also needs a single-use grant stored by the dispatch boundary. |
+| Dispatch boundary | `hosting/last_scan_dispatch.py` | Imported by nothing. Every dependency defaults to deny; tested against fakes only. |
 
 ## Order of activation (none of it done)
 
