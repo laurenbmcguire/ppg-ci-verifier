@@ -67,22 +67,35 @@ def items(scanned_at=None, nok=None, other_day=True):
 
 
 class Source:
-    """A fake read-only source. Counts every request; never accepts a write."""
-    def __init__(self, rows=None, photo_status=403, photo_bytes=b''):
+    """A fake read-only source. Counts every request; has no way to accept a write.
+
+    ``page_size`` splits the item list into pages linked by @odata.nextLink, as the real service does.
+    ``answers`` maps a piece of a URL to a canned (status, body, headers) answer, to imitate failures."""
+    def __init__(self, rows=None, photo_status=403, photo_bytes=b'', page_size=None, answers=None, list_id=LIST):
         self.rows = items() if rows is None else rows
         self.photo_status, self.photo_bytes = photo_status, photo_bytes
+        self.page_size, self.answers, self.list_id = page_size, dict(answers or {}), list_id
         self.requests, self.photo_requests = [], []
 
     def get(self, url):
         self.requests.append(url)
+        for piece, answer in self.answers.items():
+            if piece in url:
+                return answer(url) if callable(answer) else answer
         if '/columns?' in url:
             return 200, {'value': list(columns().values())}
         if '/items?' in url:
-            return 200, {'value': deepcopy(self.rows)}
+            if not self.page_size:
+                return 200, {'value': deepcopy(self.rows)}
+            start = int(url.split('$skiptoken=')[1]) if '$skiptoken=' in url else 0
+            page = {'value': deepcopy(self.rows[start:start + self.page_size])}
+            if start + self.page_size < len(self.rows):
+                page['@odata.nextLink'] = url.split('&$skiptoken=')[0] + '&$skiptoken=%d' % (start + self.page_size)
+            return 200, page
         if '/items/' in url:
             ident = url.split('/items/')[1].split('?')[0]
             return 200, deepcopy(next(r for r in self.rows if r['id'] == ident))
-        return 200, {'id': LIST, 'displayName': 'TEST-9001 demo list', 'webUrl': 'https://%s/sites/DemoClient/Lists/TEST9001' % HOST}
+        return 200, {'id': self.list_id, 'displayName': 'TEST-9001 demo list', 'webUrl': 'https://%s/sites/DemoClient/Lists/TEST9001' % HOST}
 
     def photo(self, url):
         self.photo_requests.append(url)

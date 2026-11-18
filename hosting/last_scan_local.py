@@ -60,7 +60,8 @@ class NativeDraftPublisher:
         notice=('HISTORICAL RECORD. This draft and checklist describe the source exactly as captured at '+str(as_of)+
                 '. They are never updated. Anything observed later, including a different result for a photo download, is not reflected here.')
         checklist=dict(operation_id=op,scope=snapshot['scope'],binding=self.binding,render_version=self.render_version(),
-                       format=self.FORMAT,evidence_as_of=as_of,historical_notice=notice,source_snapshot_hash=cap['snapshot_hash'],
+                       format=self.FORMAT,evidence_as_of=as_of,historical_notice=notice,
+                       unassigned_shifts=snapshot.get('unassigned_shifts') or {},source_snapshot_hash=cap['snapshot_hash'],
                        scoped_snapshot_hash=view['snapshot_hash'],captured_at=cap['captured_at'],
                        workbook_sha256=sf.digest(raw),source_ids=sorted(selected),findings=findings,
                        layout_findings=wb.scope_findings(rows,head,view,contract),verification=verification,
@@ -72,6 +73,9 @@ class NativeDraftPublisher:
                'Shift/day completion is not established.','Source IDs: '+', '.join(sorted(selected)),
                'Verification issues (%d). Nothing below was corrected, filled in or hidden:'%len(findings+checklist['layout_findings'])]
         notes+=[('Record '+str(f['record_id'])+': ' if f.get('record_id') else '')+f.get('text','')+' ['+str(f.get('code'))+']' for f in findings+checklist['layout_findings']]
+        if snapshot.get('unassigned_shifts'):
+            notes+=['Rows of this day whose recorded shift is in no verified assignment (in NO draft): '+
+                    ', '.join(f'{count} row(s) with shift "{value}"' for value,count in sorted(snapshot['unassigned_shifts'].items()))]
         notes+=['Photos named at the source but not captured:']+[f"Record {p['record_id']}: {p.get('reason')}" for p in view['photos'] if p.get('status')!='supported'] if any(p.get('status')!='supported' for p in view['photos']) else []
         receipt=dict(operation_id=op,workbook_sha256=sf.digest(raw),checklist_sha256=sf.digest(body),
                      render_version=self.render_version(),binding=self.binding,status='draft_ready',client_release='held',

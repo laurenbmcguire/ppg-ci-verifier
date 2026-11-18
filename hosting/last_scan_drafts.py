@@ -130,7 +130,12 @@ class Runner:
             return dict(status='draft_ready' if latest['operation_id']==op else 'superseded', operation_id=op, receipt=receipt)
 
 
-def capture_adapter(scope, *, scan_field, shift_field, capture_fn, not_before):
+# Arrival / save metadata and the business-date column are never the actual scan time, under any spelling.
+FORBIDDEN_SCAN_FIELDS = {'date', 'date0', 'created', 'createddatetime', 'modified', 'lastmodifieddatetime',
+                         'fields/created', 'fields/modified', 'created_x0020_date', 'last_x0020_modified', 'author', 'editor'}
+
+
+def capture_adapter(scope, *, scan_field, shift_field, capture_fn, not_before, recorded_shifts=None):
     """Use existing complete, sealed SharePoint capture; never Date/Created fallback.
 
     Explicit scan_field/shift_field and not_before come from validated per-list
@@ -138,20 +143,27 @@ def capture_adapter(scope, *, scan_field, shift_field, capture_fn, not_before):
     existing source_first_capture.capture in a live host; tests inject transport.
     """
     s=scope_key(scope)
+    if not isinstance(scan_field,str) or not isinstance(shift_field,str) or not scan_field.strip() or not shift_field.strip() \
+            or scan_field.strip().lower() in FORBIDDEN_SCAN_FIELDS:
+        raise ValueError('Verified actual-scan field required, never date or arrival metadata.')   # before any read
     cap, blobs = capture_fn(sf.scope(s))
     sf.verify_seal(cap)
     if cap['scope'] != sf.scope(s) or cap.get('uncertain_dates'):
         raise ValueError('Uncertain business-day membership must be resolved before scheduling.')
     if not scan_field or not shift_field or scan_field in ('Date','createdDateTime','lastModifiedDateTime'):
         raise ValueError('Verified actual-scan field required, never date or arrival metadata.')
-    rows=[]
+    rows=[];unassigned={}
     for record in cap['records']:
         raw=record['raw']
         if raw.get(shift_field) is None:
             raise ValueError('Missing shift mapping prevents trustworthy scope membership.')
         if str(raw[shift_field]) != s['shift']:
+            # A row whose recorded shift no verified assignment covers belongs to no draft. It is counted and
+            # reported with every draft of the day, never silently dropped and never guessed into a shift.
+            if recorded_shifts is not None and str(raw[shift_field]) not in recorded_shifts:
+                unassigned[str(raw[shift_field])]=unassigned.get(str(raw[shift_field]),0)+1
             continue
         instant(raw.get(scan_field))
         rows.append(dict(id=record['id'], scan_at=raw[scan_field], source=deepcopy(record)))
-    return dict(scope=s, rows=rows, captured_at=cap['captured_at'], terminal=True,
+    return dict(scope=s, rows=rows, captured_at=cap['captured_at'], terminal=True, unassigned_shifts=unassigned,
                 not_before=not_before, source_capture=cap, photo_blobs={k:__import__('base64').b64encode(v).decode() for k,v in blobs.items()})

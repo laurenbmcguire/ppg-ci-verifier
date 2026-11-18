@@ -19,12 +19,9 @@ from zoneinfo import ZoneInfo
 
 from hosting import source_first as sf
 from hosting import registry as job_registry
-from hosting.last_scan_drafts import instant, scope_key
+from hosting.last_scan_drafts import FORBIDDEN_SCAN_FIELDS, instant, scope_key
 from hosting.last_scan_service import ScheduledWorker
 
-# Arrival / save metadata and the business-date column are never the actual scan time.
-FORBIDDEN_SCAN_FIELDS = {'date', 'date0', 'created', 'createddatetime', 'modified', 'lastmodifieddatetime',
-                         'fields/created', 'fields/modified'}
 REQUIRED = ('client_id', 'job', 'site_id', 'list_id', 'zone', 'scan_field', 'shift_field')
 DEFAULT_COOLDOWN = timedelta(minutes=15)
 CURSOR, HOLD, RUN = 'runner:cursor', 'runner:hold:', 'run:'
@@ -181,7 +178,7 @@ def run_once(store, config, *, fetch, render, run_id, entries=None, clock=sf.now
                 hold.update(not_before=until, recorded_at=clock(), provider_stated=bool(cool.get('known')))
             out = dict(out, cooldown_until=until)
         results.append(dict(row, **{k: out[k] for k in ('status', 'operation_id', 'error_type', 'reconcile', 'superseded_by',
-                                                         'due_at', 'timing_basis', 'cooldown_until', 'artifact_state', 'evidence_as_of', 'observed_at') if k in out}))
+                                                         'due_at', 'timing_basis', 'cooldown_until', 'artifact_state', 'evidence_as_of', 'observed_at', 'unassigned_shifts') if k in out}))
         last = item['key']
     if last is not None:
         with store.transaction(cursor_key) as cursor:

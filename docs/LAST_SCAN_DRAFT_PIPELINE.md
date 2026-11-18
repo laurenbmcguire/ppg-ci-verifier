@@ -153,6 +153,13 @@ Status: local code and tests only. Not deployed, not scheduled, not connected to
   `observed_at`; only the run that rendered it says `built_this_run`. `worker.provenance(scope, op)` compares the
   draft with the latest observation (for example photo status 403 in the draft, 404 now) without changing either,
   and `StoredDraftPublisher.export(op)` returns the stored bytes with a historical label. Nothing is rewritten.
+- **Rows in no configured shift are reported.** A row of the day whose recorded shift value is not among the
+  assignment's `recorded_shifts` belongs to no draft. It is counted in `unassigned_shifts` on every result,
+  checklist and text checklist for that day; it is never guessed into a shift and never dropped silently.
+- **Adapter contract tests** (`tests/test_last_scan_adapter_contract.py`) run the real capture and adapter code
+  against a synthetic read-only fake: pagination completeness, exact list/shift/mapping/timezone, the scan-time
+  contract, photo authorisation, unknown quantities, throttling, and GET-only transports. They do not make any
+  real list ready.
 - **A cached draft never shortens the hour.** If content returns to an earlier version, the hour restarts like any
   other change. The earlier receipt and outbox entry are used again only when the renewed hour is over. `Date`, `Created`, `Modified` and their Graph names are refused as scan fields.
   Anything else is reported in the run receipt under `issues` and skipped.

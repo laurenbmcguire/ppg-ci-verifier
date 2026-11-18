@@ -44,8 +44,8 @@ def discover(config, *, fetch=capture.graph_fetch):
 def source_adapter(scope,settings,*,capture_fn=capture.capture):
     if not settings.get('timestamp_semantics_verified'):
         raise ValueError('Actual scan timestamp meaning must be verified, not inferred from field name.')
-    return capture_adapter(scope,scan_field=settings['scan_field'],shift_field=settings['shift_field'],
-        capture_fn=capture_fn,not_before=settings.get('not_before',{}).get(scope['business_date']+'|'+scope['shift']))
+    return capture_adapter(scope,scan_field=settings.get('scan_field'),shift_field=settings.get('shift_field'),
+        recorded_shifts=settings.get('recorded_shifts'),capture_fn=capture_fn,not_before=settings.get('not_before',{}).get(scope['business_date']+'|'+scope['shift']))
 
 BINDING=('client_id','site_id','list_id','job')
 
@@ -111,7 +111,10 @@ class ScheduledWorker:
         held=claim(self.store,key,self.clock(),self.lease_seconds,self.owner)
         if not held:return dict(status='busy')
         try:
-            return self._run(s,key,settings,held)
+            self._unassigned=None
+            out=self._run(s,key,settings,held)
+            if self._unassigned:out=dict(out,unassigned_shifts=self._unassigned)   # rows of the day in no configured shift
+            return out
         except LeaseLost:
             return dict(status='lease_lost')     # nothing of ours was committed; the current holder carries on
         except Exception as error:
@@ -126,6 +129,7 @@ class ScheduledWorker:
         full=dict(self.fetch(s,settings))
         if hasattr(self.render,'render_version'):full['render_version']=self.render.render_version()
         slim={k:v for k,v in full.items() if k!='photo_blobs'}
+        self._unassigned=full.get('unassigned_shifts') or None
         refs={}
         for name,encoded in sorted((full.get('photo_blobs') or {}).items()):
             refs[name]=self.store.put_blob(base64.b64decode(encoded,validate=True))
