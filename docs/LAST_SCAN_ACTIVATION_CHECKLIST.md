@@ -1,25 +1,29 @@
 # Last-scan draft runner: activation checklist
 
-Status on branch `claude/durable-report-runner-20261118`: **prepared, disabled, not connected.** In this branch's
-code there is no route, cron entry, scheduled task or table creation for it, no secret, and no real sender, status
-adapter, identity system or authority. **No deployment, hosted environment or live schedule was inspected for this
-document**; it describes the branch. Nothing in this document has been done. Each step below needs its own approval.
+Status on branch `claude/durable-report-runner-20261118`: **prepared, disabled, no production wiring in the reviewed
+branch.** That means: no route, cron entry, scheduled task or production call that creates its tables, no secret, and
+no real sender, status adapter, identity system or authority, in this branch's code. It is **not a statement about
+any live environment**: no deployment, hosted environment or live schedule was inspected for this document. Inside
+the branch the modules do import each other (the send and reconciliation boundaries, the readiness inventory script
+and the tests import the entry-point module), and the tests create the tables in disposable databases.
+No real-source validation evidence is recorded for this isolated runner branch; separate reporting work is outside
+this document. Nothing in this document has been done. Each step below needs its own approval.
 Stop at the first step that cannot be completed.
 
 For the operator's view (what to supply first, and the manual draft comparison that does not wait for any of this),
-read `docs/LAST_SCAN_PILOT_HANDOFF.md`. This checklist covers the automated runner and delivery only.
+read `docs/LAST_SCAN_PILOT_HANDOFF.md`. This checklist covers the automated runner and approved automated delivery to Lauren only.
 
 ## What exists (code only)
 
 | Piece | File | State |
 |---|---|---|
-| Entry point `handle(method, headers, body, deps)` | `hosting/last_scan_hosted.py` | Not imported by anything. |
+| Entry point `handle(method, headers, body, deps)` | `hosting/last_scan_hosted.py` | No production wiring in this branch: no route, cron or app module calls it. Imported by the send and reconciliation boundaries, the readiness inventory script and tests. |
 | Runner, worker, timer | `hosting/last_scan_runner.py`, `last_scan_service.py`, `last_scan_drafts.py` | Off unless `enabled` is exactly `true`. |
-| Durable store | `hosting/last_scan_store.py` | PostgreSQL tables are created only by an explicit `install()`; never called. |
+| Durable store | `hosting/last_scan_store.py` | PostgreSQL tables are created only by an explicit `install()`; no production path in this branch calls it. Tests call it against disposable databases. |
 | Draft storage | `BlobArtifacts`, `StoredDraftPublisher`, `StoredDraftRouter` in `hosting/last_scan_local.py` | Drafts as private blobs in the same store. |
 | Delivery gate and outcome contract | `hosting/last_scan_transport.py` | `VERIFIED_CONTRACTS` is empty: no sending, no retry. `deliver` also needs a single-use grant stored by the dispatch boundary. Provider answers are judged against a version 1 outcome contract; only a stated delivery counts. |
-| Dispatch boundary (the send door) | `hosting/last_scan_dispatch.py` | Imported only by the reconciliation module. It calls a sender **supplied by the host**; no sender is implemented. Every dependency defaults to deny; tested against fakes only. |
-| Reconciliation boundary | `hosting/last_scan_reconcile.py` | Imported by nothing. Records a provider's stated outcome for one uncertain attempt, with its own approval and audit trail; never resends. Needs a status adapter supplied by the host; none is implemented. |
+| Dispatch boundary (the send door) | `hosting/last_scan_dispatch.py` | No production wiring in this branch; imported by the reconciliation module and tests. It calls a sender **supplied by the host**; no sender is implemented. Every dependency defaults to deny; tested against fakes only. |
+| Reconciliation boundary | `hosting/last_scan_reconcile.py` | No production wiring in this branch; imported by tests only. Records a provider's stated outcome for one uncertain attempt, with its own approval and audit trail; never resends. Needs a status adapter supplied by the host; none is implemented. |
 | Authority record contract | `hosting/last_scan_authority.py` | Version 1 shape and lifecycle rules for approvals and capture receipts. Defines the contract; is not an authority. |
 | Source-mapping readiness | `hosting/last_scan_readiness.py` | Offline check; a mandatory preflight. Never marks a mapping verified. |
 | Schema capture | `hosting/last_scan_schema_capture.py` | Manual, GET-only, columns only. No default transport; run only by hand per its runbook. |
@@ -66,7 +70,8 @@ read `docs/LAST_SCAN_PILOT_HANDOFF.md`. This checklist covers the automated runn
    inside `handle` from the configuration; a caller cannot supply them. Budget is capped at 45 seconds.
 10. **Schedule (a separate decision).** A scheduled caller with a unique `run_id`, a timestamp and a single-use
     nonce per firing. Not created here.
-11. **First live run** on one list, watched by a person; compare the draft with a hand-built report.
+11. **First live run** on one list, watched by a person; compare the draft with the report built the usual way.
+    The available draft and its checklist go to Lauren even when the comparison finds gaps; she decides hold or release.
 
 ## What a run request must pass, in order
 
@@ -87,7 +92,10 @@ read `docs/LAST_SCAN_PILOT_HANDOFF.md`. This checklist covers the automated runn
 Known boundaries: nonces are never pruned; the quota is a simple hourly counter; nothing limits dry runs; a
 compromised authorizer or approval authority defeats everything above; replay protection depends on the host clock.
 
-## Delivery: disabled, and what would be needed
+## Approved automated delivery to Lauren: disabled, and what would be needed
+
+The only recipient this code allows is Lauren, the user-authorized private recipient. It never delivers to a client;
+client release is her decision, made outside the runner.
 
 There is **no real provider, sender or status adapter**, and none should be invented. The code path for a send
 exists and is closed: the dispatch boundary would call a host-supplied sender, but only after every run gate above
@@ -97,7 +105,7 @@ and its own checks (`recipient_policy_configured`, `recipient_is_the_approved_on
 `provider_contract_states_outcome_contract_deadline_and_validity`, `dispatch_sender_configured`,
 `dispatch_quota_configured`), and `provider_contract_verified` cannot pass while the registry is empty. Drafts are
 built, held, and readable through `StoredDraftPublisher.read(op, name)`; an internal outbox entry is recorded and
-never attempted. The recipient is internal only; a client is never a recipient.
+never attempted. The recipient is Lauren only; a client is never a recipient.
 
 Before any transport could be enabled, an independent reviewer would need written evidence from the provider that:
 
@@ -170,7 +178,9 @@ snapshot is supplied and the offline readiness check passes against it
       receipt as "reported by capture authority"; it cannot verify the authority itself.
 - [ ] A real read-only schema probe (`SchemaProbe`). Interface only; test fake only. Without one, no run.
 - [ ] Owner decision on the bounds, which are placeholders: capture age 24 hours, future skew 5 minutes, probe
-      answer age 60 seconds.
+      answer age 60 seconds. The one-hour wait after the last scan is **not** one of them: it is Lauren's explicit
+      requirement. What needs verification around it is the actual-scan column, the shift and lunch policy, and how
+      late-arriving rows are handled.
 - [ ] Named people to attest each business meaning per list, and the approver's review of those attestations.
       An approval covers the exact snapshot and contract by hash; it does not show the approver examined them.
 - [ ] Runtime source proof. Readiness says the configuration and a captured schema agree. It does not show what
