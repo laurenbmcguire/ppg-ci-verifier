@@ -454,6 +454,10 @@ class ScheduledWorker:
                         attempt=dict(id=uuid4().hex,number=len(entry.get('attempts') or [])+1,state='in_flight',started_at=now,
                                      deadline=(instant(now)+timedelta(seconds=self.attempt_seconds)).isoformat(),
                                      fence=held['fence'],capture=ref)
+                        # Which reviewed provider contract this attempt goes out through, written once, in the claim,
+                        # BEFORE the sender is called. Only that same contract can later attest what happened to it.
+                        if isinstance(self.provider_contract,transport.ProviderContract):
+                            attempt.update(provider=self.provider_contract.provider,provider_contract=self.provider_contract.digest())
                         entry.setdefault('attempts',[]).append(attempt)      # append-only audit trail of every attempt
                         entry.pop('delivery_error_type',None)
                         entry.update(status='uncertain',delivery_status='uncertain',delivery_attempted_at=now,

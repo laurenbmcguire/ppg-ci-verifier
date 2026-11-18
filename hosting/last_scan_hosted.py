@@ -210,7 +210,16 @@ def time_gate(deps, started, bounds, max_seconds=None):
     try:
         with deps.store.transaction(CLOCK) as seen:
             high = seen.get('high_water')
-        now, begun = instant(deps.clock()), instant(started)
+        return time_gate_at(high, deps.clock(), started, bounds, max_seconds)
+    except Exception as error:
+        return 'time_gate_failed:' + type(error).__name__
+
+
+def time_gate_at(high, now, started, bounds, max_seconds=None):
+    """The same judgment on values already in hand: the watermark as read (for a caller that holds the clock record
+    inside its own transaction and must not open another), and ONE reading of the host clock. Touches no store."""
+    try:
+        now, begun = instant(now), instant(started)
         if now < begun:
             return 'host_clock_went_backwards_during_the_call'
         if clock_behind(high, now.isoformat()):

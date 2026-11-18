@@ -198,6 +198,12 @@ the provider states. It never sends, never re-queues and never makes an entry de
 | the same, while the original sender call may still be running (attempt in flight, its deadline not passed) | nothing; kept in the audit trail |
 | `accepted`, `unknown`, a bare `delivered: false`, any mismatch, an error, no answer, a passed deadline | nothing; kept in the audit trail |
 
+Only the provider contract an attempt went out through can attest it. The worker records the provider and the
+contract's hash on the attempt before the sender is called; a reconciliation through another provider, version or
+set of reviewed terms is refused even with its own approval, and an attempt with no such record stays unresolved.
+Inside the recording transaction the entry is checked again against everything the approval covers, and the time
+limit, validity and clock watermark are judged again after the lock is held.
+
 Each reconciliation that reaches the provider appends one audit entry to the operation (at most 50): who, when,
 under which approval record, which provider contract and provider record, the answer's hash, the decision, and the
 entry before and after. A late acknowledgment from the original sender is still recorded afterwards and, if it

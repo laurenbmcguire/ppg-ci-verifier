@@ -15,6 +15,11 @@ adapter about ONE exact attempt and record what the provider states, with an aud
   * anything else                                        -> nothing changes. "accepted", "unknown", a bare
                                                             delivered:false, a mismatched or unreadable answer, an
                                                             error, no answer, and a passed deadline establish nothing.
+Only the provider contract the attempt went out through can attest it: the worker writes the provider and the
+contract's hash on the attempt in the claim, before the sender is called, and both must equal the contract in force
+here, before the provider is asked and again inside the recording transaction. A separately approved reconciliation
+through another provider, version or set of reviewed terms is refused, and an attempt that carries no such record is
+left unresolved rather than guessed at; migrating such attempts would need its own reviewed design.
 A terminal not-delivered is not recorded while the original sender call may still be running (the attempt is in
 flight and its own deadline has not passed): the answer is kept in the audit trail and the entry stays uncertain.
 A late acknowledgment from that sender is still recorded by the worker afterwards, and contradicts the proof openly.
@@ -35,8 +40,10 @@ exists for production (the only implementations are TEST-ONLY fakes):
 the stored entry must be exactly the named artifact and attempt, addressed to the approved recipient, and still
 uncertain; ONE transaction takes the clock check, the nonce, the quota and the intent; the approval is asked again and
 the pure time gate passes; the status adapter is called once; the approval is asked again and the gate passes again;
-then ONE transaction re-reads the entry, applies at most one of the two recordings above if the entry is still on
-this attempt and still uncertain, and appends the audit entry (who, when, under which approval record, which
+then ONE transaction that holds the entry and the clock record: inside it the pure time gate is judged once more (the
+wait for the lock counts) and the entry is checked again, as it is then, against everything the approval covers
+(artifact, scope, recipient, attempt, still uncertain); only then is at most one of the two recordings above applied,
+and the audit entry appended (who, when, under which approval record, which
 provider record, the answer's hash, and the entry before and after). No secret is stored: the answer is kept as its
 hash, and whole only when small.
 
@@ -97,9 +104,17 @@ def _entry(deps, key, body):
     """('ready' | refusal, details, before). Reads the store only."""
     with deps.store.transaction('outbox:' + key) as box:
         entry = deepcopy(box.get('entries', {}).get(body['operation_id']))
+    return _fits(entry, body, deps.provider_contract)
+
+
+def _fits(entry, body, contract):
+    """Whether this entry, AS IT IS NOW, is exactly what the caller named and the approval covers: the artifact, the
+    scope it belongs to, the recipient, the attempt, and still uncertain. Pure. Used before the provider is asked and
+    again inside the recording transaction, because the entry can change in between."""
     if not entry:
         return 'no_such_entry', [], None
     mine, receipt, problems = _attempt(entry, body['attempt_id']), entry.get('receipt') or {}, []
+    receipt = receipt if isinstance(receipt, dict) else {}
     if entry.get('audience') != RECIPIENT or entry.get('audience') != body['recipient']:
         problems.append('entry_is_addressed_to_someone_else')
     for k in ('operation_id', 'workbook_sha256', 'checklist_sha256'):
@@ -114,6 +129,13 @@ def _entry(deps, key, body):
         return 'artifact_mismatch', problems, _look(entry, mine)
     if mine is None or entry.get('attempt_id') != body['attempt_id']:
         return 'stale_attempt', ['the_entry_is_not_on_this_attempt'], _look(entry, mine)
+    # The attempt names the provider contract it went out through, recorded before the sender was called. Only that
+    # exact contract may attest it. An attempt with no such record is NOT guessed at: it stays unresolved.
+    made = (mine.get('provider'), mine.get('provider_contract'))
+    if not all(isinstance(v, str) and v.strip() for v in made):
+        return 'attempt_has_no_provider_binding', [], _look(entry, mine)
+    if made != (getattr(contract, 'provider', None), contract.digest() if isinstance(contract, transport.ProviderContract) else None):
+        return 'provider_mismatch', ['the_attempt_went_out_through_another_provider_contract'], _look(entry, mine)
     if entry.get('delivery_status') != 'uncertain':
         return 'nothing_to_reconcile', [str(entry.get('delivery_status'))], _look(entry, mine)
     if len(entry.get('reconciliations') or []) >= MAX_AUDIT:
@@ -308,13 +330,18 @@ def handle(method, headers, body, deps):
     why = withdrawn()                                                        # the lookup may have taken time
 
     # ---- ONE transaction: re-read the entry, record at most one outcome, append the audit entry
-    with deps.store.transaction('outbox:' + key) as box:
+    # The pure time gate is judged HERE, once the records are held: waiting for the lock takes time too. The clock
+    # record is part of this same transaction, so its watermark is read without opening another one.
+    with deps.store.atomic(['outbox:' + key, hosted.CLOCK]) as records:
+        box = records['outbox:' + key]
         entry = box.get('entries', {}).get(op)
         if not entry:
             decision, recorded = 'no_such_entry', None
         else:
-            mine, now = _attempt(entry, aid), deps.clock()
+            mine, now = _attempt(entry, aid), deps.clock()           # ONE reading of the host clock for everything below
             was = _look(entry, mine)
+            fits = _fits(entry, body, contract)[0]
+            late = hosted.time_gate_at(records[hosted.CLOCK].get('high_water'), now, started, bounds, LIMIT_SECONDS)
             proof = dict(operation_id=op, attempt_id=aid, provider_record_id=verdict['provider_record_id'], observed_at=verdict['observed_at'],
                          outcome_sha256=verdict['evidence']['sha256'], deadline_breach=verdict['deadline_breach'], via='reconciliation')
             recorded = None
@@ -322,10 +349,10 @@ def handle(method, headers, body, deps):
                 decision = 'audit_trail_full'                            # nothing is recorded that could not also be audited
             elif why:
                 decision = 'authorization_or_time_gate_failed_after_the_lookup'
-            elif mine is None or entry.get('attempt_id') != aid:
-                decision = 'stale_attempt'
-            elif entry.get('delivery_status') != 'uncertain':
-                decision = 'nothing_to_reconcile'
+            elif late:
+                decision, why = 'time_gate_failed_inside_the_recording_transaction', late
+            elif fits != 'ready':
+                decision = fits                                          # artifact_mismatch, stale_attempt, nothing_to_reconcile, ...
             elif verdict['outcome'] == 'delivered':
                 mine.update(state='acked', ack=proof, acked_at=now, acked_by='reconciliation')
                 entry.update(ack=proof, delivery_status='sent', reconciled_at=now, provider_outcome='delivered')

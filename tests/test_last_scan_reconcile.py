@@ -444,6 +444,174 @@ class StaleAndCross(Reconcile):
         self.assertEqual((self.entry()['status'], len(self.entry()['reconciliations'])), ('uncertain', reconcile.MAX_AUDIT))
 
 
+class RecordingTransaction(Reconcile):
+    """QA of eb415bb: what is recorded is decided INSIDE the recording transaction, on the entry as it is then and on
+    the clock as it is then, not on what was true before the provider was asked or before the lock was taken."""
+    def altering(self, alter, state='delivered'):
+        """A FAKE status adapter that, while the provider is being asked, changes the stored entry and then answers validly."""
+        key = 'outbox:' + self.r.item('alpha', '1')['key']
+        def make(out):
+            with self.r.store.transaction(key) as box:
+                alter(box['entries'][self.op])
+            return out
+        return self.status(state, make=make)
+
+    def test_qa_repro_an_artifact_changed_during_the_lookup_is_not_recorded_as_delivered(self):
+        code, body = self.rec(deps=self.deps(status_lookup=self.altering(lambda e: e['receipt'].update(workbook_sha256='0' * 64))))
+        self.assertEqual((code, body['status'], body['reason'], body['provider_outcome']), (202, 'held', 'artifact_mismatch', 'delivered'), body)
+        entry = self.entry()
+        self.assertEqual((entry['status'], entry['delivery_status'], entry['attempts'][0]['state'], self.r.lauren.calls), ('uncertain', 'uncertain', 'returned_error', 1))
+        self.assertNotIn('ack', entry)
+
+    def test_every_approved_binding_is_checked_again_inside_the_recording_transaction(self):
+        alters = dict(
+            workbook=(lambda e: e['receipt'].update(workbook_sha256='0' * 64), 'artifact_mismatch'),
+            checklist=(lambda e: e['receipt'].update(checklist_sha256='0' * 64), 'artifact_mismatch'),
+            operation=(lambda e: e['receipt'].update(operation_id='another-operation'), 'artifact_mismatch'),
+            client=(lambda e: e['receipt'].update(binding=dict(e['receipt']['binding'], client_id='BRAVO-REHEARSAL')), 'artifact_mismatch'),
+            site=(lambda e: e['receipt'].update(binding=dict(e['receipt']['binding'], site_id='another-site')), 'artifact_mismatch'),
+            list=(lambda e: e['receipt'].update(binding=dict(e['receipt']['binding'], list_id='another-list')), 'artifact_mismatch'),
+            job=(lambda e: e['receipt'].update(binding=dict(e['receipt']['binding'], job='RH-7002')), 'artifact_mismatch'),
+            audience=(lambda e: e.update(audience='Client'), 'artifact_mismatch'),
+            receipt_gone=(lambda e: e.pop('receipt'), 'artifact_mismatch'),
+            newer_attempt=(lambda e: e.update(attempt_id='a-newer-attempt'), 'stale_attempt'),
+            attempt_gone=(lambda e: e.update(attempts=[]), 'stale_attempt'),
+            already_sent=(lambda e: e.update(delivery_status='sent'), 'nothing_to_reconcile'),
+            already_closed=(lambda e: e.update(delivery_status='not_delivered'), 'nothing_to_reconcile'))
+        for name, (alter, reason) in alters.items():
+            for state in ('delivered', 'not_delivered'):
+                with self.subTest(name=name, state=state):
+                    self.setUp()
+                    before = deepcopy(self.entry())
+                    alter(before)
+                    code, body = self.rec(deps=self.deps(status_lookup=self.altering(alter, state)))
+                    self.assertEqual((code, body['status'], body['reason'], body['provider_asked']), (202, 'held', reason, 1), body)
+                    entry = self.entry()
+                    (audit,) = entry.pop('reconciliations')                      # one complete audit entry, and nothing else changed
+                    self.assertEqual((audit['decision'], audit['before'], audit['principal']), (reason, audit['after'], 'alice'))
+                    entry.pop('provider_deadline_breach', None)
+                    self.assertEqual(entry, before)
+                    self.assertEqual(self.r.lauren.calls, 1)
+
+    def waiting(self, seconds=0, inside=None):
+        """The recording transaction is slow to get its lock: once it holds the outbox record, ``seconds`` have passed."""
+        from contextlib import contextmanager
+        store, key, armed = self.r.store, 'outbox:' + self.r.item('alpha', '1')['key'], dict(on=False, hit=0)
+        original = store.atomic
+        @contextmanager
+        def atomic(keys):
+            with original(keys) as records:
+                if armed['on'] and key in [str(k) for k in keys]:
+                    armed['on'] = False; armed['hit'] += 1
+                    self.r.clock.advance(seconds=seconds)
+                    if inside:
+                        inside(records)
+                yield records
+        store.atomic = atomic
+        self.addCleanup(lambda: setattr(store, 'atomic', original))
+        return armed
+
+    def test_qa_repro_a_61_second_wait_for_the_lock_is_past_the_limit(self):
+        armed = self.waiting(61)
+        code, body = self.rec(deps=self.deps(status_lookup=self.status(make=lambda out: (armed.update(on=True), out)[1])))
+        self.assertEqual((code, body['status'], body['reason'], armed['hit']), (202, 'held', 'time_gate_failed_inside_the_recording_transaction', 1), body)
+        entry = self.entry()
+        self.assertEqual((entry['status'], entry['delivery_status'], entry['reconciliations'][0]['decision'], self.r.lauren.calls),
+                         ('uncertain', 'uncertain', 'time_gate_failed_inside_the_recording_transaction', 1))
+
+    def test_the_limit_expiry_and_watermark_are_judged_after_the_lock_is_held(self):
+        self.assertEqual(reconcile.LIMIT_SECONDS, 60)
+        for seconds, recorded in ((59.999, True), (60, False), (60.001, False), (3600, False)):
+            for state in ('delivered', 'not_delivered'):
+                with self.subTest(seconds=seconds, state=state):
+                    self.setUp()
+                    armed = self.waiting(seconds)
+                    code, body = self.rec(deps=self.deps(status_lookup=self.status(state, make=lambda out: (armed.update(on=True), out)[1])))
+                    if recorded:
+                        self.assertEqual((code, body['status']), (200, 'recorded_' + state), body)
+                    else:
+                        self.assertEqual((code, body['status'], body['reason']), (202, 'held', 'time_gate_failed_inside_the_recording_transaction'), body)
+                        self.assertEqual((self.entry()['status'], self.entry()['delivery_status'], len(self.entry()['reconciliations'])), ('uncertain', 'uncertain', 1))
+        self.setUp()                                                             # the approval runs out while waiting for the lock
+        self.r.approvals.records[self.digest] = dict(self.r.approvals.records[self.digest], expires_at=(self.r.clock.at + rh.timedelta(seconds=90)).isoformat())
+        armed = self.waiting(30.001)
+        code, body = self.rec(deps=self.deps(status_lookup=self.status(make=lambda out: (armed.update(on=True), out)[1], before=lambda: self.r.clock.advance(seconds=59.999))))
+        self.assertEqual((code, body['status'], body['reason'], self.entry()['status']), (202, 'held', 'time_gate_failed_inside_the_recording_transaction', 'uncertain'), body)
+        self.setUp()                                                             # a concurrent worker with a later clock got there first
+        def later_watermark(records):
+            records[hosted.CLOCK]['high_water'] = (self.r.clock.at + rh.timedelta(hours=1)).isoformat()
+        armed = self.waiting(0, inside=later_watermark)
+        code, body = self.rec(deps=self.deps(status_lookup=self.status(make=lambda out: (armed.update(on=True), out)[1])))
+        self.assertEqual((code, body['status'], body['reason'], self.entry()['status']), (202, 'held', 'time_gate_failed_inside_the_recording_transaction', 'uncertain'), body)
+        self.assertEqual(self.r.lauren.calls, 1)
+
+
+class ProviderBinding(Reconcile):
+    """QA of eb415bb: an attempt made through provider contract A can only be attested by provider contract A."""
+    def other(self, **change):
+        b = replace(FAKE_CONTRACT, **(change or dict(provider='different-provider')))
+        trust(self, FAKE_CONTRACT, b)
+        return b
+
+    def through(self, b, state):
+        deps = self.deps(provider_contract=b, status_lookup=self.status(state, provider=b.provider, provider_contract=b.digest()))
+        self.approve(deps=deps)                                                 # separately approved, for provider B
+        return self.rec(deps=deps)
+
+    def test_qa_repro_another_provider_cannot_attest_this_attempt(self):
+        for state in ('not_delivered', 'delivered'):
+            for b in (self.other(), self.other(version='2'), self.other(sender_timeout_seconds=601)):   # another provider, version, or reviewed terms
+                self.setUp()
+                trust(self, FAKE_CONTRACT, b)
+                code, body = self.through(b, state)
+                self.assertEqual((code, body['status'], body['provider_asked']), (409, 'provider_mismatch', 0), body)
+                for _ in range(2):
+                    self.r.restart()
+                    entry = self.unchanged()
+                    self.assertNotIn('reconciliations', entry)
+                    self.assertEqual((entry['attempts'][0]['provider'], entry['attempts'][0]['provider_contract']), (FAKE_CONTRACT.provider, FAKE_CONTRACT.digest()))
+        self.setUp()
+        self.assertEqual(self.rec()[1]['status'], 'recorded_delivered')         # the provider the attempt went through still can
+
+    def test_the_attempt_carries_its_provider_from_before_the_sender_was_called(self):
+        seen = {}
+        def sender(**kw):
+            seen['attempt'] = deepcopy(self.r.outbox('bravo', '2')[seen['op']]['attempts'][0])
+            raise TimeoutError('no answer')
+        self.at('19:40')
+        seen['op'] = self.poll()[('bravo', '2')]['operation_id']
+        self.assertEqual(self.go('bravo', '2', deps=self.r.dispatch_deps(sender=sender))[1]['status'], 'uncertain')
+        self.assertEqual((seen['attempt']['state'], seen['attempt']['provider'], seen['attempt']['provider_contract']),
+                         ('in_flight', FAKE_CONTRACT.provider, FAKE_CONTRACT.digest()))
+
+    def test_an_attempt_without_a_recorded_provider_stays_unresolved(self):
+        key = 'outbox:' + self.r.item('alpha', '1')['key']
+        for missing in (('provider',), ('provider_contract',), ('provider', 'provider_contract')):
+            self.setUp()
+            with self.r.store.transaction(key) as box:                           # as an attempt made before the binding existed would look
+                for field in missing:
+                    box['entries'][self.op]['attempts'][0].pop(field)
+            for state in ('delivered', 'not_delivered'):
+                code, body = self.rec(deps=self.deps(status_lookup=self.status(state)))
+                self.assertEqual((code, body['status'], body['provider_asked']), (409, 'attempt_has_no_provider_binding', 0), body)
+            self.unchanged()
+
+    def test_a_binding_changed_while_the_provider_is_asked_records_nothing(self):
+        key = 'outbox:' + self.r.item('alpha', '1')['key']
+        for alter, reason in ((lambda a: a.update(provider='different-provider'), 'provider_mismatch'),
+                              (lambda a: a.update(provider_contract='0' * 64), 'provider_mismatch'),
+                              (lambda a: a.pop('provider_contract'), 'attempt_has_no_provider_binding')):
+            for state in ('delivered', 'not_delivered'):
+                self.setUp()
+                def make(out, alter=alter):
+                    with self.r.store.transaction(key) as box:
+                        alter(box['entries'][self.op]['attempts'][0])
+                    return out
+                code, body = self.rec(deps=self.deps(status_lookup=self.status(state, make=make)))
+                self.assertEqual((code, body['status'], body['reason']), (202, 'held', reason), body)
+                self.assertEqual((self.entry()['status'], self.entry()['delivery_status'], self.r.lauren.calls), ('uncertain', 'uncertain', 1))
+
+
 class Boundaries(unittest.TestCase):
     def test_the_boundary_cannot_send_enqueue_or_reach_anything(self):
         text = (ROOT / 'hosting' / 'last_scan_reconcile.py').read_text()
