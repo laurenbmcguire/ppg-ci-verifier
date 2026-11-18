@@ -298,6 +298,19 @@ class Delivery(Base):
         out = self.r.dispatch('alpha', '1', sender=lambda **kw: dict(operation_id='something-else'))
         self.assertEqual(out, dict(status='uncertain', delivery_status='uncertain'))
 
+    def test_known_gap_dispatch_does_not_run_the_hosted_schema_probe(self):
+        """Pins a KNOWN GAP so it cannot be forgotten: dispatch bypasses the hosted checks, the live schema probe
+        included. When a reviewed hosted dispatch step exists this test must be turned around to expect a refusal."""
+        trust(self, FAKE_CONTRACT)
+        self.poll()
+        scan = next(c for c in self.r.tenants['alpha'].columns_now if c['name'] == 'ActualScan')
+        scan['calculated'] = {'formula': '=[Created]', 'outputType': 'dateTime'}                  # the live schema drifts after the draft was built
+        self.at('19:05')
+        self.r.poll()
+        self.assertEqual(self.r.last_response[1]['status'], 'schema_drift')     # the hosted poll notices...
+        self.assertEqual(self.r.dispatch('alpha', '1'), dict(status='sent'))    # ...the dispatch path does not
+        self.assertEqual(len(self.r.lauren.messages), 1)
+
     def test_no_exactly_once_claim_is_made_anywhere(self):
         for path in (ROOT / 'hosting' / 'last_scan_transport.py', ROOT / 'hosting' / 'last_scan_service.py', ROOT / 'docs' / 'LAST_SCAN_REHEARSAL.md'):
             text = path.read_text().lower()

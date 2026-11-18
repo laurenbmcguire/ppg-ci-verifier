@@ -67,7 +67,16 @@ def png(colour=(10, 120, 200)):
 
 
 class Clock:
-    """The rehearsal's only clock. Nothing in a rehearsal reads the wall clock for a decision."""
+    """The clock the rehearsal INJECTS: the hosted entry point, the runner, the timers, the worker, the probe, the
+    schema capture and the stamp on each source capture all read it.
+
+    It is not the only clock in the process. Still on real time, and known:
+      * the run budget (``time.monotonic``), which only bounds how long one firing may take;
+      * ``source_first_capture.cooldown``, which also works out a wall-clock ``not_before`` for a relative Retry-After
+        (kept for the existing source-first service). The runner no longer uses that value: it counts a relative wait
+        on its own clock (tests/test_last_scan_cooldown_clock.py);
+      * timestamps written into failure evidence by the capture code (``sf.now()``), which are records, not decisions;
+      * the real capture's own ``captured_at``, which the tenant below overwrites with this clock before sealing."""
     def __init__(self, start):
         self.at = utc(start)
     def __call__(self):
@@ -244,7 +253,13 @@ class Rehearsal:
         return out
 
     def restart(self):
-        """The host process dies and comes back: every in-memory object is rebuilt over the same database file."""
+        """The runner's host process dies and comes back. ONLY the durable store handle is reopened over the same
+        database file; ``deps()`` already builds a new authorizer, probe, artifact store and worker for every call, so
+        nothing of the runner's survives in memory.
+
+        Deliberately NOT reset, because they stand for systems outside the runner that a restart would not touch:
+        the tenants (the source), the fake approval and capture records, the fake outbox's list of messages, and the
+        rehearsal clock. A restart of those is not rehearsed here."""
         self.store = StateStore(self.path)
 
     # ---- looking at what was produced
@@ -270,7 +285,12 @@ class Rehearsal:
             return deepcopy(box.get('entries', {}))
 
     def dispatch(self, client, shift, op=None, sender=None, contract=FAKE_CONTRACT):
-        """Hand one ready draft to the FAKE Lauren outbox through the one real door (transport.deliver)."""
+        """Hand one ready draft to the FAKE Lauren outbox through the one real door (transport.deliver).
+
+        KNOWN GAP, on purpose not hidden: this path does NOT go through the hosted entry point. No identity, approval,
+        capture-receipt, capture-age or live schema probe check runs here. The worker does re-read the source rows and
+        refuses if they changed, but a column definition that drifted since approval is not noticed at dispatch. The
+        hosted entry point has no dispatch step at all; one would have to be designed and reviewed."""
         item = self.item(client, shift)
         worker = ScheduledWorker(self.store, self.fetch, item['render'], clock=self.clock, enabled=True, provider_contract=contract)
         return transport.deliver(worker, item['scope'], op or self.last[(client, shift)]['operation_id'], sender or self.lauren.send, item['settings'])

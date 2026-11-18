@@ -55,10 +55,24 @@ Every authority in the rehearsal is a fake that says yes. It therefore proves no
 columns or rows, what any real column means, a real collector or its identity, a real approver's review, a real
 delivery provider's behaviour, a real scheduler, or PostgreSQL (the rehearsal runs on SQLite).
 
-One thing the rehearsal surfaced and worked around rather than changed: a relative `Retry-After` (seconds) is
-turned into a time using the wall clock, while the runner compares it with its injected clock. In production both
-are the wall clock, so they agree; the rehearsal uses an absolute `Retry-After` date so the hold follows its
-simulated clock. No production behaviour was altered.
+Clock mismatch found through the rehearsal and fixed afterwards: a relative `Retry-After` (seconds) was turned into
+a time using the wall clock inside the capture code and then compared with the runner's own clock. With the capture
+clock two minutes behind, a 60-second wait had already "expired" and all three shifts of the same site were read in
+one poll. The runner now counts a relative wait on its own clock from the moment it saw the answer
+(`last_scan_drafts.hold_until`), keeps an absolute date as stated, waits 15 minutes when nothing usable was stated,
+never less than 60 seconds and never more than 7 days (a longer stated wait is held at 7 days and flagged). Those
+three figures are policy awaiting an owner's decision. See `tests/test_last_scan_cooldown_clock.py`.
+
+Three things the rehearsal does not cover or fix, stated here and in the harness:
+
+- **Dispatch bypasses the hosted checks.** `Rehearsal.dispatch` goes through the worker and the one delivery door,
+  not through the hosted entry point, so no identity, approval, capture-receipt or live schema probe check runs
+  there. A test pins this as a known gap. The hosted entry point has no dispatch step.
+- **A restart reopens only the durable store.** The fake source, approval and capture records, outbox and clock
+  stand for outside systems and are not reset.
+- **A throttled re-read at dispatch sets no site hold.** If the source answers 429/503 while a dispatch re-reads it,
+  the outbox entry is held, but the runner's per-site wait is not recorded, so another dispatch could ask again at
+  once. Not changed here; it belongs with the design of a hosted dispatch step.
 
 ## Activation gap matrix
 
