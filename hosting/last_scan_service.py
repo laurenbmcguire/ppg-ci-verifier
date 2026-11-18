@@ -89,7 +89,7 @@ class ScheduledWorker:
     Photo bytes and the captured snapshot are stored as content-addressed blobs, not in the state row.
     """
     def __init__(self,transaction,fetch,render,*,clock=sf.now,enabled=False,lease_seconds=300,owner=None,attempt_seconds=900,
-                 provider_contract=None,contract_registry=None):
+                 provider_contract=None):
         self.store=getattr(transaction,'__self__',transaction)
         if not hasattr(self.store,'atomic') or not hasattr(self.store,'put_blob'):
             raise TypeError('A store with atomic multi-record transactions is required (hosting.last_scan_store).')
@@ -97,7 +97,8 @@ class ScheduledWorker:
         self.clock=clock;self.enabled=enabled;self.lease_seconds=lease_seconds;self.owner=owner
         self.attempt_seconds=attempt_seconds      # an extra wait before a closed attempt may be replaced; never proof by itself
         # Default: no provider contract, so an uncertain delivery is NEVER retried (see hosting.last_scan_transport).
-        self.provider_contract=provider_contract;self.contract_registry=contract_registry
+        # The contract is checked against the one registry in that module; a worker cannot bring its own.
+        self.provider_contract=provider_contract
 
     # ---- one scope
     def tick(self,scope,settings):
@@ -414,7 +415,7 @@ class ScheduledWorker:
             if not entry or entry.get('delivery_status')!='uncertain' or not entry.get('attempt_id'):
                 return dict(status='nothing_to_reconcile')
             aid=entry['attempt_id']
-        if not transport.verified(self.provider_contract,self.contract_registry):
+        if not transport.verified(self.provider_contract):
             return dict(status='uncertain',reason='no_verified_provider_contract')      # provider not even queried
         try:
             answer=status_lookup(idempotency_key=op,attempt_id=aid)
@@ -433,7 +434,7 @@ class ScheduledWorker:
                 return dict(status=entry['status'],delivery_status='sent')
             if not self.terminal_non_delivery(answer,op,aid):
                 return dict(status='uncertain',reason='no_terminal_proof_for_this_attempt')
-            if not transport.permits_retry(self.provider_contract,self.contract_registry,self.attempt_seconds):
+            if not transport.permits_retry(self.provider_contract,self.attempt_seconds):
                 mine.update(terminal_proof_not_acted_on=answer,terminal_proof_seen_at=now)   # kept as evidence only
                 return dict(status='uncertain',reason='retry_not_permitted_by_provider_contract')
             if mine['state']=='in_flight' and instant(now)<instant(mine['deadline']):

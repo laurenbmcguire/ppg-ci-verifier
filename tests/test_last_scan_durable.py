@@ -18,7 +18,15 @@ FAKE_CONTRACT = ProviderContract(provider='synthetic-test-transport', version='1
                                  retry_after_terminal_non_delivery=True, verified_by='test fixture', verified_at='2026-11-10',
                                  evidence='tests/test_last_scan_durable.py')
 FAKE_REGISTRY = {(FAKE_CONTRACT.provider, FAKE_CONTRACT.version): FAKE_CONTRACT.digest()}
-VERIFIED = dict(provider_contract=FAKE_CONTRACT, contract_registry=FAKE_REGISTRY)
+VERIFIED = dict(provider_contract=FAKE_CONTRACT)
+
+
+def trust(test, *contracts):
+    """TEST ONLY: replace the one trusted registry for the duration of a test. Production code has no such door:
+    transport.verified / permits_retry / deliver and the worker accept no registry of their own."""
+    from unittest import mock
+    patcher = mock.patch.object(transport, 'VERIFIED_CONTRACTS', {(c.provider, c.version): c.digest() for c in contracts})
+    patcher.start(); test.addCleanup(patcher.stop)
 
 
 class Base(unittest.TestCase):
@@ -437,6 +445,7 @@ class AttemptFencing(Base):
     worker_kw = VERIFIED
     def setUp(self):
         super().setUp()
+        trust(self, FAKE_CONTRACT)
         self.env, self.w, self.op = sc.ready_entry(self.store, **self.worker_kw)
         self.calls = []
 
@@ -648,11 +657,30 @@ class NoRetryByDefault(Base):
         self.assertEqual(env.state()['receipts'][op]['state'], 'draft_ready'); self.assertIn(op, env.published)   # draft kept
         return entry
 
-    def test_real_registry_is_empty(self):
+    def test_real_registry_is_empty_and_is_the_only_one(self):
+        import inspect
         self.assertEqual(dict(transport.VERIFIED_CONTRACTS), {})
         with self.assertRaises(TypeError):
             transport.VERIFIED_CONTRACTS['x'] = 'y'
-        self.assertFalse(transport.verified(FAKE_CONTRACT)); self.assertFalse(transport.permits_retry(FAKE_CONTRACT, None, 900))
+        self.assertFalse(transport.verified(FAKE_CONTRACT)); self.assertFalse(transport.permits_retry(FAKE_CONTRACT, 900))
+        self.assertEqual(list(inspect.signature(transport.verified).parameters), ['contract'])
+        self.assertEqual(list(inspect.signature(transport.permits_retry).parameters), ['contract', 'attempt_seconds'])
+        self.assertNotIn('registry', ' '.join(inspect.signature(ScheduledWorker.__init__).parameters))
+        with self.assertRaises(TypeError):
+            transport.verified(FAKE_CONTRACT, FAKE_REGISTRY)
+        with self.assertRaises(TypeError):
+            ScheduledWorker(self.store, None, None, provider_contract=FAKE_CONTRACT, contract_registry=FAKE_REGISTRY)
+
+    def test_qa_repro_injected_registry_cannot_open_deliver_or_reconcile(self):
+        env, w, op = sc.ready_entry(self.store, provider_contract=FAKE_CONTRACT); reads = env.fetches
+        w.contract_registry = FAKE_REGISTRY                      # the injected fake hash mapping from the audit
+        w.registry = FAKE_REGISTRY; w.VERIFIED_CONTRACTS = FAKE_REGISTRY
+        self.assertEqual(transport.deliver(w, env.scope, op, lambda **kw: self.fail('sender invoked')), dict(status='transport_disabled'))
+        self.assertEqual((env.fetches, env.entries()[op]['status']), (reads, 'pending'))
+        def lost(**kw): raise TimeoutError()
+        w.dispatch_test(env.scope, op, lost)                     # test transport, to get an uncertain entry
+        out = w.reconcile_test(env.scope, op, lambda **kw: self.fail('provider queried'))
+        self.assertEqual(out, dict(status='uncertain', reason='no_verified_provider_contract'))
 
     def test_no_contract_full_looking_proof_and_passed_deadline_change_nothing(self):
         self.never_retried(*self.uncertain(), reason='no_verified_provider_contract', queried=False)
@@ -665,18 +693,17 @@ class NoRetryByDefault(Base):
 
     def test_unknown_or_unlisted_or_altered_contracts_do_not_count(self):
         from dataclasses import replace
+        trust(self, FAKE_CONTRACT)                               # the trusted registry lists exactly FAKE_CONTRACT
         cases = dict(
-            contract_but_default_registry=dict(provider_contract=FAKE_CONTRACT),
-            caller_boolean=dict(provider_contract=True, contract_registry=FAKE_REGISTRY),
-            plain_dict=dict(provider_contract=dict(retry_after_terminal_non_delivery=True), contract_registry=FAKE_REGISTRY),
-            unlisted_provider=dict(provider_contract=replace(FAKE_CONTRACT, provider='unknown-provider'), contract_registry=FAKE_REGISTRY),
-            altered_after_review=dict(provider_contract=replace(FAKE_CONTRACT, sender_timeout_seconds=601), contract_registry=FAKE_REGISTRY),
-            registry_not_a_mapping=dict(provider_contract=FAKE_CONTRACT, contract_registry=[FAKE_CONTRACT.digest()]),
-            registry_says_true=dict(provider_contract=FAKE_CONTRACT, contract_registry={(FAKE_CONTRACT.provider, '1'): True}))
-        for i, (name, kw) in enumerate(cases.items()):
+            caller_boolean=True, plain_dict=dict(retry_after_terminal_non_delivery=True, provider=FAKE_CONTRACT.provider, version='1'),
+            digest_string=FAKE_CONTRACT.digest(),
+            unlisted_provider=replace(FAKE_CONTRACT, provider='unknown-provider'),
+            unlisted_version=replace(FAKE_CONTRACT, version='2'),
+            altered_after_review=replace(FAKE_CONTRACT, sender_timeout_seconds=601))
+        for i, (name, contract) in enumerate(cases.items()):
             with self.subTest(name):
                 self.store = StateStore(Path(self.folder.name) / ('u%d.db' % i))
-                self.never_retried(*self.uncertain(**kw), reason='no_verified_provider_contract', queried=False)
+                self.never_retried(*self.uncertain(provider_contract=contract), reason='no_verified_provider_contract', queried=False)
 
     def test_verified_contract_that_does_not_permit_retry_keeps_proof_as_evidence_only(self):
         from dataclasses import replace
@@ -688,31 +715,46 @@ class NoRetryByDefault(Base):
         for i, (name, contract) in enumerate(weak.items()):
             with self.subTest(name):
                 self.store = StateStore(Path(self.folder.name) / ('w%d.db' % i))
-                registry = {(contract.provider, contract.version): contract.digest()}
-                entry = self.never_retried(*self.uncertain(provider_contract=contract, contract_registry=registry),
+                trust(self, contract)
+                entry = self.never_retried(*self.uncertain(provider_contract=contract),
                                            reason='retry_not_permitted_by_provider_contract', queried=True)
                 self.assertEqual(entry['attempts'][0]['terminal_proof_not_acted_on']['proof_id'], 'synthetic-provider-record-1')
 
     def test_contract_without_at_most_once_is_not_verified_at_all(self):
         from dataclasses import replace
         contract = replace(FAKE_CONTRACT, at_most_once_per_idempotency_key=False)
-        registry = {(contract.provider, contract.version): contract.digest()}
-        self.assertFalse(transport.verified(contract, registry))
+        trust(self, contract)
+        self.assertFalse(transport.verified(contract))
         for blank in ('verified_by', 'verified_at', 'evidence'):
             c = replace(FAKE_CONTRACT, **{blank: ' '})
-            self.assertFalse(transport.verified(c, {(c.provider, c.version): c.digest()}), blank)
+            trust(self, c)
+            self.assertFalse(transport.verified(c), blank)
 
     def test_deliver_refuses_to_send_without_a_verified_contract(self):
         env, w, op = sc.ready_entry(self.store); reads = env.fetches
-        for worker in (w, env.worker(provider_contract=FAKE_CONTRACT), env.worker(provider_contract=True, contract_registry=FAKE_REGISTRY)):
+        for worker in (w, env.worker(provider_contract=FAKE_CONTRACT), env.worker(provider_contract=True)):
             self.assertEqual(transport.deliver(worker, env.scope, op, lambda **kw: self.fail('sent')), dict(status='transport_disabled'))
         self.assertEqual((env.fetches, env.entries()[op]['status']), (reads, 'pending'))     # nothing read, nothing claimed
         sent = []
         def send(**kw): sent.append(kw); return dict(operation_id=kw['idempotency_key'], attempt_id=kw['attempt_id'])
-        self.assertEqual(transport.deliver(env.worker(**VERIFIED), env.scope, op, send), dict(status='sent'))   # fake contract only
+        trust(self, FAKE_CONTRACT)                               # only inside this test process
+        self.assertEqual(transport.deliver(env.worker(**VERIFIED), env.scope, op, send), dict(status='sent'))
         self.assertEqual(len(sent), 1)
 
+    def test_no_production_code_supplies_or_replaces_the_registry(self):
+        import re
+        root = Path(__file__).resolve().parents[1]
+        for path in list((root / 'hosting').glob('*.py')) + list((root / 'api').rglob('*.py')) + list((root / 'scripts').glob('*.py')):
+            text = path.read_text(errors='ignore')
+            if path.name == 'last_scan_transport.py':
+                self.assertEqual(len(re.findall(r'^VERIFIED_CONTRACTS\s*=', text, flags=re.M)), 1)
+                self.assertIn('VERIFIED_CONTRACTS = MappingProxyType({})', text)
+                continue
+            self.assertNotIn('VERIFIED_CONTRACTS', text, path.name)
+            self.assertNotIn('contract_registry', text, path.name)
+
     def test_deadline_alone_never_closes_an_attempt_even_with_a_contract(self):
+        trust(self, FAKE_CONTRACT)
         env, w, op = sc.ready_entry(self.store, **VERIFIED)
         with self.assertRaises(Crash):
             w.dispatch_test(env.scope, op, lambda **kw: (_ for _ in ()).throw(Crash()))

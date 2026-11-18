@@ -30,23 +30,40 @@ Each step below needs its own approval. Stop at the first step that cannot be co
    Seed entries carry site names, not site ids, and do not match.
 5. **Existing scheduled reporting task.** It already builds reports for a fixed list of jobs. For each such job
    either set `externally_built: true` here or retire it there first. Do not change that schedule as part of this.
-6. **Dry run.** Call the entry point with `mode: "dry_run"` (the default). It reads no source and writes nothing.
-   Every preflight check must be `ok` and the planned scopes must be exactly the intended ones.
-7. **Approval record.** Add `activation: {approved_by, approved_at, config_digest}` where `config_digest` is the
-   value the dry run returned. Any later change to the configuration invalidates it.
-8. **Host wiring (a reviewed code change).** One authenticated route that builds `Deps` and calls `handle`:
-   the token from the host's secret store (32+ characters), the store, `runner.registry_entries(inbox)`,
-   `StoredDraftRouter(BlobArtifacts(store), assignments)`, and the read-only source adapter. Budget must stay
-   below the host's time limit (capped at 45 seconds here).
-9. **Schedule (a separate decision).** A scheduled caller with a unique `run_id` per firing. Not created here.
-10. **First live run** on one list, watched by a person; compare the draft with a hand-built report.
+6. **Three external systems this code only has interfaces for.** None is implemented, and none should be faked in
+   production:
+   - `Authorizer`: verifies the caller and returns a `Principal`. It is given the hash of the exact request body
+     so a signature can cover the timestamp and nonce. A shared static token is not accepted anywhere.
+   - `ApprovalAuthority`: stored where the runner and the configuration editor cannot write. It answers for one
+     `snapshot_digest` with `{snapshot_digest, approved_by, approved_at, principals}`.
+   - `Quota`: runs per hour for one principal and one approved snapshot.
+7. **Dry run.** Call the entry point with `mode: "dry_run"` (the default). It reads no source and writes nothing.
+   It returns `snapshot_digest`: one hash over the configuration, each routed assignment's renderer version
+   (mapping, header, pinned template, generator code, binding) and the job registry as supplied.
+8. **Approval.** A person records that `snapshot_digest` and the allowed principals in the approval authority.
+   Any change to configuration, header, mapping, template, generator code or registry changes the digest, and
+   runs are refused until it is approved again. An `activation` block inside the configuration is ignored.
+9. **Host wiring (a reviewed code change).** One route that builds `Deps` and calls `handle`. Renderers are built
+   inside `handle` from the configuration; a caller cannot supply them. Budget is capped at 45 seconds.
+10. **Schedule (a separate decision).** A scheduled caller with a unique `run_id`, a timestamp and a single-use
+    nonce per firing. Not created here.
+11. **First live run** on one list, watched by a person; compare the draft with a hand-built report.
 
-## Preflight checks returned by every call
+## What a run request must pass, in order
 
-`configuration_present`, `enabled_is_exactly_true`, `approval_matches_this_configuration`,
-`job_registry_available`, `renderer_router_available`, `source_adapter_configured`, `durable_store_ready`
-(read-only; never creates tables), `at_least_one_runnable_scope`, `no_assignment_issues`,
-`delivery_transport_disabled`.
+1. An `Authorizer` is configured, the headers are well formed, and it returns a `Principal`. Otherwise 503 or 401.
+2. POST, a plain JSON body with only the allowed fields, finite numbers, `max_scopes` a whole number.
+3. `timestamp` within 5 minutes of the host clock.
+4. For a run: a `nonce` of 16 to 200 characters.
+5. Every preflight check: `configuration_present`, `enabled_is_exactly_true`, `job_registry_available`,
+   `renderers_built_from_configuration`, `source_adapter_configured`, `durable_store_ready` (read-only),
+   `at_least_one_runnable_scope`, `no_assignment_issues`, `approval_attested_for_this_snapshot_and_principal`,
+   `quota_configured`, `delivery_transport_disabled`.
+6. The nonce and the hourly quota are taken in one transaction. A used nonce gives 409, an exhausted quota 429.
+   Only after this is any source read.
+
+Known boundaries: nonces are never pruned; the quota is a simple hourly counter; nothing limits dry runs; a
+compromised authorizer or approval authority defeats everything above; replay protection depends on the host clock.
 
 ## Delivery: disabled, and what would be needed
 
@@ -83,6 +100,7 @@ $PY scripts/last_scan_synthetic_demo.py $PWD/.tmp/demo
 
 Things worth trying to break:
 - enable a retry without editing `VERIFIED_CONTRACTS` (`NoRetryByDefault` in `tests/test_last_scan_durable.py`);
-- reach a source read or a store write through `handle` without a valid token, an exact approval, or a passing
-  preflight (`tests/test_last_scan_hosted.py`);
+- reach a source read or a store write through `handle` without a verified principal, an attested approval for the
+  exact snapshot, a fresh single-use nonce, quota, or a passing preflight (`tests/test_last_scan_hosted.py`);
+- send or retry by handing the worker a registry of your own (`NoRetryByDefault`);
 - find any import of `last_scan_*` from `api/`, `web/`, `vercel.json` or another `hosting/` module (`NotConnected`).

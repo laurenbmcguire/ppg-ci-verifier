@@ -1,8 +1,9 @@
 """Delivery transport gate for the last-scan draft pipeline. NO transport is enabled: the registry below is empty.
 
-Nothing a caller passes at run time (a flag, a lookup answer, arbitrary JSON) can enable sending or retrying. That
-takes a ``ProviderContract`` whose exact content hash is listed in ``VERIFIED_CONTRACTS`` in this file, i.e. a
-reviewed code change made after the provider's behaviour has been independently verified. Until then:
+Nothing a caller passes at run time (a flag, a lookup answer, arbitrary JSON, a registry of its own) can enable
+sending or retrying. That takes a ``ProviderContract`` whose exact content hash is listed in ``VERIFIED_CONTRACTS``
+in this file, i.e. a reviewed code change made after the provider's behaviour has been independently verified.
+The functions below read that one registry and accept no other. Until then:
   * ``deliver`` refuses to send;
   * an uncertain delivery is never retried and reconciliation does not even query a provider.
 Nothing here claims exactly-once delivery. With a verified contract the claim is only: at most one attempt is open
@@ -35,9 +36,9 @@ class ProviderContract:
         return sf.digest(asdict(self))
 
 
-def verified(contract, registry=None):
-    """True only for a contract whose exact content is listed in the registry (default: the empty one above)."""
-    registry = VERIFIED_CONTRACTS if registry is None else registry
+def verified(contract):
+    """True only for a contract whose exact content is listed in VERIFIED_CONTRACTS above. No other registry exists."""
+    registry = VERIFIED_CONTRACTS
     return (isinstance(contract, ProviderContract) and isinstance(registry, Mapping)
             and registry.get((contract.provider, contract.version)) == contract.digest()
             and contract.at_most_once_per_idempotency_key is True
@@ -45,9 +46,9 @@ def verified(contract, registry=None):
                                                                contract.verified_at, contract.evidence)))
 
 
-def permits_retry(contract, registry=None, attempt_seconds=None):
+def permits_retry(contract, attempt_seconds=None):
     """A new attempt after an unknown outcome needs every one of these. A deadline alone never does."""
-    return (verified(contract, registry) and contract.terminal_status_per_attempt is True
+    return (verified(contract) and contract.terminal_status_per_attempt is True
             and contract.honours_attempt_closed is True and contract.retry_after_terminal_non_delivery is True
             and isinstance(contract.sender_timeout_seconds, int) and not isinstance(contract.sender_timeout_seconds, bool)
             and isinstance(attempt_seconds, (int, float)) and 0 < contract.sender_timeout_seconds <= attempt_seconds)
@@ -55,6 +56,6 @@ def permits_retry(contract, registry=None, attempt_seconds=None):
 
 def deliver(worker, scope, op, sender, settings=None):
     """The only door to a sender outside tests. Closed unless the worker carries a verified provider contract."""
-    if not verified(getattr(worker, 'provider_contract', None), getattr(worker, 'contract_registry', None)):
+    if not verified(getattr(worker, 'provider_contract', None)):
         return dict(status='transport_disabled')
     return worker.dispatch_test(scope, op, sender, settings)
