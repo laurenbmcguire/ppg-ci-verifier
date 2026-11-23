@@ -15,7 +15,7 @@ SNAPSHOT = [
                dict(job='2300', numbers=['2300'], site='Hyundai_Montgomery', list_id='h-2300')]),
     dict(client='SL Alabama', key='SLAlabama', sites=[dict(site='SLAlabama_AlexanderCity', location='Alexander City')],
          jobs=[dict(job='2207', numbers=['2207'], site='SLAlabama_AlexanderCity', list_id=SL_LIST, modified='2026-11-01T10:00:00Z'),
-               dict(job='2214', numbers=['2214'], site='SLAlabama_AlexanderCity', list_id='s-2214'),
+               dict(job='2214', numbers=['2214'], site='SLAlabama_AlexanderCity', list_id='d1a655b8-dc19-4d0f-bad2-35ed9999ccc2'),   # the list now pinned in the registry
                dict(job='2300', numbers=['2300'], site='SLAlabama_AlexanderCity', list_id='s-2300')]),
 ]
 REG = registry.entries([])
@@ -58,7 +58,7 @@ class DuplicateJobNumbers(unittest.TestCase):
         from hosting.spreadsheets import inspect_spreadsheet
         r = inspect_spreadsheet('PPG_2214.xlsx', sl_daily())
         a = registry.resolve(r, 'PPG_2214.xlsx', '2214', '2026-11-06', REG, SNAPSHOT)
-        self.assertEqual((a['status'], a['client_key'], a['site']), ('matched', 'SLAlabama', 'SLAlabama_AlexanderCity'))
+        self.assertEqual((a['status'], a['client_key'], a['site']), ('verified', 'SLAlabama', 'SLAlabama_AlexanderCity'))   # 2214 is a pinned source since 2026-11-20
 
     def test_filename_that_contradicts_the_source_urls_is_a_conflict(self):
         from hosting.spreadsheets import inspect_spreadsheet
@@ -109,6 +109,62 @@ class ManualAssignment(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             with self.assertRaises(ValueError):
                 registry.assign(SpreadsheetInbox(root), 'a' * 64, dict(client_key='SLAlabama'), None, '')
+
+
+class ActiveJobSources(unittest.TestCase):
+    """The active job lists pinned on 2026-11-20: a build needs exactly one verified list for the job."""
+    PINNED = {'SLALAL-SLAL-2169': ('SLAlabama_AlexanderCity', '38718598-a97e-4388-bcc5-709ede868b21'),
+              'SLALAL-SLALANNX-2200': ('SLAlabama_AlexanderCity', 'e402d426-4595-47bc-a305-a0704df18258'),
+              'SLAL-SLAL-2214': ('SLAlabama_AlexanderCity', 'd1a655b8-dc19-4d0f-bad2-35ed9999ccc2'),
+              'SLAL-HMMA-2236': ('Hyundai_Montgomery', '9876a097-558d-4407-9b90-216d46a81217'),
+              'LSAMX-HMMA-2250': ('Hyundai_Montgomery', '4a6b1fb9-ede1-4d5c-80dd-9ad1d889df91'),
+              'BROQU-LEART1-2206': ('Lear_T1', '4cd2ca3c-c0c6-4092-8b8d-8b52ada1fb3d'),
+              'TENFM-BSAL-2228': ('BriggsStratton_Auburn', 'fe964017-6594-4f24-8e8a-deb82119418c')}
+
+    def verified(self, job):
+        return [(e['site'], e['list_id']) for e in registry.entries([]) if e.get('verified') and e.get('list_id') and registry._same_job(job, e.get('job'))]
+
+    def test_each_active_job_has_exactly_one_verified_list(self):
+        for job, source in self.PINNED.items():
+            self.assertEqual(self.verified(job), [source], job)
+
+    def test_jobs_that_were_not_pinned_still_have_none_and_2207_still_needs_its_site_named(self):
+        for job in ('SCTMFG-BSAL-2229', 'OWENS-BASCO-2230', 'SLAL-HYMOBAL-2221', 'SLTN-HMMA-2231'):
+            self.assertEqual(self.verified(job), [], job)
+        self.assertEqual(len(self.verified('SLALAL-CJAL-2207')), 2)        # the SL Alabama list and the separate Hyundai copy
+
+    def test_no_list_is_pinned_twice_and_no_pratt_list_was_added(self):
+        ids = [e['list_id'] for e in registry.SEED if e.get('list_id')]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual([e for e in registry.SEED if e['client_key'] == 'PrattWhitney' and e.get('list_id')], [])
+
+
+class OneListIsOneCandidate(unittest.TestCase):
+    """SharePoint reports each list with its site ID; a pinned entry names the site only by name. They are the same list."""
+    SID = 'ppg.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222'
+    LIVE = [dict(client='SL Alabama', key='SLAlabama', sites=[dict(site='SLAlabama_AlexanderCity', location='Alexander City')],
+                 jobs=[dict(job='2207', numbers=['2207'], site='SLAlabama_AlexanderCity', site_id=SID, list_id=SL_LIST, url='https://ppg.sharepoint.com/sites/SLAlabama_AlexanderCity/Lists/Data%202207')])]
+
+    def test_a_pinned_list_seen_on_sharepoint_with_its_site_id_is_one_candidate(self):
+        sl = [c for c in registry.candidates_for('2207', REG, self.LIVE) if c['client_key'] == 'SLAlabama']
+        self.assertEqual(len(sl), 1)
+        self.assertEqual((sl[0]['verified'], sl[0]['list_id'], sl[0]['site_id'], bool(sl[0]['url'])), (True, SL_LIST, self.SID, True))
+
+    def test_a_named_report_for_a_pinned_job_is_not_called_ambiguous(self):
+        a = registry.resolve({}, 'SL Alabama - 2207 - 2026-11-06.xlsx', '2207', '2026-11-06', REG, self.LIVE)
+        self.assertEqual((a['status'], a['client_key'], a['list_id']), ('verified', 'SLAlabama', SL_LIST))
+
+    def test_a_different_site_id_is_a_different_list_and_stays_separate(self):
+        other = [dict(self.LIVE[0], jobs=[dict(self.LIVE[0]['jobs'][0], site_id=self.SID.replace('2222', '3333'))])]
+        saved = [dict(client_key='SLAlabama', client='SL Alabama', job='2207', site='SLAlabama_AlexanderCity', site_id=self.SID, list_id=SL_LIST, verified=True)]
+        sl = [c for c in registry.candidates_for('2207', registry.entries(saved), other) if c['client_key'] == 'SLAlabama']
+        self.assertEqual(len(sl), 2)                                             # two site IDs disagree: nothing is merged
+
+    def test_a_saved_entry_with_the_site_id_replaces_the_pinned_one_for_the_same_list(self):
+        saved = [dict(client_key='SLAlabama', client='SL Alabama', job='2207', site='SLAlabama_AlexanderCity', site_id=self.SID, list_id=SL_LIST, verified=True)]
+        sl = [e for e in registry.entries(saved) if e.get('list_id') == SL_LIST]
+        self.assertEqual([(e.get('site_id'), e['verified']) for e in sl], [(self.SID, True)])
+        self.assertEqual(len([e for e in registry.entries([]) if e.get('list_id') == SL_LIST]), 1)   # with nothing saved the pinned entry stands
 
 
 if __name__ == '__main__':

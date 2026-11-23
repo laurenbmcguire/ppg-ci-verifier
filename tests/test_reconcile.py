@@ -13,7 +13,7 @@ def sl_daily(**kwargs):
     # Successful reconciliation supplies measured reject counts, including explicit zeros.
     return _sl_daily(**dict({"nok_blank": False}, **kwargs))
 
-SITE, LIST = 'SLAlabama_AlexanderCity', 'list-2214'
+SITE, LIST = 'SLAlabama_AlexanderCity', 'd1a655b8-dc19-4d0f-bad2-35ed9999ccc2'   # the 2214 list as pinned in hosting.registry.SEED
 COLS = [dict(name='Date', displayName='Date', dateTime=dict(format='dateOnly')), dict(name='Date0', displayName='Scan time', dateTime=dict(format='dateTime')),
         dict(name='Identifier', displayName='Identifier'), dict(name='QuantityInspected', displayName='Quantity Inspected'),
         dict(name='QuantityOK', displayName='Quantity OK'), dict(name='QtyNOK', displayName='Qty NOK')]
