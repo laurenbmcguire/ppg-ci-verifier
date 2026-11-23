@@ -1148,6 +1148,13 @@
     for (const f of fixes) if (!used.has(f.id)) items.push(make(null, f));
     return items;
   }
+  // Errors Fix with AI set aside because Dex had no correct value for them. They are still wrong in the report, so
+  // every count on the page includes them: a report is never shown with 0 errors while some were not corrected.
+  function fdNotCorrected(items) {
+    const dec = store.get(decisionsKey(), {});
+    return (items || fdItems()).filter(it => ['rejected', 'kept'].includes(it.state)
+      && (/Not corrected\.\s*$/.test(it.note || '') || (!it.fp && it.fix && dec[it.fix.id]?.notCorrected === true)));
+  }
   function fdRecordCount(items) {
     return new Set(items.map(x => x.sheet && x.row ? JSON.stringify([x.sheet, x.row]) : x.key)).size;
   }
@@ -1806,6 +1813,9 @@
     const r = state.report, left = r && state.fixes ? (state.fdItems?.length ? state.fdItems : fdItems()).filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
     // Zero possible errors is Completed, also when a SharePoint check note remains: those notes stay readable in the
     // hover text and under "SharePoint check notes", they are no longer shown as a block.
+    const notCorrected = left === 0 ? fdNotCorrected(state.fdItems?.length ? state.fdItems : null).length : 0;
+    if (notCorrected) return {tone: 'amber', icon: st.icon, text: `${plural(notCorrected, 'error')} not corrected`,
+      why: 'Fix with AI left these exactly as written because Dex had no correct value for them. They are still wrong in the report. Open Ignored to bring one back and fix it by hand.'};
     if (left === 0 && !['Check unavailable', 'Checks out of date'].includes(st.text)) {
       const notes = (r?.holds || []).filter(x => x.hard && x.code !== 'awaiting_source_owner').map(x => x.text).filter(Boolean);
       return {tone: 'green', icon: 'ok', text: 'Completed', why: [st.tone === 'amber' ? st.text : '', st.tone === 'amber' ? st.why : '', ...notes].filter(Boolean).join('. ')};
@@ -2342,7 +2352,7 @@
       if (whole) {
         const guesses = fdItems().filter(it => it.state === 'open' && !it.fp && it.fix), dec = store.get(decisionsKey(), {});
         for (const it of guesses) {
-          dec[it.fix.id] = {...(dec[it.fix.id] || {}), state: 'rejected'};
+          dec[it.fix.id] = {...(dec[it.fix.id] || {}), state: 'rejected', notCorrected: true};
           unsolved.push({key: it.key, where: [it.fix.sheet, it.fix.cell].filter(Boolean).join(' ') || 'Whole report', text: String(it.text || it.fix.reason || 'Suggested correction not applied').slice(0, 200)});
         }
         if (guesses.length) { store.set(decisionsKey(), dec); state.fdItems = null; }
@@ -2351,7 +2361,7 @@
       state.fdAIRun = {...run, leftAsWritten, unsolved, summary: true}; drawSide();
       globalThis.setTimeout?.(() => { const side = document.getElementById('side'); if (side) side.scrollTop = 0; }, 0);
       toast(`${run.manual ? `You changed ${plural(run.fixed, 'cell')}` : run.fixed ? `Dex fixed ${plural(run.fixed, 'cell')}` : 'Dex had nothing to change'}${leftAsWritten ? ` and left ${leftAsWritten} as written` : ''}${unsolved.length ? `. ${plural(unsolved.length, 'error')} Dex could not correct ${unsolved.length === 1 ? 'was' : 'were'} left exactly as written (see the revision summary)` : ''}. ` +
-        (left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you (serious, or different from SharePoint): ${left === 1 ? 'it is' : 'they are'} listed on the right.` : 'No possible errors left.'));   // a result, not a failure: never shown as an error message
+        (left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you (serious, or different from SharePoint): ${left === 1 ? 'it is' : 'they are'} listed on the right.` : unsolved.length ? '' : 'No possible errors left.'));   // a result, not a failure: never shown as an error message
     })().finally(() => { state.fdAfterAIPending = false; if (state.fdAIRun?.finishing) { state.fdAIRun = {...state.fdAIRun, finishing: false, summary: true}; if (state.report?.file_hash === state.fdAIRun.hash) drawSide(); } });
   }
   function fdSummaryWhenReady() {
@@ -2741,7 +2751,8 @@
     const show = v => v === '' || v == null ? 'blank' : '“' + String(v).slice(0, 80) + '”';
     const list = (title, rows) => rows.length ? h('details', {class: 'fd-saved-changes'}, h('summary', {}, title),
       h('ul', {class: 'fd-fixed-list'}, rows.slice(0, 200).map(x => h('li', {}, h('b', {}, x.where), ` ${show(x.before)} → ${show(x.after)}`)), rows.length > 200 ? h('li', {}, `…and ${rows.length - 200} more (see History).`) : null)) : null;
-    return h('div', {class: 'fd-airun fd-revision ' + (left ? '' : 'good'), role: 'status'},
+    const unsolvedN = (run.unsolved || []).length;
+    return h('div', {class: 'fd-airun fd-revision ' + (left || unsolvedN ? '' : 'good'), role: 'status'},
       h('h3', {}, 'Revision summary'),
       h('ul', {class: 'fd-revision-counts'},
         run.tidy ? null : h('li', {}, h('b', {}, String(run.fixed || 0)), run.manual ? (run.fixed === 1 ? ' cell changed by you' : ' cells changed by you') : run.fixed === 1 ? ' cell fixed by Dex' : ' cells fixed by Dex'),
@@ -2749,8 +2760,10 @@
         run.look ? h('li', {}, 'Report colours made consistent (one cream, no yellow patches); no value was changed') : null,
         run.tidy || run.manual ? null : h('li', {}, h('b', {}, String(run.leftAsWritten || 0)), ' left as written'),
         (run.unsolved || []).length ? h('li', {class: 'fd-revision-open'}, h('b', {}, String(run.unsolved.length)), run.unsolved.length === 1 ? ' error Dex could not correct: left exactly as written, not checked by anyone' : ' errors Dex could not correct: left exactly as written, not checked by anyone') : null,
-        h('li', {class: left ? 'fd-revision-open' : ''}, h('b', {}, String(left)), left === 1 ? ' possible error still needs you' : ' possible errors still need you')),
-      left === 0 ? h('p', {class: 'fd-hint'}, 'Nothing is left to fix, so the Fix buttons are not shown. Download the fixed report below.') : null,
+        // One number: with errors not corrected, the summary never also says that 0 are left.
+        left || !unsolvedN ? h('li', {class: left ? 'fd-revision-open' : ''}, h('b', {}, String(left)), left === 1 ? ' possible error still needs you' : ' possible errors still need you') : null),
+      left === 0 && !unsolvedN ? h('p', {class: 'fd-hint'}, 'Nothing is left to fix, so the Fix buttons are not shown. Download the fixed report below.') : null,
+      left === 0 && unsolvedN ? h('p', {class: 'fd-hint'}, `The report still has ${plural(unsolvedN, 'error')} that ${unsolvedN === 1 ? 'was' : 'were'} not corrected. The count at the top shows the same number.`) : null,
       run.fixed ? h('p', {class: 'fd-hint'}, `${run.reused ? 'Matches saved version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept unchanged.`) : null,
       (run.unsolved || []).length ? h('details', {class: 'fd-saved-changes', open: true}, h('summary', {}, `See the ${plural(run.unsolved.length, 'error')} Dex could not correct`),
         h('ul', {class: 'fd-fixed-list'}, run.unsolved.slice(0, 200).map(x => h('li', {}, h('b', {}, x.where), ' ' + x.text)), run.unsolved.length > 200 ? h('li', {}, `…and ${run.unsolved.length - 200} more (see History).`) : null),
@@ -3737,13 +3750,14 @@
     const open = state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
     // The number never goes blank while the report refreshes itself (a recheck or the SharePoint check reloads it): the
     // last count for this report stays, or the count the report list already showed, until the fresh one arrives.
+    const notCorrected = open == null ? 0 : fdNotCorrected().length;
     if (open != null) state.fdLastCount = {hash: r.file_hash, n: open};
     const listed = rv?.counts || {}, held = open != null ? null : state.fdLastCount?.hash === r.file_hash ? state.fdLastCount.n
       : [listed.high, listed.medium, listed.low].every(Number.isFinite) ? listed.high + listed.medium + listed.low : null;
     side.replaceChildren(h('header', {class: 'fd-apphead'},
-        h('p', {class: 'fd-errcount' + (open === 0 ? ' done' : ''), title: open == null && held != null ? 'Updating…' : null}, open == null ? (held == null ? 'Counting possible errors…' : plural(held, 'possible error')) : open === 0 ? [icon('ok', 18), ' 0 possible errors'] : plural(open, 'possible error')),
+        h('p', {class: 'fd-errcount' + (open === 0 && !notCorrected ? ' done' : ''), id: 'fd-errcount', title: open == null && held != null ? 'Updating…' : null}, open == null ? (held == null ? 'Counting possible errors…' : plural(held, 'possible error')) : open === 0 && notCorrected ? `${plural(notCorrected, 'error')} not corrected` : open === 0 ? [icon('ok', 18), ' 0 possible errors'] : plural(open, 'possible error') + (notCorrected ? ` · ${notCorrected} not corrected` : '')),
         // Nothing left: the copy with every fix applied is one click away, right at the top.
-        open === 0 ? h('a', {class: 'btn primary', id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
+        open === 0 ? h('a', {class: 'btn' + (notCorrected ? '' : ' primary'), id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
         // Change any cell by hand, whether or not it was flagged.
         // Fix with AI is offered on every report. With nothing open it says so instead of being hidden or greyed out.
         h('button', {type: 'button', class: 'btn', id: 'fd-ai-any', onclick: () => fdAIStart(null, {everything: true})}, 'Fix with AI'),
