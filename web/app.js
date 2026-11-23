@@ -1155,6 +1155,19 @@
     return (items || fdItems()).filter(it => ['rejected', 'kept'].includes(it.state)
       && (/Not corrected\.\s*$/.test(it.note || '') || (!it.fp && it.fix && dec[it.fix.id]?.notCorrected === true)));
   }
+  // One number everywhere. "Possible errors" are the errors the checks listed: the same ones the report list counts.
+  // A suggested change that belongs to no listed error (a blank header Dex can fill in) is named beside that number,
+  // never added to it, so the report page and the report list always show the same count.
+  function fdOpenCounts(items) {
+    const open = (items || fdItems()).filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state));
+    const errors = open.filter(it => it.issue).length;
+    return {open: open.length, errors, suggested: open.length - errors};
+  }
+  function fdOpenWords(c, tail) {
+    const extra = c.suggested ? plural(c.suggested, 'suggested change') : '';
+    if (!c.errors) return extra ? `${extra}${tail ? ' to accept or ignore' : ''}` : plural(0, 'possible error') + (tail || '');
+    return plural(c.errors, 'possible error') + (tail || '') + (extra ? ` · ${extra}` : '');
+  }
   function fdRecordCount(items) {
     return new Set(items.map(x => x.sheet && x.row ? JSON.stringify([x.sheet, x.row]) : x.key)).size;
   }
@@ -1813,6 +1826,7 @@
     const r = state.report, left = r && state.fixes ? (state.fdItems?.length ? state.fdItems : fdItems()).filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
     // Zero possible errors is Completed, also when a SharePoint check note remains: those notes stay readable in the
     // hover text and under "SharePoint check notes", they are no longer shown as a block.
+    const counts = r && state.fixes ? fdOpenCounts(state.fdItems?.length ? state.fdItems : null) : null;
     const notCorrected = left === 0 ? fdNotCorrected(state.fdItems?.length ? state.fdItems : null).length : 0;
     if (notCorrected) return {tone: 'amber', icon: st.icon, text: `${plural(notCorrected, 'error')} not corrected`,
       why: 'Fix with AI left these exactly as written because Dex had no correct value for them. They are still wrong in the report. Open Ignored to bring one back and fix it by hand.'};
@@ -1832,10 +1846,10 @@
       // Only a SharePoint check note and no serious error: say what is left to do, not "Blocked". The note stays in the hover text.
       // One number everywhere: the same count of possible errors the report list shows, with the serious ones named
       // beside it instead of replacing it.
-      if (left) return {...(serious ? st : {tone: 'amber', icon: st.icon}), text: `${plural(left, 'possible error')} to fix or ignore${serious ? ` (${serious} serious)` : ''}`, why};
+      if (left) return {...(serious ? st : {tone: 'amber', icon: st.icon}), text: `${fdOpenWords(counts, ' to fix or ignore')}${serious ? ` (${serious} serious)` : ''}`, why};
       return {...st, text: serious ? `${plural(serious, 'serious error')} to fix or ignore` : short || st.text, why};
     }
-    if (st.next === 'review' && left) return {...st, text: `${plural(left, 'possible error')} to fix or ignore`};
+    if (st.next === 'review' && left) return {...st, text: fdOpenWords(counts, ' to fix or ignore')};
     if (st.next === 'review') return {...st, text: 'Review needed' + (st.text && !/to review$/.test(st.text) ? ': ' + st.text : '')};
     return st;
   }
@@ -3747,15 +3761,15 @@
     if (state.sideTab === 'facts') state.sideTab = 'fixes';
     const rv = r.review, tab = state.sideTab || 'fixes';
     const body = h('div', {class: 'sidebody', id: 'side-body'});
-    const open = state.fixes ? fdItems().filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state)).length : null;
+    const openCounts = state.fixes ? fdOpenCounts() : null, open = openCounts ? openCounts.open : null;
     // The number never goes blank while the report refreshes itself (a recheck or the SharePoint check reloads it): the
     // last count for this report stays, or the count the report list already showed, until the fresh one arrives.
     const notCorrected = open == null ? 0 : fdNotCorrected().length;
-    if (open != null) state.fdLastCount = {hash: r.file_hash, n: open};
+    if (open != null) state.fdLastCount = {hash: r.file_hash, n: openCounts.errors};
     const listed = rv?.counts || {}, held = open != null ? null : state.fdLastCount?.hash === r.file_hash ? state.fdLastCount.n
       : [listed.high, listed.medium, listed.low].every(Number.isFinite) ? listed.high + listed.medium + listed.low : null;
     side.replaceChildren(h('header', {class: 'fd-apphead'},
-        h('p', {class: 'fd-errcount' + (open === 0 && !notCorrected ? ' done' : ''), id: 'fd-errcount', title: open == null && held != null ? 'Updating…' : null}, open == null ? (held == null ? 'Counting possible errors…' : plural(held, 'possible error')) : open === 0 && notCorrected ? `${plural(notCorrected, 'error')} not corrected` : open === 0 ? [icon('ok', 18), ' 0 possible errors'] : plural(open, 'possible error') + (notCorrected ? ` · ${notCorrected} not corrected` : '')),
+        h('p', {class: 'fd-errcount' + (open === 0 && !notCorrected ? ' done' : ''), id: 'fd-errcount', title: open == null && held != null ? 'Updating…' : null}, open == null ? (held == null ? 'Counting possible errors…' : plural(held, 'possible error')) : open === 0 && notCorrected ? `${plural(notCorrected, 'error')} not corrected` : open === 0 ? [icon('ok', 18), ' 0 possible errors'] : fdOpenWords(openCounts) + (notCorrected ? ` · ${notCorrected} not corrected` : '')),
         // Nothing left: the copy with every fix applied is one click away, right at the top.
         open === 0 ? h('a', {class: 'btn' + (notCorrected ? '' : ' primary'), id: 'fd-download-top', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, r.fixed_from ? 'Download fixed report' : 'Download report') : null,
         // Change any cell by hand, whether or not it was flagged.

@@ -28,7 +28,7 @@ test('the status line says how many were not corrected instead of Completed',()=
  assert.equal(shown.text,'19 errors not corrected');assert.notEqual(shown.tone,'green');assert.match(shown.why,/still wrong in the report/);
  assert.equal(harness({items:notCorrected(1)}).fdShown(st).text,'1 error not corrected');
  assert.equal(harness({items:[{key:'i',fp:'x',state:'kept',note:'A real second inspection.'}]}).fdShown(st).text,'Completed');
- assert.match(harness({items:[...notCorrected(2),{key:'o',fp:'z',state:'open',note:''}]}).fdShown(st).text,/^1 possible error to fix or ignore/);
+ assert.match(harness({items:[...notCorrected(2),{key:'o',fp:'z',issue:{key:'o'},state:'open',note:''}]}).fdShown(st).text,/^1 possible error to fix or ignore/);
 });
 
 test('the revision summary gives one number: never 19 not corrected beside 0 left',()=>{
@@ -53,7 +53,24 @@ test('the count at the top of the report uses the same number and is not shown a
  const head=between("h('p', {class: 'fd-errcount'","h('button', {type: 'button', class: 'btn', id: 'fd-ai-any'");
  assert.match(head,/open === 0 && !notCorrected \? ' done' : ''/);
  assert.match(head,/open === 0 && notCorrected \? `\$\{plural\(notCorrected, 'error'\)\} not corrected`/);
- assert.match(head,/plural\(open, 'possible error'\) \+ \(notCorrected \? ` · \$\{notCorrected\} not corrected` : ''\)/);
+ assert.match(head,/fdOpenWords\(openCounts\) \+ \(notCorrected \? ` · \$\{notCorrected\} not corrected` : ''\)/);
  assert.match(source,/state: 'rejected', notCorrected: true\}/);
  assert.match(source,/unsolved\.length \? '' : 'No possible errors left\.'/);
+});
+
+test('the report page counts the same errors as the report list; suggested changes are named beside the number',()=>{
+ const err=(k,state='open')=>({key:k,fp:k,issue:{key:k},state,note:''}),sug=(k,state='open')=>({key:'fix:'+k,fix:{id:k},state,note:''});
+ // The Nov 21 case: the list showed 9, the page showed 11 because two blank-header suggestions were added in.
+ const items=[...Array.from({length:9},(_,i)=>err('e'+i)),sug('d5'),sug('d6'),err('done','kept')],ctx=harness({items});
+ const c=ctx.fdOpenCounts();assert.deepEqual({...c},{open:11,errors:9,suggested:2});
+ assert.equal(ctx.fdOpenWords(c),'9 possible errors · 2 suggested changes');
+ const st={tone:'red',icon:'stop',text:'Blocked',next:'blockers'};
+ assert.equal(ctx.fdShown(st).text,'9 possible errors to fix or ignore · 2 suggested changes');
+ assert.equal(ctx.fdShown({tone:'amber',icon:'i',text:'x',next:'review'}).text,'9 possible errors to fix or ignore · 2 suggested changes');
+ const only=harness({items:[sug('d5')]});
+ assert.equal(only.fdOpenWords(only.fdOpenCounts()),'1 suggested change');assert.equal(only.fdShown(st).text,'1 suggested change to accept or ignore');
+ const plain=harness({items:[err('a'),err('b','deferred')]});
+ assert.equal(plain.fdOpenWords(plain.fdOpenCounts()),'2 possible errors');assert.equal(plain.fdShown(st).text,'2 possible errors to fix or ignore');
+ assert.equal(harness().fdOpenWords({open:0,errors:0,suggested:0}),'0 possible errors');
+ assert.match(source,/state\.fdLastCount = \{hash: r\.file_hash, n: openCounts\.errors\}/);
 });
