@@ -167,6 +167,56 @@ class OneListIsOneCandidate(unittest.TestCase):
         self.assertEqual(len([e for e in registry.entries([]) if e.get('list_id') == SL_LIST]), 1)   # with nothing saved the pinned entry stands
 
 
+class ExactSiteAndListBeforeVerification(unittest.TestCase):
+    """A list is its exact site ID and list ID. A pin known only by site name is matched after everything is collected."""
+    A = 'ppg.sharepoint.com,aaaaaaaa-0000-0000-0000-000000000000,aaaaaaaa-1111-1111-1111-111111111111'
+    B = 'ppg.sharepoint.com,bbbbbbbb-0000-0000-0000-000000000000,bbbbbbbb-1111-1111-1111-111111111111'
+
+    def live(self, *site_ids):
+        return [dict(client='SL Alabama', key='SLAlabama', sites=[dict(site='SLAlabama_AlexanderCity', location='Alexander City')],
+                     jobs=[dict(job='2207', numbers=['2207'], site='SLAlabama_AlexanderCity', site_id=sid, list_id=SL_LIST, url=f'https://x/{sid[19:27]}') for sid in site_ids])]
+
+    def sl(self, cands):
+        return sorted(((c.get('site_id'), c['verified']) for c in cands if c['client_key'] == 'SLAlabama'), key=str)
+
+    def test_two_site_ids_for_one_pinned_name_stay_ambiguous_in_either_discovery_order(self):
+        for order in ((self.A, self.B), (self.B, self.A)):
+            cands = registry.candidates_for('2207', REG, self.live(*order))
+            self.assertEqual(self.sl(cands), [(self.A, False), (self.B, False)], order)       # the pin verified neither one
+            self.assertTrue(all(c.get('name_only_entry_unresolved') for c in cands if c['client_key'] == 'SLAlabama'))
+            a = registry.resolve({}, 'SL Alabama - 2207 - 2026-11-06.xlsx', '2207', '2026-11-06', REG, self.live(*order))
+            self.assertEqual(a['status'], 'ambiguous', order)
+            self.assertIsNone(a.get('list_id'))
+
+    def test_the_same_holds_when_the_two_site_ids_are_saved_entries_in_either_order(self):
+        saved = [dict(client_key='SLAlabama', client='SL Alabama', job='2207', site='SLAlabama_AlexanderCity', site_id=sid, list_id=SL_LIST, verified=False) for sid in (self.A, self.B)]
+        for order in (saved, saved[::-1]):
+            entries = registry.entries(order)
+            self.assertEqual(len([e for e in entries if e.get('list_id') == SL_LIST]), 3)     # the pin and both saved entries: nothing resolved
+            self.assertEqual(self.sl(registry.candidates_for('2207', entries, [])), [(self.A, False), (self.B, False)])
+            self.assertEqual(registry.resolve({}, 'SL Alabama - 2207.xlsx', '2207', '2026-11-06', entries, [])['status'], 'ambiguous')
+
+    def test_one_exact_match_is_resolved_and_verified_wherever_it_appears(self):
+        other_list = dict(job='2207', numbers=['2207'], site='SLAlabama_AlexanderCity', site_id=self.B, list_id='another-list')
+        for jobs in ([self.live(self.A)[0]['jobs'][0], other_list], [other_list, self.live(self.A)[0]['jobs'][0]]):
+            snap = [dict(self.live(self.A)[0], jobs=jobs)]
+            got = {c['list_id']: (c.get('site_id'), c['verified']) for c in registry.candidates_for('2207', REG, snap) if c['client_key'] == 'SLAlabama'}
+            self.assertEqual(got, {SL_LIST: (self.A, True), 'another-list': (self.B, False)})
+
+    def test_a_saved_mapping_for_another_job_neither_hides_nor_inherits_the_pin(self):
+        other_job = dict(client_key='SLAlabama', client='SL Alabama', job='2300', site='SLAlabama_AlexanderCity', site_id=self.A, list_id=SL_LIST, verified=False)
+        entries = registry.entries([other_job])
+        pin = [e for e in entries if e.get('list_id') == SL_LIST and str(e.get('job')) == '2207']
+        self.assertEqual([(e.get('site_id'), e['verified']) for e in pin], [(None, True)])           # the 2207 pin is still there, untouched
+        saved = [e for e in entries if str(e.get('job')) == '2300']
+        self.assertEqual([(e['site_id'], e['verified']) for e in saved], [(self.A, False)])            # and 2300 did not become verified
+        self.assertEqual([(c['job'], c['verified']) for c in registry.candidates_for('2300', entries, [])], [('2300', False)])
+        self.assertEqual(self.sl(registry.candidates_for('2207', entries, [])), [(None, True)])
+        # the reverse: a saved, verified 2207 entry with the site ID does not verify a pin for another job on the same list
+        both = registry.entries([dict(other_job, job='2207', verified=True), other_job])
+        self.assertEqual(sorted((str(e['job']), e['verified']) for e in both if e.get('list_id') == SL_LIST), [('2207', True), ('2300', False)])
+
+
 if __name__ == '__main__':
     unittest.main()
 

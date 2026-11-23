@@ -329,7 +329,8 @@ def _build_binding(inbox, job, source=None):
     """Select only a verified registry source; explicit source narrows, never grants."""
     from hosting import registry, sharepoint
     entries = [e for e in registry.entries(inbox.setting(registry.REGISTRY_KEY, []))
-               if e.get('verified') and e.get('list_id') and registry._same_job(job,e.get('job'))]
+               if e.get('verified') and e.get('list_id') and registry._same_job(job,e.get('job'))
+               and e.get('production') is not False and e['list_id'] not in registry.not_for_production()]   # never a build source
     if source is not None and not isinstance(source,dict):
         raise ApiError(400,'source must identify a verified site/list object.')
     if source:

@@ -25,10 +25,14 @@ SEED = [
          list_id='47f89ceb-d8b9-45c3-932a-66d46e3f4272', verified=True, separate=True,
          note='A separate Hyundai list with the same label. It never overrides the SL Alabama 2207 list.'),
     # Active job lists, 2026-11-20. Each list ID was read from the SharePoint site itself on that date (list title and ID
-    # matched) at the operations owner's direction. Empty same-label copies ("2169 #2", the Hyundai copy of 2207) are
-    # not listed here and are never chosen.
+    # matched) at the operations owner's direction.
     dict(client_key='SLAlabama', client='SL Alabama', site='SLAlabama_AlexanderCity', location='Alexander City', job='2169',
          list_id='38718598-a97e-4388-bcc5-709ede868b21', verified=True, note='Data #2169-SLALAL-SLAL.'),
+    # The second list labelled 2169. It is not empty, but the rows seen in it carry no authoritative work date, so it is
+    # kept apart: never verified, never chosen by itself, and not a source for production reports.
+    dict(client_key='SLAlabama', client='SL Alabama', site='SLAlabama_AlexanderCity', location='Alexander City', job='2169',
+         list_id='b85d1fdb-d7b3-4f5c-8223-8d8f737e06d5', verified=False, separate=True, production=False,
+         note='Data #2169-SLALAL-SLAL #2: secondary list; rows lack an authoritative work date.'),
     dict(client_key='SLAlabama', client='SL Alabama', site='SLAlabama_AlexanderCity', location='Alexander City', job='2200',
          list_id='e402d426-4595-47bc-a305-a0704df18258', verified=True, note='Data #2200-SLALAL-SLALANNX.'),
     dict(client_key='SLAlabama', client='SL Alabama', site='SLAlabama_AlexanderCity', location='Alexander City', job='2214',
@@ -46,6 +50,11 @@ SEED = [
     dict(client_key='PrattWhitney', client='Pratt & Whitney', source='DCA Main Audit', job=None, verified=True, note='No verified job number.'),
     dict(client_key='PrattWhitney', client='Pratt & Whitney', source='DCA Multi-Pack Audit', job=None, verified=True, note='No verified job number.'),
 ]
+def not_for_production():
+    """List IDs pinned as not a source for production reports. A saved entry cannot lift this."""
+    return {e['list_id'] for e in SEED if e.get('production') is False and e.get('list_id')}
+
+
 RESOLVED = ('manual', 'verified', 'matched', 'source')
 NEEDS_PERSON = ('ambiguous', 'conflict', 'unmatched')
 
@@ -64,42 +73,90 @@ def _same_job(a, b):
     return _n(a) == _n(b) or bool(_nums(a) & _nums(b) and len(_nums(a)) == 1 and _nums(a) == _nums(b))
 
 
+def _job_key(job):
+    """What makes two entries the same job: its number when it has exactly one, else its whole normalised label."""
+    nums = _nums(job)
+    return ('n', next(iter(nums))) if len(nums) == 1 else ('t', _n(job))
+
+
 def entries(saved):
-    """Seed entries plus the ones people verified in the app (theirs win on the same client/site/job/source)."""
+    """Seed entries plus the ones people verified in the app (theirs win on the same client/site/job/source).
+
+    One list for one job is one entry. An entry that names its site only by name is resolved to the entry for the same
+    client, site name, list and JOB that carries the site ID, but only when exactly one site ID is on record for it. Then
+    the entry with the site ID is kept and a pin's verification carries over to it. Two different site IDs are a
+    disagreement: nothing is resolved and every entry stays as it is. An entry for another job never replaces, hides or
+    inherits from this one, even on the same list."""
     out = {}
     for e in SEED + list(saved or []):
         out[(e.get('client_key'), e.get('site_id') or e.get('site'), str(e.get('job')), e.get('list_id'), e.get('source'))] = e
-    # One list is one entry. A pinned entry that names its site only by name and a saved entry for the same client, site
-    # name and list that also carries the site ID are the same list: the one with the site ID is kept.
-    with_id = {(e.get('client_key'), e.get('site'), e.get('list_id')) for e in out.values() if e.get('list_id') and e.get('site') and e.get('site_id')}
-    return [e for e in out.values() if e.get('site_id') or (e.get('client_key'), e.get('site'), e.get('list_id')) not in with_id]
+    def group(e):
+        return (e.get('client_key'), e.get('site'), e.get('list_id'), _job_key(e.get('job')))
+    ids, named = {}, {}
+    for e in out.values():
+        if e.get('list_id') and e.get('site') and e.get('job'):
+            (ids.setdefault(group(e), set()).add(e['site_id']) if e.get('site_id') else named.setdefault(group(e), []).append(e))
+    result = []
+    for e in out.values():
+        g = group(e) if e.get('list_id') and e.get('site') and e.get('job') else None
+        if g and not e.get('site_id') and len(ids.get(g, ())) == 1:
+            continue                                   # resolved to the one entry that carries the site ID (below)
+        if g and e.get('site_id') and len(ids[g]) == 1 and any(n.get('verified') for n in named.get(g, ())) and not e.get('verified'):
+            e = dict(e, verified=True)
+        result.append(e)
+    return result
 
 
 def candidates_for(job, registry, snapshot):
-    """Every client list that carries this job label: verified registry entries and SharePoint job lists."""
-    found = {}
+    """Every client list that carries this job label: verified registry entries and SharePoint job lists.
+
+    A list is identified by its exact site ID and list ID. Everything that carries a site ID is collected first; only
+    then is an entry known by site name alone matched against them, so the answer does not depend on the order in
+    which lists were discovered. One exact match: they are the same list, and a pin's verification applies to it. Two
+    exact matches with different site IDs: the name does not say which is meant, so the pin verifies neither and both
+    stay as separate, unverified candidates for a person to choose between."""
+    exact, loose = {}, []
+    def take(c):
+        if c.get('site_id'):
+            key = (c['client_key'], c['site_id'], c.get('list_id'))
+            if key in exact:
+                was = exact[key]
+                merged = dict(c, **{k: v for k, v in was.items() if v is not None}) if was.get('origin') == 'registry' else dict(was, **{k: v for k, v in c.items() if v is not None})
+                merged['verified'] = bool(was.get('verified') or c.get('verified'))
+                merged['origin'] = 'registry' if 'registry' in (was.get('origin'), c.get('origin')) else 'sharepoint'
+                merged['url'] = was.get('url') or c.get('url')
+                exact[key] = merged
+            else:
+                exact[key] = c
+        else:
+            loose.append(c)
     for e in registry:
         if e.get('job') and _same_job(job, e['job']):
-            found[(e['client_key'], e.get('site_id') or e.get('site'), e.get('list_id'))] = dict(e, verified=bool(e.get('verified')), origin='registry')
+            take(dict(e, verified=bool(e.get('verified')), origin='registry'))
     for c in snapshot or []:
         for j in c.get('jobs') or []:
             if _same_job(job, j.get('job')):
-                key = (c['key'], j.get('site_id') or j.get('site'), j.get('list_id'))
-                # A registry entry saved by site name and the same list seen on SharePoint by site ID are one list, not
-                # two: same client, same site name, same list ID, and no site ID that disagrees. Without this a pinned
-                # job would show up twice and read as "several lists carry this job label".
-                if key not in found:
-                    matches = [k for k, v in found.items() if v.get('client_key') == c['key'] and v.get('site') == j.get('site') and v.get('list_id') == j.get('list_id')
-                               and (not v.get('site_id') or not j.get('site_id') or v.get('site_id') == j.get('site_id'))]
-                    if len(matches) == 1:
-                        key = matches[0]
-                if key in found:
-                    found[key].setdefault('url', j.get('url'))
-                    if j.get('site_id') and not found[key].get('site_id'):
-                        found[key]['site_id'] = j['site_id']
-                    continue
-                found[key] = dict(client_key=c['key'], client=c.get('client'), site=j.get('site'), job=j.get('job'),
-                                  site_id=j.get('site_id'), list_id=j.get('list_id'), url=j.get('url'), verified=False, origin='sharepoint')
+                take(dict(client_key=c['key'], client=c.get('client'), site=j.get('site'), job=j.get('job'),
+                          site_id=j.get('site_id'), list_id=j.get('list_id'), url=j.get('url'), verified=False, origin='sharepoint'))
+    found = dict(exact)
+    for c in sorted(loose, key=lambda c: c.get('origin') != 'registry'):       # registry entries first, whatever order they came in
+        same = [k for k, v in exact.items() if v.get('client_key') == c['client_key'] and v.get('site') == c.get('site') and v.get('list_id') == c.get('list_id')]
+        if len(same) == 1:
+            was = found[same[0]]
+            merged = dict(was, **{k: v for k, v in c.items() if v is not None and k not in ('origin', 'verified', 'url', 'site_id')}) if c.get('origin') == 'registry' else dict(was)
+            merged.update(verified=bool(was.get('verified') or c.get('verified')), url=was.get('url') or c.get('url'),
+                          origin='registry' if 'registry' in (was.get('origin'), c.get('origin')) else 'sharepoint')
+            found[same[0]] = merged
+        elif len(same) > 1:
+            for k in same:                                # two site IDs disagree: the name-only entry settles nothing
+                found[k] = dict(found[k], name_only_entry_unresolved=True)
+        else:
+            key = (c['client_key'], c.get('site'), c.get('list_id'))
+            if key in found:
+                was = found[key]
+                found[key] = dict(was, verified=bool(was.get('verified') or c.get('verified')), url=was.get('url') or c.get('url'))
+            else:
+                found[key] = c
     return list(found.values())
 
 
