@@ -67,9 +67,9 @@ class SourceSaveGuards(unittest.TestCase):
 
     def test_two_lists_with_same_client_site_job_remain_ambiguous(self):
         from hosting import registry
-        base=dict(client_key='Plant',client='Plant',job='2214',site='Plant',site_id='sid',verified=True)
+        base=dict(client_key='Plant',client='Plant',job='9914',site='Plant',site_id='sid',verified=True)
         entries=registry.entries([dict(base,list_id='one'),dict(base,list_id='two')])
-        candidates=registry.candidates_for('2214',entries,[])
+        candidates=registry.candidates_for('9914',entries,[])
         self.assertEqual({c['list_id'] for c in candidates},{'one','two'})
-        resolved=registry.resolve({},'Plant - 2214.xlsx','2214',DAY,entries,[])
+        resolved=registry.resolve({},'Plant - 9914.xlsx','9914',DAY,entries,[])
         self.assertEqual(resolved['status'],'ambiguous')

@@ -24,6 +24,23 @@ SEED = [
     dict(client_key='Hyundai', client='Hyundai', site='Hyundai_Montgomery', location='Montgomery', job='2207',
          list_id='47f89ceb-d8b9-45c3-932a-66d46e3f4272', verified=True, separate=True,
          note='A separate Hyundai list with the same label. It never overrides the SL Alabama 2207 list.'),
+    # Active job lists, 2026-11-20. Each list ID was read from the SharePoint site itself on that date (list title and ID
+    # matched) at the operations owner's direction. Empty same-label copies ("2169 #2", the Hyundai copy of 2207) are
+    # not listed here and are never chosen.
+    dict(client_key='SLAlabama', client='SL Alabama', site='SLAlabama_AlexanderCity', location='Alexander City', job='2169',
+         list_id='38718598-a97e-4388-bcc5-709ede868b21', verified=True, note='Data #2169-SLALAL-SLAL.'),
+    dict(client_key='SLAlabama', client='SL Alabama', site='SLAlabama_AlexanderCity', location='Alexander City', job='2200',
+         list_id='e402d426-4595-47bc-a305-a0704df18258', verified=True, note='Data #2200-SLALAL-SLALANNX.'),
+    dict(client_key='SLAlabama', client='SL Alabama', site='SLAlabama_AlexanderCity', location='Alexander City', job='2214',
+         list_id='d1a655b8-dc19-4d0f-bad2-35ed9999ccc2', verified=True, note='Data #2214-SLAL-SLAL.'),
+    dict(client_key='Hyundai', client='Hyundai', site='Hyundai_Montgomery', location='Montgomery', job='2236',
+         list_id='9876a097-558d-4407-9b90-216d46a81217', verified=True, note='Data #2236-SLAL-HMMA.'),
+    dict(client_key='Hyundai', client='Hyundai', site='Hyundai_Montgomery', location='Montgomery', job='2250',
+         list_id='4a6b1fb9-ede1-4d5c-80dd-9ad1d889df91', verified=True, note='Data #2250-LSAMX-HMMA.'),
+    dict(client_key='Lear', client='Lear', site='Lear_T1', location='Tuscaloosa', job='2206',
+         list_id='4cd2ca3c-c0c6-4092-8b8d-8b52ada1fb3d', verified=True, note='Data #2206-BROQU-LEART1.'),
+    dict(client_key='BriggsStratton', client='Briggs Stratton', site='BriggsStratton_Auburn', location='Auburn', job='2228',
+         list_id='fe964017-6594-4f24-8e8a-deb82119418c', verified=True, note='Data #2228-TENFM-BSAL.'),
     # Pratt & Whitney sources have no verified numeric job: each source is shown under its own name, never combined.
     dict(client_key='PrattWhitney', client='Pratt & Whitney', source='Audits_KN', job=None, verified=True, note='No verified job number.'),
     dict(client_key='PrattWhitney', client='Pratt & Whitney', source='DCA Main Audit', job=None, verified=True, note='No verified job number.'),
@@ -53,7 +70,10 @@ def entries(saved):
     out = {}
     for e in SEED + list(saved or []):
         out[(e.get('client_key'), e.get('site_id') or e.get('site'), str(e.get('job')), e.get('list_id'), e.get('source'))] = e
-    return list(out.values())
+    # One list is one entry. A pinned entry that names its site only by name and a saved entry for the same client, site
+    # name and list that also carries the site ID are the same list: the one with the site ID is kept.
+    with_id = {(e.get('client_key'), e.get('site'), e.get('list_id')) for e in out.values() if e.get('list_id') and e.get('site') and e.get('site_id')}
+    return [e for e in out.values() if e.get('site_id') or (e.get('client_key'), e.get('site'), e.get('list_id')) not in with_id]
 
 
 def candidates_for(job, registry, snapshot):
@@ -66,12 +86,18 @@ def candidates_for(job, registry, snapshot):
         for j in c.get('jobs') or []:
             if _same_job(job, j.get('job')):
                 key = (c['key'], j.get('site_id') or j.get('site'), j.get('list_id'))
-                if not j.get('site_id'):
-                    matches = [k for k, v in found.items() if v.get('client_key') == c['key'] and v.get('site') == j.get('site') and v.get('list_id') == j.get('list_id')]
+                # A registry entry saved by site name and the same list seen on SharePoint by site ID are one list, not
+                # two: same client, same site name, same list ID, and no site ID that disagrees. Without this a pinned
+                # job would show up twice and read as "several lists carry this job label".
+                if key not in found:
+                    matches = [k for k, v in found.items() if v.get('client_key') == c['key'] and v.get('site') == j.get('site') and v.get('list_id') == j.get('list_id')
+                               and (not v.get('site_id') or not j.get('site_id') or v.get('site_id') == j.get('site_id'))]
                     if len(matches) == 1:
                         key = matches[0]
                 if key in found:
                     found[key].setdefault('url', j.get('url'))
+                    if j.get('site_id') and not found[key].get('site_id'):
+                        found[key]['site_id'] = j['site_id']
                     continue
                 found[key] = dict(client_key=c['key'], client=c.get('client'), site=j.get('site'), job=j.get('job'),
                                   site_id=j.get('site_id'), list_id=j.get('list_id'), url=j.get('url'), verified=False, origin='sharepoint')

@@ -72,7 +72,7 @@ def reread(box, h, value, snapshot):
     """SharePoint read again: a new snapshot, and the value it now has for item 433."""
     item = box.get(h)
     rec = dict(status='discrepancies', rows=[sp_row(value)], snapshot_id=snapshot, report_rows=5,
-               site_id='site-1', list_id='list-2214', mapping_binding=box.source_mapping('site-1','list-2214'),
+               site_id='site-1', list_id='d1a655b8-dc19-4d0f-bad2-35ed9999ccc2', mapping_binding=box.source_mapping('site-1','d1a655b8-dc19-4d0f-bad2-35ed9999ccc2'),
                proposed_corrections=[dict(identity_verified=True, item='433', sheet='Inspection Detail', row=5, column=10, field='inspected', before='72', after=str(value))],
                bound_to=dict(file_hash=h, checker_version=item['checker_version']))
     return box._update(h, lambda r: r.update(source_reconciliation=rec))

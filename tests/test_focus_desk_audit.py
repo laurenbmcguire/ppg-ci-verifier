@@ -15,7 +15,7 @@ from tests.sl_daily_fixture import sl_daily
 
 NAME = 'SL Alabama - 2214 - 2026-11-06.xlsx'
 SNAP = [dict(client='SL Alabama', key='SLAlabama', sites=[dict(site='SLAlabama_AlexanderCity', location='Alexander City')],
-             jobs=[dict(job='2214', numbers=['2214'], site='SLAlabama_AlexanderCity', list_id='l-2214')])]
+             jobs=[dict(job='2214', numbers=['2214'], site='SLAlabama_AlexanderCity', list_id='d1a655b8-dc19-4d0f-bad2-35ed9999ccc2')])]
 
 
 class _Store:
