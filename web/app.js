@@ -1117,6 +1117,9 @@
     // findings a person kept as recorded are listed too (from the server's decisions), so they can be seen and undone
     const loadedIssues = allIssues(rv), loadedKeys = new Set(loadedIssues.map(i => i.key));
     const issues = [...new Map([...loadedIssues, ...(rv.dismissed || []).filter(i => !loadedKeys.has(i.key))].map(i => [i.key, i])).values()].filter(i => i.severity !== 'info'), fixes = state.fixes || [], used = new Set(), items = [];
+    // A version a person fixed by hand is finished as they left it: a suggested change that belongs to no listed error
+    // (a blank header Dex could fill in) is set aside on it, not offered again. It stays under Ignored.
+    const byHand = (r.fixed_from?.changes || []).some(c => /^Your edit/.test(c.source || ''));
     const make = (i, f) => {
       const key = i ? i.key : 'fix:' + f.id, fd = i?.decision || null, d = fd || decided[key] || (f ? decided['fix:' + f.id] : null);
       const fmt = f && fmtKind(f);
@@ -1133,7 +1136,7 @@
       const stateNow = own || (f && dec[f.id]?.state === 'accepted') ? 'selected'
         : aside ? aside
         : fd ? ({reject: 'kept', defer: 'deferred', confirm: 'confirmed', reopen: 'open'}[fd.action] || 'open')
-        : (d?.action === 'reject' || (f && dec[f.id]?.state === 'rejected')) ? 'rejected' : d?.action === 'keep' ? 'kept' : 'open';
+        : (d?.action === 'reject' || (f && dec[f.id]?.state === 'rejected') || (!i && f && byHand && !d)) ? 'rejected' : d?.action === 'keep' ? 'kept' : 'open';
       const evidence = f ? (f.source === 'SharePoint' || i?.source_value != null ? 'source' : isSureFix(f) ? 'mechanical' : f.source === 'AI fix' ? 'ai' : 'guess') : i?.source_value != null ? 'source_only' : 'none';
       return {binding: reviewBinding(r), fp: i?.fp, key, issue: i, fix: f, tier, group: JSON.stringify([group, f?.sheet || i?.sheet || null, evidence, stateNow === 'selected' ? 'open' : stateNow, i?.severity || null, f?.source || i?.source || null, i?.code || null, fd?.action || d?.action || null]), cell, row, sheet: f?.sheet || i?.sheet || null, kind, fmt, state: stateNow, note: d?.note || d?.reason || '', decidedBy: d?.by,
         decision: fd, legacyNote: i?.legacy_note || null, previous: i?.previous_decision || null,
