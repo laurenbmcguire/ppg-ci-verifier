@@ -5140,7 +5140,7 @@
     const b = r.built, rv = r.review;
     return h('div', {class: 'builtbar'},
       h('div', {}, h('b', {}, 'Built from SharePoint'),
-        h('span', {}, `${fmt(b.scans)} scans from “${b.list}”, ${ago(b.built_at)}. Each scan is on the shift its scan time falls in` + (b.outside ? `; ${b.outside} scan${b.outside === 1 ? ' was' : 's were'} outside every shift and went on the nearest one.` : '.'))),
+        h('span', {}, `${fmt(b.scans)} scans from “${b.list}”, ${ago(b.built_at)}. Each scan is on the shift its scan time falls in` + (b.outside ? `; ${b.outside} scan${b.outside === 1 ? ' was' : 's were'} outside every shift and went on the nearest one.` : '.') + (b.undated?.count ? ` ${b.undated.count} row${b.undated.count === 1 ? '' : 's'} in this SharePoint list ${b.undated.count === 1 ? 'has' : 'have'} no Date and ${b.undated.count === 1 ? 'is' : 'are'} in no day’s report.` : ''))),
       h('div', {class: 'btns'},
         h('button', {type: 'button', class: 'btn small ghost', onclick: e => headerForm(rv, e.target.closest('.builtbar'))}, 'Report header'),
         h('button', {type: 'button', class: 'btn small', onclick: e => buildReport(rv.job, rv.day, true, e.target)}, 'Rebuild with the latest scans')));

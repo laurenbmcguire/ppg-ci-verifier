@@ -381,14 +381,17 @@ def op_build(h, job, day=None, force=False, header=None, source=None):
         rows, info = builder.day_rows(job, day, schedule, **binding)        # network call outside any DB transaction
     except builder.BuildError as exc:
         raise ApiError(409, str(exc)) from None
+    blank = (info.get('undated') or {}).get('count') or 0
+    blank_note = (f' {blank} row{"" if blank == 1 else "s"} in this SharePoint list {"has" if blank == 1 else "have"} no Date, so '
+                  f'{"it is" if blank == 1 else "they are"} in no day\'s report. No date was given to {"it" if blank == 1 else "them"}.') if blank else ''
     if not rows:
-        raise ApiError(409, f'SharePoint has no scans for {job} on {day}.')
+        raise ApiError(409, f'SharePoint has no scans for {job} on {day}.' + blank_note)
     ready = builder.readiness(info['last_scan'])
     raw = builder.build_xlsx(job, day, rows, schedule, saved)
     # 45 quiet minutes only means nobody scanned for a while: it never proves the shift is over, so the built report says so
     built = dict(info, built_at=_dt.now(_tz.utc).isoformat(), ready=ready, nexus=builder.nexus_split(rows, windows),
                  shift_end_confirmed=False,
-                 completeness_note='Built from the scans in SharePoint at this time. A pause in scanning does not prove the shift is over; build again later if more scans may come.',
+                 completeness_note='Built from the scans in SharePoint at this time. A pause in scanning does not prove the shift is over; build again later if more scans may come.' + blank_note,
                  shifts={sh['name']: sum(1 for r in rows if r['shift_name'] == sh['name']) for sh in schedule})
     with h.store().session() as directory:
         inbox = SpreadsheetInbox(directory)

@@ -56,11 +56,20 @@ class BuilderUnit(unittest.TestCase):
         with self.assertRaisesRegex(builder.BuildError, 'verified site_id and list_id'):
             builder.day_rows(JOB, '2026-10-07', shifts.DEFAULT, opener=FakeGraph())
         from test_shifts import items
-        for field in ('Date', 'Shift'):
-            rows = items()
-            rows[0]['fields'].pop(field)
-            with patch('test_shifts.items', return_value=rows), self.assertRaises(builder.BuildError):
-                builder.day_rows(JOB, '2026-10-07', shifts.DEFAULT, opener=FakeGraph(), site_id='site-Owens', list_id='L1')
+        rows = items()
+        rows[0]['fields'].pop('Shift')
+        with patch('test_shifts.items', return_value=rows), self.assertRaises(builder.BuildError):
+            builder.day_rows(JOB, '2026-10-07', shifts.DEFAULT, opener=FakeGraph(), site_id='site-Owens', list_id='L1')
+        # A blank Date is shown as SharePoint has it: the row is in no day's report and is counted, never dated by entry time.
+        rows = items()
+        full = len(rows)
+        blank_id = str(rows[0]['id'])
+        rows[0]['fields'].pop('Date')
+        with patch('test_shifts.items', return_value=rows):
+            built, info = builder.day_rows(JOB, '2026-10-07', shifts.DEFAULT, opener=FakeGraph(), site_id='site-Owens', list_id='L1')
+        self.assertEqual(info['undated'], {'count': 1, 'items': [blank_id]})
+        self.assertNotIn(blank_id, [r['source']['item'] for r in built])
+        self.assertLess(len(built), full)
 
     def test_missing_counts_remain_unknown_not_inferred(self):
         row = builder._row({'n': 8, 'bad': 1}, {'n': 'inspected', 'bad': 'rejected'})

@@ -28,8 +28,16 @@ class SafeBuilder(unittest.TestCase):
     def test_missing_shift_holds_instead_of_guessing(self):
         c=self.capture();c[3][0]['fields']['Shift']=None
         with self.assertRaises(builder.BuildError):self.rows(c)
-    def test_missing_business_date_holds(self):
+    def test_blank_business_date_is_counted_and_never_dated_from_entry_time(self):
+        # SharePoint is shown as it is: a row with a blank Date goes in no day's report, and is counted and named.
         c=self.capture();del c[3][0]['fields']['Date']
+        rows,info=self.rows(c)
+        self.assertEqual([r['source']['item'] for r in rows],['2']);self.assertEqual(info['undated'],{'count':1,'items':['1']})
+        for blank in (None,''):
+            c=self.capture();c[3][0]['fields']['Date']=blank
+            self.assertEqual(self.rows(c)[1]['undated']['count'],1)
+    def test_a_date_that_is_present_but_cannot_be_confirmed_still_holds(self):
+        c=self.capture();c[3][0]['fields']['Date']='not a date'
         with self.assertRaises(builder.BuildError):self.rows(c)
     def test_unbound_builder_refused(self):
         with patch.object(sharepoint,'configured',return_value=True):

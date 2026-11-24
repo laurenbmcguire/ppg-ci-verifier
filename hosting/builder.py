@@ -102,9 +102,16 @@ def day_rows(job, day, schedule, opener=None, *, site_id=None, list_id=None):
         raise BuildError('Source capture identity does not match the selected site and list.')
     from hosting.source_date_contracts import capture_contract
     date_contract = capture_contract(site_id,list_id,columns,opener)
+    # The report shows SharePoint as it is. A row whose Date was left blank belongs to no day: it goes in no day's report,
+    # gets no date from its entry time, and is counted and named so it is never lost from view. A date that is present
+    # but cannot be confirmed still stops the build.
+    date_field, undated = (date_contract or {}).get('field') or 'Date', []
     for it in items:
         business_day = sharepoint._item_day(it, schedule, columns, site_id=site_id, list_id=list_id, date_contract=date_contract)
         if business_day is None:
+            if (it.get('fields') or {}).get(date_field) in (None, ''):
+                undated.append(str(it.get('id')))
+                continue
             raise BuildError('Source has unconfirmed business dates; no submission-time assignment was invented.')
         if business_day != day:
             continue
@@ -123,6 +130,7 @@ def day_rows(job, day, schedule, opener=None, *, site_id=None, list_id=None):
     rows.sort(key=lambda r: (r['time'] or datetime.min))
     last = max((r['time'] for r in rows if r['time']), default=None)
     return rows, dict(site=site, site_id=site_id, list_id=list_id, capture=dict(capture,date_contract=date_contract), list=lst.get('displayName'), list_url=lst.get('webUrl'), scans=len(rows), outside=outside,
+                      undated=dict(count=len(undated), items=undated[:500]),
                       last_scan=last.isoformat() if last else None, columns={v: names.get(k, k) for k, v in roles.items()})
 
 

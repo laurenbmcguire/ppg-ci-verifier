@@ -183,13 +183,27 @@ class TheMissingNov19Report(unittest.TestCase):
         later, _, _ = build('SLALAL-CJAL-2207', self.SOURCE, {L2207: self.day_rows([item(23)])}, handler)
         self.assertEqual((later['built']['scans'], later['report']['id'] != first['report']['id']), (23, True))
 
-    def test_one_row_anywhere_in_the_list_without_a_date_blocks_every_day(self):
-        undated = item(900, day='2026-11-20'); del undated['fields']['Date']
-        for day in (DAY, '2026-11-18'):                                    # also a day that built fine before the undated row arrived
-            with self.assertRaises(public_api.ApiError) as e:
-                build('SLALAL-CJAL-2207', self.SOURCE, {L2207: self.day_rows([undated])}, day=day)
-            self.assertEqual((e.exception.status, str(e.exception.message if hasattr(e.exception, 'message') else e.exception.args[-1])),
-                             (409, 'Source has unconfirmed business dates; no submission-time assignment was invented.'))
+    def test_rows_with_a_blank_date_are_in_no_report_and_are_counted_not_dated(self):
+        blank = []
+        for n in (900, 901):
+            row = item(n, day='2026-11-20'); del row['fields']['Date']; blank.append(row)
+        for day in (DAY, '2026-11-18'):                                    # every day still builds from its own dated rows
+            dated = self.day_rows([item(950, day='2026-11-18')])
+            want, _, _ = build('SLALAL-CJAL-2207', self.SOURCE, {L2207: dated}, day=day)
+            out, _, _ = build('SLALAL-CJAL-2207', self.SOURCE, {L2207: dated + blank}, day=day)
+            self.assertEqual(out['built']['scans'], want['built']['scans'])                       # the blank rows are added to no day
+            self.assertEqual(out['report']['id'], want['report']['id'])                           # the same workbook, row for row
+            self.assertEqual(out['built']['undated'], {'count': 2, 'items': ['900', '901']})
+            self.assertIn("2 rows in this SharePoint list have no Date, so they are in no day's report. No date was given to them.", out['built']['completeness_note'])
+        clean, _, _ = build('SLALAL-CJAL-2207', self.SOURCE, {L2207: self.day_rows()})
+        self.assertEqual(clean['built']['undated'], {'count': 0, 'items': []})
+        self.assertNotIn('no Date', clean['built']['completeness_note'])
+
+    def test_a_day_whose_only_rows_have_a_blank_date_says_so_instead_of_inventing_one(self):
+        blank = item(900, day='2026-11-20'); del blank['fields']['Date']
+        with self.assertRaises(public_api.ApiError) as e:
+            build('SLALAL-CJAL-2207', self.SOURCE, {L2207: [item(1, day='2026-11-18'), blank]}, day='2026-11-20')
+        self.assertIn("SharePoint has no scans for SLALAL-CJAL-2207 on 2026-11-20. 1 row in this SharePoint list has no Date, so it is in no day's report. No date was given to it.", str(e.exception.args))
 
     def test_dates_stored_as_timestamps_block_when_the_site_date_settings_cannot_be_confirmed(self):
         stamped = [item(n, **{'Date': '2026-11-19T06:00:00Z'}) for n in range(1, 23)]     # how SharePoint returns a date-only column
