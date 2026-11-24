@@ -49,6 +49,40 @@ test('with nothing left uncorrected the summary still says 0 and is marked good;
  assert.match(text(mixed),/4 errors Dex could not correct/);assert.match(text(mixed),/2 possible errors still need you/);assert.doesNotMatch(mixed.attrs.class,/good/);
 });
 
+test('what Dex left as written is asked about: review or ignore',()=>{
+ const find=(n,id)=>n&&typeof n==='object'?(Array.isArray(n)?n.map(x=>find(x,id)).find(Boolean):n.attrs?.id===id?n:find(n.kids,id)):null;
+ const ctx=harness();let reviewed=null,drawn=0;ctx.fdReviewLeft=r=>{reviewed=r;};ctx.drawSide=()=>{drawn++;};
+ const run={fixed:2,leftAsWritten:3,unsolved:[],leftKeys:['a','b','c']},box=ctx.fdRevisionSummary(run,0,null),t=text(box);
+ assert.match(t,/3 left as written/);assert.match(t,/Dex left 3 errors as written\. Would you like to review them or ignore them\?/);
+ assert.equal(text(find(box,'fd-left-review')),'Review them');assert.equal(text(find(box,'fd-left-ignore')),'Ignore them');
+ find(box,'fd-left-review').attrs.onclick();assert.equal(reviewed,run);
+ find(box,'fd-left-ignore').attrs.onclick();assert.equal(ctx.state.fdAIRun.leftAnswered,'ignored');assert.equal(drawn,1);
+ const after=ctx.fdRevisionSummary(ctx.state.fdAIRun,0,null);                                    // answered: not asked twice
+ assert.equal(find(after,'fd-revision-ask'),undefined);assert.match(text(after),/Ignored: 3 errors stay as written\. Open Ignored to bring them back/);
+ const both=text(ctx.fdRevisionSummary({fixed:0,leftAsWritten:1,unsolved:unsolved(4)},0,null));    // both kinds are counted in the question
+ assert.match(both,/Dex left 5 errors as written/);
+ assert.match(text(ctx.fdRevisionSummary({fixed:0,leftAsWritten:1,unsolved:[]},0,null)),/Dex left 1 error as written\. Would you like to review it or ignore it\?/);
+ for(const quiet of [{fixed:3,leftAsWritten:0,unsolved:[]},{fixed:1,manual:true,leftAsWritten:0,unsolved:[]},{tidy:true,fixed:0,leftAsWritten:0,items:[]}])
+  assert.equal(find(ctx.fdRevisionSummary(quiet,0,null),'fd-revision-ask'),undefined);            // nothing left as written: no question
+});
+
+test('Review them puts exactly those errors back on the list and opens them for fixing by hand',async()=>{
+ const items=[{key:'a',fp:'1',state:'kept'},{key:'b',fp:'2',state:'rejected'},{key:'c',fp:'3',state:'open'},{key:'other',fp:'4',state:'kept'}];
+ const state={report:{file_hash:'h'},fixes:[],fdAIRun:{summary:true}},sent=[],started=[],toasts=[];
+ const ctx=vm.createContext({state,setTimeout,fdItems:()=>items,findingBinding:()=>({file_hash:'h'}),fdActiveBusy:()=>false,drawSide(){},toast:(m,bad)=>toasts.push([m,bad]),
+  fdManualStart:list=>started.push(list.map(x=>x.key)),fdSendDecision:async d=>{sent.push(d);for(const it of items)if(d.ids.includes(it.key))it.state='open';}});
+ vm.runInContext(between('  async function fdReviewLeft(','  function fdAIRunBanner('),ctx);
+ await ctx.fdReviewLeft({leftKeys:['a','b','c']});
+ assert.equal(sent.length,1);assert.equal(sent[0].action,'reopen');assert.deepEqual([...sent[0].ids],['a','b']);assert.match(sent[0].reason,/chose to review what Dex left as written/);
+ assert.deepEqual(started,[['a','b','c']]);assert.equal(state.fdAIRun,null);assert.equal(items[3].state,'kept');assert.equal(toasts.length,0);
+ // A refused save changes nothing and says so; the summary stays so the question can be answered again.
+ const items2=[{key:'a',fp:'1',state:'kept'}],state2={report:{file_hash:'h'},fixes:[],fdAIRun:{summary:true}},t2=[],s2=[];
+ const ctx2=vm.createContext({state:state2,setTimeout,fdItems:()=>items2,findingBinding:()=>({}),fdActiveBusy:()=>false,drawSide(){},toast:(m,bad)=>t2.push([m,bad]),fdManualStart:l=>s2.push(l),fdSendDecision:async()=>{throw new Error('offline');}});
+ vm.runInContext(between('  async function fdReviewLeft(','  function fdAIRunBanner('),ctx2);
+ await ctx2.fdReviewLeft({leftKeys:['a']});
+ assert.equal(s2.length,0);assert.deepEqual(state2.fdAIRun,{summary:true});assert.match(t2[0][0],/could not be put back on the list/);assert.equal(t2[0][1],true);
+});
+
 test('the count at the top of the report uses the same number and is not shown as done',()=>{
  const head=between("h('p', {class: 'fd-errcount'","h('button', {type: 'button', class: 'btn', id: 'fd-ai-any'");
  assert.match(head,/open === 0 && !notCorrected \? ' done' : ''/);

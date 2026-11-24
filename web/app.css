@@ -1852,6 +1852,7 @@ body[data-page=reports]:not(.viewing) .queue{position:static;max-height:none;min
 .fd-revision h3{margin:0 0 6px;font-size:1rem}.fd-revision-counts{list-style:none;margin:0 0 6px;padding:0;display:grid;gap:2px}
 .fd-revision-counts b{display:inline-block;min-width:1.6em;font-variant-numeric:tabular-nums}.fd-revision-open b{color:#a4372b}
 .fd-revision .fd-cardacts{margin-top:8px}
+.fd-revision-ask{margin:8px 0;padding:10px 12px;border:1px solid #d9c9a3;border-radius:8px;background:#fffaf0}.fd-revision-ask p{margin:0}
 .fd-revision .fd-fixed-list li{overflow-wrap:anywhere}.fd-revision .fd-fixed-list{max-height:260px;overflow:auto}
 #side>.fd-airun{margin:10px 14px}
 .fd-revision .fd-fixed-list li{white-space:pre-wrap}

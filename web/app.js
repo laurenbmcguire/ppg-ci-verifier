@@ -2331,7 +2331,7 @@
       // very same value (that confirms it, it is not a difference).
       const soft = fdItems().filter(it => mine.has(it.key) && it.fp && it.state === 'open' && (/_format_differs$/.test(it.issue?.code || '') ||
         it.tier !== 'blocker' && it.issue?.severity !== 'high' && it.source == null && !/^SharePoint/i.test(String(it.issue?.source || ''))));
-      let leftAsWritten = 0;
+      let leftAsWritten = 0; const softKeys = soft.map(x => x.key);
       // Dex's own follow-up never shows an error: if the report was updated in the meantime (its SharePoint check
       // finished, for example) the step is simply done again on the updated report.
       const softNow = () => fdItems().filter(it => mine.has(it.key) && it.fp && it.state === 'open' && (/_format_differs$/.test(it.issue?.code || '') ||
@@ -2384,7 +2384,10 @@
         if (guesses.length) { store.set(decisionsKey(), dec); state.fdItems = null; }
       }
       const left = fdItems().filter(it => openStates.includes(it.state)).length;
-      state.fdAIRun = {...run, leftAsWritten, unsolved, summary: true}; drawSide();
+      // The reviewer is asked about what was left as written (review or ignore), so those errors are remembered here.
+      const openNow = new Set(fdItems().filter(it => openStates.includes(it.state)).map(it => it.key));
+      const leftKeys = [...new Set([...softKeys, ...unsolved.map(x => x.key)])].filter(k => !openNow.has(k));
+      state.fdAIRun = {...run, leftAsWritten, unsolved, leftKeys, summary: true}; drawSide();
       globalThis.setTimeout?.(() => { const side = document.getElementById('side'); if (side) side.scrollTop = 0; }, 0);
       toast(`${run.manual ? `You changed ${plural(run.fixed, 'cell')}` : run.fixed ? `Dex fixed ${plural(run.fixed, 'cell')}` : 'Dex had nothing to change'}${leftAsWritten ? ` and left ${leftAsWritten} as written` : ''}${unsolved.length ? `. ${plural(unsolved.length, 'error')} Dex could not correct ${unsolved.length === 1 ? 'was' : 'were'} left exactly as written (see the revision summary)` : ''}. ` +
         (left ? `${plural(left, 'error')} still ${left === 1 ? 'needs' : 'need'} you (serious, or different from SharePoint): ${left === 1 ? 'it is' : 'they are'} listed on the right.` : unsolved.length ? '' : 'No possible errors left.'));   // a result, not a failure: never shown as an error message
@@ -2778,6 +2781,8 @@
     const list = (title, rows) => rows.length ? h('details', {class: 'fd-saved-changes'}, h('summary', {}, title),
       h('ul', {class: 'fd-fixed-list'}, rows.slice(0, 200).map(x => h('li', {}, h('b', {}, x.where), ` ${show(x.before)} → ${show(x.after)}`)), rows.length > 200 ? h('li', {}, `…and ${rows.length - 200} more (see History).`) : null)) : null;
     const unsolvedN = (run.unsolved || []).length;
+    // What Dex left as written is never settled silently: the reviewer is asked once whether to review or ignore it.
+    const remaining = run.tidy || run.manual ? 0 : (run.leftAsWritten || 0) + unsolvedN, asking = remaining > 0 && !run.leftAnswered;
     return h('div', {class: 'fd-airun fd-revision ' + (left || unsolvedN ? '' : 'good'), role: 'status'},
       h('h3', {}, 'Revision summary'),
       h('ul', {class: 'fd-revision-counts'},
@@ -2790,6 +2795,12 @@
         left || !unsolvedN ? h('li', {class: left ? 'fd-revision-open' : ''}, h('b', {}, String(left)), left === 1 ? ' possible error still needs you' : ' possible errors still need you') : null),
       left === 0 && !unsolvedN ? h('p', {class: 'fd-hint'}, 'Nothing is left to fix, so the Fix buttons are not shown. Download the fixed report below.') : null,
       left === 0 && unsolvedN ? h('p', {class: 'fd-hint'}, `The report still has ${plural(unsolvedN, 'error')} that ${unsolvedN === 1 ? 'was' : 'were'} not corrected. The count at the top shows the same number.`) : null,
+      asking ? h('div', {class: 'fd-revision-ask', id: 'fd-revision-ask'},
+        h('p', {}, h('b', {}, `Dex left ${plural(remaining, 'error')} as written.`), ` Would you like to review ${remaining === 1 ? 'it' : 'them'} or ignore ${remaining === 1 ? 'it' : 'them'}?`),
+        h('div', {class: 'fd-cardacts'},
+          h('button', {type: 'button', class: 'btn primary small', id: 'fd-left-review', onclick: () => fdReviewLeft(run)}, remaining === 1 ? 'Review it' : 'Review them'),
+          h('button', {type: 'button', class: 'btn small', id: 'fd-left-ignore', onclick: () => { state.fdAIRun = {...run, leftAnswered: 'ignored'}; drawSide(); }}, remaining === 1 ? 'Ignore it' : 'Ignore them'))) : null,
+      remaining && run.leftAnswered === 'ignored' ? h('p', {class: 'fd-hint'}, `Ignored: ${plural(remaining, 'error')} ${remaining === 1 ? 'stays' : 'stay'} as written. Open Ignored to bring ${remaining === 1 ? 'it' : 'them'} back at any time.`) : null,
       run.fixed ? h('p', {class: 'fd-hint'}, `${run.reused ? 'Matches saved version' : 'Saved as version'} ${run.version || (run.from || 1) + 1}. Version ${run.from || 1} is kept unchanged.`) : null,
       (run.unsolved || []).length ? h('details', {class: 'fd-saved-changes', open: true}, h('summary', {}, `See the ${plural(run.unsolved.length, 'error')} Dex could not correct`),
         h('ul', {class: 'fd-fixed-list'}, run.unsolved.slice(0, 200).map(x => h('li', {}, h('b', {}, x.where), ' ' + x.text)), run.unsolved.length > 200 ? h('li', {}, `…and ${run.unsolved.length - 200} more (see History).`) : null),
@@ -2802,6 +2813,23 @@
         r && (run.fixed || tidied.length || run.look) ? h('a', {class: 'btn ' + (left ? '' : 'primary ') + 'small', href: '/api/spreadsheets/download?id=' + r.file_hash, download: r.filename}, 'Download fixed report') : null,
         run.fixed || tidied.length ? h('button', {type: 'button', class: 'btn small', onclick: () => { state.fdView = 'history'; drawReport(); }}, 'View history') : null,
         dismiss));
+  }
+  // "Review them": what Dex left as written goes back on the list (recorded in the history) and opens for fixing by hand.
+  async function fdReviewLeft(run) {
+    const openStates = ['open', 'selected', 'deferred', 'confirmed'], keys = new Set(run.leftKeys || []), hash = state.report?.file_hash;
+    const mine = it => keys.size ? keys.has(it.key) : /left (exactly )?as written by Fix with AI/.test(String(it.note || ''));
+    const held = fdItems().filter(it => mine(it) && it.fp && !openStates.includes(it.state));
+    if (held.length) {
+      try {
+        await fdSendDecision({...findingBinding(held), ids: held.map(it => it.key), action: 'reopen', reason: 'Put back on the list because the reviewer chose to review what Dex left as written.', quiet: true, batch: true});
+        if (state.decisionFailed) { const message = state.decisionFailed.message; state.decisionFailed = null; throw new Error(message); }
+      } catch (e) { toast('These could not be put back on the list. Open Ignored to bring them back. ' + (e?.message || ''), true); return; }
+      for (let i = 0; i < 100 && (!state.fixes || fdActiveBusy()); i++) await new Promise(r => setTimeout(r, 400));
+    }
+    if (state.report?.file_hash !== hash) return;
+    const open = fdItems().filter(it => mine(it) && openStates.includes(it.state));
+    state.fdAIRun = null;
+    if (open.length) fdManualStart(open); else { drawSide(); toast('Nothing could be put back here. Open Ignored to see what was left as written.', true); }
   }
   function fdAIRunBanner(run, left) {
     const dismiss = h('button', {type: 'button', class: 'btn small subtle', onclick: () => { state.fdAIRun = null; drawSide(); }}, 'OK');
