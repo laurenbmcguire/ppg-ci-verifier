@@ -1,0 +1,591 @@
+"""Opt-in host-neutral scheduled worker. Live defaults are read-only Graph capture.
+No scheduling installation or delivery transport is implicitly enabled.
+"""
+import base64
+import json
+from copy import deepcopy
+from datetime import timedelta
+from uuid import uuid4
+from hosting import source_first as sf, source_first_capture as capture
+from hosting import last_scan_transport as transport
+from hosting.last_scan_drafts import capture_adapter, hold_until, instant, observe, scope_key
+from hosting.last_scan_store import LeaseLost, claim, fenced, release
+
+def discover(config, *, fetch=capture.graph_fetch):
+    """Terminal Graph discovery over explicitly configured sites, never job-name join.
+    Lists with no verified assignment return issues; inactivity is never inferred
+    from scan silence. Active-job flags must be supplied by authoritative registry.
+    """
+    scopes=[];issues=[];seen=set()
+    for site in config['sites']:
+        pages=[]
+        lists=capture.collection('/sites/'+site+'/lists','lists',pages,fetch)
+        for item in lists:
+            key=(site,item['id'])
+            assignment=config['assignments'].get('|'.join(key))
+            if assignment is None:
+                issues.append(dict(code='unmapped_list',site_id=site,list_id=item['id']))
+                continue
+            seen.add(key)
+            if assignment.get('active') is False:continue
+            if assignment.get('active') is not True or assignment.get('verified') is not True:
+                issues.append(dict(code='unverified_active_assignment',site_id=site,list_id=item['id']))
+                continue
+            for day in assignment['business_dates']:
+                for shift in assignment['recorded_shifts']:
+                    scope=scope_key(dict(site_id=site,list_id=item['id'],job=assignment['job'],
+                        client_id=assignment['client_id'],business_date=day,shift=shift,zone=assignment['zone']))
+                    scopes.append(dict(scope=scope,settings=deepcopy(assignment)))
+    for key in config['assignments']:
+        if tuple(key.split('|')) not in seen:
+            issues.append(dict(code='configured_source_not_discovered',source=key))
+    return scopes,issues
+
+def source_adapter(scope,settings,*,capture_fn=capture.capture):
+    if not settings.get('timestamp_semantics_verified'):
+        raise ValueError('Actual scan timestamp meaning must be verified, not inferred from field name.')
+    return capture_adapter(scope,scan_field=settings.get('scan_field'),shift_field=settings.get('shift_field'),
+        recorded_shifts=settings.get('recorded_shifts'),capture_fn=capture_fn,not_before=settings.get('not_before',{}).get(scope['business_date']+'|'+scope['shift']))
+
+BINDING=('client_id','site_id','list_id','job')
+
+# ---- the per-site wait a source asked for (HTTP 429/503). One record per site, shared by every reader of that
+# site: polls, dispatch re-reads, other jobs on the same site, other workers, and across restarts.
+HOLD='runner:hold:'
+
+class SiteCooldown(Exception):
+    """Raised INSTEAD of reading a site that asked to be left alone. Carries the stored hold."""
+    def __init__(self,hold):
+        super().__init__('The source asked for a wait; it was not read.');self.hold=dict(hold)
+
+def site_hold(store,site_id,now):
+    """The hold in force for this site at ``now``, or None. A hold that needs a manual release never lapses."""
+    with store.transaction(HOLD+sf.digest(site_id)) as hold:h=deepcopy(dict(hold))
+    if h.get('manual_release_required') is True:return h
+    until=h.get('not_before')
+    if until and instant(now)<instant(until):return h
+    return None
+
+def record_site_hold(store,site_id,cool,observed,now):
+    """Record the wait a source asked for, counted on the caller's clock from when it saw the answer (``observed``).
+    Never loosens an existing hold: a later time or a manual-release hold already stored is kept."""
+    wait=hold_until(cool,observed)
+    with store.transaction(HOLD+sf.digest(site_id)) as hold:
+        stricter=hold.get('manual_release_required') is True or (
+            not wait['manual_release_required'] and hold.get('not_before') and instant(hold['not_before'])>=wait['until'])
+        if not stricter:
+            for k in ('released_at','released_by','release_reason'):hold.pop(k,None)
+            hold.update(not_before=None if wait['manual_release_required'] else wait['until'].isoformat(),
+                        manual_release_required=wait['manual_release_required'],needs_attention=wait['needs_attention'],
+                        recorded_at=now,observed_at=observed.isoformat(),basis=wait['basis'],
+                        provider_stated=wait['basis']!='default',stated_seconds=wait['stated_seconds'],
+                        retry_after=(cool or {}).get('retry_after') if isinstance(cool,dict) else None)
+        return deepcopy(dict(hold))
+
+def release_site_hold(store,site_id,*,released_by,reason,now):
+    """MANUAL escalation only: a named person clears a hold that could not be given an end time. Nothing in the
+    runner, the worker or the hosted entry point calls this."""
+    if not all(isinstance(v,str) and v.strip() for v in (released_by,reason)):
+        raise ValueError('A manual release needs who released it and why.')
+    with store.transaction(HOLD+sf.digest(site_id)) as hold:
+        previous=deepcopy(dict(hold))
+        hold.update(not_before=None,manual_release_required=False,needs_attention=False,released_at=now,
+                    released_by=released_by,release_reason=reason,released_hold=previous)
+        return deepcopy(dict(hold))
+
+def _cooldown_of(error):
+    evidence=getattr(error,'evidence',None)
+    return evidence.get('cooldown') if isinstance(evidence,dict) and isinstance(evidence.get('cooldown'),dict) else None
+
+def binding(value):
+    """The exact client / site / list / job a renderer is allowed to serve. No normalising, no partial match."""
+    out={k:value.get(k) for k in BINDING}
+    if any(not isinstance(v,str) or not v.strip() or v!=v.strip() for v in out.values()):
+        raise ValueError('Exact client, site, list and job are required.')
+    return out
+
+class RendererRouter:
+    """Exactly one publisher per client/site/list/job. There is no default publisher: an unrouted scope is refused.
+
+    Every publisher carries its own ``binding`` and a ``render_version()`` covering its mapping, header and template,
+    so that configuration is part of each operation ID and a receipt is never reused after it changes."""
+    def __init__(self,publishers):
+        self._by={}
+        for p in publishers:
+            key=sf.digest(binding(getattr(p,'binding',None) or {}))
+            if key in self._by:raise ValueError('Two publishers claim the same client/site/list/job.')
+            if not callable(p) or not callable(getattr(p,'render_version',None)):
+                raise TypeError('A publisher must be callable and report its render_version().')
+            self._by[key]=p
+    def for_scope(self,scope):
+        found=self._by.get(sf.digest(binding(scope)))
+        if found is None:raise LookupError('No verified renderer is configured for this exact client/site/list/job.')
+        return found
+
+class ScheduledWorker:
+    """One scope per tick, under a fenced lease, on a store with ``atomic(keys)`` (hosting.last_scan_store).
+
+    Requires a host calling tick periodically; never installs a cron. Draft only: nothing is approved or sent.
+
+    What is committed together, in ONE database transaction that also re-reads the lease:
+      * observing a capture: timer state, the render claim for a due operation, and superseding older outbox entries;
+      * finishing a draft: the pre-outbox recheck of the source, the check that the rendered operation is still the
+        current one, the render receipt, and the outbox entry.
+    A worker whose lease was taken over or expired cannot commit either step (LeaseLost): it writes nothing.
+
+    A render whose outcome is unknown is never repeated blindly. It is looked up by its operation ID; only a
+    publisher that declares its lookup authoritative may render the same operation again.
+    Photo bytes and the captured snapshot are stored as content-addressed blobs, not in the state row.
+    """
+    def __init__(self,transaction,fetch,render,*,clock=sf.now,enabled=False,lease_seconds=300,owner=None,attempt_seconds=900,
+                 provider_contract=None):
+        self.store=getattr(transaction,'__self__',transaction)
+        if not hasattr(self.store,'atomic') or not hasattr(self.store,'put_blob'):
+            raise TypeError('A store with atomic multi-record transactions is required (hosting.last_scan_store).')
+        self.transaction=self.store.transaction;self.fetch=fetch;self.render=render
+        self.clock=clock;self.enabled=enabled;self.lease_seconds=lease_seconds;self.owner=owner
+        self.attempt_seconds=attempt_seconds      # an extra wait before a closed attempt may be replaced; never proof by itself
+        # Default: no provider contract, so an uncertain delivery is NEVER retried (see hosting.last_scan_transport).
+        # The contract is checked against the one registry in that module; a worker cannot bring its own.
+        self.provider_contract=provider_contract
+
+    _LATEST='_latest_unassigned_shifts'     # internal key: carries the final capture's counts out of _finish; never returned
+
+    # ---- one scope
+    def tick(self,scope,settings):
+        if not self.enabled:return dict(status='disabled')
+        s=scope_key(scope);key=sf.digest(s)
+        bound=getattr(self.render,'binding',None)
+        if bound is not None and bound!=binding(s):   # before any lease, read or render
+            return dict(status='error',error_type='RendererBindingMismatch')
+        held=claim(self.store,key,self.clock(),self.lease_seconds,self.owner)
+        if not held:return dict(status='busy')
+        try:
+            # Everything about this capture stays in local variables: one worker may tick several scopes at once.
+            slim,full,ref=self._capture(s,settings)
+            out=dict(self._run(s,key,settings,held,slim,full,ref))
+            # Rows of the day in no configured shift, from the LATEST capture this tick committed: the recheck
+            # capture when the tick got that far, otherwise the first one. Never a count from a capture that a
+            # later one in the same tick replaced.
+            unassigned=out.pop(self._LATEST,slim.get('unassigned_shifts'))
+            return dict(out,unassigned_shifts=deepcopy(unassigned)) if unassigned else out
+        except LeaseLost:
+            return dict(status='lease_lost')     # nothing of ours was committed; the current holder carries on
+        except SiteCooldown as waiting:          # the site asked to be left alone: it was not read
+            return dict(status='cooldown',not_before=waiting.hold.get('not_before'),
+                        manual_release_required=waiting.hold.get('manual_release_required') is True)
+        except Exception as error:
+            self._health(key,error)
+            return dict(status='error',error_type=type(error).__name__)
+        finally:
+            try:release(self.store,key,held,self.clock())
+            except Exception:pass                # the lease simply runs out
+
+    def _capture(self,s,settings):
+        """One source capture -> (slim snapshot for state, full snapshot for rendering, blob address of the slim one).
+
+        EVERY read of a site by this worker (a poll, the recheck before the outbox, the re-read before a dispatch)
+        goes through here, so every one of them first honours the site's stored wait and, if the source asks for a
+        wait, records it on this worker's clock at the moment the answer was seen."""
+        waiting=site_hold(self.store,s['site_id'],self.clock())
+        if waiting:raise SiteCooldown(waiting)
+        try:
+            full=dict(self.fetch(s,settings))
+        except Exception as error:
+            cool=_cooldown_of(error)
+            if cool is not None:
+                record_site_hold(self.store,s['site_id'],cool,instant(self.clock()),self.clock())
+            raise
+        if hasattr(self.render,'render_version'):full['render_version']=self.render.render_version()
+        slim={k:v for k,v in full.items() if k!='photo_blobs'}
+        refs={}
+        for name,encoded in sorted((full.get('photo_blobs') or {}).items()):
+            refs[name]=self.store.put_blob(base64.b64decode(encoded,validate=True))
+        slim['photo_blob_refs']=refs
+        return slim,full,self.store.put_blob(sf.canonical(slim))
+
+    @staticmethod
+    def _stub(snapshot,ref):
+        return dict(captured_at=snapshot['captured_at'],ref=ref,rows=len(snapshot.get('rows') or []),
+                    not_before=snapshot.get('not_before'),render_version=snapshot.get('render_version'))
+
+    @staticmethod
+    def _supersede_in(box,current,now=None):
+        for op,entry in (box.get('entries') or {}).items():
+            if op!=current and entry['status'] in ('pending','held','sent','uncertain'):
+                entry['status']='superseded';entry['superseded_by']=current
+                if now:entry['superseded_at']=now
+
+    @staticmethod
+    def _gate(box,current,ready,now=None,due_at=None):
+        """Bring the outbox in line with the readiness just observed, in the same transaction as that observation.
+
+        Other operations are superseded. The CURRENT operation's entry is only deliverable while the scope is
+        ready: if the latest observation is not due (for example the same rows, but a later verified shift end),
+        a pending entry is put on hold. An attempt already in flight cannot be recalled: it keeps its status so
+        its acknowledgment is not lost, and is marked for reconciliation. Releasing a hold is done by _queue,
+        only when the scope is ready again."""
+        ScheduledWorker._supersede_in(box,current,now)
+        entry=(box.get('entries') or {}).get(current)
+        if entry is None or ready:return
+        if entry['status']=='pending' or (entry['status']=='held' and entry.get('held_reason')):
+            entry.pop('held_reason',None);entry.pop('held_error_type',None)
+            entry.update(status='held',held_at=now,held_until=due_at)
+        elif entry['status'] in ('uncertain','sent') and not entry.get('readiness_revoked_at'):
+            entry.update(readiness_revoked_at=now,readiness_revoked_until=due_at)
+
+    def _run(self,s,key,settings,held,slim,full,ref):
+        state_key,box_key=key,'outbox:'+key
+        with fenced(self.store,key,held,self.clock,[state_key,box_key]) as records:
+            now=self.clock()
+            current=observe(records[state_key].get('state'),s,slim,now)
+            op=current['operation_id'];status=current['status']
+            if status=='due':
+                current['receipts'][op]=dict(state='uncertain',claimed_at=now,fence=held['fence'])
+                current['status']='uncertain'    # a crash after this point is reconcile-only
+            current['snapshot']=self._stub(slim,ref)
+            records[state_key]['state']=current
+            self._gate(records[box_key],op,status=='draft_ready',now,current.get('due_at'))
+            public={k:v for k,v in current.items() if k not in ('receipts','snapshot')}
+            if status=='draft_ready':            # same content as a finished draft: exact retry, only make sure it is queued
+                receipt=deepcopy(current['receipts'][op]['receipt'])
+                self._queue(records[box_key],op,receipt,now,held['fence'])
+                return self._ready(op,receipt,built=False,observed_at=now)
+        if status in ('waiting','no_scans'):
+            return public
+        if status=='uncertain':
+            receipt,built=self._reconcile(op,full)
+            if receipt is None:
+                return dict(status='uncertain',operation_id=op,reconcile='render_outcome_unknown')
+        else:
+            try:
+                receipt,built=self._obtain(full,op)
+            except Exception as error:
+                self._health(key,error,op)
+                return dict(status='uncertain',operation_id=op,error_type=type(error).__name__)
+        return self._finish(s,key,settings,held,op,receipt,built)
+
+    def _obtain(self,full,op):
+        """(receipt, built). ``built`` is True only when the artifact did not exist and was rendered just now."""
+        lookup=getattr(self.render,'lookup',None)
+        existing=lookup(op) if lookup is not None else None
+        if existing:return self._checked(existing,op),False
+        return self._checked(self.render(full,op),op),True
+
+    @staticmethod
+    def _ready(op,receipt,built,observed_at):
+        """How a ready draft is reported. A draft is an immutable record of ONE capture. When it is reused for a
+        later, content-identical observation it is reported as historical: never as regenerated, current or freshly
+        verified. ``evidence_as_of`` is the capture it was built from; ``observed_at`` is this observation."""
+        return dict(status='draft_ready',operation_id=op,receipt=receipt,
+                    artifact_state='built_this_run' if built else 'historical_reused',
+                    evidence_as_of=receipt.get('evidence_as_of'),observed_at=observed_at)
+
+    def _checked(self,receipt,op):
+        if not isinstance(receipt,dict) or receipt.get('operation_id')!=op or not receipt.get('workbook_sha256') or not receipt.get('checklist_sha256'):
+            raise ValueError('Renderer must return matching workbook and checklist receipt.')
+        bound=getattr(self.render,'binding',None)
+        if bound is not None and receipt.get('binding')!=bound:
+            raise ValueError('Receipt belongs to another client/site/list/job.')
+        if receipt.get('render_version') is not None and hasattr(self.render,'render_version') and receipt['render_version']!=self.render.render_version():
+            raise ValueError('Receipt was made with another mapping/header/template.')
+        return receipt
+
+    def _reconcile(self,op,full):
+        """The earlier render of this operation has no recorded outcome. Ask the publisher; never just run it again."""
+        lookup=getattr(self.render,'lookup',None)
+        if lookup is None:return None,False
+        found=lookup(op)                          # raises on an interrupted or altered artifact: stays uncertain
+        if found:return self._checked(found,op),False
+        if getattr(self.render,'lookup_is_authoritative',False) is True:
+            return self._checked(self.render(full,op),op),True   # the publisher vouches that nothing was written
+        return None,False
+
+    def _finish(self,s,key,settings,held,op,receipt,built=True):
+        """Recheck the source, then commit receipt + outbox only if this operation is still current and the lease is ours."""
+        state_key,box_key=key,'outbox:'+key
+        slim,_,ref=self._capture(s,settings)      # edits, deletions and late uploads supersede a rendered draft
+        latest=deepcopy(slim.get('unassigned_shifts') or {})
+        def done(out):return dict(out,**{self._LATEST:latest})   # every outcome reports THIS capture's counts
+        with fenced(self.store,key,held,self.clock,[state_key,box_key]) as records:
+            now=self.clock()
+            checked=observe(records[state_key].get('state'),s,slim,now)
+            current=checked['operation_id']
+            checked['receipts'][op]=dict(state='draft_ready',receipt=receipt,finished_at=now,fence=held['fence'])
+            checked['snapshot']=self._stub(slim,ref)
+            ready=current==op and checked['status'] in ('uncertain','draft_ready','due')   # never before the timer
+            if ready:checked['status']='draft_ready'
+            records[state_key]['state']=checked
+            box=records[box_key]
+            self._gate(box,current,ready,now,checked.get('due_at'))
+            if current!=op:
+                return done(dict(status='superseded',operation_id=op,superseded_by=current))
+            if not ready:
+                return done({k:v for k,v in checked.items() if k not in ('receipts','snapshot')})
+            self._queue(box,op,receipt,now,held['fence'])
+            return done(self._ready(op,receipt,built,now))
+
+    def provenance(self,scope,op):
+        """Read-only. What a stored draft is, as against what was most recently observed. Changes nothing.
+
+        The draft is always described as HISTORICAL: it reflects the source as captured at ``evidence_as_of`` and
+        nothing later. ``latest_observation`` is the newest capture this worker has seen for the scope, and
+        ``photo_evidence_differences`` lists where the two disagree about a photo (for example the draft recorded
+        HTTP 403 and the latest capture saw 404). A difference is information, not a correction: the stored
+        draft and checklist are never rewritten."""
+        s=scope_key(scope);key=sf.digest(s)
+        with self.transaction(key) as record:
+            state=deepcopy(record.get('state') or {})
+        held=(state.get('receipts') or {}).get(op)
+        if not held or held.get('state')!='draft_ready':
+            return dict(status='no_such_draft',operation_id=op)
+        receipt=held['receipt'];latest=state.get('snapshot') or {};current=state.get('operation_id')
+        built_photos=latest_photos=None
+        reader=getattr(self.render,'read',None)
+        if reader is not None:
+            try:built_photos=json.loads(reader(op,'checklist.json')).get('photo_evidence')
+            except Exception:built_photos=None
+        if latest.get('ref'):
+            try:
+                slim=json.loads(self.store.get_blob(latest['ref']))
+                ids={r['id'] for r in slim.get('rows') or []}
+                latest_photos=[p for p in (slim.get('source_capture') or {}).get('photos') or [] if p.get('record_id') in ids]
+            except Exception:latest_photos=None
+        differences=None
+        if built_photos is not None and latest_photos is not None:
+            shown=('status','http_status','reason','sha256')
+            index=lambda photos:{(p.get('record_id'),p.get('field')):{k:p.get(k) for k in shown} for p in photos}
+            was,now_=index(built_photos),index(latest_photos)
+            differences=[dict(record_id=k[0],field=k[1],in_this_draft=was.get(k),latest_observation=now_.get(k))
+                         for k in sorted(set(was)|set(now_),key=str) if was.get(k)!=now_.get(k)]
+        return dict(status='ok',label='HISTORICAL',freshly_verified=False,regenerated=False,
+                    artifact=dict(operation_id=op,evidence_as_of=receipt.get('evidence_as_of'),recorded_ready_at=held.get('finished_at'),
+                                  format=receipt.get('format'),render_version=receipt.get('render_version'),
+                                  workbook_sha256=receipt.get('workbook_sha256'),checklist_sha256=receipt.get('checklist_sha256'),
+                                  reflects='The source exactly as captured at evidence_as_of. Nothing observed later is in it.'),
+                    latest_observation=dict(captured_at=latest.get('captured_at'),operation_id=current,scope_status=state.get('status')),
+                    relation='same_content_reused' if current==op else 'superseded_by_newer_operation',
+                    photo_comparison='compared' if differences is not None else 'unavailable',
+                    photo_evidence_differences=differences,generated_at=self.clock())
+
+    @staticmethod
+    def _queue(box,op,receipt,now=None,fence=None):
+        """One internal outbox entry per operation. Content that returns to an earlier version makes that
+        operation current again: its entry goes back to pending only if no delivery was ever attempted."""
+        entries=box.setdefault('entries',{})
+        entry=entries.get(op)
+        if entry is None:
+            entries[op]=dict(status='pending',audience='Lauren',receipt=receipt,enqueued_at=now,fence=fence)
+        elif entry['status']=='superseded' and not entry.get('delivery_status'):
+            entry.update(status='pending',requeued_at=now)
+            entry.pop('superseded_by',None);entry.pop('superseded_at',None)
+        elif entry['status']=='held':            # the scope is ready again: release, exactly once
+            entry.update(status='pending',released_at=now)
+            for k in ('held_at','held_until','held_reason','held_error_type'):entry.pop(k,None)
+
+    def _health(self,key,error,op=None):
+        try:
+            with self.transaction('health:'+key) as health:
+                health.update(status='error',error_type=type(error).__name__,at=self.clock(),operation_id=op)
+        except Exception:pass
+
+    # ---- outbox helpers (single record; used by tests and by reconciliation tooling)
+    def _supersede(self,key,current):
+        with self.transaction('outbox:'+key) as box:
+            self._supersede_in(box,current)
+
+    def _enqueue(self,key,op,receipt):
+        with self.transaction('outbox:'+key) as box:
+            self._supersede_in(box,op)
+            self._queue(box,op,receipt)
+
+    @staticmethod
+    def _claimable(entry):
+        # a hold caused only by a failed recapture may be tried again, because every try recaptures the source
+        return bool(entry) and (entry['status']=='pending' or (entry['status']=='held' and entry.get('held_reason')=='recapture_failed'))
+
+    def _hold(self,key,held,op,reason,error=None):
+        with fenced(self.store,key,held,self.clock,['outbox:'+key]) as records:
+            entry=records['outbox:'+key].get('entries',{}).get(op)
+            if entry and entry['status']=='pending':
+                entry.update(status='held',held_at=self.clock(),held_reason=reason,
+                             held_error_type=type(error).__name__ if error is not None else None)
+
+    def dispatch_test(self,scope,op,sender,settings=None):
+        """Test transport only. No network sender is supplied in this module.
+
+        Stored readiness is never enough to send. Immediately before the claim this takes the scope's lease and
+        recaptures the exact scope from the source; then ONE transaction, fenced by that lease, re-observes the
+        fresh capture against the stored state and claims the entry only if the fresh capture yields this same
+        operation (same rows, photos, mapping/header/template version), the scope is due on the latest schedule,
+        and the capture is not stale. Otherwise nothing is sent: the timer and outbox are updated from what was
+        seen (held or superseded). If the source cannot be read, or the capture is partial, stale or for another
+        scope, the entry is held; "unchanged" is never assumed. The draft and its receipt are never touched.
+
+        ``delivery_status`` is recorded apart from ``status``: once an attempt starts it is 'uncertain' until a
+        matching acknowledgment arrives, and it stays 'uncertain' (for reconciliation with the provider by the
+        operation ID) when the sender fails, also when the entry was superseded while the attempt was in flight.
+        The source can still change between the recapture and the provider receiving the message; that window is
+        not closed here, only detected by the next poll (``readiness_revoked_at``).
+        """
+        s=scope_key(scope);key=sf.digest(s);state_key,box_key=key,'outbox:'+key
+        with self.transaction(box_key) as box:                      # cheap look first: no source read for a dead entry
+            if not self._claimable(box.get('entries',{}).get(op)):return dict(status='not_pending')
+        bound=getattr(self.render,'binding',None)
+        if bound is not None and bound!=binding(s):
+            return dict(status='error',error_type='RendererBindingMismatch')
+        held=claim(self.store,key,self.clock(),self.lease_seconds,self.owner)
+        if not held:return dict(status='busy')                      # a poll or another dispatch has the scope
+        payload=None
+        try:
+            try:
+                slim,_,ref=self._capture(s,settings or {})
+                with fenced(self.store,key,held,self.clock,[state_key,box_key]) as records:
+                    now=self.clock()
+                    current=observe(records[state_key].get('state'),s,slim,now)   # refuses partial/stale/older/other-scope
+                    ready=current['operation_id']==op and current['status']=='draft_ready'
+                    current['snapshot']=self._stub(slim,ref)
+                    records[state_key]['state']=current
+                    box=records[box_key]
+                    self._gate(box,current['operation_id'],current['status']=='draft_ready',now,current.get('due_at'))
+                    entry=box.get('entries',{}).get(op)
+                    if ready and self._claimable(entry):
+                        for k in ('held_at','held_until','held_reason','held_error_type'):entry.pop(k,None)
+                        attempt=dict(id=uuid4().hex,number=len(entry.get('attempts') or [])+1,state='in_flight',started_at=now,
+                                     deadline=(instant(now)+timedelta(seconds=self.attempt_seconds)).isoformat(),
+                                     fence=held['fence'],capture=ref)
+                        # Which reviewed provider contract this attempt goes out through, written once, in the claim,
+                        # BEFORE the sender is called. Only that same contract can later attest what happened to it.
+                        if isinstance(self.provider_contract,transport.ProviderContract):
+                            attempt.update(provider=self.provider_contract.provider,provider_contract=self.provider_contract.digest())
+                        entry.setdefault('attempts',[]).append(attempt)      # append-only audit trail of every attempt
+                        entry.pop('delivery_error_type',None)
+                        entry.update(status='uncertain',delivery_status='uncertain',delivery_attempted_at=now,
+                                     attempt_id=attempt['id'],claim_fence=held['fence'],claim_capture=ref,
+                                     claim_captured_at=slim['captured_at'])
+                        payload=deepcopy(entry);aid=attempt['id']
+                    else:
+                        seen=(entry or {}).get('status')
+                        if seen in ('held','superseded'):
+                            outcome=dict(status=seen,reason='source_changed_or_not_due',
+                                         current_status=current['status'],due_at=current.get('due_at'))
+                        else:                               # another dispatcher already claimed or finished it
+                            outcome=dict(status='not_pending')
+            except LeaseLost:
+                return dict(status='lease_lost')                    # another worker owns the scope now; nothing sent
+            except SiteCooldown as waiting:                         # the site asked to be left alone: not read, nothing sent
+                return dict(status='held',reason='site_cooldown',not_before=waiting.hold.get('not_before'),
+                            manual_release_required=waiting.hold.get('manual_release_required') is True)
+            except Exception as error:
+                self._health(key,error,op)
+                try:self._hold(key,held,op,'recapture_failed',error)
+                except LeaseLost:return dict(status='lease_lost')
+                out=dict(status='held',reason='recapture_failed',error_type=type(error).__name__)
+                if _cooldown_of(error) is not None:                 # the wait was recorded for the whole site in _capture
+                    now_held=site_hold(self.store,s['site_id'],self.clock()) or {}
+                    out.update(cooldown_until=now_held.get('not_before'),manual_release_required=now_held.get('manual_release_required') is True)
+                return out
+        finally:
+            try:release(self.store,key,held,self.clock())
+            except Exception:pass
+        if payload is None:return outcome
+        # Every result of this call is applied only through its own attempt ID: a callback that arrives after the
+        # entry has moved on to another attempt is recorded as evidence on its own attempt and changes nothing else.
+        try:
+            ack=sender(idempotency_key=op,attempt_id=aid,audience='Lauren',payload=payload)
+            if not isinstance(ack,dict) or ack.get('operation_id')!=op or ack.get('attempt_id',aid)!=aid:
+                raise ValueError('Matching delivery acknowledgment required.')
+        except Exception as error:
+            with self.transaction(box_key) as box:
+                entry=box['entries'][op];mine=self._attempt(entry,aid);now=self.clock()
+                if entry.get('attempt_id')!=aid or mine['state']!='in_flight':
+                    mine.update(late_error_type=type(error).__name__,late_error_at=now)
+                    return dict(status='stale_attempt',delivery_status='uncertain')
+                mine.update(state='returned_error',error_type=type(error).__name__,returned_at=now)
+                entry.update(delivery_status='uncertain',delivery_error_type=type(error).__name__)
+                superseded=entry['status']!='uncertain'
+            return dict(status='superseded' if superseded else 'uncertain',delivery_status='uncertain')
+        with self.transaction(box_key) as box:
+            entry=box['entries'][op];mine=self._attempt(entry,aid);now=self.clock()
+            if entry.get('attempt_id')!=aid:
+                # a later attempt exists: this delivery DID happen, so keep the proof and flag the duplicate
+                mine.update(late_ack=ack,late_ack_at=now)
+                entry['duplicate_delivery_evidence']=aid
+                return dict(status='stale_attempt',delivery_status='sent')
+            if mine.get('closed_proof'):entry['proof_contradicted_by_late_ack']=True
+            mine.update(state='acked',ack=ack,acked_at=now)
+            entry.update(ack=ack,delivery_status='sent')
+            if entry['status'] not in ('uncertain','held','pending'):
+                return dict(status='superseded',delivery_status='sent')
+            for k in ('held_at','held_until','held_reason','held_error_type'):entry.pop(k,None)
+            entry['status']='sent'                  # also when it had been put back on hold: it is delivered, never resend
+            if entry.get('readiness_revoked_at'):   # sent, then the wait was extended while it was in flight
+                return dict(status='sent',readiness_revoked=True)
+        return dict(status='sent')
+
+    @staticmethod
+    def _attempt(entry,attempt_id):
+        return next(a for a in entry.get('attempts') or [] if a['id']==attempt_id)
+
+    @staticmethod
+    def terminal_non_delivery(answer,op,attempt_id):
+        """The ONLY answer that may ever lead to another attempt. All of it is required:
+        operation_id and attempt_id equal to this attempt; delivered is False; terminal is True (the provider's final
+        state for this attempt, not "not seen yet"); attempt_closed is True (the provider will reject this attempt if it
+        arrives later); and a non-empty proof_id naming the provider's record. A bare delivered:false is not proof."""
+        return (isinstance(answer,dict) and answer.get('operation_id')==op and answer.get('attempt_id')==attempt_id
+                and answer.get('delivered') is False and answer.get('terminal') is True
+                and answer.get('attempt_closed') is True and isinstance(answer.get('proof_id'),str) and bool(answer['proof_id'].strip()))
+
+    def reconcile_test(self,scope,op,status_lookup):
+        """Settle a delivery whose outcome is unknown by ASKING the (test) transport about this attempt. Never sends.
+
+        DEFAULT: without a provider contract verified in hosting.last_scan_transport this does nothing at all. The
+        provider is not queried, whatever a lookup would say is not trusted, and the entry stays uncertain. No
+        answer, flag or deadline can change that at run time.
+
+        With a verified contract the lookup is called with the operation ID and the attempt ID, and must name both:
+          * delivered is True -> recorded as sent, with the answer kept as the acknowledgment.
+          * terminal non-delivery proof (see terminal_non_delivery) -> only if the contract also permits a retry
+            (permits_retry), and never while this process's own sender call may still be running, the attempt is
+            closed and the entry is put on hold; only a later poll that finds the scope ready, followed by a fresh
+            recapture, can lead to a new attempt. Otherwise the proof is stored on the attempt and nothing changes.
+          * anything else (delivered:false alone, "not found", another attempt's proof, no answer, an error) ->
+            stays uncertain. Not having arrived yet is not the same as never arriving.
+        """
+        key=sf.digest(scope_key(scope));box_key='outbox:'+key
+        with self.transaction(box_key) as box:
+            entry=box.get('entries',{}).get(op)
+            if not entry or entry.get('delivery_status')!='uncertain' or not entry.get('attempt_id'):
+                return dict(status='nothing_to_reconcile')
+            aid=entry['attempt_id']
+        if not transport.verified(self.provider_contract):
+            return dict(status='uncertain',reason='no_verified_provider_contract')      # provider not even queried
+        try:
+            answer=status_lookup(idempotency_key=op,attempt_id=aid)
+        except Exception as error:
+            return dict(status='uncertain',reason='lookup_failed',error_type=type(error).__name__)
+        with self.transaction(box_key) as box:
+            entry=box['entries'][op];now=self.clock()
+            if entry.get('attempt_id')!=aid or entry.get('delivery_status')!='uncertain':
+                return dict(status='nothing_to_reconcile')          # the entry moved on while we were asking
+            mine=self._attempt(entry,aid)
+            mine['reconcile_checks']=int(mine.get('reconcile_checks') or 0)+1;mine['last_reconcile_at']=now
+            if isinstance(answer,dict) and answer.get('operation_id')==op and answer.get('attempt_id')==aid and answer.get('delivered') is True:
+                mine.update(state='acked',ack=answer,acked_at=now,acked_by='reconciliation')
+                entry.update(ack=answer,delivery_status='sent',reconciled_at=now)
+                if entry['status']=='uncertain':entry['status']='sent'
+                return dict(status=entry['status'],delivery_status='sent')
+            if not self.terminal_non_delivery(answer,op,aid):
+                return dict(status='uncertain',reason='no_terminal_proof_for_this_attempt')
+            if not transport.permits_retry(self.provider_contract,self.attempt_seconds):
+                mine.update(terminal_proof_not_acted_on=answer,terminal_proof_seen_at=now)   # kept as evidence only
+                return dict(status='uncertain',reason='retry_not_permitted_by_provider_contract')
+            if mine['state']=='in_flight' and instant(now)<instant(mine['deadline']):
+                return dict(status='uncertain',reason='attempt_may_still_be_in_flight',not_before=mine['deadline'])
+            mine.update(state='closed_not_delivered',closed_proof=answer,closed_at=now,
+                        closed_under_contract=self.provider_contract.digest())
+            entry.update(delivery_status='not_delivered',reconciled_at=now)
+            if entry['status']=='uncertain':
+                entry.update(status='held',held_at=now,held_reason='not_delivered_needs_fresh_readiness')
+            return dict(status=entry['status'],delivery_status='not_delivered')

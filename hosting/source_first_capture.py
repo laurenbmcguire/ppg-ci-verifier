@@ -20,19 +20,86 @@ class CaptureFailure(sf.ReviewError):
         self.evidence = deepcopy(evidence)
 
 
-def cooldown(headers):
-    value = (headers or {}).get('Retry-After')
-    if value is None:
-        return {'retry_after': None, 'not_before': None, 'known': False}
+def _retry_after_values(headers):
+    """Every Retry-After value in the headers. HTTP header names are case-insensitive, and a transport may hand them
+    over in any casing, more than once, or as a list; none of those may make a stated wait disappear."""
+    if not hasattr(headers, 'items'):
+        return []
+    out = []
+    for name, value in headers.items():
+        if isinstance(name, str) and name.strip().lower() == 'retry-after':
+            out += [v for v in (value if isinstance(value, (list, tuple)) else [value]) if v is not None]
+    return out
+
+
+def retry_after_header(headers):
+    """The Retry-After of an HTTP error, as ``{'Retry-After': value}`` for ``cooldown``: None when there is none, the
+    value when there is one, and a LIST of every value when the header is repeated on the wire (in any casing).
+    ``headers.get`` returns only the first occurrence, which could be the shortest; nothing may be dropped here."""
+    if hasattr(headers, 'get_all'):                         # email.message.Message / http.client.HTTPMessage: case-insensitive
+        values = [v for v in (headers.get_all('Retry-After') or []) if v is not None]
+    else:
+        values = _retry_after_values(headers)
+    return {'Retry-After': None if not values else values[0] if len(values) == 1 else list(values)}
+
+
+def _retry_after(value):
+    """One stated Retry-After value, kept apart from any clock."""
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = bytes(value).decode('ascii')
+        except UnicodeDecodeError:
+            return {'retry_after': repr(value)[:200], 'not_before': None, 'known': False, 'basis': 'invalid'}
+    text = value.strip() if isinstance(value, str) else str(value) if isinstance(value, int) and not isinstance(value, bool) else None
+    if text is None:                                        # a boolean, a float, a mapping: not a header value
+        return {'retry_after': repr(value)[:200], 'not_before': None, 'known': False, 'basis': 'invalid'}
+    if re.fullmatch(r'[0-9]+', text):                       # ASCII digits only: a whole number of seconds
+        try:
+            seconds = int(text)
+        except ValueError:                                  # too many digits to be a number at all
+            return {'retry_after': text[:64], 'not_before': None, 'known': False, 'basis': 'relative_seconds', 'seconds': None, 'unrepresentable': True}
+        try:
+            due = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+        except OverflowError:
+            due = None
+        return {'retry_after': text[:64], 'not_before': due, 'known': due is not None, 'basis': 'relative_seconds', 'seconds': seconds}
     try:
-        if re.fullmatch(r'[0-9]+', str(value)):
-            due = datetime.now(timezone.utc) + timedelta(seconds=int(value))
-        else:
-            due = parsedate_to_datetime(value)
-            if due.tzinfo is None: raise ValueError('Unknown timezone')
-        return {'retry_after': str(value), 'not_before': due.astimezone(timezone.utc).isoformat(), 'known': True}
-    except (TypeError, ValueError, OverflowError):
-        return {'retry_after': str(value), 'not_before': None, 'known': False}
+        due = parsedate_to_datetime(text)
+        if due.tzinfo is None: raise ValueError('Unknown timezone')
+        return {'retry_after': text, 'not_before': due.astimezone(timezone.utc).isoformat(), 'known': True, 'basis': 'http_date'}
+    except (TypeError, ValueError, OverflowError, IndexError):
+        # Something WAS stated, and it cannot be read as a wait (words, a negative or fractional number, a date with
+        # no zone or beyond the calendar, an empty value). This is not the same as no header: see hold_until.
+        return {'retry_after': text[:200], 'not_before': None, 'known': False, 'basis': 'invalid'}
+
+
+def cooldown(headers):
+    """What the provider said about waiting, kept apart from any clock.
+
+    No Retry-After at all returns ``{'retry_after': None, 'not_before': None, 'known': False}`` with no ``basis``.
+    Otherwise ``basis`` says what was stated:
+      'relative_seconds'  a whole number of seconds, in ``seconds``. A caller with its own clock adds that to the time
+                          IT saw the answer (hosting.last_scan_drafts.hold_until) and does not use ``not_before``, which
+                          for a relative wait is only this process's wall clock plus the seconds, kept for the existing
+                          source-first service.
+      'http_date'         the provider's absolute time, in ``not_before``.
+      'invalid'           a value was stated but cannot be read as a wait. ``known`` is False and there is no deadline.
+      'conflict'          more than one different value was stated (for example under differently cased names). All of
+                          them are in ``candidates``; none is picked here, because comparing a number of seconds with
+                          a date needs the caller's clock. ``known`` is False and there is no deadline.
+    The header name is matched without regard to case."""
+    stated, seen = [], set()
+    for value in _retry_after_values(headers):
+        one = _retry_after(value)
+        key = (one.get('basis'), one.get('seconds'), one['retry_after'])
+        if key not in seen:
+            seen.add(key); stated.append(one)
+    if not stated:
+        return {'retry_after': None, 'not_before': None, 'known': False}
+    if len(stated) == 1:
+        return stated[0]
+    return {'retry_after': ' | '.join(sorted(s['retry_after'][:40] for s in stated))[:200], 'not_before': None, 'known': False,
+            'basis': 'conflict', 'candidates': stated}
 
 
 def graph_fetch(url):
@@ -51,7 +118,7 @@ def graph_fetch(url):
             if len(raw) > MAX_CAPTURE_BYTES: raise sf.ReviewError('Source page exceeds the capture byte limit.')
             return response.status, json.loads(raw), {}
     except urllib.error.HTTPError as exc:
-        return exc.code, None, {'Retry-After': exc.headers.get('Retry-After')}
+        return exc.code, None, retry_after_header(exc.headers)
     except (OSError, ValueError):
         return 0, None, {}
 
@@ -117,7 +184,7 @@ def regional_capture(site_id, list_id, columns):
         except urllib.error.HTTPError as exc:
             if exc.code in (429,503):
                 failures.append(dict(status=exc.code,failed_request=request.full_url,
-                                     cooldown=cooldown({'Retry-After':exc.headers.get('Retry-After')}),
+                                     cooldown=cooldown(retry_after_header(exc.headers)),
                                      remaining_cursor=request.full_url, pages=[], raw_pages=[]))
             raise
     contract=capture_contract(site_id,list_id,columns,opener=observe)
@@ -139,7 +206,7 @@ def photo_download(url):
             raw = response.read(MAX_PHOTO_BYTES + 1)
             return response.status, raw, {}
     except urllib.error.HTTPError as exc:
-        return exc.code, b'', {'Retry-After':exc.headers.get('Retry-After')}
+        return exc.code, b'', retry_after_header(exc.headers)
     except (OSError, RuntimeError):
         return 0, b'', {}
 
@@ -244,6 +311,7 @@ def _capture(scope, *, fetch=None, date_capture=None, photo_fetch=None, _evidenc
             st, blob, photo_headers = response(photo_fetch, photo_url)
             if st in (429,503):
                 raise CaptureFailure('Source photo provider has a cooldown. No early retry is allowed.',dict(status=st,failed_request=photo_url,remaining_cursor=photo_url,cooldown=cooldown(photo_headers),pages=pages,raw_pages=raw_pages))
+            photo['http_status'] = st                      # kept as evidence: denied, missing and unreadable are different
             size = photo_embed.image_size(blob) if st == 200 and 0 < len(blob) <= MAX_PHOTO_BYTES else None
             st_after, after, item_headers = response(fetch, item_url)
             if st_after in (429,503):
@@ -252,6 +320,9 @@ def _capture(scope, *, fetch=None, date_capture=None, photo_fetch=None, _evidenc
                 raise CaptureFailure('Exact source item could not be read after photo capture.',dict(status=st_after,failed_request=item_url,remaining_cursor=item_url,pages=pages,raw_pages=raw_pages))
             if substantive(after) != substantive(original):
                 raise sf.ReviewError('Source record changed while its photo was downloaded. Recapture required.')
+            if st in (401, 403):
+                photo['reason'] = 'The source refused permission to download this photo (HTTP %d). It was not captured and no substitute was inserted.' % st
+                continue
             if not size or any(n <= 0 or n > 20000 for n in size) or total + len(blob) > MAX_TOTAL_PHOTO_BYTES:
                 photo['reason'] = 'Photo unavailable, unsupported, or over the safe size limit.'
                 continue

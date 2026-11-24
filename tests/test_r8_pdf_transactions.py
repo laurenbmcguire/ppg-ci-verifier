@@ -70,12 +70,11 @@ import os
 @unittest.skipUnless(os.environ.get('CI_PG_TEST_URL'),'set CI_PG_TEST_URL for disposable PostgreSQL')
 class PDFPostgresTransactions(unittest.TestCase):
     def setUp(self):
-        from pg_safety import assert_disposable
+        from pg_safety import wipe
         from hosting.postgres_storage import PostgresWorkspace
-        import psycopg
-        self.url=os.environ['CI_PG_TEST_URL'];assert_disposable(self.url)
-        with psycopg.connect(self.url) as db:
-            db.execute('TRUNCATE ci_verifier.ci_verifier_state, ci_verifier.ci_verifier_files, ci_verifier.ci_verifier_upload_parts, ci_verifier.spreadsheets, ci_verifier.spreadsheet_checks, ci_verifier.spreadsheet_sources, ci_verifier.client_contacts, ci_verifier.settings, ci_verifier.vin_index, ci_verifier.vin_indexed, ci_verifier.dashboards, ci_verifier.api_keys RESTART IDENTITY')
+        # The wipe is done by the disposable cluster's administrator; everything under test runs as the limited
+        # application role, which does not own the sequences and so cannot restart them itself.
+        self.url=os.environ['CI_PG_TEST_URL'];wipe(self.url)
         self.store=PostgresWorkspace(self.url)
         store=self.store
         class Handler:

@@ -232,6 +232,11 @@ def reviewed_rows(capture, mapping_value, overlays):
         photos = [p for p in capture.get('photos', []) if p['record_id'] == record['id']]
         if resolved.get('rejected') and not any(p.get('status') == 'supported' for p in photos):
             issue('photo_unavailable', 'No supported, verified defect photo is available for this rejected record.', record['id'], blocking=False)
+        elif any(p.get('status') != 'supported' for p in photos) and not any(p.get('status') == 'supported' for p in photos):
+            # The record names a photo that could not be captured, and its rejected quantity is zero or unknown:
+            # still say so, instead of leaving the missing evidence visible only inside the capture.
+            issue('photo_not_captured', 'This record names a defect photo that could not be captured: ' +
+                  '; '.join(sorted({str(p.get('reason') or 'no reason recorded') for p in photos})), record['id'], blocking=False)
         rows.append(dict(id=record['id'], record_hash=digest(record), source_version=record['version'],
                          original_values={f: typed(record['raw'], m['fields'][f]) for f in FIELDS},
                          mapped_fields=deepcopy(m['fields']),

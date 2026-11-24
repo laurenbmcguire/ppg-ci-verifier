@@ -251,6 +251,34 @@ _add('hidden_characters',
 _add('missing_value',
      'A cell is blank in a column that is filled in on almost every other row, so something was probably skipped.',
      'Fill it in from the scan or paperwork.', False)
+# Scheduled draft pipeline: configuration problems. None of these is a finding about report data.
+_add('unmapped_list',
+     'A list on a configured site has no verified assignment, so it is not read for scheduled drafts.',
+     'Add a verified assignment for the list, or leave it out on purpose.', True)
+_add('unverified_active_assignment',
+     'An assignment is not marked both active and verified, so its list is not read.',
+     'Have a person verify the assignment before it is used.', True)
+_add('configured_source_not_discovered',
+     'A configured site and list was not found when the site was listed.',
+     'Check the site and list identifiers in the assignment.', True)
+_add('incomplete_assignment unverified_assignment recorded_shifts_missing duplicate_scope',
+     'An assignment is missing a required verified detail, so nothing is read for it.',
+     'Complete and verify the client, job, site, list, timezone, scan field, shift field and shifts.', True)
+_add('scan_time_meaning_not_verified scan_field_is_date_or_arrival_metadata',
+     'The field given as the scan time is not a verified actual scan time, so no timer is started from it.',
+     'Verify which field records the actual scan time. Date, Created and Modified are never accepted.', True)
+_add('job_registry_unavailable not_in_verified_job_registry ambiguous_job_registry registry_entry_is_another_source registry_client_mismatch registry_job_mismatch',
+     'The assignment does not match exactly one verified job registry entry for this client, site, list and job.',
+     'Correct the assignment or the registry entry. Names and shared numbers are never matched.', True)
+_add('no_renderer_for_scope',
+     'No report mapping and header is configured for this exact client, site, list and job, so no draft is built.',
+     'Add the verified mapping and header for this assignment. Another client\'s settings are never used.', True)
+_add('built_by_external_process',
+     'Another approved process builds this job, so it is skipped here to avoid two reports.',
+     'Remove the flag only after that process stops building the job.', True)
+_add('photo_not_captured',
+     'The source record names a defect photo, but the photo could not be downloaded, so it is not in the report.',
+     'Check the photo and its permissions at the source, then capture again. No substitute picture is used.', True)
 _add('blank_header',
      'A column has no heading, so it cannot be read or checked.',
      'Add a heading to the column.', True)

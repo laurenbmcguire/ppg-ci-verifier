@@ -1,0 +1,709 @@
+{
+ "accepted_collectors": [
+  "rehearsal-fake-collector"
+ ],
+ "accepted_issuers": {
+  "approval": [
+   "synthetic-approval-authority"
+  ],
+  "capture": [
+   "synthetic-capture-authority"
+  ]
+ },
+ "approvals": [
+  {
+   "approved_at": "2026-11-10T00:00:00+00:00",
+   "approved_by": "synthetic approver",
+   "contract": "last_scan.approval",
+   "expires_at": "2026-11-13T00:00:00+00:00",
+   "issuer": "synthetic-approval-authority",
+   "not_before": "2026-11-10T00:00:00+00:00",
+   "principals": [
+    "alice"
+   ],
+   "record_id": "synthetic-approval-c1c6c04d9b36ef8b",
+   "snapshot_digest": "c1c6c04d9b36ef8b7343306a90ded0a14c1a150b1df4ab0eb37fa19e2afc3390",
+   "status": "active",
+   "version": 1
+  }
+ ],
+ "capture_receipts": [
+  {
+   "captured_at": "2026-11-10T18:30:00+00:00",
+   "collector": "rehearsal-fake-collector",
+   "contract": "last_scan.capture_receipt",
+   "expires_at": "2026-11-11T18:30:00+00:00",
+   "issuer": "synthetic-capture-authority",
+   "list_id": "c1c1c1c1-0000-4000-8000-000000007001",
+   "record_id": "synthetic-receipt-8909f20fd257167e",
+   "schema_digest": "7b5dc9295ba93e4959f498d41ac09d873b230d6d6c0e24ed72dbd052a504c9ec",
+   "site_id": "example.sharepoint.com,a1a1a1a1-0000-4000-8000-000000007001,b1b1b1b1-0000-4000-8000-000000007001",
+   "snapshot_identity": "8909f20fd257167e632b8793f458bfc23c34543ffaf428c007361049b23a948a",
+   "status": "active",
+   "version": 1
+  },
+  {
+   "captured_at": "2026-11-10T18:30:00+00:00",
+   "collector": "rehearsal-fake-collector",
+   "contract": "last_scan.capture_receipt",
+   "expires_at": "2026-11-11T18:30:00+00:00",
+   "issuer": "synthetic-capture-authority",
+   "list_id": "c2c2c2c2-0000-4000-8000-000000007002",
+   "record_id": "synthetic-receipt-cf398cb89043d99f",
+   "schema_digest": "e7e69162ae4a3acbca266210244e4e3a5744b64df534a6edfd8e3ded05a451bd",
+   "site_id": "example.sharepoint.com,a2a2a2a2-0000-4000-8000-000000007002,b2b2b2b2-0000-4000-8000-000000007002",
+   "snapshot_identity": "cf398cb89043d99f3a60f6c907e7add3490e191a30f4876bf07818f9835113fc",
+   "status": "active",
+   "version": 1
+  }
+ ],
+ "config": {
+  "assignments": [
+   {
+    "active": true,
+    "attestations": {
+     "business_date": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "36dc515550d83eae21d0c570885cca0bb74117995516166f2701f79f6e082d8e",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "identity_and_registry": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "777ffce5663cbc231f0f8e6327a53f2f22a5eb80e6deb75978039c1755b849db",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "quantities": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "80dae532ba19780344a739282b75704c4c1db1ccc4e7bf5d4fa87eccf19d832f",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "scan_time_meaning": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "037b1f40c4cb54860f15e232af7503db2fc43b0b173dbb2b98afbb5b49ccf3a9",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "shift_values": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "3a6535fb20eb6c7f2bd63de64e5a3f146253f88c6abb25cd7abe120665803200",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "template_and_header": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "d0534ddbe3159549d0c8f28ec409e4c7d2279663aaebdc8c0ff80061376d3df0",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "timezone": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "42f791722a1fd35211371cbd16d66ef024e3d50f6e4a5fc7b65f00b5a7fd0ce5",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     }
+    },
+    "business_dates": [
+     "2026-11-10"
+    ],
+    "client_id": "ALPHA-REHEARSAL",
+    "field_contract": {
+     "certified": {
+      "column": "Certified",
+      "column_id": "9266ca56-befd-4366-8b2d-1bc9d0755a28",
+      "definition": "6c2d007933fcbfadbb68317ee1e1c5bc37d5cc755127581e916b77438779c9b7",
+      "type": "number"
+     },
+     "comments": {
+      "column": "Comments",
+      "column_id": "e2bbeb84-c648-4d9b-8c3f-4676c7b90f4a",
+      "definition": "b54f11661838503c6274638245eba3e3da6d40196c4de5280de7a537f0c31c75",
+      "type": "text"
+     },
+     "condition": {
+      "column": "Condition",
+      "column_id": "e235c83e-5be0-4f9d-854e-43d1b0e9713a",
+      "definition": "5646e5cc02b293702a40c501c6a661e91c3445a1bafee1a7c2b0545b06b6ee9b",
+      "type": "text"
+     },
+     "date": {
+      "column": "Date",
+      "column_id": "39620392-ebb4-4423-879d-7c38626b26de",
+      "definition": "50f24740e50b697a4f03d01506b0b93fbafd8074241f1d0dc7326ebe8f4d4ce5",
+      "format": "dateOnly",
+      "type": "dateTime"
+     },
+     "identifier": {
+      "column": "Identifier",
+      "column_id": "1e9bba41-7ee0-47f9-8a06-aebb51b50d5e",
+      "definition": "ea0f6c087976544ee27149ba1125f04553987186c24bff9a2389a9eb98dd216b",
+      "type": "text"
+     },
+     "inspected": {
+      "column": "Inspected",
+      "column_id": "a6e4be5d-dcf9-40ce-886c-9b93768f6a7d",
+      "definition": "f7d73bf3bb9d25b73ce8b7fb4e89d8e902948876f543a7a2063cb128e599b53f",
+      "type": "number"
+     },
+     "inspected_for": {
+      "column": "InspectedFor",
+      "column_id": "84c1482c-9a72-4ea5-8844-2c7ad1b5ca22",
+      "definition": "78a831e03582857697128b39f371f59f3bdbbe60b429e0b5bc3b4bc286f827a1",
+      "type": "text"
+     },
+     "location": {
+      "column": "Location",
+      "column_id": "d5908698-0f02-4b4e-8418-bd1458d7b322",
+      "definition": "e7e46983334158a0a33b9995dcbb3ed58b252f0b1a468bc5f9f36fbe7ee97518",
+      "type": "text"
+     },
+     "part": {
+      "column": "Part",
+      "column_id": "ea6f662c-1170-45de-8481-623844bc63dc",
+      "definition": "d1493bae31a4c4d403da1d5638cba752bec3027592cfe8e48d664ff5ace28c2e",
+      "type": "text"
+     },
+     "reject_reason": {
+      "column": "RejectReason",
+      "column_id": "ca79ce38-59f6-4d61-8f22-8f632f68e679",
+      "definition": "54175aa774944a6f5d97b68439bc82044c05f8071658086f233c01782238f6cc",
+      "type": "text"
+     },
+     "rejected": {
+      "column": "Rejected",
+      "column_id": "6ff3c1bc-fe5f-46c2-8a6e-92c290de5db8",
+      "definition": "7c24c1958f38a5fa8547c46998b6e4da2d8b6361bbd7adea27c6ce7c1b0cfae7",
+      "type": "number"
+     },
+     "scan": {
+      "column": "ActualScan",
+      "column_id": "92d9514b-1f45-458e-8d43-7a71d40ee464",
+      "definition": "4dd53ac9951a46654d45857bc03cf48d909b05e57a32443183fa9a1a6bb3fe72",
+      "format": "dateTime",
+      "type": "dateTime"
+     },
+     "shift": {
+      "column": "Shift",
+      "column_id": "661080a4-378e-4f0b-898d-fc92981bce0c",
+      "definition": "c58f5ffb7d2ea2fcf568a65f3d6356b03d7f136971a019d9a2c4cf25151222b7",
+      "type": "choice"
+     }
+    },
+    "header": {
+     "evidence": "Synthetic header for the ALPHA rehearsal client",
+     "part_name": "Alpha bracket",
+     "paying_client": "ALPHA REHEARSAL CO (fictitious)",
+     "worksite": "Alpha Plant (fictitious)"
+    },
+    "job": "RH-7001",
+    "list_id": "c1c1c1c1-0000-4000-8000-000000007001",
+    "mapping": {
+     "fields": {
+      "certified": "Certified",
+      "comments": "Comments",
+      "condition": "Condition",
+      "date": "Date",
+      "identifier": "Identifier",
+      "inspected": "Inspected",
+      "inspected_for": "InspectedFor",
+      "location": "Location",
+      "part": "Part",
+      "reject_reason": "RejectReason",
+      "rejected": "Rejected",
+      "shift": "Shift"
+     },
+     "shifts": {
+      "1": "1st Shift",
+      "1st": "1st Shift",
+      "1st Shift": "1st Shift",
+      "2": "2nd Shift",
+      "2nd": "2nd Shift",
+      "2nd Shift": "2nd Shift",
+      "3": "3rd Shift",
+      "3rd": "3rd Shift",
+      "3rd Shift": "3rd Shift"
+     }
+    },
+    "not_before": {
+     "2026-11-10|1": "2026-11-10T18:00:00+00:00",
+     "2026-11-10|2": "2026-11-10T22:00:00+00:00",
+     "2026-11-10|3": "2026-11-11T06:00:00+00:00"
+    },
+    "recorded_shifts": [
+     "1",
+     "2",
+     "3"
+    ],
+    "scan_field": "ActualScan",
+    "shift_field": "Shift",
+    "site_id": "example.sharepoint.com,a1a1a1a1-0000-4000-8000-000000007001,b1b1b1b1-0000-4000-8000-000000007001",
+    "timestamp_semantics_verified": true,
+    "verified": true,
+    "zone": "America/Chicago"
+   },
+   {
+    "active": true,
+    "attestations": {
+     "business_date": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "a33cf0123ceafeadf24c4d66e1beef1409c50238924732eb643ffbbcc75d15f7",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "identity_and_registry": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "8b07e742db69f53c0ea522bbb0e704b294bd50e200e40dbb0729d5908302ab1f",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "quantities": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "97a2745e4fac5e67f95e1ad20ea736dd7d2471a21724e1a021e2ff5eadc3d3ac",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "scan_time_meaning": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "f91b06c15e6b899f58ab4ac36a02704f986fd0c5ccbec146bec792712cec4829",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "shift_values": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "bb6dbec67886cff8588904fbb5f76717e0d63b13eca74ffe73bf5605ad4dfaf4",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "template_and_header": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "b82ba3c1e40a22215e6994251e927baeb8e47a8164f5afa69ea4c87fb29a729d",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     },
+     "timezone": {
+      "attested_at": "2026-11-10",
+      "attested_by": "Synthetic reviewer (test fixture)",
+      "bound_to": "7238bc738bc7e26a6b7b94293c95fd5f37a5654231152af277890eba97a3ad22",
+      "evidence": "tests/readiness_fixture.py (synthetic)"
+     }
+    },
+    "business_dates": [
+     "2026-11-10"
+    ],
+    "client_id": "BRAVO-REHEARSAL",
+    "field_contract": {
+     "certified": {
+      "column": "Certified",
+      "column_id": "01c90883-5619-410a-8e4a-6ffb6f9f6d13",
+      "definition": "ad6943a783f0881f0de7e4436382347098aff7f684df0a97fdb4b3e57873b643",
+      "type": "number"
+     },
+     "comments": {
+      "column": "Comments",
+      "column_id": "0ef6e4eb-69a1-4230-8fa5-909b8e60d72c",
+      "definition": "1e3438a0c23702b77ae7251c65f42bd0bc618deb46e124ac09f1fb6e48afd31b",
+      "type": "text"
+     },
+     "condition": {
+      "column": "Condition",
+      "column_id": "8d840342-6454-4394-8664-e6b1bd31eb52",
+      "definition": "a0f90bb8e3f1e3778c3e81c4875f3b265ea8b232604d7a78575c9e503f0f6728",
+      "type": "text"
+     },
+     "date": {
+      "column": "Date",
+      "column_id": "3d7f312d-3a1e-489b-8883-09e0e218ca1e",
+      "definition": "b538fbe89e14ac5225710699182ed769d73ccca20226c0ae81f7630fbc6af4fd",
+      "format": "dateOnly",
+      "type": "dateTime"
+     },
+     "identifier": {
+      "column": "Identifier",
+      "column_id": "3aa2d06e-13e4-476d-801e-21aaf4e3cbb0",
+      "definition": "198a779f21dfb1eeb9689cd235c96160df4280f474272038c6699e6663160bad",
+      "type": "text"
+     },
+     "inspected": {
+      "column": "Inspected",
+      "column_id": "a3c411c9-081e-40c6-8c2b-602c15d38fd2",
+      "definition": "ea579cbb21cc92a7ebd1229771f29f1635ca42d35b236f7cf53fa5a1185780cf",
+      "type": "number"
+     },
+     "inspected_for": {
+      "column": "InspectedFor",
+      "column_id": "04f7a4a1-58d9-4abe-852d-c7473c68aea5",
+      "definition": "bd27aff838a5fa6251f046b5aed5b68408ab928dba538aea33e794de62909942",
+      "type": "text"
+     },
+     "location": {
+      "column": "Location",
+      "column_id": "94a91de0-535b-47d8-8e0f-5dc2e9b285ef",
+      "definition": "29e82e7126a884f4cde3acc8786658b295cea88d6e8b9a816048bd9c4652df57",
+      "type": "text"
+     },
+     "part": {
+      "column": "Part",
+      "column_id": "35d808cc-4adf-42e7-8340-0b630c191d8f",
+      "definition": "1599b462874ab483751c59f8943aa318e4246de559147ced3ed425ec72849478",
+      "type": "text"
+     },
+     "reject_reason": {
+      "column": "RejectReason",
+      "column_id": "1d193471-97ef-425f-820c-b63517fcd84c",
+      "definition": "45d3e8afecd4eac3390a8329f244e5198a0477bd6d1d43c7307ae214e91f5c34",
+      "type": "text"
+     },
+     "rejected": {
+      "column": "Rejected",
+      "column_id": "a94707e9-7076-4ec9-8fcc-432279b75c91",
+      "definition": "2a91f6182f6bd948c08c38015e7a88bf6ca54b13674190324f40a1530cbcfb2e",
+      "type": "number"
+     },
+     "scan": {
+      "column": "ActualScan",
+      "column_id": "3ab7b536-4038-4d5b-8d40-31c2c34286aa",
+      "definition": "8160e99d8a687b03a583b7ee7f58945aa8cf335187b6237c7fa3861d9abdf617",
+      "format": "dateTime",
+      "type": "dateTime"
+     },
+     "shift": {
+      "column": "Shift",
+      "column_id": "fd504282-b10b-43cd-87c0-ee4948c04c87",
+      "definition": "9cf1b10e8ee934d4fb3b321c31be319a4a69ee9186ab54c5c5515be4d9d02529",
+      "type": "choice"
+     }
+    },
+    "header": {
+     "evidence": "Synthetic header for the BRAVO rehearsal client",
+     "part_name": "Bravo housing",
+     "paying_client": "BRAVO REHEARSAL LLC (fictitious)",
+     "worksite": "Bravo Works (fictitious)"
+    },
+    "job": "RH-7002",
+    "list_id": "c2c2c2c2-0000-4000-8000-000000007002",
+    "mapping": {
+     "fields": {
+      "certified": "Certified",
+      "comments": "Comments",
+      "condition": "Condition",
+      "date": "Date",
+      "identifier": "Identifier",
+      "inspected": "Inspected",
+      "inspected_for": "InspectedFor",
+      "location": "Location",
+      "part": "Part",
+      "reject_reason": "RejectReason",
+      "rejected": "Rejected",
+      "shift": "Shift"
+     },
+     "shifts": {
+      "1": "1st Shift",
+      "1st": "1st Shift",
+      "1st Shift": "1st Shift",
+      "2": "2nd Shift",
+      "2nd": "2nd Shift",
+      "2nd Shift": "2nd Shift",
+      "3": "3rd Shift",
+      "3rd": "3rd Shift",
+      "3rd Shift": "3rd Shift"
+     }
+    },
+    "recorded_shifts": [
+     "1",
+     "2"
+    ],
+    "scan_field": "ActualScan",
+    "shift_field": "Shift",
+    "site_id": "example.sharepoint.com,a2a2a2a2-0000-4000-8000-000000007002,b2b2b2b2-0000-4000-8000-000000007002",
+    "timestamp_semantics_verified": true,
+    "verified": true,
+    "zone": "America/Chicago"
+   }
+  ],
+  "enabled": true
+ },
+ "evidence": [
+  {
+   "at": "2026-11-10T12:00:00+00:00",
+   "by": "Synthetic example",
+   "claim": "Invented: the ActualScan column is filled by the tablet at the scan.",
+   "client_id": "ALPHA-REHEARSAL",
+   "job": "RH-7001",
+   "kind": "synthetic",
+   "reference": "none (synthetic)",
+   "topic": "scan_time_meaning"
+  },
+  {
+   "at": "2026-11-10T12:00:00+00:00",
+   "by": "Synthetic example",
+   "claim": "Invented: shift 1 ends at 18:00 UTC.",
+   "client_id": "ALPHA-REHEARSAL",
+   "job": "RH-7001",
+   "kind": "self_attested",
+   "reference": "none (synthetic)",
+   "shift": "1",
+   "topic": "shift_schedule"
+  }
+ ],
+ "job_registry": [
+  {
+   "client_key": "ALPHA-REHEARSAL",
+   "job": "RH-7001",
+   "list_id": "c1c1c1c1-0000-4000-8000-000000007001",
+   "site_id": "example.sharepoint.com,a1a1a1a1-0000-4000-8000-000000007001,b1b1b1b1-0000-4000-8000-000000007001",
+   "verified": true
+  },
+  {
+   "client_key": "BRAVO-REHEARSAL",
+   "job": "RH-7002",
+   "list_id": "c2c2c2c2-0000-4000-8000-000000007002",
+   "site_id": "example.sharepoint.com,a2a2a2a2-0000-4000-8000-000000007002,b2b2b2b2-0000-4000-8000-000000007002",
+   "verified": true
+  }
+ ],
+ "operations": {
+  "scheduler": {
+   "at": "2026-11-10T12:00:00+00:00",
+   "by": "Synthetic example",
+   "decided": true,
+   "reference": "none (synthetic)"
+  }
+ },
+ "packet": "last_scan.readiness_packet",
+ "pilot_principal": "alice",
+ "prepared_at": "2026-11-10T18:45:00+00:00",
+ "prepared_by": "Synthetic example (no real person)",
+ "provider_contract": {
+  "at_most_once_per_idempotency_key": true,
+  "evidence": "tests/test_last_scan_durable.py",
+  "honours_attempt_closed": true,
+  "outcome_contract_version": 1,
+  "provider": "synthetic-test-transport",
+  "retry_after_terminal_non_delivery": true,
+  "sender_timeout_seconds": 600,
+  "terminal_status_per_attempt": true,
+  "valid_until": "2026-11-13T00:00:00+00:00",
+  "verified_at": "2026-11-10",
+  "verified_by": "test fixture",
+  "version": "1"
+ },
+ "recipient_policy": {
+  "ALPHA-REHEARSAL": "Lauren",
+  "BRAVO-REHEARSAL": "Lauren"
+ },
+ "schemas": [
+  {
+   "captured_at": "2026-11-10T18:30:00+00:00",
+   "columns": {
+    "ActualScan": {
+     "dateTime": {
+      "format": "dateTime"
+     },
+     "displayName": "ActualScan",
+     "id": "92d9514b-1f45-458e-8d43-7a71d40ee464",
+     "name": "ActualScan"
+    },
+    "Certified": {
+     "displayName": "Certified",
+     "id": "9266ca56-befd-4366-8b2d-1bc9d0755a28",
+     "name": "Certified",
+     "number": {}
+    },
+    "Comments": {
+     "displayName": "Comments",
+     "id": "e2bbeb84-c648-4d9b-8c3f-4676c7b90f4a",
+     "name": "Comments",
+     "text": {}
+    },
+    "Condition": {
+     "displayName": "Condition",
+     "id": "e235c83e-5be0-4f9d-854e-43d1b0e9713a",
+     "name": "Condition",
+     "text": {}
+    },
+    "Date": {
+     "dateTime": {
+      "format": "dateOnly"
+     },
+     "displayName": "Date",
+     "id": "39620392-ebb4-4423-879d-7c38626b26de",
+     "name": "Date"
+    },
+    "DefectPhoto": {
+     "displayName": "DefectPhoto",
+     "id": "51e7e9b3-8110-45b0-8d4e-2bb87f73cd27",
+     "name": "DefectPhoto",
+     "thumbnail": {}
+    },
+    "Identifier": {
+     "displayName": "Identifier",
+     "id": "1e9bba41-7ee0-47f9-8a06-aebb51b50d5e",
+     "name": "Identifier",
+     "text": {}
+    },
+    "Inspected": {
+     "displayName": "Inspected",
+     "id": "a6e4be5d-dcf9-40ce-886c-9b93768f6a7d",
+     "name": "Inspected",
+     "number": {}
+    },
+    "InspectedFor": {
+     "displayName": "InspectedFor",
+     "id": "84c1482c-9a72-4ea5-8844-2c7ad1b5ca22",
+     "name": "InspectedFor",
+     "text": {}
+    },
+    "Location": {
+     "displayName": "Location",
+     "id": "d5908698-0f02-4b4e-8418-bd1458d7b322",
+     "name": "Location",
+     "text": {}
+    },
+    "Part": {
+     "displayName": "Part",
+     "id": "ea6f662c-1170-45de-8481-623844bc63dc",
+     "name": "Part",
+     "text": {}
+    },
+    "RejectReason": {
+     "displayName": "RejectReason",
+     "id": "ca79ce38-59f6-4d61-8f22-8f632f68e679",
+     "name": "RejectReason",
+     "text": {}
+    },
+    "Rejected": {
+     "displayName": "Rejected",
+     "id": "6ff3c1bc-fe5f-46c2-8a6e-92c290de5db8",
+     "name": "Rejected",
+     "number": {}
+    },
+    "Shift": {
+     "choice": {
+      "choices": [
+       "1",
+       "2",
+       "3"
+      ]
+     },
+     "displayName": "Shift",
+     "id": "661080a4-378e-4f0b-898d-fc92981bce0c",
+     "name": "Shift"
+    }
+   },
+   "list": {
+    "displayName": "RH-7001 rehearsal list",
+    "id": "c1c1c1c1-0000-4000-8000-000000007001"
+   },
+   "list_id": "c1c1c1c1-0000-4000-8000-000000007001",
+   "site_id": "example.sharepoint.com,a1a1a1a1-0000-4000-8000-000000007001,b1b1b1b1-0000-4000-8000-000000007001"
+  },
+  {
+   "captured_at": "2026-11-10T18:30:00+00:00",
+   "columns": {
+    "ActualScan": {
+     "dateTime": {
+      "format": "dateTime"
+     },
+     "displayName": "ActualScan",
+     "id": "3ab7b536-4038-4d5b-8d40-31c2c34286aa",
+     "name": "ActualScan"
+    },
+    "Certified": {
+     "displayName": "Certified",
+     "id": "01c90883-5619-410a-8e4a-6ffb6f9f6d13",
+     "name": "Certified",
+     "number": {}
+    },
+    "Comments": {
+     "displayName": "Comments",
+     "id": "0ef6e4eb-69a1-4230-8fa5-909b8e60d72c",
+     "name": "Comments",
+     "text": {}
+    },
+    "Condition": {
+     "displayName": "Condition",
+     "id": "8d840342-6454-4394-8664-e6b1bd31eb52",
+     "name": "Condition",
+     "text": {}
+    },
+    "Date": {
+     "dateTime": {
+      "format": "dateOnly"
+     },
+     "displayName": "Date",
+     "id": "3d7f312d-3a1e-489b-8883-09e0e218ca1e",
+     "name": "Date"
+    },
+    "DefectPhoto": {
+     "displayName": "DefectPhoto",
+     "id": "ab4120ac-5f63-419b-83fc-d98a44f685c4",
+     "name": "DefectPhoto",
+     "thumbnail": {}
+    },
+    "Identifier": {
+     "displayName": "Identifier",
+     "id": "3aa2d06e-13e4-476d-801e-21aaf4e3cbb0",
+     "name": "Identifier",
+     "text": {}
+    },
+    "Inspected": {
+     "displayName": "Inspected",
+     "id": "a3c411c9-081e-40c6-8c2b-602c15d38fd2",
+     "name": "Inspected",
+     "number": {}
+    },
+    "InspectedFor": {
+     "displayName": "InspectedFor",
+     "id": "04f7a4a1-58d9-4abe-852d-c7473c68aea5",
+     "name": "InspectedFor",
+     "text": {}
+    },
+    "Location": {
+     "displayName": "Location",
+     "id": "94a91de0-535b-47d8-8e0f-5dc2e9b285ef",
+     "name": "Location",
+     "text": {}
+    },
+    "Part": {
+     "displayName": "Part",
+     "id": "35d808cc-4adf-42e7-8340-0b630c191d8f",
+     "name": "Part",
+     "text": {}
+    },
+    "RejectReason": {
+     "displayName": "RejectReason",
+     "id": "1d193471-97ef-425f-820c-b63517fcd84c",
+     "name": "RejectReason",
+     "text": {}
+    },
+    "Rejected": {
+     "displayName": "Rejected",
+     "id": "a94707e9-7076-4ec9-8fcc-432279b75c91",
+     "name": "Rejected",
+     "number": {}
+    },
+    "Shift": {
+     "choice": {
+      "choices": [
+       "1",
+       "2"
+      ]
+     },
+     "displayName": "Shift",
+     "id": "fd504282-b10b-43cd-87c0-ee4948c04c87",
+     "name": "Shift"
+    }
+   },
+   "list": {
+    "displayName": "RH-7002 rehearsal list",
+    "id": "c2c2c2c2-0000-4000-8000-000000007002"
+   },
+   "list_id": "c2c2c2c2-0000-4000-8000-000000007002",
+   "site_id": "example.sharepoint.com,a2a2a2a2-0000-4000-8000-000000007002,b2b2b2b2-0000-4000-8000-000000007002"
+  }
+ ],
+ "synthetic": true,
+ "version": 1
+}

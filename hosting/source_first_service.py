@@ -94,17 +94,46 @@ def _hold_key(scope):
     return 'source_first_hold|' + sf.digest({k: scope[k] for k in ('site_id','list_id')})
 
 
+def _hold_end(hold):
+    """The time a stored hold ends, or None when it has no usable end. A hold with no end (nothing stated, something
+    stated that could not be read, or an end that cannot be parsed) is never treated as expired: it stays until a
+    verified provider recovery."""
+    from datetime import datetime
+    text = hold.get('not_before') if isinstance(hold, dict) else None
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        end = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return end if end.tzinfo is not None else None
+
+
+def _stricter_hold(previous, new):
+    """Which of two holds for the same source to keep. A hold with no end dominates in BOTH orders; between two that
+    have an end, the later one (compared as times, not as text). A hold is never shortened."""
+    if not isinstance(previous, dict):
+        return new if _hold_end(new) is not None or not isinstance(new, dict) else dict(new, not_before=None)
+    before, after = _hold_end(previous), _hold_end(new)
+    if before is None:
+        return dict(previous, not_before=None)
+    if after is None:
+        return dict(new, not_before=None)
+    return previous if before >= after else new
+
+
 def _check_hold(db, scope):
     from datetime import datetime, timezone
     row = db.execute('SELECT value_json FROM settings WHERE key=?', (_hold_key(scope),)).fetchone()
     if not row: return
     hold = json.loads(row[0])
-    due = hold.get('not_before')
-    if not due or datetime.now(timezone.utc) < datetime.fromisoformat(due):
+    end = _hold_end(hold)
+    due = hold.get('not_before') if end is not None else None
+    if end is None or datetime.now(timezone.utc) < end:
         raise sf.ReviewError('This exact source has a provider cooldown hold. ' + ('Do not read it before ' + due + '.' if due else 'A verified provider recovery is required; no retry deadline was supplied.'))
 
 
-def _failure(directory, db, state, exc):
+def _failure(directory, db, state, exc, inbox=None):
     evidence = getattr(exc, 'evidence', None)
     if evidence is None: return
     raw = sf.canonical(evidence); sha = sf.digest(raw)
@@ -115,10 +144,13 @@ def _failure(directory, db, state, exc):
                                     cooldown=evidence.get('cooldown'), private_evidence_path=path)
     hold = evidence.get('cooldown')
     if hold:
+        # Two captures of the same source can fail in different transactions (each is serialized on its own request).
+        # On PostgreSQL take a lock for this source's hold so the read and the write below cannot interleave; on
+        # SQLite the surrounding BEGIN IMMEDIATE already serializes every writer.
+        if getattr(inbox, 'pg', None) is not None:
+            db.execute('SELECT pg_advisory_xact_lock(hashtext(?))', (_hold_key(state['scope']),))
         old = db.execute('SELECT value_json FROM settings WHERE key=?', (_hold_key(state['scope']),)).fetchone()
-        previous = json.loads(old[0]) if old else None
-        if previous and (not previous.get('not_before') or previous.get('not_before') > (hold.get('not_before') or '')):
-            hold = previous
+        hold = _stricter_hold(json.loads(old[0]) if old else None, hold)
         db.execute('INSERT INTO settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json',
                    (_hold_key(state['scope']),sf.canonical(hold).decode()))
 
@@ -280,9 +312,9 @@ def capture(h, payload, *, capture_fn=None):
                          freshness=dict(snapshot_hash=snapshot['snapshot_hash'], compared_at=snapshot['captured_at'], match=True))
             _put(db, key, state)
     except sf.ReviewError as exc:
-        with transaction(h, key) as (directory, _, db, _):
+        with transaction(h, key) as (directory, inbox, db, _):
             state = _get(db, key)
-            _failure(directory, db, state, exc)
+            _failure(directory, db, state, exc, inbox)
             if state['status'] == 'capture_pending':
                 state.update(status='capture_failed', error=str(exc), updated_at=sf.now())
                 _put(db, key, state)
@@ -396,9 +428,9 @@ def refresh(h, key, payload, *, capture_fn=None):
             state['updated_at'] = sf.now()
             _put(db, key, state)
     except sf.ReviewError as exc:
-        with transaction(h, key) as (directory, _, db, _):
+        with transaction(h, key) as (directory, inbox, db, _):
             state = _get(db, key)
-            _failure(directory, db, state, exc)
+            _failure(directory, db, state, exc, inbox)
             op = next(o for o in state['operations'] if o['request_id'] == req)
             op.update(status='failed', error=str(exc))
             _put(db, key, state)

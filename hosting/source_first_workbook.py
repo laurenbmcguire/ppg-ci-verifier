@@ -15,6 +15,18 @@ from hosting import source_first_template as tx
 from hosting import source_first_layout as lx
 
 ASSETS=Path(__file__).resolve().parent/'assets'/'source_first'
+UNKNOWN_PART='Part number UNKNOWN (blank at source)'
+def unknown_part_label(shown):
+    """The by-part line for records with no part number.
+
+    Which line that is is decided by the record having no part number, never by what the line says. The wording only has
+    to be readable; if a real part number happens to read the same, this line says more so the two can be told apart.
+    """
+    plain=lambda text:' '.join(str(text).split()).casefold()
+    taken={plain(text) for text in shown if text is not None};label=UNKNOWN_PART;n=0
+    while plain(label) in taken:
+        n+=1;label=UNKNOWN_PART+' - no part number was recorded'+('' if n==1 else f' ({n})')
+    return label
 HEADER_FIELDS=('area','service_type','description','paying_client','client_contact','worksite','prepared_by','part_name')
 
 
@@ -82,7 +94,17 @@ def _native_layout(raw):
     return out
 
 
+def known_sum(values):
+    values=list(values)
+    return None if any(v is None for v in values) else sum(values)
+
+
+def ratio(numerator,denominator):
+    return numerator/denominator if numerator is not None and denominator else ''
+
+
 def build(rows,head,cap,bind,blobs):
+    incomplete=any(r['resolved'][f] is None for r in rows for f in sf.QUANTITIES)
     c=contract();holds=[f for f in scope_findings(rows,head,cap,c) if f['blocking']]
     if holds:raise sf.ReviewError(holds[0]['text'])
     template=(ASSETS/c['clean_filename']).read_bytes();p=tx.read_package(template);parts=tx.sheets(p)
@@ -91,6 +113,9 @@ def build(rows,head,cap,bind,blobs):
     parts=tx.sheets(p)
     expected={};locations={};photo_expect=[];text_entries=[];text_locations={}
     def actual(sheet,address,value=None,formula=None):
+        # In incomplete drafts, materialize reviewed values instead of Excel
+        # formulas that would silently coerce an unknown blank to zero.
+        if incomplete:formula=None
         tx.write(roots[sheet],address,value,formula)
         expected[(sheet,address)]={'value':value,'formula':formula.lstrip('=') if formula else None}
     def put(sheet,address,value=None,formula=None):
@@ -126,11 +151,11 @@ def build(rows,head,cap,bind,blobs):
     for key,address in c['summary'].items():
         if key in HEADER_FIELDS:put(summary,address,head.get(key) or None)
     put(summary,'D13',job);put(summary,'D14',serial)
-    put(summary,'B5','Daily Report · HELD')
+    put(summary,'B5','DRAFT · UNKNOWN QUANTITIES' if incomplete else 'Daily Report · HELD')
     title=f"{job} · {day} · reviewed source snapshot"
     put(summary,'B6',title)
     put(summary,'B10',f'{len(rows)} recorded inspections. Shift completion and future submissions are not established.')
-    put(summary,'B25','Totals include every approved recorded row once. Blank shifts mean no rows were captured, not that production was completed or not run.')
+    put(summary,'B25','Blank quantities/totals are UNKNOWN, not zero. A total is withheld if any contributing quantity is unknown.' if incomplete else 'Totals include every approved recorded row once. Blank shifts mean no rows were captured, not that production was completed or not run.')
     put(summary,'B29',rows[0]['resolved']['part'] if rows else None)
     inspected_for={r['resolved']['inspected_for'] for r in rows if r['resolved']['inspected_for'] is not None}
     put(summary,'H29',next(iter(inspected_for)) if len(inspected_for)==1 else 'See shift detail' if inspected_for else None)
@@ -144,7 +169,7 @@ def build(rows,head,cap,bind,blobs):
     # Retain a truthful source-record unit instead of calling arbitrary scans boxes.
     for address in ('B8','F20'):put(summary,address,'Records')
     for address in ('G48','H48'):put(summary,address,None)
-    totals={f:sum(r['resolved'][f] for r in rows) for f in sf.QUANTITIES}
+    totals={f:known_sum(r['resolved'][f] for r in rows) for f in sf.QUANTITIES}
     selected=head.get('photo_choices',{})
     def photo_status(item):
         available=[p for p in cap['photos'] if p.get('record_id')==item]
@@ -169,13 +194,13 @@ def build(rows,head,cap,bind,blobs):
                 # blank-coercing calculation; the reconciliation is independent.
                 put(sheet,col+str(rr),display(row,field,value))
             put(sheet,'M'+str(rr),photo_status(row['id']) if row['resolved']['rejected'] and row['id'] not in selected else None)
-        quantities={f:sum(r['resolved'][f] for r in subset) for f in sf.QUANTITIES}
+        quantities={f:known_sum(r['resolved'][f] for r in subset) for f in sf.QUANTITIES}
         for col,inputcol,field in (('A','G',None),('C','G','inspected'),('E','K','certified'),('G','J','rejected')):
             value=len(subset) if field is None else quantities[field]
             put(sheet,f'{col}{total}',value,f'={"COUNT" if field is None else "SUM"}({inputcol}{start}:{inputcol}{end})')
         put(sheet,f'A{total-1}','Records inspected')
         for col,num in (('J','G'),('L','E')):
-            value=(quantities['rejected' if col=='J' else 'certified']/quantities['inspected']) if quantities['inspected'] else ''
+            value=ratio(quantities['rejected' if col=='J' else 'certified'],quantities['inspected'])
             put(sheet,f'{col}{total}',value,f'=IF(C{total}=0,"",{num}{total}/MAX(1,C{total}))')
         for key in ('billing_name','billing_hours','billing_total'):put(sheet,spec[key],'Unavailable')
         put(sheet,'D'+str(int(spec['billing_total'][1:])+1),'Unavailable')
@@ -186,11 +211,11 @@ def build(rows,head,cap,bind,blobs):
             value=(len(subset) if field is None else quantities[field]) if subset else ''
             put(summary,f'{col}{index}',value,f'=IF(\'{sheet}\'!A{total}=0,"",\'{sheet}\'!{source}{total})')
         for col,num,field in (('L','K','rejected'),('M','I','certified')):
-            value=quantities[field]/quantities['inspected'] if quantities['inspected'] else ''
+            value=ratio(quantities[field],quantities['inspected'])
             put(summary,f'{col}{index}',value,f'=IF(G{index}="","",IF(G{index}=0,"",{num}{index}/MAX(1,G{index})))')
         put(summary,'N'+str(index),'Unavailable');put(summary,'P'+str(index),'Unavailable')
     for col,field in (('F',None),('G','inspected'),('I','certified'),('K','rejected')):put(summary,col+'24',len(rows) if field is None else totals[field],f'=SUM({col}21:{col}23)')
-    for col,num,field in (('L','K','rejected'),('M','I','certified')):put(summary,col+'24',totals[field]/totals['inspected'] if totals['inspected'] else '',f'=IF(G24=0,"",{num}24/MAX(1,G24))')
+    for col,num,field in (('L','K','rejected'),('M','I','certified')):put(summary,col+'24',ratio(totals[field],totals['inspected']),f'=IF(G24=0,"",{num}24/MAX(1,G24))')
     put(summary,'N24','Unavailable');put(summary,'P24','Unavailable')
     for dest,source in {'B9':'F24','D9':'G24','G9':'I24','J9':'K24','M9':'L24','O9':'M24'}.items():put(summary,dest,expected[(summary,source)]['value'],'='+source)
     for dest,source in {'J29':'G24','L29':'I24','N29':'K24','P29':'L24','J30':'J29','L30':'L29','N30':'N29','P30':'P29'}.items():put(summary,dest,expected[(summary,source)]['value'],'='+source)
@@ -209,15 +234,15 @@ def build(rows,head,cap,bind,blobs):
         put('_Calc','H'+str(ri),'Yes' if row['id'] in selected else 'No')
     metrics={'K2':len(rows),'K4':len(rejected),'K6':len(selected),'K8':len([r for r in rejected if r['id'] not in selected])}
     for address,value in metrics.items():put('_Calc',address,value)
-    put(summary,'M43','Selected photos');put(summary,'O43','No selected photo')
+    put(summary,'M43','Selected photos');put(summary,'O43','Known rejects without photo' if incomplete else 'No selected photo')
     put(summary,'M44',len(selected),'=_Calc!K6');put(summary,'O44',metrics['K8'],'=_Calc!K8')
     shown=rejected[:13]
-    put(summary,'B47','TOP 13 REJECTED RECORDS · quantity, then source record ID')
+    put(summary,'B47','TOP KNOWN REJECTED QUANTITIES · unknowns excluded' if incomplete else 'TOP 13 REJECTED RECORDS · quantity, then source record ID')
     source_end=len(rows)+1
     source_ids={r['id']:i for i,r in enumerate(sorted(rows,key=lambda r:r['id']),1)}
     for ri,row in enumerate(rows,2):
         ordinal=source_ids[row['id']]
-        rank=1+sum(r['resolved']['rejected']>row['resolved']['rejected'] or r['resolved']['rejected']==row['resolved']['rejected'] and r['id']<row['id'] for r in rows)
+        rank=None if row['resolved']['rejected'] is None else 1+sum(r['resolved']['rejected']>row['resolved']['rejected'] or r['resolved']['rejected']==row['resolved']['rejected'] and r['id']<row['id'] for r in rows if r['resolved']['rejected'] is not None)
         put('_Calc','L'+str(ri),ordinal)
         put('_Calc','F'+str(ri),rank,f'=COUNTIF($D$2:$D${source_end},">"&D{ri})+COUNTIFS($D$2:$D${source_end},D{ri},$L$2:$L${source_end},"<"&L{ri})+1')
     for i in range(13):
@@ -235,13 +260,16 @@ def build(rows,head,cap,bind,blobs):
         put('_Calc','N'+str(cr),v.get('rejected'),f'=IF(D{cr}="","",D{cr})')
         for outcol,incol in {'B':'A','C':'B','E':'C','F':'D','I':'G'}.items():put(summary,outcol+str(outrow),values[incol],f'=IF(_Calc!{incol}{cr}="","",_Calc!{incol}{cr})')
         for col in ('G','H'):put(summary,col+str(outrow),None)
-    for col,field in (('E','inspected'),('F','rejected')):put(summary,col+'62',sum(r['resolved'][field] for r in shown),f'=SUM({col}49:{col}61)')
+    # With unknown reject quantities and no known rejected record to show, a subtotal of 0 would read as
+    # "no rejects". It stays blank: unknown is not zero.
+    nothing_known=incomplete and not shown
+    for col,field in (('E','inspected'),('F','rejected')):put(summary,col+'62',None if nothing_known else known_sum(r['resolved'][field] for r in shown),f'=SUM({col}49:{col}61)')
     put(summary,'G62',None);put(summary,'H62',None)
     put(summary,'B62','Shown-record subtotal')
-    denom=sum(r['resolved']['inspected'] for r in shown)
-    put(summary,'I62',sum(r['resolved']['rejected'] for r in shown)/denom if denom else '', '=IF(E62=0,"",F62/MAX(1,E62))')
-    for r,label,result,note in [(66,'Defect categories','Unavailable','No category totals were inferred from comments.'),(67,'Reject quantity vs. inspected','Checked','Every approved row was checked independently.'),(68,'Rejected records without selected photo',str(metrics['K8']),'Missing images remain explicit.'),(69,'Billable hours','Unavailable','Labor fields are not mapped in this pilot.'),(70,'Inspector name','Unavailable','Inspector fields are not mapped in this pilot.'),(71,'Certified + rejected = inspected','Checked','Independently checked source quantities are retained.')]:
-        for col,value in (('B',label),('E',result),('J',note)):put(summary,col+str(r),value)
+    denom=known_sum(r['resolved']['inspected'] for r in shown)
+    put(summary,'I62',ratio(known_sum(r['resolved']['rejected'] for r in shown),denom), '=IF(E62=0,"",F62/MAX(1,E62))')
+    for r,label,result,note in [(66,'Defect categories','Unavailable','No category totals were inferred from comments.'),(67,'Reject quantity vs. inspected','Checked','Every approved row was checked independently.'),(68,'Rejected records without selected photo',str(metrics['K8']) if not any(r['resolved']['rejected'] is None for r in rows) else f"{metrics['K8']} known; unknown on {len([r for r in rows if r['resolved']['rejected'] is None])} records",'Missing images remain explicit.'),(69,'Billable hours','Unavailable','Labor fields are not mapped in this pilot.'),(70,'Inspector name','Unavailable','Inspector fields are not mapped in this pilot.'),(71,'Certified + rejected = inspected','Checked','Independently checked source quantities are retained.')]:
+        for col,value in (('B',label),('E','Incomplete' if incomplete and result=='Checked' else result),('J','Unknown quantities require review.' if incomplete and result=='Checked' else note)):put(summary,col+str(r),value)
     # No generic category chart should imply holes/glue counts. Keep its native
     # dimensions/anchor but rebind its two series to actual inspected/rejected.
     for name in list(p):
@@ -275,7 +303,7 @@ def build(rows,head,cap,bind,blobs):
         if blob is None or sf.digest(blob)!=sha:raise sf.ReviewError('Selected original photo bytes are missing or changed.')
         put(photo_sheet,f'{col}{base}',f"Record {item} · {row['resolved']['reject_reason'] or 'Recorded defect'}")
         put(photo_sheet,f'{col}{base+1}','ID '+row['resolved']['identifier'])
-        put(photo_sheet,f'{col}{base+2}',row['resolved']['shift']+' · Part '+row['resolved']['part'])
+        put(photo_sheet,f'{col}{base+2}',row['resolved']['shift']+' · '+('Part '+row['resolved']['part'] if row['resolved']['part'] is not None else 'No part number at source'))   # a real part always reads "Part ..."
         put(photo_sheet,f'{col}{base+13}',display(row,'comments',row['resolved']['comments']))
         put(photo_sheet,f'{col}{base+15}','Original source photo · '+sha[:12])
         sh,rn=locations[item];link=f'HYPERLINK("#\'{photo_sheet}\'!{col}{base}","View source photo")'
@@ -294,22 +322,27 @@ def build(rows,head,cap,bind,blobs):
     text_cells.update((photo_sheet,col+str(r)) for r in range(8,21+layout['reject_extra']) for col in ('C','D','I'))
     # All parts receive distinct exact source-string rows, with formula totals
     # referencing the complete reviewed detail range rather than a top-N list.
-    part_totals={}
+    part_totals={};part_groups=[]
+    first={part:next(r for r in rows if r['resolved']['part']==part) for part in layout['parts']}
+    shown={part:display(first[part],'part',part) for part in layout['parts'] if part is not None}
+    unknown_label=unknown_part_label([*shown,*shown.values()])
     for i,part in enumerate(layout['parts'],29):
         part_rows=[r for r in rows if r['resolved']['part']==part]
-        part_totals[part]={f:sum(r['resolved'][f] for r in part_rows) for f in sf.QUANTITIES}
-        actual(summary,'B'+str(i),display(part_rows[0],'part',part))
+        part_totals[part]={f:known_sum(r['resolved'][f] for r in part_rows) for f in sf.QUANTITIES}
+        # A record with no part number at the source keeps its own line. The label says it is unknown; no number is put in.
+        actual(summary,'B'+str(i),unknown_label if part is None else shown[part])
+        part_groups.append(dict(part=part,missing=part is None,label=unknown_label if part is None else shown[part],summary_row=i,**part_totals[part]))
         actual(summary,'E'+str(i),head.get('part_name') or None if len(layout['parts'])==1 else None)
         purposes={r['resolved']['inspected_for'] for r in part_rows if r['resolved']['inspected_for'] is not None}
         actual(summary,'H'+str(i),display(next(r for r in part_rows if r['resolved']['inspected_for'] is not None),'inspected_for',next(iter(purposes))) if len(purposes)==1 else 'See detail' if purposes else None)
         for dest,source,field in [('J','C','inspected'),('L','E','certified'),('N','D','rejected')]:
             formula='=SUMIF(_Calc!$J$2:$J$'+str(len(rows)+1)+','+str(i-28)+',_Calc!$'+source+'$2:$'+source+'$'+str(len(rows)+1)+')'
             actual(summary,dest+str(i),part_totals[part][field],formula)
-        actual(summary,'P'+str(i),part_totals[part]['rejected']/part_totals[part]['inspected'] if part_totals[part]['inspected'] else '',f'=IF(J{i}=0,"",N{i}/MAX(1,J{i}))')
+        actual(summary,'P'+str(i),ratio(part_totals[part]['rejected'],part_totals[part]['inspected']),f'=IF(J{i}=0,"",N{i}/MAX(1,J{i}))')
         text_cells.add((summary,'B'+str(i)))
     end=29+layout['part_extra'];total=end+1
     for col,field in [('J','inspected'),('L','certified'),('N','rejected')]:actual(summary,col+str(total),totals[field],f'=SUM({col}29:{col}{end})')
-    actual(summary,'P'+str(total),totals['rejected']/totals['inspected'] if totals['inspected'] else '',f'=IF(J{total}=0,"",N{total}/MAX(1,J{total}))')
+    actual(summary,'P'+str(total),ratio(totals['rejected'],totals['inspected']),f'=IF(J{total}=0,"",N{total}/MAX(1,J{total}))')
     # The source block includes certified quantities separately; no inferred
     # relationship substitutes for their reviewed source representation.
     for ri,row in enumerate(rows,2):
@@ -319,7 +352,10 @@ def build(rows,head,cap,bind,blobs):
         put('_Calc','J'+str(ri),layout['parts'].index(row['resolved']['part'])+1)
     supported=sum(p.get('status')=='supported' for p in cap['photos'])
     unavailable=len(cap['photos'])-supported
+    unknown_rejects=len([r for r in rows if r['resolved']['rejected'] is None])
     coverage=f"Representative photos: {len(selected)} selected; {supported} supported captured; {supported-len(selected)} supported not selected; {unavailable} unavailable or not attempted. {metrics['K8']} rejected records have no selected photo."
+    if unknown_rejects:
+        coverage=f"Representative photos: {len(selected)} selected; {supported} supported captured; {supported-len(selected)} supported not selected; {unavailable} unavailable or not attempted. {metrics['K8']} records with a known rejected quantity have no selected photo; the rejected quantity is unknown on {unknown_rejects} records."
     put(summary,'B42',coverage)
     put(photo_sheet,'A6','ALL REJECTED RECORDS · exact source record IDs below')
     put(summary,'B10',f'{len(rows)} recorded inspections. See all parts and complete rejected-record traceability. Completion is unknown.')
@@ -366,7 +402,13 @@ def build(rows,head,cap,bind,blobs):
     raw=tx.packed(p)
     budgets=lx.package_limits(p,roots,raw)
     verification=verify(raw,rows,head,cap,bind,expected,locations,photo_expect,layout,text_entries)
-    verification['part_totals']=part_totals
+    # What a group is and what its line says are kept apart. `part_groups` is every by-part line in order: `part` is the
+    # part number as text, or None with `missing` true for the records that have none; `label` is only the wording shown.
+    # `part_totals` is keyed by real part numbers alone, so a part whose number reads like the unknown wording can never
+    # take the place of, or be replaced by, the records with no part number. Those are in `unknown_part_totals`.
+    verification['part_groups']=part_groups
+    verification['part_totals']={part:totals_ for part,totals_ in part_totals.items() if part is not None}
+    verification['unknown_part_totals']=part_totals.get(None)
     verification['output_budgets']=budgets
     return raw,verification
 
@@ -468,7 +510,9 @@ def verify(raw,rows,head,cap,bind,expected,locations,photo_expect,layout=None,te
             want=row['resolved'][field]
             if lx.needs_continuation(field,want):
                 actual=''.join(t['text'] for t in text_entries if t['record_id']==row['id'] and t['field']==field)
-            if actual!=want or field in ('part','identifier') and type(actual)is not str:
+            # A part number or identifier that is missing at the source must be saved as missing (an empty cell): that is
+            # checked by the equality. One that exists must be saved as text, never as a number.
+            if actual!=want or field in ('part','identifier') and want is not None and type(actual)is not str:
                 raise sf.ReviewError('Saved row identifier/quantity provenance failed.')
         if values[sheet][f'B{r}'].value!=row['values']['shift'].get('value'):raise sf.ReviewError('Recorded shift representation changed.')
     lx.verify_ledger(values,rows,cap)
@@ -479,7 +523,7 @@ def verify(raw,rows,head,cap,bind,expected,locations,photo_expect,layout=None,te
     if ledger_ids!=[r['id'] for r in rows] or len(set(ledger_ids))!=len(rows):raise sf.ReviewError('Source ledger record identity coverage failed.')
     for rr,t in enumerate(text_entries,5):
         if values['Source Text']['D'+str(rr)].value!=t['text']:raise sf.ReviewError('Complete source text continuation failed.')
-    totals={f:sum(r['resolved'][f] for r in rows) for f in sf.QUANTITIES}
+    totals={f:known_sum(r['resolved'][f] for r in rows) for f in sf.QUANTITIES}
     for col,f in [('G','inspected'),('I','certified'),('K','rejected')]:
         if values['Summary'][col+'24'].value!=totals[f]:raise sf.ReviewError('Saved daily total differs from the complete approved scope.')
     actual=images(raw);source_images=[im for im in actual if im['sha256'] not in c['preserve_media_sha256']]
@@ -496,7 +540,9 @@ def verify(raw,rows,head,cap,bind,expected,locations,photo_expect,layout=None,te
                                     approved_values_hash=sf.digest(r['values'])) for r in rows],
                 photo_provenance=photo_expect,cell_manifest_hash=sf.digest({s+'!'+a:v for (s,a),v in expected.items()}),
                 formula_expectations_checked=True,formula_cache_values_checked=True,source_reference_cache_values_checked=True,native_layout_preserved=True,layout_expansion=layout,typed_source_ledger_verified=True,
-                complete_rejected_record_count=sum(bool(r['resolved']['rejected']) for r in rows),
+                complete_rejected_record_count=None if any(r['resolved']['rejected'] is None for r in rows) else sum(bool(r['resolved']['rejected']) for r in rows),
+                known_rejected_record_count=sum(bool(r['resolved']['rejected']) for r in rows),
+                rejected_quantity_unknown_count=sum(r['resolved']['rejected'] is None for r in rows),
                 top_ranked_count=min(13,sum(bool(r['resolved']['rejected']) for r in rows)),
                 printable_text_segments=len(text_entries),
                 note='Saved values and supported formula expressions match the sealed reviewed snapshot. Live freshness is a separate ten-minute receipt.')
