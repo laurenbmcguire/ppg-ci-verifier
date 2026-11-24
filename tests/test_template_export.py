@@ -71,11 +71,21 @@ class InTheTemplate(unittest.TestCase):
         first, second = detail(book, '1st Shift'), detail(book, '2nd Shift')
         self.assertEqual([(r[3], r[4], r[6], r[7], r[9], r[10]) for r in first], [('00000001-V', 'SYN0001', 48, 'OK', 0, 48), ('00000001-V', 'SYN0002', 48, 'NOK', 3, 45)])
         self.assertEqual([(r[3], r[4], r[6], r[9], r[10]) for r in second], [('00000002-V', 'SYN0003', 48, 0, 48)])
-        self.assertEqual(notes, dict(reject_blank=2, certified_derived=3, inspected_blank=0))
+        self.assertEqual(notes, dict(reject_blank=0, certified_derived=3, inspected_blank=0))     # built reports already carry 0 where the crew left rejects empty
         said = ' '.join(t[2] for t in visible_text(book) if t[0] == 'Summary')
-        self.assertIn('No reject quantity was recorded on 2 records; as on the template, a blank reject quantity counts as zero.', said)
+        self.assertNotIn('No reject quantity was recorded', said)
         self.assertIn('Quantity Certified is Quantity Inspected minus Reject Quantity on 3 records where it was not recorded.', said)
         self.assertIn('3 inspection records: 144 parts inspected, 141 certified, 3 rejected.', said)
+
+    def test_a_stored_report_with_blank_reject_cells_counts_them_as_zero_and_says_so(self):
+        with patch.dict(ROLES, clear=True, values={k: v for k, v in ROLES.items() if v != 'rejected'}):     # a report whose reject cells are empty
+            raw = stored_report(SMALL)
+        out, notes = te.in_template(NAME, raw, JOB, DAY, HEAD)
+        book = load_workbook(io.BytesIO(out))
+        self.assertEqual(notes['reject_blank'], 3)
+        self.assertEqual([r[9] for r in detail(book, '1st Shift')], [0, 0])
+        said = ' '.join(x[2] for x in visible_text(book) if x[0] == 'Summary')
+        self.assertIn('No reject quantity was recorded on 3 records; as on the template, a blank reject quantity counts as zero.', said)
 
     def test_more_rows_and_part_numbers_than_the_blank_template_holds(self):
         out, _ = te.in_template(NAME, stored_report(LARGE), JOB, DAY, HEAD)

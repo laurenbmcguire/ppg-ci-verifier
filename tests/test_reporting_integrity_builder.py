@@ -48,9 +48,16 @@ class SafeBuilder(unittest.TestCase):
     def test_actual_workbook_preserves_blanks_and_omits_empty_shift_tabs(self):
         rows,_=self.rows();raw=builder.build_xlsx('2207','2026-11-07',rows,shifts.DEFAULT)
         w=load_workbook(io.BytesIO(raw));self.assertEqual(w.sheetnames,['Summary','1st Shift','Rejects'])
-        self.assertIsNone(w['1st Shift']['J16'].value);self.assertIsNone(w['1st Shift']['K16'].value)
-        cached=load_workbook(io.BytesIO(raw),data_only=True)
-        self.assertIn(cached['Summary']['K21'].value,(None,''));self.assertIn(cached['Summary']['M21'].value,(None,''))
+        # The list has a reject column the crew left empty: nothing was rejected on that row, so it is 0, not unknown.
+        self.assertEqual(w['1st Shift']['J16'].value,0);self.assertIsNone(w['1st Shift']['K16'].value)       # certified was not recorded and stays blank
+    def test_reject_quantity_from_sharepoint_is_never_unknown_when_the_list_has_the_column(self):
+        roles={'Qty':'inspected','NOK':'rejected'}
+        for value in (None,''):self.assertEqual(builder._row({'Qty':10,'NOK':value},roles)['rejected'],0)
+        self.assertEqual(builder._row({'Qty':10},roles)['rejected'],0)                                       # the field is absent on the row: still the list's own column
+        self.assertEqual(builder._row({'Qty':10,'NOK':3},roles)['rejected'],3);self.assertEqual(builder._row({'Qty':10,'NOK':0},roles)['rejected'],0)
+        self.assertIsNone(builder._row({'Qty':10,'NOK':'a few'},roles)['rejected'])                          # text is not turned into a number
+        self.assertIsNone(builder._row({'Qty':10},{'Qty':'inspected'})['rejected'])                          # a list with no reject column gives no quantity
+        self.assertIsNone(builder._row({'NOK':None},roles)['inspected'])                                     # only the reject quantity has this rule
     def test_rate_caches_positive_zero_and_unknown_cases(self):
         for inspected,rejected,certified,want in [(10,2,8,0.2),(10,0,10,0),(0,0,0,None),(10,None,None,None),(None,2,None,None)]:
             with self.subTest(inspected=inspected,rejected=rejected):

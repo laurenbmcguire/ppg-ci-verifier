@@ -65,6 +65,11 @@ def _row(fields, roles):
     cond = str(r.get('condition') or '').strip()
     inspected = _num(r.get('inspected'))
     rejected = _num(r.get('rejected'))
+    # The reject quantity comes from the SharePoint list. When the list has a reject column and the crew left it empty on
+    # a row, nothing was rejected on that row: it is 0, never "unknown" (operations owner, 2026-11-24). A list with no
+    # reject column at all, or a value that is not a number, still gives no quantity.
+    if rejected is None and 'rejected' in roles.values() and r.get('rejected') in (None, ''):
+        rejected = 0
     certified = _num(r.get('certified'))
     return dict(identifier=_s(r.get('identifier')), part=_s(r.get('part')), area=_s(r.get('area')), inspected_for=_s(r.get('inspected_for')),
                 defect=_s(r.get('defect')), comment=_s(r.get('comment')), condition=cond.upper() if cond.lower() in ('ok', 'nok', 'ng') else cond,
