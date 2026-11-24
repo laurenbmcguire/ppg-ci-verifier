@@ -103,7 +103,9 @@ def ratio(numerator,denominator):
     return numerator/denominator if numerator is not None and denominator else ''
 
 
-def build(rows,head,cap,bind,blobs):
+def build(rows,head,cap,bind,blobs,wording=None):
+    # `wording`, when given, may reword a text the writer is about to place: (sheet, selected-template address, text) -> text.
+    # It never sees or changes a number or a formula. hosting.template_export uses it for the client-ready download.
     incomplete=any(r['resolved'][f] is None for r in rows for f in sf.QUANTITIES)
     c=contract();holds=[f for f in scope_findings(rows,head,cap,c) if f['blocking']]
     if holds:raise sf.ReviewError(holds[0]['text'])
@@ -119,6 +121,7 @@ def build(rows,head,cap,bind,blobs):
         tx.write(roots[sheet],address,value,formula)
         expected[(sheet,address)]={'value':value,'formula':formula.lstrip('=') if formula else None}
     def put(sheet,address,value=None,formula=None):
+        if wording is not None and isinstance(value,str):value=wording(sheet,address,value)
         # Calls in the original Summary remain relative to its selected layout.
         # Its part-table insertions move the entire dependent lower section.
         if sheet=='Summary':

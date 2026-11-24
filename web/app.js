@@ -581,7 +581,7 @@
     return h('details', {class: 'version-history'}, h('summary', {}, 'Saved versions and original downloads'),
       h('ul', {}, [{file_hash: r.file_hash, filename: r.filename}, ...(v.history || [])].map(x => h('li', {},
         h('a', {href: '#r=' + x.file_hash + '&history=1'}, x.filename || 'Saved version'), ' · ',
-        h('a', {href: '/api/spreadsheets/download?id=' + x.file_hash, download: x.filename || ''}, 'Download original bytes')))));
+        h('a', {href: '/api/spreadsheets/download?id=' + x.file_hash + '&as=stored', download: x.filename || ''}, 'Download original bytes')))));
   }
   function fdReadOnlyReason(r) {
     const v = r.version_view || {};

@@ -139,7 +139,7 @@ class FixRouteTests(unittest.TestCase):
         status, data = self.post('/api/spreadsheets/apply-fixes', {'file_hash': h, 'changes': props, 'expected_check_hash': displayed['check_hash']})
         self.assertEqual(status, 200, data); fixed = data['item']
         self.assertTrue(fixed['filename'].endswith('(fixed).xlsx'))
-        with urllib.request.urlopen(self.base + '/api/spreadsheets/download?id=' + fixed['file_hash'], timeout=30) as r:
+        with urllib.request.urlopen(self.base + '/api/spreadsheets/download?id=' + fixed['file_hash'] + '&as=stored', timeout=30) as r:
             self.assertIn('attachment; filename="2230-OWENS-BASCO - EOS - 10.07.26 (fixed).xlsx"', r.headers['Content-Disposition'])
             body = r.read()
         self.assertEqual(body, apply_fixes(NAME, raw, props))

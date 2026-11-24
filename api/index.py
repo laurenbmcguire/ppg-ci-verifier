@@ -818,6 +818,13 @@ class handler(BaseHTTPRequestHandler):
                         proof = self.report_view(inbox, file_hash)['checked_copy']
                         if not proof['ready'] or proof.get('file_hash') != file_hash or query.get('check') != [proof['check_hash']]:
                             raise Conflict('This copy changed or its evidence expired while reading the file. Reload before downloading a checked copy.')
+                if query.get('checked') != ['1'] and query.get('as') != ['stored'] and filename.lower().endswith('.xlsx'):
+                    # An ordinary download comes in the PPG Daily End of Shift template. The stored version is never
+                    # changed, and "Download original bytes" (as=stored) and the exact checked copy still give it as it is.
+                    from hosting import template_export
+                    with self.store().session() as directory:
+                        inbox = SpreadsheetInbox(directory)
+                        filename, raw, _ = template_export.for_download(inbox, inbox.get(file_hash), filename, raw)
                 if query.get('checked') != ['1']:
                     # An ordinary download opens in Excel without its repair prompt; the stored version and the
                     # exact checked copy are never altered.

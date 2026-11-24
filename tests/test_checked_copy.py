@@ -125,11 +125,12 @@ class Handler:
 ns['SpreadsheetInbox'] = Inbox
 
 def test_actual_guarded_download_exact_filename_type_bytes_and_original():
-    for suffix in ('', f'&checked=1&check={CHECK}'):
+    # The exact stored bytes come from "as stored" and from the checked copy; an ordinary download is the PPG template.
+    for suffix in ('&as=stored', f'&checked=1&check={CHECK}'):
         out = Handler(suffix).download()
         assert out[:3] == (200, b'PK\x03\x04SYNTHETIC-EXACT-BYTES', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         assert out[3]['Content-Disposition'] == 'attachment; filename="Synthetic checked.xlsx"'
-        if suffix:
+        if 'checked=1' in suffix:
             receipt = json.loads(out[3]['X-PPG-Checked-Copy'])
             assert receipt['protocol'] == 'ppg-checked-copy-v1' and receipt['ready'] is True
             assert receipt['file_hash'] == HASH and receipt['check_hash'] == CHECK
@@ -153,7 +154,7 @@ def test_actual_guarded_download_rejects_state_change_without_bytes(change):
     else: w['status'] = 'choice' if change == 'fork' else 'superseded'
     h.proof = completion(i, r, holds, w)
     with pytest.raises(ValueError, match='no longer verified'): h.download()
-    assert Handler().download()[0] == 200
+    assert Handler('&as=stored').download()[0] == 200
 
 
 def test_canonical_fork_requires_choice_but_explicit_valid_leaf_qualifies():
