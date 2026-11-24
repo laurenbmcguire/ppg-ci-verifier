@@ -30,6 +30,7 @@ SEED = [
     dict(client_key='PrattWhitney', client='Pratt & Whitney', source='DCA Multi-Pack Audit', job=None, verified=True, note='No verified job number.'),
 ]
 RESOLVED = ('manual', 'verified', 'matched', 'source')
+BUILT_FROM_PREFIX = 'built_from|'
 NEEDS_PERSON = ('ambiguous', 'conflict', 'unmatched')
 
 
@@ -113,9 +114,21 @@ def _pratt_source(result, filename):
     return None
 
 
-def resolve(result, filename, job, day, registry, snapshot, manual=None):
+def built_from(entry, binding, job):
+    """What a build records about its source: the client and the exact site and list the rows were read from."""
+    return dict(client_key=entry.get('client_key'), client=entry.get('client'), job=str(job or entry.get('job') or ''),
+                job_number=entry.get('job'), site=entry.get('site'), site_id=binding['site_id'], list_id=binding['list_id'])
+
+
+def resolve(result, filename, job, day, registry, snapshot, manual=None, built=None):
     """-> dict(status, client_key, client, job, site, list_id, business_date, evidence[], candidates[])."""
     out = dict(business_date=day, evidence=[], candidates=[])
+    # A report the app built itself came from one verified client site and list, recorded at build time. A person's own
+    # choice still comes first; nothing is inferred when the record is incomplete.
+    if not manual and built and built.get('client_key') and built.get('site_id') and built.get('list_id'):
+        return dict(out, status='verified', client_key=built['client_key'], client=built.get('client'), job=job or built.get('job') or built.get('job_number'),
+                    site=built.get('site'), site_id=built['site_id'], list_id=built['list_id'],
+                    evidence=[f'Built from the {built.get("client") or built["client_key"]} SharePoint list on site {built.get("site") or built["site_id"]}.'])
     if manual:
         return dict(out, status='manual', client_key=manual.get('client_key'), client=manual.get('client'), job=manual.get('job') or job,
                     site=manual.get('site'), site_id=manual.get('site_id'), list_id=manual.get('list_id'), source=manual.get('source'),

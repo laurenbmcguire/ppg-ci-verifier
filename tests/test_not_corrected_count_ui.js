@@ -8,8 +8,8 @@ const h=(tag,attrs,...kids)=>({tag,attrs:attrs||{},kids});
 const plural=(n,s)=>n+' '+s+(n===1?'':'s');
 function harness({items=[],dec={}}={}){
  const state={report:{file_hash:'a',filename:'r.xlsx'},fixes:[],fdItems:items};
- const ctx=vm.createContext({state,h,plural,icon:()=>'',store:{get:()=>dec},decisionsKey:()=>'k',fdItems:()=>items,drawReport(){},fdManualStart(){},fdReviewDialog(){},sharePointUrl:()=>null});
- vm.runInContext(between('  function fdNotCorrected(','  function fdRecordCount(')+between('  function fdShown(','  function fdPanelStatus(')+between('  function fdRevisionSummary(','  function fdAIRunBanner('),ctx);
+ const ctx=vm.createContext({state,h,plural,icon:()=>'',store:{get:()=>dec},decisionsKey:()=>'k',fdItems:()=>items,fdGroups:its=>[{items:its,title:'Duplicate identifier'}],drawReport(){},fdManualStart(){},fdReviewDialog(){},sharePointUrl:()=>null});
+ vm.runInContext(between('  function fdNotCorrected(','  function fdRecordCount(')+between('  function fdPlainSummary(','  function fdSummaryContext(')+between('  function fdShown(','  function fdPanelStatus(')+between('  function fdRevisionSummary(','  function fdAIRunBanner('),ctx);
  return ctx;
 }
 const unsolved=n=>Array.from({length:n},(_,i)=>({key:'u'+i,where:'1st Shift row '+(i+16),text:'Duplicate identifier'}));
@@ -73,4 +73,15 @@ test('the report page counts the same errors as the report list; suggested chang
  assert.equal(plain.fdOpenWords(plain.fdOpenCounts()),'2 possible errors');assert.equal(plain.fdShown(st).text,'2 possible errors to fix or ignore');
  assert.equal(harness().fdOpenWords({open:0,errors:0,suggested:0}),'0 possible errors');
  assert.match(source,/state\.fdLastCount = \{hash: r\.file_hash, n: openCounts\.errors\}/);
+});
+
+test('the quick summary and the fix-everything question use the same count',()=>{
+ const err=k=>({key:k,fp:k,issue:{key:k},state:'open',note:''}),sug=k=>({key:'fix:'+k,fix:{id:k},state:'open',note:''});
+ const items=[...Array.from({length:9},(_,i)=>err('e'+i)),sug('d5'),sug('d6')],ctx=harness({items});
+ assert.equal(ctx.fdCountWords(items),'9 possible errors and 2 suggested changes');
+ assert.match(ctx.fdPlainSummary(),/^The loaded findings contain 9 possible errors and 2 suggested changes in 1 group\./);
+ assert.equal(ctx.fdCountWords([err('a')]),'1 possible error');assert.equal(ctx.fdCountWords([sug('a')]),'1 suggested change');
+ assert.equal(ctx.fdCountWords([{key:'plain',state:'open'}]),'1 possible error');     // an item with no proposed change is an error, never a suggestion
+ assert.match(source,/What would you like to do with \$\{all\.length === 1 \? \(fdCountsOf\(all\)\.suggested \? 'this suggested change' : 'this possible error'\) : `these \$\{fdCountWords\(all\)\}`\}\?/);
+ assert.doesNotMatch(source,/these \$\{all\.length\} possible errors/);
 });

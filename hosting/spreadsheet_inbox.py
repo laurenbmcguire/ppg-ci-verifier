@@ -50,6 +50,13 @@ class _NoChange(Exception):
 _CHECK_LINKS = {}   # check row number -> (check hash, its version links as JSON text, has a history-repair record); rows never change
 
 
+
+def _first(mapping, *keys):
+    for key in keys:
+        if key and mapping.get(key):
+            return mapping[key]
+    return None
+
 class SpreadsheetInbox:
     def __init__(self, root):
         self.root = Path(root)
@@ -923,7 +930,7 @@ class SpreadsheetInbox:
     def assignment_context(self):
         from hosting import registry
         return dict(registry=registry.entries(self.setting(registry.REGISTRY_KEY, [])), snapshot=self.setting(registry.SNAPSHOT_KEY, []) or [],
-                    manual=self.settings_with_prefix('assignment|'))
+                    manual=self.settings_with_prefix('assignment|'), built=self.settings_with_prefix(registry.BUILT_FROM_PREFIX))
     def assignment_for(self, result, review, ctx=None):
         from hosting import registry
         ctx = ctx or self.assignment_context()
@@ -931,7 +938,9 @@ class SpreadsheetInbox:
         a = registry.resolve(result, result.get('filename'), rv.get('job'), rv.get('day'), ctx['registry'], ctx['snapshot'],
                              # a person's client choice stays with the report through its fixed copies
                              ctx['manual'].get(result.get('file_hash')) or ctx['manual'].get((result.get('fixed_from') or {}).get('file_hash'))
-                             or ctx['manual'].get(result.get('root_hash')))
+                             or ctx['manual'].get(result.get('root_hash')),
+                             # and so does the client of a report built from that client's SharePoint list
+                             built=_first(ctx.get('built') or {}, result.get('file_hash'), (result.get('fixed_from') or {}).get('file_hash'), result.get('root_hash')))
         a['label'] = registry.label(a)
         a['needs_person'] = a['status'] in registry.NEEDS_PERSON
         return a

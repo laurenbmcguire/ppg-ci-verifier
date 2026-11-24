@@ -327,6 +327,11 @@ def _job_day(job, day):
 
 def _build_binding(inbox, job, source=None):
     """Select only a verified registry source; explicit source narrows, never grants."""
+    return _build_selection(inbox, job, source)[0]
+
+
+def _build_selection(inbox, job, source=None):
+    """-> (exact site/list IDs, the verified registry entry they came from). The entry names the client."""
     from hosting import registry, sharepoint
     entries = [e for e in registry.entries(inbox.setting(registry.REGISTRY_KEY, []))
                if e.get('verified') and e.get('list_id') and registry._same_job(job,e.get('job'))]
@@ -348,7 +353,7 @@ def _build_binding(inbox, job, source=None):
             binding = sharepoint.assignment_identity(dict(entry,status='verified'))
             if source and source.get('site_id') and binding['site_id'] != source['site_id']:
                 continue
-            resolved[(binding['site_id'],binding['list_id'])] = binding
+            resolved[(binding['site_id'],binding['list_id'])] = (binding, entry)
     except (sharepoint.SharePointError,sharepoint.SharePointNotConfigured) as exc:
         raise ApiError(409,str(exc)) from None
     if len(resolved) != 1:
@@ -363,7 +368,7 @@ def op_build(h, job, day=None, force=False, header=None, source=None):
     job, day = _job_day(job, day)
     with h.store().session() as directory:
         inbox = SpreadsheetInbox(directory)
-        binding = _build_binding(inbox, job, source)
+        binding, entry = _build_selection(inbox, job, source)
         photo_embed.use_stored_certificate(inbox.setting(photo_embed.CERT_KEY, None))
         schedule = inbox.shift_schedule(job)
         saved = inbox.setting(f'report_header|{binding["site_id"]}|{binding["list_id"]}', {}) or {}
@@ -388,6 +393,10 @@ def op_build(h, job, day=None, force=False, header=None, source=None):
         inbox = SpreadsheetInbox(directory)
         item = inbox.ingest(builder.file_name(job, day), raw)
         inbox.set_setting(f'built|{item["file_hash"]}', built)
+        # A report built from a client's own SharePoint site and list belongs to that client: the build records it, so
+        # the report is never left waiting for a person to say whose it is, whatever way the job number was typed.
+        from hosting import registry
+        inbox.set_setting(f'{registry.BUILT_FROM_PREFIX}{item["file_hash"]}', registry.built_from(entry, binding, job))
     _after_change(h, item['file_hash'])
     return dict(report=_report(h, _get(h, item['file_hash'])), built={k: v for k, v in built.items() if k != 'columns'})
 

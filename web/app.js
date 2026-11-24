@@ -238,7 +238,7 @@
   function queueTitle(r) {
     const rv = r.review || {}, day = queueDay(r), d = day ? new Date(day + 'T12:00:00') : null;
     const date = d && !isNaN(d) ? d.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'}) : 'No date';
-    return `${date} · ${queueClient(r)} · ${rv.job ? 'Job ' + rv.job : r.assignment?.client_key === 'practice' ? 'made-up test data' : 'Job not found'}`;
+    return `${date} · ${queueClient(r)} · ${rv.job ? 'Job ' + rv.job : r.assignment?.client_key === 'practice' ? 'made-up test data' : SETTLED.includes(r.assignment?.status) && r.assignment?.job ? 'Job ' + r.assignment.job : 'Job not found'}`;
   }
   const queueVersion = value => Number.isInteger(value) && value > 0 ? String(value) : 'unknown';
   const queueSearch = r => [r.filename, r.review?.job, queueDay(r), queueClient(r), r.assignment?.status, r.review?.sharepoint?.source,
@@ -1160,9 +1160,15 @@
   // never added to it, so the report page and the report list always show the same count.
   function fdOpenCounts(items) {
     const open = (items || fdItems()).filter(it => ['open', 'selected', 'deferred', 'confirmed'].includes(it.state));
-    const errors = open.filter(it => it.issue).length;
-    return {open: open.length, errors, suggested: open.length - errors};
+    return fdCountsOf(open);
   }
+  // The same split for any set of items (a selection, a group): a suggested change is an item made from a proposed
+  // change alone, with no listed error behind it.
+  function fdCountsOf(items) {
+    const suggested = items.filter(it => !it.issue && it.fix).length;
+    return {open: items.length, errors: items.length - suggested, suggested};
+  }
+  function fdCountWords(items) { return fdOpenWords(fdCountsOf(items)).replace(' · ', ' and '); }
   function fdOpenWords(c, tail) {
     const extra = c.suggested ? plural(c.suggested, 'suggested change') : '';
     if (!c.errors) return extra ? `${extra}${tail ? ' to accept or ignore' : ''}` : plural(0, 'possible error') + (tail || '');
@@ -1307,7 +1313,7 @@
             h('button', {type: 'button', class: 'btn', id: 'fd-drop-typed', disabled: off || null, onclick: dropTyped}, 'Remove them')),
           h('p', {class: 'fd-hint'}, 'Fix with AI instead removes your typed values first, then Dex works on these errors.'));
         return h('div', {class: 'fd-fixall'},
-          h('p', {class: 'fd-fixall-q'}, some ? `${plural(ticked.length, 'possible error')} selected. What would you like to do?` : `What would you like to do with ${all.length === 1 ? 'this possible error' : `these ${all.length} possible errors`}?`),
+          h('p', {class: 'fd-fixall-q'}, some ? `${fdCountWords(ticked)} selected. What would you like to do?` : `What would you like to do with ${all.length === 1 ? (fdCountsOf(all).suggested ? 'this suggested change' : 'this possible error') : `these ${fdCountWords(all)}`}?`),
           h('div', {class: 'fd-cardacts'},
             h('button', {type: 'button', class: 'btn primary', id: 'fd-fix-everything', onclick: () => fdAIStart(some ? scope : null, {everything: !some})}, some ? 'Fix selected with AI' : 'Fix everything with AI'),
             h('button', {type: 'button', class: 'btn', id: 'fd-fix-all-manual', disabled: off || null, onclick: () => { if (current()) fdManualStart(scope); }}, 'Fix manually'),
@@ -1401,7 +1407,10 @@
     if (!open.length) return 'No unresolved possible errors in the loaded findings. This does not establish source completeness or readiness.';
     const groups = fdGroups(open).map(g => [g.items.length, g.title.replace(/ \(and \d+ more like it\)$/, '')]).sort((a, b) => b[0] - a[0]);
     const top = groups.slice(0, 3).map(([n, title]) => `${n} × ${title.charAt(0).toLowerCase() + title.slice(1)}`);
-    return `The loaded findings contain ${plural(open.length, 'possible error')} in ${plural(groups.length, 'group')}. The biggest: ${top.join('; ')}${groups.length > 3 ? `; and ${groups.length - 3} more ${groups.length - 3 === 1 ? 'group' : 'groups'}` : ''}.`;
+    // The same count as the top of the report and the report list: listed errors, with suggested changes named beside them.
+    const suggested = open.filter(it => !it.issue && it.fix).length, errors = open.length - suggested;
+    const what = [errors || !suggested ? plural(errors, 'possible error') : '', suggested ? plural(suggested, 'suggested change') : ''].filter(Boolean).join(' and ');
+    return `The loaded findings contain ${what} in ${plural(groups.length, 'group')}. The biggest: ${top.join('; ')}${groups.length > 3 ? `; and ${groups.length - 3} more ${groups.length - 3 === 1 ? 'group' : 'groups'}` : ''}.`;
   }
   function fdSummaryContext(report) {
     return JSON.stringify({assignment: report.assignment, holds: report.holds, source: report.source_reconciliation,
